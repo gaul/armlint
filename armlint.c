@@ -52,7 +52,17 @@ struct armlint_state {
     bool cmp_is_64bit;
     unsigned cmp_rn;
     size_t cmp_offset;
+
+    // Deferred CMP+B.EQ/NE finding awaiting forward NZCV-liveness
+    // verification. The fold is emitted only when a subsequent
+    // instruction confirms it does not read N/Z/C/V before they are
+    // rewritten or rendered irrelevant by control flow.
+    bool pending_active;
+    unsigned pending_window;
+    armlint_finding pending_finding;
 };
+
+#define LIVENESS_WINDOW 16
 
 armlint_state *armlint_state_create(void)
 {
@@ -186,9 +196,12 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
 {
     // The LSL and CMP checks never produce a finding from flush alone
     // -- an isolated LSL or CMP is not actionable -- but their state
-    // must be cleared so a new region starts fresh.
+    // must be cleared so a new region starts fresh. Any pending
+    // CMP+B.EQ/NE finding is discarded too: without seeing a safe
+    // stopper before end-of-region, we cannot prove the fold is sound.
     state->lsl_active = false;
     state->cmp_active = false;
+    state->pending_active = false;
     return mov_close(state, out);
 }
 
@@ -504,13 +517,137 @@ static bool decode_b_eq_or_ne(uint32_t op, bool *out_is_eq,
     return true;
 }
 
+// Flag-liveness classification of a single instruction observed during
+// the forward scan that runs after a CMP+B.EQ/B.NE candidate.
+typedef enum {
+    LIV_UNKNOWN,        // no effect on NZCV; keep scanning
+    LIV_OVERWRITE,      // writes all NZCV without reading them first
+    LIV_READ,           // reads any of NZCV
+    LIV_TERM_SAFE,      // terminator after which prior NZCV is unobservable
+    LIV_TERM_UNSAFE,    // terminator whose target may observe NZCV
+} liveness_t;
+
+// Classify `op` for the NZCV liveness scan. Conservative on both ends:
+// instructions we don't recognize are LIV_UNKNOWN (keep scanning until
+// the window expires), and ambiguous reads/writes are erred toward
+// LIV_READ.
+static liveness_t classify_liveness(uint32_t op)
+{
+    // B.cond reads NZCV (which flags depend on cond).
+    if ((op & 0xFF000010u) == 0x54000000u) {
+        return LIV_READ;
+    }
+    // CFINV (Armv8.4): inverts C, depends on prior C value.
+    if (op == 0xD500401Fu) {
+        return LIV_READ;
+    }
+    // Conditional select family CSEL/CSINC/CSINV/CSNEG: reads NZCV.
+    if ((op & 0x3FE00000u) == 0x1A800000u) {
+        return LIV_READ;
+    }
+    // Conditional compare CCMP/CCMN: reads NZCV via cond then writes
+    // either the compare result or the immediate nzcv. The read makes
+    // the fold unsound regardless.
+    if ((op & 0x3FE00000u) == 0x3A400000u) {
+        return LIV_READ;
+    }
+    // Add/Subtract with carry (ADC/ADCS/SBC/SBCS): reads C. The same
+    // encoding prefix also covers a handful of rare flag-touching
+    // instructions (RMIF, SETF8, SETF16); classifying them as a read
+    // is conservatively correct.
+    if ((op & 0x1FE00000u) == 0x1A000000u) {
+        return LIV_READ;
+    }
+
+    // ADDS/SUBS immediate (S=1): bit 29 = 1, bits 28..23 = 100010.
+    if ((op & 0x3F800000u) == 0x31000000u) {
+        return LIV_OVERWRITE;
+    }
+    // ADDS/SUBS shifted-register and extended-register (S=1):
+    //   bit 29 = 1, bits 28..24 = 01011.
+    if ((op & 0x3F000000u) == 0x2B000000u) {
+        return LIV_OVERWRITE;
+    }
+    // ANDS immediate (bits 30..29 = 11, bits 28..23 = 100100).
+    if ((op & 0x7F800000u) == 0x72000000u) {
+        return LIV_OVERWRITE;
+    }
+    // ANDS/BICS shifted-register (bits 30..29 = 11, bits 28..24 = 01010).
+    if ((op & 0x7F000000u) == 0x6A000000u) {
+        return LIV_OVERWRITE;
+    }
+    // FCMP/FCMPE (any FP type): bits 31..24 = 00011110, bit 21 = 1,
+    // bits 15..10 = 001000, bits 2..0 = 000. Covers register-register
+    // and register-zero variants. FCSEL and FCCMP/FCCMPE -- which DO
+    // read NZCV -- have different bits 11..10 (11 and 01 respectively)
+    // and will not match this mask.
+    if ((op & 0xFF20FC07u) == 0x1E202000u) {
+        return LIV_OVERWRITE;
+    }
+
+    // BL (function call): callee may clobber NZCV per the AArch64 PCS.
+    if ((op & 0xFC000000u) == 0x94000000u) {
+        return LIV_TERM_SAFE;
+    }
+    // B (unconditional immediate): target may read NZCV; we don't
+    // follow targets in v1.
+    if ((op & 0xFC000000u) == 0x14000000u) {
+        return LIV_TERM_UNSAFE;
+    }
+    // Unconditional branch (register): BR, BLR, RET, ERET, plus arm64e
+    // PAC variants. opc at bits 24..21 distinguishes:
+    //   0001 = BLR / 1001 = BLRA[A|B][Z]  -> safe (callee clobbers)
+    //   0010 = RET / 1010 = RETA[A|B]     -> safe (function ends)
+    //   0000 = BR  / 0100 = ERET / etc.   -> unsafe (unknown target)
+    if ((op & 0xFE000000u) == 0xD6000000u) {
+        unsigned opc = (op >> 21) & 0xFu;
+        if (opc == 0x1u || opc == 0x2u
+                || opc == 0x9u || opc == 0xAu) {
+            return LIV_TERM_SAFE;
+        }
+        return LIV_TERM_UNSAFE;
+    }
+
+    return LIV_UNKNOWN;
+}
+
+// Advance the deferred CMP+B.EQ/NE finding's flag-liveness scan by one
+// instruction. Emits the pending finding into *out if the current
+// instruction provably overwrites NZCV or otherwise renders the prior
+// flag state unobservable. Suppresses the finding if any read of NZCV
+// is seen, or if the window expires.
+static bool advance_pending_cmp(armlint_state *state, uint32_t op,
+                                armlint_finding *out)
+{
+    if (!state->pending_active) {
+        return false;
+    }
+    switch (classify_liveness(op)) {
+    case LIV_OVERWRITE:
+    case LIV_TERM_SAFE:
+        *out = state->pending_finding;
+        state->pending_active = false;
+        return true;
+    case LIV_READ:
+    case LIV_TERM_UNSAFE:
+        state->pending_active = false;
+        return false;
+    case LIV_UNKNOWN:
+        if (state->pending_window == 0
+                || --state->pending_window == 0) {
+            state->pending_active = false;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out)
 {
-    bool produced = false;
-
     if (insn->size != 4) {
         state->cmp_active = false;
+        state->pending_active = false;
         return false;
     }
 
@@ -519,7 +656,10 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
 
-    // (1) Close: is this a B.EQ/B.NE following the pending CMP?
+    // (0) Advance the deferred finding's liveness scan, if any.
+    bool produced = advance_pending_cmp(state, op, out);
+
+    // (1) Close: is this a B.EQ/B.NE consuming the pending CMP?
     if (state->cmp_active) {
         bool is_eq;
         int32_t imm19;
@@ -530,21 +670,26 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
             const char *cb_mnem = is_eq ? "cbz" : "cbnz";
             const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
 
-            out->name = "compare-zero branch foldable into CBZ/CBNZ";
-            out->start_offset = state->cmp_offset;
-            out->insn_count = 2;
-            clear_finding_strings(out);
+            armlint_finding *p = &state->pending_finding;
+            p->name = "compare-zero branch foldable into CBZ/CBNZ";
+            p->start_offset = state->cmp_offset;
+            p->insn_count = 2;
+            clear_finding_strings(p);
 
-            snprintf(out->detail, sizeof(out->detail),
+            snprintf(p->detail, sizeof(p->detail),
                 "-> %s %c%u, 0x%" PRIx64,
                 cb_mnem, w_or_x, state->cmp_rn, target);
 
-            snprintf(out->lines[0], sizeof(out->lines[0]),
+            snprintf(p->lines[0], sizeof(p->lines[0]),
                 "cmp %c%u, #0", w_or_x, state->cmp_rn);
-            snprintf(out->lines[1], sizeof(out->lines[1]),
+            snprintf(p->lines[1], sizeof(p->lines[1]),
                 "%s 0x%" PRIx64, bcond_mnem, target);
 
-            produced = true;
+            // Defer emission until a forward-liveness stopper confirms
+            // no downstream code observes the dropped N/C/V (and Z
+            // beyond the branch itself).
+            state->pending_active = true;
+            state->pending_window = LIVENESS_WINDOW;
         }
         // Strict adjacency: any non-matching instruction expires the CMP.
         state->cmp_active = false;

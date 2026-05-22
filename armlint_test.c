@@ -516,74 +516,219 @@ static void b_cond(uint8_t out[4], unsigned cond, int32_t byte_offset)
     out[3] = (op >> 24) & 0xff;
 }
 
+// RET x30 -- the safe-terminator stopper for flag liveness.
+static void ret_(uint8_t out[4])
+{
+    out[0] = 0xC0;
+    out[1] = 0x03;
+    out[2] = 0x5F;
+    out[3] = 0xD6;
+}
+
+// BL with byte offset (function call -- LIV_TERM_SAFE).
+static void bl_(uint8_t out[4], int32_t byte_offset)
+{
+    int32_t imm26 = byte_offset / 4;
+    uint32_t op = 0x94000000u | ((uint32_t)imm26 & 0x3FFFFFFu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// B (unconditional) -- LIV_TERM_UNSAFE.
+static void b_(uint8_t out[4], int32_t byte_offset)
+{
+    int32_t imm26 = byte_offset / 4;
+    uint32_t op = 0x14000000u | ((uint32_t)imm26 & 0x3FFFFFFu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// ADCS Wd, Wn, Wm -- reads C; LIV_READ.
+static void adcs_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x3A000000u
+        | ((rm & 0x1fu) << 16)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// CSEL Wd, Wn, Wm, cond -- reads NZCV; LIV_READ.
+static void csel_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
+                   unsigned cond)
+{
+    uint32_t op = 0x1A800000u
+        | ((rm & 0x1fu) << 16)
+        | ((cond & 0xfu) << 12)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 static void test_cmp_zero_branch(void)
 {
-    uint8_t code[16];
+    uint8_t code[32];
 
-    // cmp w0, #0 ; b.eq +8 (positive; W).
+    // -- Positive: stopper present, no flag use --
+
+    // cmp w0,#0 ; b.eq +8 ; ret (RET = LIV_TERM_SAFE; fold safe).
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
-    assert(run_helper_check(code, 8) == 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
 
-    // cmp x5, #0 ; b.ne -16 (positive; X, NE, backward target).
+    // cmp x5,#0 ; b.ne -16 ; ret (X register, NE).
     cmp_x_imm(&code[0], 5, 0);
     b_cond(&code[4], 1, -16);
-    assert(run_helper_check(code, 8) == 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
 
-    // cmp w7, #0 ; b.eq +1MB (positive; near-maximum forward offset).
+    // cmp w7,#0 ; b.eq +1MB ; ret (near-maximum forward branch).
     cmp_w_imm(&code[0], 7, 0);
     b_cond(&code[4], 0, 0x40000);
-    assert(run_helper_check(code, 8) == 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
 
-    // -- Negative cases --
+    // cmp w0,#0 ; b.eq L ; bl func (BL = LIV_TERM_SAFE).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    bl_(&code[8], 0x100);
+    assert(run_helper_check(code, 12) == 1);
 
-    // cmp w0, #1 (non-zero immediate); not a CMP-zero.
+    // cmp w0,#0 ; b.eq L ; cmp w1,#0 (next CMP overwrites NZCV; safe).
+    // Two findings: the first is fully verified by the second's
+    // overwrite; the second is itself a new pending that gets
+    // discarded at flush (no stopper after it).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    cmp_w_imm(&code[8], 1, 0);
+    b_cond(&code[12], 0, 8);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 2);
+
+    // Window: 14 UNKNOWN insns (LDR-shaped slots represented by MOV
+    // immediates) then RET -- still within the 16-instruction window.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    // 14 MOVZ instructions (no flag effect, no terminator):
+    {
+        uint8_t big[4 + 4 + 14 * 4 + 4];
+        cmp_w_imm(&big[0], 0, 0);
+        b_cond(&big[4], 0, 8);
+        for (int i = 0; i < 14; i++) {
+            movz_w(&big[8 + i * 4], 5, (uint16_t)(i + 1));
+        }
+        ret_(&big[8 + 14 * 4]);
+        assert(run_helper_check(big, sizeof(big)) == 1);
+    }
+
+    // -- Negative: flag readers immediately after the branch --
+
+    // cmp w0,#0 ; b.eq L ; b.lt M (B.cond reads NZCV; suppress).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    b_cond(&code[8], 11 /* LT */, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // cmp w0,#0 ; b.eq L ; adcs w1,w2,w3 (reads C; suppress).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    adcs_w(&code[8], 1, 2, 3);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // cmp w0,#0 ; b.eq L ; csel w1,w2,w3,eq (reads NZCV; suppress).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    csel_w(&code[8], 1, 2, 3, 0);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: unsafe terminator --
+
+    // cmp w0,#0 ; b.eq L ; b M (unconditional B; target may read NZCV).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    b_(&code[8], 0x100);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: window expiry --
+
+    // cmp w0,#0 ; b.eq L ; 16 MOVZ ; ret -- 16 UNKNOWN insns exceed
+    // the window (must see a stopper within LIVENESS_WINDOW=16);
+    // pending is discarded.
+    {
+        uint8_t big[4 + 4 + 16 * 4 + 4];
+        cmp_w_imm(&big[0], 0, 0);
+        b_cond(&big[4], 0, 8);
+        for (int i = 0; i < 16; i++) {
+            movz_w(&big[8 + i * 4], 5, (uint16_t)(i + 1));
+        }
+        ret_(&big[8 + 16 * 4]);
+        assert(run_helper_check(big, sizeof(big)) == 0);
+    }
+
+    // -- Pre-existing negatives, with a trailing RET so the positive
+    //    paths (if any) would have had a stopper. --
+
+    // cmp w0,#1 (non-zero immediate); not a CMP-zero.
     cmp_w_imm(&code[0], 0, 1);
     b_cond(&code[4], 0, 8);
-    assert(run_helper_check(code, 8) == 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 
-    // cmp w0, #0 ; b.lt -- not EQ/NE.
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 11 /* LT */, 8);
-    assert(run_helper_check(code, 8) == 0);
-
-    // cmp w0, #0 ; b.gt -- not EQ/NE.
+    // cmp w0,#0 ; b.gt (not EQ/NE).
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 12 /* GT */, 8);
-    assert(run_helper_check(code, 8) == 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 
-    // cmp w0, #0 ; <unrelated> ; b.eq -- intervening instruction
-    // expires CMP state.
+    // cmp w0,#0 ; movz w5,#1 ; b.eq -- intervening instruction
+    // expires CMP state before the B.EQ is seen.
     cmp_w_imm(&code[0], 0, 0);
     movz_w(&code[4], 5, 1);
     b_cond(&code[8], 0, 8);
-    assert(run_helper_check(code, 12) == 0);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
 
-    // cmp wzr, #0 ; b.eq -- Rn=31 excluded (always-taken degenerate).
+    // cmp wzr,#0 ; b.eq -- Rn=31 excluded.
     cmp_w_imm(&code[0], 31, 0);
     b_cond(&code[4], 0, 8);
-    assert(run_helper_check(code, 8) == 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 
-    // subs w1, w0, #0 (real Rd) ; b.eq -- not a CMP alias, has a side
-    // effect (writes w1). Must not fold.
+    // subs w1,w0,#0 (real Rd); not a CMP alias.
     subs_w_imm(&code[0], 1, 0, 0);
     b_cond(&code[4], 0, 8);
-    assert(run_helper_check(code, 8) == 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 
-    // b.eq with no preceding cmp -- nothing to fold.
+    // b.eq with no preceding cmp.
     b_cond(&code[0], 0, 8);
-    assert(run_helper_check(code, 4) == 0);
+    ret_(&code[4]);
+    assert(run_helper_check(code, 8) == 0);
 
     // Lone cmp without consumer.
     cmp_w_imm(&code[0], 0, 0);
-    assert(run_helper_check(code, 4) == 0);
+    ret_(&code[4]);
+    assert(run_helper_check(code, 8) == 0);
 
-    // Two independent CMP+B.EQ pairs back-to-back.
+    // CMP+B.EQ at end of region with no stopper at all -- pending
+    // discarded on flush.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
-    cmp_x_imm(&code[8], 3, 0);
-    b_cond(&code[12], 1, -8);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 int main(void)

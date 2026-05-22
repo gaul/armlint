@@ -34,6 +34,17 @@ code, and documents corners of the A64 instruction set.
     `b.ne` -> `cbnz`. v1 matches only the canonical `CMP Rn, #0`
     encoding (SUBS XZR, Rn, #0); does not catch `cmp Rn, xzr` or
     `tst Rn, Rn` (other zero-test idioms).
+  - Soundness: `CBZ`/`CBNZ` does not write NZCV, but `CMP Rn, #0`
+    writes all four flags. Folding is unsound if subsequent code
+    reads N, C, or V (e.g. `ADCS`, `CSEL`, `B.LT`, `CCMP`). armlint
+    runs a forward NZCV-liveness scan on the fall-through path: the
+    finding is emitted only after seeing an instruction that
+    overwrites NZCV without reading them (ADDS/SUBS/ANDS/BICS/FCMP)
+    or a terminator that makes prior flags unobservable (RET, BL,
+    BLR). The scan suppresses on any flag-reader, an unsafe
+    terminator (B unconditional, BR), or after a 16-instruction
+    window with no decision. The branch-target path is not scanned;
+    full soundness would require basic-block analysis.
 
 ## Compilation
 
