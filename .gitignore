@@ -1,0 +1,4 @@
+armlint
+armlint_test
+libarmlint.a
+*.o

@@ -1,0 +1,288 @@
+/*
+ * Copyright 2026 Andrew Gaul <andrew@gaul.org>
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <assert.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <capstone/capstone.h>
+
+#include "armlint.h"
+
+static csh g_handle;
+
+static int run_check(const uint8_t *code, size_t code_size)
+{
+    cs_insn *insns = NULL;
+    size_t count = cs_disasm(g_handle, code, code_size, 0, 0, &insns);
+    if (count != code_size / 4) {
+        if (insns != NULL) {
+            cs_free(insns, count);
+        }
+        return -1;
+    }
+
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+
+    int findings = 0;
+    for (size_t i = 0; i < count; i++) {
+        armlint_finding f;
+        size_t offset = (size_t)insns[i].address;
+        if (check_movz_movk_bitmask(state, &insns[i], offset, &f)) {
+            findings++;
+        }
+    }
+
+    armlint_finding f;
+    if (armlint_flush(state, &f)) {
+        findings++;
+    }
+
+    armlint_state_destroy(state);
+    cs_free(insns, count);
+    return findings;
+}
+
+#define EXPECT_FINDINGS(expected, ...) \
+do { \
+    static const uint8_t bytes[] = { __VA_ARGS__ }; \
+    int findings = run_check(bytes, sizeof(bytes)); \
+    if (findings != (expected)) { \
+        fprintf(stderr, "%s:%d: expected %d findings, got %d for:", \
+            __FILE__, __LINE__, (expected), findings); \
+        for (size_t _i = 0; _i < sizeof(bytes); _i++) { \
+            fprintf(stderr, " %02x", bytes[_i]); \
+        } \
+        fprintf(stderr, "\n"); \
+    } \
+    assert(findings == (expected)); \
+} while (0)
+
+static void test_is_bitmask_immediate_32(void)
+{
+    // Excluded values.
+    assert(!is_bitmask_immediate(0, 32));
+    assert(!is_bitmask_immediate(0xffffffffu, 32));
+
+    // Single-bit and small runs.
+    assert(is_bitmask_immediate(1, 32));
+    assert(is_bitmask_immediate(2, 32));
+    assert(is_bitmask_immediate(3, 32));
+    assert(is_bitmask_immediate(0x80000000u, 32));
+    assert(is_bitmask_immediate(0xc0000000u, 32));
+
+    // Replicating patterns.
+    assert(is_bitmask_immediate(0x55555555u, 32));  // esize=2
+    assert(is_bitmask_immediate(0xaaaaaaaau, 32));  // esize=2
+    assert(is_bitmask_immediate(0x66666666u, 32));  // esize=4
+    assert(is_bitmask_immediate(0x99999999u, 32));  // esize=4
+    assert(is_bitmask_immediate(0xf0f0f0f0u, 32));  // esize=8
+    assert(is_bitmask_immediate(0x0f0f0f0fu, 32));  // esize=8
+    assert(is_bitmask_immediate(0xff00ff00u, 32));  // esize=16
+    assert(is_bitmask_immediate(0xffff0000u, 32));  // esize=32, rotated run
+
+    // Common masks.
+    assert(is_bitmask_immediate(0xffu, 32));
+    assert(is_bitmask_immediate(0xffffu, 32));
+
+    // Non-rotated-run patterns at smallest replicating esize.
+    assert(!is_bitmask_immediate(0x12345678u, 32));
+    assert(!is_bitmask_immediate(0xdeadbeefu, 32));
+    assert(!is_bitmask_immediate(0x10010010u, 32));
+}
+
+static void test_is_bitmask_immediate_64(void)
+{
+    assert(!is_bitmask_immediate(0, 64));
+    assert(!is_bitmask_immediate(~(uint64_t)0, 64));
+
+    // 0xffffffff is all-ones in 32-bit but a valid bitmask in 64-bit
+    // (a rotated 32-bit run within the 64-bit register).
+    assert(is_bitmask_immediate(0xffffffffu, 64));
+
+    assert(is_bitmask_immediate(0x5555555555555555ULL, 64));
+    assert(is_bitmask_immediate(0xaaaaaaaaaaaaaaaaULL, 64));
+    assert(is_bitmask_immediate(0xf0f0f0f0f0f0f0f0ULL, 64));
+    assert(is_bitmask_immediate(0x0000000100000001ULL, 64));  // esize=32
+
+    // NOT(1): one zero bit. Rotated run of 63 ones at esize=64.
+    assert(is_bitmask_immediate(0xfffffffffffffffeULL, 64));
+
+    assert(!is_bitmask_immediate(0x123456789abcdef0ULL, 64));
+    assert(!is_bitmask_immediate(0x1000001000000000ULL, 64));
+}
+
+// MOVZ Wd, #imm16
+// sf=0, opc=10, fixed=100101, hw=00, imm16, Rd
+// Encoding base: 0x52800000
+static void movz_w(uint8_t out[4], unsigned rd, uint16_t imm16)
+{
+    uint32_t op = 0x52800000u
+        | ((uint32_t)(imm16 & 0xffffu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MOVK Wd, #imm16, LSL #(hw*16)
+// Encoding base: 0x72800000
+static void movk_w(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
+{
+    uint32_t op = 0x72800000u
+        | ((uint32_t)(hw & 0x3u) << 21)
+        | ((uint32_t)(imm16 & 0xffffu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MOVZ Xd, #imm16, LSL #(hw*16). Encoding base: 0xd2800000
+static void movz_x(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
+{
+    uint32_t op = 0xd2800000u
+        | ((uint32_t)(hw & 0x3u) << 21)
+        | ((uint32_t)(imm16 & 0xffffu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MOVK Xd. Encoding base: 0xf2800000
+static void movk_x(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
+{
+    uint32_t op = 0xf2800000u
+        | ((uint32_t)(hw & 0x3u) << 21)
+        | ((uint32_t)(imm16 & 0xffffu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MOVN Xd. Encoding base: 0x92800000
+static void movn_x(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
+{
+    uint32_t op = 0x92800000u
+        | ((uint32_t)(hw & 0x3u) << 21)
+        | ((uint32_t)(imm16 & 0xffffu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static int run_helper_check(uint8_t *bytes, size_t len)
+{
+    return run_check(bytes, len);
+}
+
+static void test_movz_movk_sequences(void)
+{
+    uint8_t code[16];
+
+    // movz w0, #0x6666 ; movk w0, #0x6666, lsl #16  -> 0x66666666 (bitmask).
+    movz_w(&code[0], 0, 0x6666);
+    movk_w(&code[4], 0, 0x6666, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // movz w0, #0x1234 ; movk w0, #0x5678, lsl #16  -> 0x56781234 (not bitmask).
+    movz_w(&code[0], 0, 0x1234);
+    movk_w(&code[4], 0, 0x5678, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Single MOVZ -- one instruction, cannot shrink.
+    movz_w(&code[0], 0, 0x6666);
+    assert(run_helper_check(code, 4) == 0);
+
+    // movz w0, #0x6666 ; movk w1, #0x6666, lsl #16
+    // Different registers: w0 seq closes with insn_count=1 (no finding),
+    // and MOVK without a base on w1 does not start a new sequence.
+    movz_w(&code[0], 0, 0x6666);
+    movk_w(&code[4], 1, 0x6666, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // 4-instruction X-register sequence producing 0x5555555555555555.
+    movz_x(&code[0], 0, 0x5555, 0);
+    movk_x(&code[4], 0, 0x5555, 1);
+    movk_x(&code[8], 0, 0x5555, 2);
+    movk_x(&code[12], 0, 0x5555, 3);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Same 4-instruction shape, but final value 0x1234567890abcdef is not
+    // a bitmask immediate.
+    movz_x(&code[0], 0, 0xcdef, 0);
+    movk_x(&code[4], 0, 0x90ab, 1);
+    movk_x(&code[8], 0, 0x5678, 2);
+    movk_x(&code[12], 0, 0x1234, 3);
+    assert(run_helper_check(code, 16) == 0);
+
+    // MOVN x0, #0, lsl #0 followed by MOVK -- MOVN starts the sequence
+    // (value = ~0 in 64-bit = all ones, which is excluded). Then MOVK
+    // clobbers the low 16 bits to 0xffff (still all-ones overall).
+    // Final value is the all-ones value, not bitmask-encodable. No flag.
+    movn_x(&code[0], 0, 0x0000, 0);
+    movk_x(&code[4], 0, 0xffff, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // movz x0, #0xffff, lsl #16 ; movk x0, #0xffff, lsl #32
+    // -> 0x0000ffffffff0000, which is a rotated run of 32 ones in 64
+    // bits and therefore bitmask-encodable.
+    movz_x(&code[0], 0, 0xffff, 1);
+    movk_x(&code[4], 0, 0xffff, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // MOVK without a preceding MOVZ/MOVN does not start a sequence
+    // (the prior value of the register is unknown), so even if two
+    // MOVKs together would name a bitmask-imm value, no finding.
+    movk_w(&code[0], 0, 0x6666, 0);
+    movk_w(&code[4], 0, 0x6666, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Two independent MOVZ/MOVK pairs to different registers, back to
+    // back. Each pair stands alone; the first should flag.
+    movz_w(&code[0], 0, 0x6666);
+    movk_w(&code[4], 0, 0x6666, 1);
+    movz_w(&code[8], 1, 0x1234);
+    movk_w(&code[12], 1, 0x5678, 1);
+    assert(run_helper_check(code, 16) == 1);
+}
+
+int main(void)
+{
+    if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
+        fprintf(stderr, "failed to initialize Capstone\n");
+        return 1;
+    }
+    cs_option(g_handle, CS_OPT_DETAIL, CS_OPT_ON);
+
+    test_is_bitmask_immediate_32();
+    test_is_bitmask_immediate_64();
+    test_movz_movk_sequences();
+
+    cs_close(&g_handle);
+    printf("all tests passed\n");
+    return 0;
+}
