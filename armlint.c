@@ -28,6 +28,7 @@ struct armlint_state {
     uint64_t value;
     size_t start_offset;
     unsigned insn_count;
+    armlint_mov_entry entries[ARMLINT_MOV_MAX];
 };
 
 armlint_state *armlint_state_create(void)
@@ -118,12 +119,32 @@ static bool close_sequence(armlint_state *state, armlint_finding *out)
             out->value = state->value;
             out->reg_width = reg_width;
             out->rd = state->rd;
+            memcpy(out->entries, state->entries, sizeof(out->entries));
             produced = true;
         }
     }
 
     state->active = false;
     return produced;
+}
+
+static void record_entry(armlint_state *state, unsigned opc,
+                         unsigned imm16, unsigned hw)
+{
+    if (state->insn_count > ARMLINT_MOV_MAX) {
+        // The longest legal chain is MOVZ + 3 MOVKs in 64-bit. We could
+        // overflow if a malformed sequence (e.g. multiple MOVKs at the
+        // same shift) lands in the same destination beyond that bound;
+        // drop the entry rather than write past the array.
+        return;
+    }
+    unsigned slot = state->insn_count - 1;
+    if (slot >= ARMLINT_MOV_MAX) {
+        return;
+    }
+    state->entries[slot].opc = (uint8_t)opc;
+    state->entries[slot].imm16 = (uint16_t)imm16;
+    state->entries[slot].shift_div_16 = (uint8_t)hw;
 }
 
 bool armlint_flush(armlint_state *state, armlint_finding *out)
@@ -177,6 +198,7 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
             state->value = (state->value & clear) | ((uint64_t)imm16 << shift);
             state->value &= mask_w;
             state->insn_count++;
+            record_entry(state, opc, imm16, hw);
             return false;
         }
         return close_sequence(state, out);
@@ -196,66 +218,92 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
     } else {
         state->value = (~((uint64_t)imm16 << shift)) & mask_w;
     }
+    record_entry(state, opc, imm16, hw);
 
     return produced;
 }
 
-static void report_finding(const armlint_finding *finding,
-                           const cs_insn *insns, size_t count,
-                           uint64_t base_addr)
+static void report_finding(const armlint_finding *finding)
 {
     printf("%s at offset: 0x%zx: %c%u = 0x%" PRIx64 " (%u instructions)\n",
         finding->name, finding->start_offset,
         finding->reg_width == 32 ? 'w' : 'x',
         finding->rd, finding->value, finding->insn_count);
 
-    size_t end_offset = finding->start_offset + (size_t)finding->insn_count * 4;
-    for (size_t i = 0; i < count; i++) {
-        size_t off = (size_t)(insns[i].address - base_addr);
-        if (off >= finding->start_offset && off < end_offset) {
-            printf("  %s %s\n", insns[i].mnemonic, insns[i].op_str);
+    char w_or_x = finding->reg_width == 32 ? 'w' : 'x';
+    unsigned n = finding->insn_count;
+    if (n > ARMLINT_MOV_MAX) {
+        n = ARMLINT_MOV_MAX;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        const armlint_mov_entry *e = &finding->entries[i];
+        const char *mnem = e->opc == 2 ? "movz"
+                       : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16;
+        if (shift == 0) {
+            printf("  %s %c%u, #0x%x\n", mnem, w_or_x, finding->rd, e->imm16);
+        } else {
+            printf("  %s %c%u, #0x%x, lsl #%u\n",
+                mnem, w_or_x, finding->rd, e->imm16, shift);
         }
     }
     printf("\n");
 }
 
+// Stream the byte buffer one instruction at a time. cs_disasm would
+// require allocating a cs_insn for every instruction up front (5+ GB on
+// a 100 MB text section) and silently stops at the first undecodable
+// 4-byte slot. cs_disasm_iter recycles a single cs_insn and lets us
+// skip past data-in-text by hand.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr)
 {
-    cs_insn *insns = NULL;
-    size_t count = cs_disasm(handle, inst, len, base_addr, 0, &insns);
-    if (count == 0) {
-        cs_err err = cs_errno(handle);
-        if (err != CS_ERR_OK) {
-            fprintf(stderr, "Capstone error: %s\n", cs_strerror(err));
-            return -1;
-        }
-        return 0;
-    }
-
     armlint_state *state = armlint_state_create();
     if (state == NULL) {
-        cs_free(insns, count);
+        return -1;
+    }
+    cs_insn *insn = cs_malloc(handle);
+    if (insn == NULL) {
+        armlint_state_destroy(state);
         return -1;
     }
 
     int errors = 0;
-    for (size_t i = 0; i < count; i++) {
-        armlint_finding finding;
-        size_t offset = (size_t)(insns[i].address - base_addr);
-        if (check_movz_movk_bitmask(state, &insns[i], offset, &finding)) {
-            report_finding(&finding, insns, count, base_addr);
-            errors++;
+    const uint8_t *code = inst;
+    size_t size = len;
+    uint64_t address = base_addr;
+
+    while (size >= 4) {
+        uint64_t insn_addr = address;
+        if (cs_disasm_iter(handle, &code, &size, &address, insn)) {
+            armlint_finding finding;
+            size_t offset = (size_t)(insn_addr - base_addr);
+            if (check_movz_movk_bitmask(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+        } else {
+            // Treat the slot as opaque data and skip a single A64
+            // word. Flush first so an in-progress MOV sequence cannot
+            // straddle the gap.
+            armlint_finding finding;
+            if (armlint_flush(state, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            code += 4;
+            size -= 4;
+            address += 4;
         }
     }
 
     armlint_finding finding;
     if (armlint_flush(state, &finding)) {
-        report_finding(&finding, insns, count, base_addr);
+        report_finding(&finding);
         errors++;
     }
 
+    cs_free(insn, 1);
     armlint_state_destroy(state);
-    cs_free(insns, count);
     return errors;
 }

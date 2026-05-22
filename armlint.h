@@ -39,6 +39,18 @@ armlint_state *armlint_state_create(void);
 void armlint_state_destroy(armlint_state *state);
 void armlint_state_reset(armlint_state *state);
 
+// A single MOVZ / MOVN / MOVK in a recorded sequence. We carry these
+// in findings so reporting does not depend on the cs_insn array still
+// being alive when the finding is emitted (cs_disasm_iter recycles a
+// single cs_insn slot).
+#define ARMLINT_MOV_MAX 4
+
+typedef struct {
+    uint16_t imm16;
+    uint8_t  shift_div_16;     // 0..3 (shift = 0/16/32/48)
+    uint8_t  opc;              // 0=MOVN, 2=MOVZ, 3=MOVK
+} armlint_mov_entry;
+
 // Findings reported by check functions. start_offset is the offset of
 // the first instruction of the suboptimal run; insn_count is its length.
 typedef struct {
@@ -48,6 +60,7 @@ typedef struct {
     uint64_t value;
     unsigned reg_width;
     unsigned rd;
+    armlint_mov_entry entries[ARMLINT_MOV_MAX];
 } armlint_finding;
 
 // Examine insn (already decoded by Capstone) in the context of recent

@@ -51,10 +51,11 @@ make all
 
 armlint is intended to be part of compiler test suites which should
 `#include "armlint.h"` and link `libarmlint.a`. It can also read
-arbitrary AArch64 ELF executables via:
+arbitrary AArch64 binaries (ELF, thin Mach-O, or universal/fat Mach-O):
 
 ```
 ./armlint /path/to/aarch64/binary
+./armlint /bin/ls
 ```
 
 ## References
