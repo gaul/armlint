@@ -79,9 +79,30 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
 
 // Detect CMP Rn, #0 (SUBS XZR, Rn, #0) immediately followed by B.EQ or
 // B.NE; the pair is replaceable by CBZ Rn / CBNZ Rn with the same
-// branch target.
+// branch target. Emission is deferred via the pending-finding mechanism
+// so the rewrite is only suggested when downstream code provably does
+// not observe the dropped NZCV state -- see armlint_advance_pending.
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
+
+// Detect TST Rn, #(1<<k) (ANDS XZR, Rn, #imm) immediately followed by
+// B.EQ or B.NE; the pair is replaceable by TBZ Rn, #k or TBNZ Rn, #k
+// when the branch target fits in TBZ's shorter (14-bit signed) range.
+// Like check_cmp_zero_branch, emission is deferred until the forward
+// liveness scan confirms NZCV is dead.
+bool check_tst_branch(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out);
+
+// Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
+// scan by one instruction. Returns true and fills *out when a stopper
+// makes prior NZCV state unobservable (or false on a flag read / unsafe
+// terminator / window expiry, suppressing the pending finding). Call
+// once per instruction BEFORE running the per-instruction checks; if
+// it were called after, a check setting a new pending in its step (1)
+// would be immediately advanced against the same instruction and
+// likely suppressed.
+bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
+                             armlint_finding *out);
 
 // Close any open sequence at end-of-region. Returns true and fills *out
 // if the closed sequence is reportable.

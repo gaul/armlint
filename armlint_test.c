@@ -43,6 +43,9 @@ static int run_check(const uint8_t *code, size_t code_size)
     for (size_t i = 0; i < count; i++) {
         armlint_finding f;
         size_t offset = (size_t)insns[i].address;
+        if (armlint_advance_pending(state, &insns[i], &f)) {
+            findings++;
+        }
         if (check_movz_movk_bitmask(state, &insns[i], offset, &f)) {
             findings++;
         }
@@ -50,6 +53,9 @@ static int run_check(const uint8_t *code, size_t code_size)
             findings++;
         }
         if (check_cmp_zero_branch(state, &insns[i], offset, &f)) {
+            findings++;
+        }
+        if (check_tst_branch(state, &insns[i], offset, &f)) {
             findings++;
         }
     }
@@ -575,6 +581,49 @@ static void csel_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
     out[3] = (op >> 24) & 0xff;
 }
 
+// TST Wn, #(1<<k) -- ANDS WZR, Wn, #imm with N=0, imms=0, immr =
+// (32 - k) mod 32. k must be in [0, 31].
+static void tst_w_bit(uint8_t out[4], unsigned rn, unsigned k)
+{
+    unsigned immr = (32u - k) % 32u;
+    uint32_t op = 0x7200001Fu
+        | ((immr & 0x3Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// TST Xn, #(1<<k) -- ANDS XZR, Xn, #imm with N=1, imms=0, immr =
+// (64 - k) mod 64. k must be in [0, 63].
+static void tst_x_bit(uint8_t out[4], unsigned rn, unsigned k)
+{
+    unsigned immr = (64u - k) % 64u;
+    uint32_t op = 0xF240001Fu
+        | ((immr & 0x3Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// TST Wn, #imm where imm is NOT a single bit (multi-bit mask) -- used
+// to verify the decoder rejects multi-bit immediates. We pass an N=0,
+// imms=k (so S=k, S+1 ones) which produces a run of k+1 ones in the
+// low bits. For k>=1, this is at least two ones.
+static void tst_w_run(uint8_t out[4], unsigned rn, unsigned imms)
+{
+    uint32_t op = 0x7200001Fu
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 static void test_cmp_zero_branch(void)
 {
     uint8_t code[32];
@@ -731,6 +780,129 @@ static void test_cmp_zero_branch(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_tst_branch(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: single-bit TST + B.EQ/NE, in range, with stopper. --
+
+    // tst w0, #1 ; b.eq +8 ; ret -- bit 0, W register.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst w0, #(1<<5) ; b.ne +8 ; ret -- mid-range bit, NE.
+    tst_w_bit(&code[0], 0, 5);
+    b_cond(&code[4], 1, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst w0, #(1<<31) ; b.eq -- top bit of W.
+    tst_w_bit(&code[0], 0, 31);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst x5, #(1<<40) ; b.eq -- X register, bit > 31.
+    tst_x_bit(&code[0], 5, 40);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst x0, #(1<<63) ; b.ne -- top bit of X.
+    tst_x_bit(&code[0], 0, 63);
+    b_cond(&code[4], 1, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: multi-bit TST mask -- not a single bit. --
+
+    // tst w0, #3 (imms=1 -> S+1=2 ones at the low end).
+    tst_w_run(&code[0], 0, 1);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // tst w0, #0xff (8 ones).
+    tst_w_run(&code[0], 0, 7);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: range -- target too far for TBZ's 14-bit imm. --
+
+    // tst w0, #1 ; b.eq +32 KB (just past TBZ's reach).
+    // imm19 = 8192, tbz disp = 8193, out of range [-8192, 8191].
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8192 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // tst w0, #1 ; b.eq just within range.
+    // imm19 = 8190, tbz disp = 8191, in range.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8190 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: flag liveness same as CMP check. --
+
+    // tst w0, #1 ; b.eq ; adcs reads C -> suppress.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    adcs_w(&code[8], 1, 2, 3);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // tst w0, #1 ; b.eq ; b.lt -> suppress.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    b_cond(&code[8], 11 /* LT */, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: not EQ/NE. --
+
+    // tst w0, #1 ; b.lt -- wrong cond, no fold.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction expires tst_active. --
+
+    // tst w0, #1 ; movz w5, #1 ; b.eq -- TST state cleared.
+    tst_w_bit(&code[0], 0, 0);
+    movz_w(&code[4], 5, 1);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: TST WZR (Rn=31) excluded. --
+
+    tst_w_bit(&code[0], 31, 0);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Lone TST without consumer. --
+
+    tst_w_bit(&code[0], 0, 0);
+    ret_(&code[4]);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Interaction: CMP+B.EQ then TST+B.EQ both flag if stopped. --
+
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    tst_w_bit(&code[8], 1, 3);   // overwrites NZCV (ANDS), emits CMP finding
+    b_cond(&code[12], 0, 8);     // closes tst, sets new pending
+    // (No stopper after this in the buffer; tst finding will be
+    // discarded on flush.)
+    assert(run_helper_check(code, 16) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -744,6 +916,7 @@ int main(void)
     test_movz_movk_sequences();
     test_lsl_fold();
     test_cmp_zero_branch();
+    test_tst_branch();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

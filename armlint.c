@@ -53,10 +53,17 @@ struct armlint_state {
     unsigned cmp_rn;
     size_t cmp_offset;
 
-    // Deferred CMP+B.EQ/NE finding awaiting forward NZCV-liveness
-    // verification. The fold is emitted only when a subsequent
-    // instruction confirms it does not read N/Z/C/V before they are
-    // rewritten or rendered irrelevant by control flow.
+    // TST Rn, #(1<<k) pending a B.EQ/B.NE consumer.
+    bool tst_active;
+    bool tst_is_64bit;
+    unsigned tst_rn;
+    unsigned tst_bit;       // bit position 0..63
+    size_t tst_offset;
+
+    // Deferred CMP/TST + B.EQ/NE finding awaiting forward NZCV-liveness
+    // verification. Only one of CMP or TST can be pending at a time
+    // (a CMP would overwrite or be overwritten by a TST), so the
+    // storage is shared.
     bool pending_active;
     unsigned pending_window;
     armlint_finding pending_finding;
@@ -194,13 +201,15 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
 
 bool armlint_flush(armlint_state *state, armlint_finding *out)
 {
-    // The LSL and CMP checks never produce a finding from flush alone
-    // -- an isolated LSL or CMP is not actionable -- but their state
-    // must be cleared so a new region starts fresh. Any pending
-    // CMP+B.EQ/NE finding is discarded too: without seeing a safe
-    // stopper before end-of-region, we cannot prove the fold is sound.
+    // The LSL, CMP, and TST checks never produce a finding from flush
+    // alone -- an isolated LSL, CMP, or TST is not actionable -- but
+    // their state must be cleared so a new region starts fresh. Any
+    // pending CMP+B.EQ/NE or TST+B.EQ/NE finding is discarded too:
+    // without seeing a safe stopper before end-of-region, we cannot
+    // prove the fold is sound.
     state->lsl_active = false;
     state->cmp_active = false;
+    state->tst_active = false;
     state->pending_active = false;
     return mov_close(state, out);
 }
@@ -611,17 +620,22 @@ static liveness_t classify_liveness(uint32_t op)
     return LIV_UNKNOWN;
 }
 
-// Advance the deferred CMP+B.EQ/NE finding's flag-liveness scan by one
-// instruction. Emits the pending finding into *out if the current
-// instruction provably overwrites NZCV or otherwise renders the prior
-// flag state unobservable. Suppresses the finding if any read of NZCV
-// is seen, or if the window expires.
-static bool advance_pending_cmp(armlint_state *state, uint32_t op,
-                                armlint_finding *out)
+bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
+                             armlint_finding *out)
 {
+    if (insn->size != 4) {
+        state->pending_active = false;
+        return false;
+    }
     if (!state->pending_active) {
         return false;
     }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
     switch (classify_liveness(op)) {
     case LIV_OVERWRITE:
     case LIV_TERM_SAFE:
@@ -645,9 +659,10 @@ static bool advance_pending_cmp(armlint_state *state, uint32_t op,
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out)
 {
+    (void)out;  // emission goes through armlint_advance_pending
+
     if (insn->size != 4) {
         state->cmp_active = false;
-        state->pending_active = false;
         return false;
     }
 
@@ -655,9 +670,6 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
         | ((uint32_t)insn->bytes[1] << 8)
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
-
-    // (0) Advance the deferred finding's liveness scan, if any.
-    bool produced = advance_pending_cmp(state, op, out);
 
     // (1) Close: is this a B.EQ/B.NE consuming the pending CMP?
     if (state->cmp_active) {
@@ -704,7 +716,125 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
         state->cmp_offset = offset;
     }
 
-    return produced;
+    return false;
+}
+
+// TST Rn, #(1<<k) = ANDS XZR, Rn, #imm where the logical immediate
+// decodes to a single bit. ANDS-immediate encoding:
+//   sf | 11 | 100100 | N | immr(6) | imms(6) | Rn | Rd
+// Rd = 31 selects the TST alias; a single-bit pattern has imms = 0
+// (S = 0, i.e. one '1'), with N == sf so the element size equals the
+// full register width.
+static bool decode_tst_single_bit(uint32_t op,
+                                  unsigned *out_sf,
+                                  unsigned *out_rn,
+                                  unsigned *out_bit)
+{
+    if ((op & 0x7F800000u) != 0x72000000u) {
+        return false;
+    }
+    if ((op & 0x1Fu) != 0x1Fu) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 1u;
+    unsigned N = (op >> 22) & 1u;
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+
+    if (imms != 0) {
+        return false;
+    }
+    if (sf == 0) {
+        if (N != 0 || (immr & 0x20u)) {
+            return false;
+        }
+        *out_bit = (32u - immr) % 32u;
+    } else {
+        if (N != 1) {
+            return false;
+        }
+        *out_bit = (64u - immr) % 64u;
+    }
+    *out_sf = sf;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+bool check_tst_branch(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out)
+{
+    (void)out;  // emission goes through armlint_advance_pending
+
+    if (insn->size != 4) {
+        state->tst_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: is this a B.EQ/B.NE consuming the pending TST?
+    if (state->tst_active) {
+        bool is_eq;
+        int32_t imm19;
+        if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
+            // The proposed TBZ replaces the TST at the same address,
+            // i.e. 4 bytes before the B.cond. Its required imm14 (in
+            // instruction units) is therefore imm19 + 1. TBZ's imm14
+            // is signed 14-bit, giving a ~32 KB reach.
+            int64_t tbz_disp = (int64_t)imm19 + 1;
+            if (tbz_disp >= -8192 && tbz_disp <= 8191) {
+                uint64_t target = insn->address
+                    + (uint64_t)((int64_t)imm19 * 4);
+                char w_or_x = state->tst_is_64bit ? 'x' : 'w';
+                const char *tb_mnem = is_eq ? "tbz" : "tbnz";
+                const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
+
+                armlint_finding *p = &state->pending_finding;
+                p->name = "TST+B.EQ/NE foldable into TBZ/TBNZ";
+                p->start_offset = state->tst_offset;
+                p->insn_count = 2;
+                clear_finding_strings(p);
+
+                snprintf(p->detail, sizeof(p->detail),
+                    "-> %s %c%u, #%u, 0x%" PRIx64,
+                    tb_mnem, w_or_x, state->tst_rn,
+                    state->tst_bit, target);
+
+                if (state->tst_bit < 32) {
+                    snprintf(p->lines[0], sizeof(p->lines[0]),
+                        "tst %c%u, #0x%x",
+                        w_or_x, state->tst_rn,
+                        1u << state->tst_bit);
+                } else {
+                    snprintf(p->lines[0], sizeof(p->lines[0]),
+                        "tst %c%u, #0x%" PRIx64,
+                        w_or_x, state->tst_rn,
+                        (uint64_t)1 << state->tst_bit);
+                }
+                snprintf(p->lines[1], sizeof(p->lines[1]),
+                    "%s 0x%" PRIx64, bcond_mnem, target);
+
+                state->pending_active = true;
+                state->pending_window = LIVENESS_WINDOW;
+            }
+        }
+        state->tst_active = false;
+    }
+
+    // (2) Open: is this a TST Rn, #(1<<k) (Rn != XZR)?
+    unsigned sf, rn, bit;
+    if (decode_tst_single_bit(op, &sf, &rn, &bit) && rn != 31) {
+        state->tst_active = true;
+        state->tst_is_64bit = (sf != 0);
+        state->tst_rn = rn;
+        state->tst_bit = bit;
+        state->tst_offset = offset;
+    }
+
+    return false;
 }
 
 static void report_finding(const armlint_finding *finding)
@@ -753,6 +883,14 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
         if (cs_disasm_iter(handle, &code, &size, &address, insn)) {
             armlint_finding finding;
             size_t offset = (size_t)(insn_addr - base_addr);
+            // Advance deferred CMP/TST findings before running the
+            // per-instruction checks, so that a check setting a new
+            // pending in its step (1) isn't immediately re-advanced
+            // against the same instruction.
+            if (armlint_advance_pending(state, insn, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
             if (check_movz_movk_bitmask(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
@@ -762,6 +900,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_cmp_zero_branch(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_tst_branch(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

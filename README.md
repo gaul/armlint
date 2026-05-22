@@ -45,6 +45,15 @@ code, and documents corners of the A64 instruction set.
     terminator (B unconditional, BR), or after a 16-instruction
     window with no decision. The branch-target path is not scanned;
     full soundness would require basic-block analysis.
+* TST single-bit + B.EQ/NE foldable into TBZ/TBNZ
+  - `tst w0, #(1<<5) ; b.eq target` instead of `tbz w0, #5, target`.
+    Same for `b.ne` -> `tbnz`. Only the immediate-form `TST` is
+    matched (`ANDS XZR, Rn, #imm`) and only when the immediate is a
+    single power-of-two bit.
+  - Range: `TBZ`/`TBNZ` use a 14-bit signed offset (~32 KB reach),
+    much shorter than `B.cond`'s 19-bit (~1 MB). The fold is
+    suggested only when the target fits in the TBZ encoding.
+  - Soundness: same NZCV-liveness scan as the CMP-branch check.
 
 ## Compilation
 
