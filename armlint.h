@@ -39,28 +39,26 @@ armlint_state *armlint_state_create(void);
 void armlint_state_destroy(armlint_state *state);
 void armlint_state_reset(armlint_state *state);
 
-// A single MOVZ / MOVN / MOVK in a recorded sequence. We carry these
-// in findings so reporting does not depend on the cs_insn array still
-// being alive when the finding is emitted (cs_disasm_iter recycles a
-// single cs_insn slot).
-#define ARMLINT_MOV_MAX 4
-
-typedef struct {
-    uint16_t imm16;
-    uint8_t  shift_div_16;     // 0..3 (shift = 0/16/32/48)
-    uint8_t  opc;              // 0=MOVN, 2=MOVZ, 3=MOVK
-} armlint_mov_entry;
-
 // Findings reported by check functions. start_offset is the offset of
 // the first instruction of the suboptimal run; insn_count is its length.
+// detail is a short summary (e.g. the constructed constant, or the
+// suggested folded instruction) shown in the header. lines[] holds the
+// disassembled offending instructions, one per line; unused slots are
+// empty strings.
+//
+// Checks own the formatting of their detail and lines so that reporting
+// does not need to retain the original cs_insn array (cs_disasm_iter
+// recycles a single cs_insn slot).
+#define ARMLINT_FINDING_LINES      4
+#define ARMLINT_FINDING_LINE_LEN   96
+#define ARMLINT_FINDING_DETAIL_LEN 128
+
 typedef struct {
     const char *name;
     size_t start_offset;
     unsigned insn_count;
-    uint64_t value;
-    unsigned reg_width;
-    unsigned rd;
-    armlint_mov_entry entries[ARMLINT_MOV_MAX];
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    char lines[ARMLINT_FINDING_LINES][ARMLINT_FINDING_LINE_LEN];
 } armlint_finding;
 
 // Examine insn (already decoded by Capstone) in the context of recent
@@ -71,6 +69,13 @@ typedef struct {
 // trailing sequence.
 bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
+
+// Detect an LSL (immediate) immediately followed by an arithmetic or
+// logical shifted-register op that consumes the LSL's destination as
+// its Rm, with the consumer overwriting that register. The pair can be
+// replaced by a single shifted-register form.
+bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out);
 
 // Close any open sequence at end-of-region. Returns true and fills *out
 // if the closed sequence is reportable.

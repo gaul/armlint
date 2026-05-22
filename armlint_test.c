@@ -46,6 +46,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_movz_movk_bitmask(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_lsl_fold(state, &insns[i], offset, &f)) {
+            findings++;
+        }
     }
 
     armlint_finding f;
@@ -270,6 +273,195 @@ static void test_movz_movk_sequences(void)
     assert(run_helper_check(code, 16) == 1);
 }
 
+// LSL (immediate) is the UBFM alias with imms = (datasize-1) - shift
+// and immr = (datasize - shift) MOD datasize.
+static void lsl_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
+{
+    unsigned imms = 31u - shift;
+    unsigned immr = (32u - shift) & 31u;
+    uint32_t op = 0x53000000u
+        | (immr << 16)
+        | (imms << 10)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void lsl_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
+{
+    unsigned imms = 63u - shift;
+    unsigned immr = (64u - shift) & 63u;
+    // sf=1 UBFM (with N=1) base = 0xd3400000
+    uint32_t op = 0xd3400000u
+        | (immr << 16)
+        | (imms << 10)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// LSR (immediate) -- UBFM with imms = imms_max, immr = shift. Used to
+// verify our LSL decoder does NOT mistake LSR for LSL.
+static void lsr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
+{
+    uint32_t op = 0x53000000u
+        | ((shift & 0x1fu) << 16)
+        | (31u << 10)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Shifted-register consumer encoders. Each takes a base value for the
+// top bits identifying the operation, then Rd/Rn/Rm slots. imm6 = 0
+// and shift type = LSL.
+static void encode_sr(uint8_t out[4], uint32_t base,
+                      unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = base
+        | ((rm & 0x1fu) << 16)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+#define ADD_W(out, rd, rn, rm)  encode_sr(out, 0x0b000000u, rd, rn, rm)
+#define ADDS_W(out, rd, rn, rm) encode_sr(out, 0x2b000000u, rd, rn, rm)
+#define SUB_W(out, rd, rn, rm)  encode_sr(out, 0x4b000000u, rd, rn, rm)
+#define ADD_X(out, rd, rn, rm)  encode_sr(out, 0x8b000000u, rd, rn, rm)
+#define SUB_X(out, rd, rn, rm)  encode_sr(out, 0xcb000000u, rd, rn, rm)
+#define AND_W(out, rd, rn, rm)  encode_sr(out, 0x0a000000u, rd, rn, rm)
+#define ORR_W(out, rd, rn, rm)  encode_sr(out, 0x2a000000u, rd, rn, rm)
+#define EOR_W(out, rd, rn, rm)  encode_sr(out, 0x4a000000u, rd, rn, rm)
+
+// Arithmetic shifted-register with imm6 = 1 (existing shift). Used to
+// verify we do NOT fold into a consumer that already has a shift.
+static void add_w_lsl1(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x0b000000u
+        | ((rm & 0x1fu) << 16)
+        | (1u << 10)        // imm6 = 1
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void test_lsl_fold(void)
+{
+    uint8_t code[16];
+
+    // lsl w0, w1, #3 ; add w0, w2, w0 -> add w0, w2, w1, lsl #3 (flag).
+    lsl_w(&code[0], 0, 1, 3);
+    ADD_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl x0, x1, #5 ; add x0, x2, x0 (X-register; flag).
+    lsl_x(&code[0], 0, 1, 5);
+    ADD_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #2 ; sub w0, w2, w0 -> sub w0, w2, w1, lsl #2 (flag).
+    lsl_w(&code[0], 0, 1, 2);
+    SUB_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #4 ; and w0, w2, w0 (logical; flag).
+    lsl_w(&code[0], 0, 1, 4);
+    AND_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #1 ; orr w0, w2, w0 (logical; flag).
+    lsl_w(&code[0], 0, 1, 1);
+    ORR_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #5 ; eor w0, w2, w0 (logical; flag).
+    lsl_w(&code[0], 0, 1, 5);
+    EOR_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl x0, x1, #32 ; add x0, x2, x0 (maximum-width-half shift; flag).
+    lsl_x(&code[0], 0, 1, 32);
+    ADD_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl x0, x1, #63 ; add x0, x2, x0 (maximum shift; flag).
+    lsl_x(&code[0], 0, 1, 63);
+    ADD_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // adds (flag-setting ADD) consumer; still folds.
+    lsl_w(&code[0], 0, 1, 3);
+    ADDS_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative cases --
+
+    // Consumer overwrites a different register: v1 safety condition
+    // (Rd_consumer == Rd_lsl) does not hold. Don't flag.
+    lsl_w(&code[0], 0, 1, 3);
+    ADD_W(&code[4], 5, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LSL Rd is at Rn position of the consumer, not Rm. v1 only folds
+    // when the LSL result is at Rm. Don't flag.
+    lsl_w(&code[0], 0, 1, 3);
+    ADD_W(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch (W LSL followed by X consumer).
+    lsl_w(&code[0], 0, 1, 3);
+    ADD_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction (movz to an unrelated reg) expires LSL.
+    lsl_w(&code[0], 0, 1, 3);
+    movz_w(&code[4], 5, 0x1234);
+    ADD_W(&code[8], 0, 2, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Consumer already has a non-zero shift; we don't try to merge.
+    lsl_w(&code[0], 0, 1, 3);
+    add_w_lsl1(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Single LSL with no consumer.
+    lsl_w(&code[0], 0, 1, 3);
+    assert(run_helper_check(code, 4) == 0);
+
+    // LSR -- different alias of UBFM; must not be misread as LSL.
+    lsr_w(&code[0], 0, 1, 3);
+    ADD_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Back-to-back LSLs: the first has no consumer, the second is alone.
+    lsl_w(&code[0], 0, 1, 3);
+    lsl_w(&code[4], 5, 6, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Two independent fold patterns back to back. Both flag.
+    lsl_w(&code[0], 0, 1, 3);
+    ADD_W(&code[4], 0, 2, 0);
+    lsl_w(&code[8], 3, 4, 2);
+    SUB_W(&code[12], 3, 5, 3);
+    assert(run_helper_check(code, 16) == 2);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -281,6 +473,7 @@ int main(void)
     test_is_bitmask_immediate_32();
     test_is_bitmask_immediate_64();
     test_movz_movk_sequences();
+    test_lsl_fold();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

@@ -21,14 +21,31 @@
 
 #include "armlint.h"
 
+#define MOV_CHAIN_MAX 4
+
+typedef struct {
+    uint16_t imm16;
+    uint8_t  shift_div_16;     // 0..3 (shift = 0/16/32/48)
+    uint8_t  opc;              // 0=MOVN, 2=MOVZ, 3=MOVK
+} mov_entry;
+
 struct armlint_state {
-    bool active;
-    unsigned rd;
-    bool is_64bit;
-    uint64_t value;
-    size_t start_offset;
-    unsigned insn_count;
-    armlint_mov_entry entries[ARMLINT_MOV_MAX];
+    // MOV chain (MOVZ/MOVN followed by zero or more MOVKs).
+    bool mov_active;
+    bool mov_is_64bit;
+    unsigned mov_rd;
+    uint64_t mov_value;
+    size_t mov_start_offset;
+    unsigned mov_insn_count;
+    mov_entry mov_entries[MOV_CHAIN_MAX];
+
+    // LSL pending a shifted-register consumer.
+    bool lsl_active;
+    bool lsl_is_64bit;
+    unsigned lsl_rd;
+    unsigned lsl_rn;
+    unsigned lsl_shift;
+    size_t lsl_offset;
 };
 
 armlint_state *armlint_state_create(void)
@@ -103,53 +120,85 @@ bool is_bitmask_immediate(uint64_t imm, unsigned reg_width)
     return false;
 }
 
-static bool close_sequence(armlint_state *state, armlint_finding *out)
+static void clear_finding_strings(armlint_finding *out)
 {
-    if (!state->active) {
+    out->detail[0] = '\0';
+    for (unsigned i = 0; i < ARMLINT_FINDING_LINES; i++) {
+        out->lines[i][0] = '\0';
+    }
+}
+
+static bool mov_close(armlint_state *state, armlint_finding *out)
+{
+    if (!state->mov_active) {
         return false;
     }
 
     bool produced = false;
-    if (state->insn_count >= 2) {
-        unsigned reg_width = state->is_64bit ? 64 : 32;
-        if (is_bitmask_immediate(state->value, reg_width)) {
+    if (state->mov_insn_count >= 2) {
+        unsigned reg_width = state->mov_is_64bit ? 64 : 32;
+        if (is_bitmask_immediate(state->mov_value, reg_width)) {
+            char w_or_x = state->mov_is_64bit ? 'x' : 'w';
+
             out->name = "suboptimal MOVZ/MOVK sequence";
-            out->start_offset = state->start_offset;
-            out->insn_count = state->insn_count;
-            out->value = state->value;
-            out->reg_width = reg_width;
-            out->rd = state->rd;
-            memcpy(out->entries, state->entries, sizeof(out->entries));
+            out->start_offset = state->mov_start_offset;
+            out->insn_count = state->mov_insn_count;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "%c%u = 0x%" PRIx64,
+                w_or_x, state->mov_rd, state->mov_value);
+
+            unsigned n = state->mov_insn_count;
+            if (n > ARMLINT_FINDING_LINES) {
+                n = ARMLINT_FINDING_LINES;
+            }
+            for (unsigned i = 0; i < n; i++) {
+                const mov_entry *e = &state->mov_entries[i];
+                const char *mnem = e->opc == 2 ? "movz"
+                               : (e->opc == 0 ? "movn" : "movk");
+                unsigned shift = (unsigned)e->shift_div_16 * 16;
+                if (shift == 0) {
+                    snprintf(out->lines[i], sizeof(out->lines[i]),
+                        "%s %c%u, #0x%x",
+                        mnem, w_or_x, state->mov_rd, e->imm16);
+                } else {
+                    snprintf(out->lines[i], sizeof(out->lines[i]),
+                        "%s %c%u, #0x%x, lsl #%u",
+                        mnem, w_or_x, state->mov_rd, e->imm16, shift);
+                }
+            }
             produced = true;
         }
     }
 
-    state->active = false;
+    state->mov_active = false;
     return produced;
-}
-
-static void record_entry(armlint_state *state, unsigned opc,
-                         unsigned imm16, unsigned hw)
-{
-    if (state->insn_count > ARMLINT_MOV_MAX) {
-        // The longest legal chain is MOVZ + 3 MOVKs in 64-bit. We could
-        // overflow if a malformed sequence (e.g. multiple MOVKs at the
-        // same shift) lands in the same destination beyond that bound;
-        // drop the entry rather than write past the array.
-        return;
-    }
-    unsigned slot = state->insn_count - 1;
-    if (slot >= ARMLINT_MOV_MAX) {
-        return;
-    }
-    state->entries[slot].opc = (uint8_t)opc;
-    state->entries[slot].imm16 = (uint16_t)imm16;
-    state->entries[slot].shift_div_16 = (uint8_t)hw;
 }
 
 bool armlint_flush(armlint_state *state, armlint_finding *out)
 {
-    return close_sequence(state, out);
+    // The LSL check never produces a finding from flush alone -- an
+    // LSL with no consumer is not actionable -- but clear its state
+    // so a new region starts fresh.
+    state->lsl_active = false;
+    return mov_close(state, out);
+}
+
+static void mov_record_entry(armlint_state *state, unsigned opc,
+                             unsigned imm16, unsigned hw)
+{
+    if (state->mov_insn_count == 0
+            || state->mov_insn_count > MOV_CHAIN_MAX) {
+        return;
+    }
+    unsigned slot = state->mov_insn_count - 1;
+    if (slot >= MOV_CHAIN_MAX) {
+        return;
+    }
+    state->mov_entries[slot].opc = (uint8_t)opc;
+    state->mov_entries[slot].imm16 = (uint16_t)imm16;
+    state->mov_entries[slot].shift_div_16 = (uint8_t)hw;
 }
 
 // Decode the move-wide-immediate fields directly from the 4-byte
@@ -160,7 +209,7 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out)
 {
     if (insn->size != 4) {
-        return close_sequence(state, out);
+        return mov_close(state, out);
     }
 
     uint32_t op = (uint32_t)insn->bytes[0]
@@ -170,7 +219,7 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
 
     bool is_move_wide = (op & 0x1f800000u) == 0x12800000u;
     if (!is_move_wide) {
-        return close_sequence(state, out);
+        return mov_close(state, out);
     }
 
     unsigned opc = (op >> 29) & 0x3u;
@@ -183,7 +232,7 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
     // SP for these aliases) and discards the constant. Treat both as
     // sequence-breakers.
     if (opc == 1 || rd == 31) {
-        return close_sequence(state, out);
+        return mov_close(state, out);
     }
 
     unsigned reg_width = sf ? 64 : 32;
@@ -192,59 +241,231 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
 
     if (opc == 3) {
         // MOVK extends an active sequence only if rd and width match.
-        if (state->active && state->rd == rd
-                && state->is_64bit == (reg_width == 64)) {
+        if (state->mov_active && state->mov_rd == rd
+                && state->mov_is_64bit == (reg_width == 64)) {
             uint64_t clear = ~((uint64_t)0xffffu << shift);
-            state->value = (state->value & clear) | ((uint64_t)imm16 << shift);
-            state->value &= mask_w;
-            state->insn_count++;
-            record_entry(state, opc, imm16, hw);
+            state->mov_value = (state->mov_value & clear)
+                | ((uint64_t)imm16 << shift);
+            state->mov_value &= mask_w;
+            state->mov_insn_count++;
+            mov_record_entry(state, opc, imm16, hw);
             return false;
         }
-        return close_sequence(state, out);
+        return mov_close(state, out);
     }
 
     // opc == 0 (MOVN) or opc == 2 (MOVZ): start a new sequence,
     // closing any previous one first.
-    bool produced = close_sequence(state, out);
+    bool produced = mov_close(state, out);
 
-    state->active = true;
-    state->rd = rd;
-    state->is_64bit = reg_width == 64;
-    state->start_offset = offset;
-    state->insn_count = 1;
+    state->mov_active = true;
+    state->mov_rd = rd;
+    state->mov_is_64bit = (reg_width == 64);
+    state->mov_start_offset = offset;
+    state->mov_insn_count = 1;
     if (opc == 2) {
-        state->value = ((uint64_t)imm16 << shift) & mask_w;
+        state->mov_value = ((uint64_t)imm16 << shift) & mask_w;
     } else {
-        state->value = (~((uint64_t)imm16 << shift)) & mask_w;
+        state->mov_value = (~((uint64_t)imm16 << shift)) & mask_w;
     }
-    record_entry(state, opc, imm16, hw);
+    mov_record_entry(state, opc, imm16, hw);
+
+    return produced;
+}
+
+// Detect LSL (immediate) as the canonical UBFM alias:
+//   sf | 10 | 100110 | N | immr(6) | imms(6) | Rn(5) | Rd(5)
+// with N == sf, imms != datasize-1, and immr == imms+1 (mod datasize).
+// shift = (datasize - 1) - imms.
+static bool decode_lsl_imm(uint32_t op,
+                           unsigned *out_sf, unsigned *out_rd,
+                           unsigned *out_rn, unsigned *out_shift)
+{
+    if ((op & 0x7f800000u) != 0x53000000u) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 0x1u;
+    unsigned N = (op >> 22) & 0x1u;
+    if (N != sf) {
+        return false;
+    }
+    unsigned immr = (op >> 16) & 0x3fu;
+    unsigned imms = (op >> 10) & 0x3fu;
+    unsigned datasize = sf ? 64 : 32;
+    unsigned imms_max = datasize - 1;
+
+    // For sf=0 the high bits of immr/imms must be zero. The encoding
+    // would otherwise be UNALLOCATED.
+    if (!sf && (imms >= 32 || immr >= 32)) {
+        return false;
+    }
+    // LSL alias requires imms != imms_max (that case is the MOV alias
+    // / UBFX-all). Also immr == (imms + 1) mod datasize.
+    if (imms == imms_max) {
+        return false;
+    }
+    unsigned expected_immr = (imms + 1) % datasize;
+    if (immr != expected_immr) {
+        return false;
+    }
+
+    *out_sf = sf;
+    *out_rd = op & 0x1fu;
+    *out_rn = (op >> 5) & 0x1fu;
+    *out_shift = imms_max - imms;
+    return true;
+}
+
+// Detect arithmetic-shifted-register (ADD/SUB and S-variants) or
+// logical-shifted-register (AND/ORR/EOR + N-variants and S-variants)
+// whose immediate shift amount is zero, so the LSL can be folded in.
+//
+// Fills *out_mnem with the canonical underlying mnemonic (without the
+// CMP/CMN/TST/MOV/MVN/NEG aliases -- those have Rd==31 or Rn==31 which
+// the caller will inspect separately if needed).
+static bool decode_shifted_register_consumer(
+    uint32_t op,
+    unsigned *out_sf,
+    unsigned *out_rd,
+    unsigned *out_rn,
+    unsigned *out_rm,
+    const char **out_mnem)
+{
+    bool is_arith = (op & 0x1f200000u) == 0x0b000000u;
+    bool is_logic = (op & 0x1f000000u) == 0x0a000000u;
+    if (!is_arith && !is_logic) {
+        return false;
+    }
+
+    // Arithmetic shift type at bits 23..22; value 11 is RESERVED for
+    // arithmetic. Capstone should have rejected such inputs, but
+    // defensively skip if we see one.
+    unsigned shift_type = (op >> 22) & 0x3u;
+    if (is_arith && shift_type == 0x3u) {
+        return false;
+    }
+
+    unsigned imm6 = (op >> 10) & 0x3fu;
+    if (imm6 != 0) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 0x1u;
+    if (!sf && imm6 >= 32) {
+        // Defensive: with sf=0 the imm6 must be < 32.
+        return false;
+    }
+
+    *out_sf = sf;
+    *out_rd = op & 0x1fu;
+    *out_rn = (op >> 5) & 0x1fu;
+    *out_rm = (op >> 16) & 0x1fu;
+
+    if (is_arith) {
+        unsigned arith_op = (op >> 30) & 0x1u;
+        unsigned S = (op >> 29) & 0x1u;
+        static const char *names[4] = { "add", "adds", "sub", "subs" };
+        *out_mnem = names[(arith_op << 1) | S];
+    } else {
+        unsigned opc = (op >> 29) & 0x3u;
+        unsigned N = (op >> 21) & 0x1u;
+        static const char *names[8] = {
+            "and", "bic", "orr", "orn", "eor", "eon", "ands", "bics"
+        };
+        *out_mnem = names[(opc << 1) | N];
+    }
+    return true;
+}
+
+bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->lsl_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Try to close: is this instruction a shifted-register consumer
+    //     of the pending LSL?
+    if (state->lsl_active) {
+        unsigned c_sf, c_rd, c_rn, c_rm;
+        const char *c_mnem;
+        if (decode_shifted_register_consumer(op, &c_sf, &c_rd, &c_rn, &c_rm,
+                                             &c_mnem)
+                && c_sf == (state->lsl_is_64bit ? 1u : 0u)
+                && c_rm == state->lsl_rd
+                && c_rd == state->lsl_rd
+                && state->lsl_rd != 31) {
+            char w_or_x = state->lsl_is_64bit ? 'x' : 'w';
+
+            out->name = "LSL foldable into shifted-register form";
+            out->start_offset = state->lsl_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, %c%u, %c%u, lsl #%u",
+                c_mnem,
+                w_or_x, c_rd,
+                w_or_x, c_rn,
+                w_or_x, state->lsl_rn,
+                state->lsl_shift);
+
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "lsl %c%u, %c%u, #%u",
+                w_or_x, state->lsl_rd,
+                w_or_x, state->lsl_rn,
+                state->lsl_shift);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %c%u, %c%u, %c%u",
+                c_mnem,
+                w_or_x, c_rd,
+                w_or_x, c_rn,
+                w_or_x, c_rm);
+
+            produced = true;
+        }
+        // Strict adjacency: any non-matching instruction expires the LSL.
+        state->lsl_active = false;
+    }
+
+    // (2) Try to open: is this an LSL (immediate)?
+    unsigned sf, rd, rn, shift;
+    if (decode_lsl_imm(op, &sf, &rd, &rn, &shift)) {
+        // Writing to XZR makes the LSL pointless and there is nothing
+        // for a consumer to fold against; skip.
+        if (rd != 31) {
+            state->lsl_active = true;
+            state->lsl_is_64bit = (sf != 0);
+            state->lsl_rd = rd;
+            state->lsl_rn = rn;
+            state->lsl_shift = shift;
+            state->lsl_offset = offset;
+        }
+    }
 
     return produced;
 }
 
 static void report_finding(const armlint_finding *finding)
 {
-    printf("%s at offset: 0x%zx: %c%u = 0x%" PRIx64 " (%u instructions)\n",
-        finding->name, finding->start_offset,
-        finding->reg_width == 32 ? 'w' : 'x',
-        finding->rd, finding->value, finding->insn_count);
-
-    char w_or_x = finding->reg_width == 32 ? 'w' : 'x';
-    unsigned n = finding->insn_count;
-    if (n > ARMLINT_MOV_MAX) {
-        n = ARMLINT_MOV_MAX;
+    if (finding->detail[0] != '\0') {
+        printf("%s at offset: 0x%zx: %s (%u instructions)\n",
+            finding->name, finding->start_offset,
+            finding->detail, finding->insn_count);
+    } else {
+        printf("%s at offset: 0x%zx (%u instructions)\n",
+            finding->name, finding->start_offset, finding->insn_count);
     }
-    for (unsigned i = 0; i < n; i++) {
-        const armlint_mov_entry *e = &finding->entries[i];
-        const char *mnem = e->opc == 2 ? "movz"
-                       : (e->opc == 0 ? "movn" : "movk");
-        unsigned shift = (unsigned)e->shift_div_16 * 16;
-        if (shift == 0) {
-            printf("  %s %c%u, #0x%x\n", mnem, w_or_x, finding->rd, e->imm16);
-        } else {
-            printf("  %s %c%u, #0x%x, lsl #%u\n",
-                mnem, w_or_x, finding->rd, e->imm16, shift);
+    for (unsigned i = 0; i < ARMLINT_FINDING_LINES; i++) {
+        if (finding->lines[i][0] != '\0') {
+            printf("  %s\n", finding->lines[i]);
         }
     }
     printf("\n");
@@ -282,9 +503,13 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 report_finding(&finding);
                 errors++;
             }
+            if (check_lsl_fold(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
         } else {
             // Treat the slot as opaque data and skip a single A64
-            // word. Flush first so an in-progress MOV sequence cannot
+            // word. Flush first so an in-progress sequence cannot
             // straddle the gap.
             armlint_finding finding;
             if (armlint_flush(state, &finding)) {

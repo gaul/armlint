@@ -23,6 +23,12 @@ code, and documents corners of the A64 instruction set.
 * suboptimal MOVZ/MOVK sequence
   - `movz w0, #0x6666 ; movk w0, #0x6666, lsl #16` instead of
     `mov w0, #0x66666666` (single bitmask-immediate ORR)
+* LSL foldable into shifted-register form
+  - `lsl w0, w1, #3 ; add w0, w2, w0` instead of
+    `add w0, w2, w1, lsl #3`. Same for SUB, AND, ORR, EOR (and
+    flag-setting variants). Conservative: v1 only flags when the
+    consumer overwrites the LSL destination, guaranteeing the LSL
+    result is dead.
 
 ## Compilation
 
