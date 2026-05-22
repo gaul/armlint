@@ -46,6 +46,12 @@ struct armlint_state {
     unsigned lsl_rn;
     unsigned lsl_shift;
     size_t lsl_offset;
+
+    // CMP Rn, #0 pending a B.EQ/B.NE consumer.
+    bool cmp_active;
+    bool cmp_is_64bit;
+    unsigned cmp_rn;
+    size_t cmp_offset;
 };
 
 armlint_state *armlint_state_create(void)
@@ -178,10 +184,11 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
 
 bool armlint_flush(armlint_state *state, armlint_finding *out)
 {
-    // The LSL check never produces a finding from flush alone -- an
-    // LSL with no consumer is not actionable -- but clear its state
-    // so a new region starts fresh.
+    // The LSL and CMP checks never produce a finding from flush alone
+    // -- an isolated LSL or CMP is not actionable -- but their state
+    // must be cleared so a new region starts fresh.
     state->lsl_active = false;
+    state->cmp_active = false;
     return mov_close(state, out);
 }
 
@@ -453,6 +460,108 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Detect CMP Rn, #0, i.e. SUBS XZR, Rn, #0 in the immediate form with
+// no LSL #12 shift.
+//
+//   sf | 1 | 1 | 100010 | sh | imm12 | Rn | Rd
+//
+// We require op=1 (SUB), S=1 (set flags), sh=0, imm12=0, Rd=31.
+static bool decode_cmp_imm_zero(uint32_t op,
+                                unsigned *out_sf, unsigned *out_rn)
+{
+    // Mask covers bit 30 (op), bit 29 (S), bits 28..23 (encoding class),
+    // bit 22 (sh), bits 21..10 (imm12), bits 4..0 (Rd). Bit 31 (sf) is
+    // left out so the comparison matches either operand width.
+    if ((op & 0x7FFFFC1Fu) != 0x7100001Fu) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 0x1u;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// Detect B.cond with cond in {EQ, NE}. Returns the (sign-extended)
+// 19-bit branch offset in *out_imm19.
+//
+//   0 1010100 0 imm19 0 cond
+//
+// (bits 31..24 = 01010100, bit 4 = 0, bits 3..0 = cond)
+static bool decode_b_eq_or_ne(uint32_t op, bool *out_is_eq,
+                              int32_t *out_imm19)
+{
+    if ((op & 0xFF000010u) != 0x54000000u) {
+        return false;
+    }
+    unsigned cond = op & 0xFu;
+    if (cond != 0 && cond != 1) {
+        return false;
+    }
+    *out_is_eq = (cond == 0);
+    int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+    // Sign-extend from 19 bits to 32.
+    imm19 = (imm19 ^ 0x40000) - 0x40000;
+    *out_imm19 = imm19;
+    return true;
+}
+
+bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->cmp_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: is this a B.EQ/B.NE following the pending CMP?
+    if (state->cmp_active) {
+        bool is_eq;
+        int32_t imm19;
+        if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
+            uint64_t target = insn->address
+                + (uint64_t)((int64_t)imm19 * 4);
+            char w_or_x = state->cmp_is_64bit ? 'x' : 'w';
+            const char *cb_mnem = is_eq ? "cbz" : "cbnz";
+            const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
+
+            out->name = "compare-zero branch foldable into CBZ/CBNZ";
+            out->start_offset = state->cmp_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, 0x%" PRIx64,
+                cb_mnem, w_or_x, state->cmp_rn, target);
+
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "cmp %c%u, #0", w_or_x, state->cmp_rn);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s 0x%" PRIx64, bcond_mnem, target);
+
+            produced = true;
+        }
+        // Strict adjacency: any non-matching instruction expires the CMP.
+        state->cmp_active = false;
+    }
+
+    // (2) Open: is this a CMP Rn, #0 (Rn != XZR)?
+    unsigned sf, rn;
+    if (decode_cmp_imm_zero(op, &sf, &rn) && rn != 31) {
+        state->cmp_active = true;
+        state->cmp_is_64bit = (sf != 0);
+        state->cmp_rn = rn;
+        state->cmp_offset = offset;
+    }
+
+    return produced;
+}
+
 static void report_finding(const armlint_finding *finding)
 {
     if (finding->detail[0] != '\0') {
@@ -504,6 +613,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_lsl_fold(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_cmp_zero_branch(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

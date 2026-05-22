@@ -29,6 +29,11 @@ code, and documents corners of the A64 instruction set.
     flag-setting variants). Conservative: v1 only flags when the
     consumer overwrites the LSL destination, guaranteeing the LSL
     result is dead.
+* compare-zero branch foldable into CBZ/CBNZ
+  - `cmp w0, #0 ; b.eq target` instead of `cbz w0, target`. Same for
+    `b.ne` -> `cbnz`. v1 matches only the canonical `CMP Rn, #0`
+    encoding (SUBS XZR, Rn, #0); does not catch `cmp Rn, xzr` or
+    `tst Rn, Rn` (other zero-test idioms).
 
 ## Compilation
 

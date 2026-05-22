@@ -49,6 +49,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_lsl_fold(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_cmp_zero_branch(state, &insns[i], offset, &f)) {
+            findings++;
+        }
     }
 
     armlint_finding f;
@@ -462,6 +465,127 @@ static void test_lsl_fold(void)
     assert(run_helper_check(code, 16) == 2);
 }
 
+// CMP Wn, #imm (no shift) = SUBS WZR, Wn, #imm.
+static void cmp_w_imm(uint8_t out[4], unsigned rn, unsigned imm12)
+{
+    uint32_t op = 0x7100001fu
+        | ((imm12 & 0xfffu) << 10)
+        | ((rn & 0x1fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void cmp_x_imm(uint8_t out[4], unsigned rn, unsigned imm12)
+{
+    uint32_t op = 0xf100001fu
+        | ((imm12 & 0xfffu) << 10)
+        | ((rn & 0x1fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// SUBS Wd, Wn, #0 with a real Rd (Rd != 31) -- not a CMP alias and
+// must not be flagged.
+static void subs_w_imm(uint8_t out[4], unsigned rd, unsigned rn,
+                       unsigned imm12)
+{
+    uint32_t op = 0x71000000u
+        | ((imm12 & 0xfffu) << 10)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// B.cond with relative byte offset (signed, multiple of 4).
+static void b_cond(uint8_t out[4], unsigned cond, int32_t byte_offset)
+{
+    int32_t imm19 = byte_offset / 4;
+    uint32_t op = 0x54000000u
+        | (((uint32_t)imm19 & 0x7ffffu) << 5)
+        | (cond & 0xfu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void test_cmp_zero_branch(void)
+{
+    uint8_t code[16];
+
+    // cmp w0, #0 ; b.eq +8 (positive; W).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // cmp x5, #0 ; b.ne -16 (positive; X, NE, backward target).
+    cmp_x_imm(&code[0], 5, 0);
+    b_cond(&code[4], 1, -16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // cmp w7, #0 ; b.eq +1MB (positive; near-maximum forward offset).
+    cmp_w_imm(&code[0], 7, 0);
+    b_cond(&code[4], 0, 0x40000);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative cases --
+
+    // cmp w0, #1 (non-zero immediate); not a CMP-zero.
+    cmp_w_imm(&code[0], 0, 1);
+    b_cond(&code[4], 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // cmp w0, #0 ; b.lt -- not EQ/NE.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // cmp w0, #0 ; b.gt -- not EQ/NE.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 12 /* GT */, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // cmp w0, #0 ; <unrelated> ; b.eq -- intervening instruction
+    // expires CMP state.
+    cmp_w_imm(&code[0], 0, 0);
+    movz_w(&code[4], 5, 1);
+    b_cond(&code[8], 0, 8);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmp wzr, #0 ; b.eq -- Rn=31 excluded (always-taken degenerate).
+    cmp_w_imm(&code[0], 31, 0);
+    b_cond(&code[4], 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // subs w1, w0, #0 (real Rd) ; b.eq -- not a CMP alias, has a side
+    // effect (writes w1). Must not fold.
+    subs_w_imm(&code[0], 1, 0, 0);
+    b_cond(&code[4], 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // b.eq with no preceding cmp -- nothing to fold.
+    b_cond(&code[0], 0, 8);
+    assert(run_helper_check(code, 4) == 0);
+
+    // Lone cmp without consumer.
+    cmp_w_imm(&code[0], 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // Two independent CMP+B.EQ pairs back-to-back.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    cmp_x_imm(&code[8], 3, 0);
+    b_cond(&code[12], 1, -8);
+    assert(run_helper_check(code, 16) == 2);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -474,6 +598,7 @@ int main(void)
     test_is_bitmask_immediate_64();
     test_movz_movk_sequences();
     test_lsl_fold();
+    test_cmp_zero_branch();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

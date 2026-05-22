@@ -77,6 +77,12 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
 bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
 
+// Detect CMP Rn, #0 (SUBS XZR, Rn, #0) immediately followed by B.EQ or
+// B.NE; the pair is replaceable by CBZ Rn / CBNZ Rn with the same
+// branch target.
+bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
+
 // Close any open sequence at end-of-region. Returns true and fills *out
 // if the closed sequence is reportable.
 bool armlint_flush(armlint_state *state, armlint_finding *out);
