@@ -141,9 +141,10 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);
 
 // Detect self-op identities: AND/ORR Rd, Rs, Rs (shifted-register,
-// LSL #0, Rn == Rm) collapses to MOV Rd, Rs; EOR/SUB Rd, Rs, Rs
-// collapses to MOV Rd, XZR. Flag-setting variants (ANDS/SUBS) are
-// skipped because the flag-set is the user's intent.
+// LSL #0, Rn == Rm) collapses to MOV Rd, Rs; EOR/SUB/BIC Rd, Rs, Rs
+// collapses to MOV Rd, XZR (zero); ORN/EON Rd, Rs, Rs collapses to
+// MOV Rd, #-1 (MOVN Rd, #0). Flag-setting variants (ANDS/SUBS/BICS)
+// are skipped because the flag-set is the user's intent.
 bool check_self_op(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out);
 

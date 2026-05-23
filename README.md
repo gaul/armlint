@@ -164,15 +164,17 @@ code, and documents corners of the A64 instruction set.
     uxtb w0, w0` (replace with `uxtb w0, w1`); `ldrsb w0, [x1] ;
     uxtb w0, w0` (replace with `ldrb w0, [x1]`); `ldrsw x0, [x1] ;
     uxtw x0, w0` (replace with `ldr w0, [x1]`).
-* self-op identities (`AND/ORR/EOR/SUB Rd, Rs, Rs`)
-  - `AND Rd, Rs, Rs` and `ORR Rd, Rs, Rs` (shifted-register, LSL #0)
-    are equivalent to `MOV Rd, Rs`. `EOR Rd, Rs, Rs` and `SUB Rd, Rs,
-    Rs` zero `Rd`, equivalent to `MOV Rd, XZR`. Both W- and X-form.
-  - The flag-setting variants `ANDS Rd, Rs, Rs` and `SUBS Rd, Rs, Rs`
-    are deliberately NOT flagged: writing `Rd` while setting flags
-    is the user's intent (a combined zero-test + register copy or
-    register zero). `BIC/ORN/EON` (logical with `N=1`) are skipped
-    for v1.
+* self-op identities (`AND/ORR/EOR/SUB/BIC/ORN/EON Rd, Rs, Rs`)
+  - `AND Rd, Rs, Rs` and `ORR Rd, Rs, Rs` collapse to `MOV Rd, Rs`
+    (identity). `EOR Rd, Rs, Rs`, `SUB Rd, Rs, Rs`, and `BIC Rd, Rs,
+    Rs` (= `Rs AND NOT Rs`) collapse to `MOV Rd, XZR` (zero). `ORN
+    Rd, Rs, Rs` (= `Rs OR NOT Rs`) and `EON Rd, Rs, Rs` (= `Rs XOR
+    NOT Rs`) collapse to `MOV Rd, #-1` / `MOVN Rd, #0` (all-ones).
+    Both W- and X-form.
+  - The flag-setting variants `ANDS Rd, Rs, Rs`, `SUBS Rd, Rs, Rs`,
+    and `BICS Rd, Rs, Rs` are deliberately NOT flagged: writing `Rd`
+    while setting flags is the user's intent (combined zero-test +
+    register copy or register zero).
   - `Rd = 31` (result discarded) and `Rn = 31` (`ZR` source, not a
     real self-op) are excluded.
   - On uarches with move elimination, `MOV Rd, Rs` is zero-cycle

@@ -1925,22 +1925,30 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
 }
 
 // Detect the logical shifted-register self-op:
-//   AND/ORR/EOR Rd, Rs, Rs (shift = LSL #0, N = 0, opc != 11)
-// with Rn == Rm. ANDS (opc=11) is skipped: the flag-set is intentional.
-// BIC/ORN/EON (N=1) are skipped for v1.
+//   AND/ORR/EOR/BIC/ORN/EON Rd, Rs, Rs (shift = LSL #0)
+// with Rn == Rm. ANDS / BICS (opc=11) are skipped: the flag-set is
+// intentional.
 //
-// Mask fixes bits 28..21 (class + LSL + N=0) and bits 15..10 (imm6=0);
-// bits 31 (sf), 30..29 (opc), 20..16 (Rm), 9..5 (Rn), 4..0 (Rd) are free.
+// Mask fixes bits 28..21 (class + LSL + N) and bits 15..10 (imm6=0).
+// Bit 21 (N) distinguishes the two halves of the family:
+//   N=0 base 0x0A000000: AND (opc=00), ORR (01), EOR (10), ANDS (11)
+//   N=1 base 0x0A200000: BIC (opc=00), ORN (01), EON (10), BICS (11)
 static bool decode_logical_self_op(uint32_t op, unsigned *out_sf,
-                                   unsigned *out_opc, unsigned *out_rd,
-                                   unsigned *out_rn)
+                                   unsigned *out_opc, unsigned *out_n,
+                                   unsigned *out_rd, unsigned *out_rn)
 {
-    if ((op & 0x1FE0FC00u) != 0x0A000000u) {
+    uint32_t masked = op & 0x1FE0FC00u;
+    unsigned n_bit;
+    if (masked == 0x0A000000u) {
+        n_bit = 0;
+    } else if (masked == 0x0A200000u) {
+        n_bit = 1;
+    } else {
         return false;
     }
     unsigned opc = (op >> 29) & 0x3u;
     if (opc == 3) {
-        return false;  // ANDS: flag-set is intentional
+        return false;  // ANDS / BICS: flag-set is intentional
     }
     unsigned rm = (op >> 16) & 0x1Fu;
     unsigned rn = (op >> 5) & 0x1Fu;
@@ -1953,6 +1961,7 @@ static bool decode_logical_self_op(uint32_t op, unsigned *out_sf,
     }
     *out_sf = (op >> 31) & 1u;
     *out_opc = opc;
+    *out_n = n_bit;
     *out_rd = rd;
     *out_rn = rn;
     return true;
@@ -2001,19 +2010,30 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
 
     unsigned sf, rd, rn;
     const char *mnem;
-    bool is_zero_result;
+    // Result of the self-op: identity (= Rs), zero (= 0), or negative
+    // one (all-ones, encoded as MOVN Rd, #0).
+    enum { RES_IDENTITY, RES_ZERO, RES_NEG_ONE } kind;
 
-    unsigned opc;
-    if (decode_logical_self_op(op, &sf, &opc, &rd, &rn)) {
-        switch (opc) {
-        case 0: mnem = "and"; is_zero_result = false; break;
-        case 1: mnem = "orr"; is_zero_result = false; break;
-        case 2: mnem = "eor"; is_zero_result = true;  break;
-        default: return false;  // unreachable: opc=3 rejected by decoder
+    unsigned opc, n_bit;
+    if (decode_logical_self_op(op, &sf, &opc, &n_bit, &rd, &rn)) {
+        if (n_bit == 0) {
+            switch (opc) {
+            case 0: mnem = "and"; kind = RES_IDENTITY; break;
+            case 1: mnem = "orr"; kind = RES_IDENTITY; break;
+            case 2: mnem = "eor"; kind = RES_ZERO;     break;
+            default: return false;  // opc=3 (ANDS) rejected by decoder
+            }
+        } else {
+            switch (opc) {
+            case 0: mnem = "bic"; kind = RES_ZERO;     break;
+            case 1: mnem = "orn"; kind = RES_NEG_ONE;  break;
+            case 2: mnem = "eon"; kind = RES_NEG_ONE;  break;
+            default: return false;  // opc=3 (BICS) rejected by decoder
+            }
         }
     } else if (decode_sub_self_op(op, &sf, &rd, &rn)) {
         mnem = "sub";
-        is_zero_result = true;
+        kind = RES_ZERO;
     } else {
         return false;
     }
@@ -2025,16 +2045,25 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
     out->insn_count = 1;
     clear_finding_strings(out);
 
-    if (is_zero_result) {
-        snprintf(out->detail, sizeof(out->detail),
-            "%s %c%u, %c%u, %c%u -> mov %c%u, %czr",
-            mnem, w_or_x, rd, w_or_x, rn, w_or_x, rn,
-            w_or_x, rd, w_or_x);
-    } else {
+    switch (kind) {
+    case RES_IDENTITY:
         snprintf(out->detail, sizeof(out->detail),
             "%s %c%u, %c%u, %c%u -> mov %c%u, %c%u",
             mnem, w_or_x, rd, w_or_x, rn, w_or_x, rn,
             w_or_x, rd, w_or_x, rn);
+        break;
+    case RES_ZERO:
+        snprintf(out->detail, sizeof(out->detail),
+            "%s %c%u, %c%u, %c%u -> mov %c%u, %czr",
+            mnem, w_or_x, rd, w_or_x, rn, w_or_x, rn,
+            w_or_x, rd, w_or_x);
+        break;
+    case RES_NEG_ONE:
+        snprintf(out->detail, sizeof(out->detail),
+            "%s %c%u, %c%u, %c%u -> mov %c%u, #-1 (movn %c%u, #0)",
+            mnem, w_or_x, rd, w_or_x, rn, w_or_x, rn,
+            w_or_x, rd, w_or_x, rd);
+        break;
     }
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);

@@ -387,6 +387,10 @@ static void encode_sr(uint8_t out[4], uint32_t base,
 #define ANDS_W(out, rd, rn, rm) encode_sr(out, 0x6a000000u, rd, rn, rm)
 #define BIC_W(out, rd, rn, rm)  encode_sr(out, 0x0a200000u, rd, rn, rm)
 #define BICS_W(out, rd, rn, rm) encode_sr(out, 0x6a200000u, rd, rn, rm)
+#define ORN_W(out, rd, rn, rm)  encode_sr(out, 0x2a200000u, rd, rn, rm)
+#define EON_W(out, rd, rn, rm)  encode_sr(out, 0x4a200000u, rd, rn, rm)
+#define BIC_X(out, rd, rn, rm)  encode_sr(out, 0x8a200000u, rd, rn, rm)
+#define ORN_X(out, rd, rn, rm)  encode_sr(out, 0xaa200000u, rd, rn, rm)
 #define ORR_W(out, rd, rn, rm)  encode_sr(out, 0x2a000000u, rd, rn, rm)
 #define ORR_X(out, rd, rn, rm)  encode_sr(out, 0xaa000000u, rd, rn, rm)
 #define EOR_W(out, rd, rn, rm)  encode_sr(out, 0x4a000000u, rd, rn, rm)
@@ -2414,9 +2418,31 @@ static void test_self_op(void)
     AND_W(&code[0], 0, 1, 2);
     assert(run_helper_check(code, 4) == 0);
 
-    // -- Negative: BIC (N=1, skipped in v1). --
+    // -- Positive: N=1 logical self-ops. --
 
+    // bic w0, w1, w1 -> mov w0, wzr (Rs AND NOT Rs = 0)
     BIC_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // orn w0, w1, w1 -> mov w0, #-1 (Rs OR NOT Rs = all-ones)
+    ORN_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // eon w0, w1, w1 -> mov w0, #-1 (Rs XOR NOT Rs = all-ones)
+    EON_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // bic x5, x6, x6 (X-form zero)
+    BIC_X(&code[0], 5, 6, 6);
+    assert(run_helper_check(code, 4) == 1);
+
+    // orn x5, x6, x6 (X-form -1)
+    ORN_X(&code[0], 5, 6, 6);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Negative: BICS (N=1, S=1, flag-set is intentional). --
+
+    BICS_W(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: Rd = 31 (result discarded). --
