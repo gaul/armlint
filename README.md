@@ -46,6 +46,22 @@ code, and documents corners of the A64 instruction set.
     terminator (B unconditional, BR), or after a 16-instruction
     window with no decision. The branch-target path is not scanned;
     full soundness would require basic-block analysis.
+* compare-zero signed-branch foldable into TBZ/TBNZ
+  - `cmp wn, #0 ; b.lt target` (or `b.ge`/`b.mi`/`b.pl`) folds to
+    `tbnz wn, #(datasize-1), target` (or `tbz`). After `CMP Rn, #0` /
+    `CMP Rn, ZR` / `TST Rn, Rn`, `V == 0`, so `B.LT` (N != V) reduces
+    to "N == 1" -- exactly a test of the sign bit. `B.MI` directly
+    tests `N`; `B.GE`/`B.PL` are the inverse.
+  - Range: `TBZ`/`TBNZ` use a 14-bit signed offset (~32 KB reach),
+    vs. `B.cond`'s 19-bit (~1 MB). The fold is suggested only when
+    the target fits in the TBZ encoding.
+  - Soundness: same NZCV-liveness scan as the CMP-branch check
+    above. The rewrite drops the CMP/TST, so downstream code that
+    observes N/C/V before they're overwritten would see different
+    values; the scan suppresses on any flag-reader. Shares the
+    existing CMP/TST pending slot, which is sufficient because the
+    sign-only and EQ/NE conditions are mutually exclusive at the
+    same B.cond.
 * TST single-bit + B.EQ/NE foldable into TBZ/TBNZ
   - `tst w0, #(1<<5) ; b.eq target` instead of `tbz w0, #5, target`.
     Same for `b.ne` -> `tbnz`. Only the immediate-form `TST` is

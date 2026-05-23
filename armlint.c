@@ -886,6 +886,40 @@ static bool decode_b_eq_or_ne(uint32_t op, bool *out_is_eq,
     return true;
 }
 
+// Detect B.cond with cond in {MI, PL, LT, GE} -- branches whose truth
+// depends only on the sign bit when V == 0 (which holds after a
+// CMP Rn, #0 / CMP Rn, ZR / TST Rn, Rn). MI (N==1) and LT (N!=V with
+// V=0 -> N==1) test "sign == 1"; PL (N==0) and GE (N==V with V=0 ->
+// N==0) test "sign == 0". Returns is_neg = true for MI/LT, false for
+// PL/GE, plus the specific cond (for disassembly).
+static bool decode_b_sign_cond(uint32_t op, bool *out_is_neg,
+                               unsigned *out_cond, int32_t *out_imm19)
+{
+    if ((op & 0xFF000010u) != 0x54000000u) {
+        return false;
+    }
+    unsigned cond = op & 0xFu;
+    bool is_neg;
+    switch (cond) {
+    case 4:   // MI
+    case 11:  // LT
+        is_neg = true;
+        break;
+    case 5:   // PL
+    case 10:  // GE
+        is_neg = false;
+        break;
+    default:
+        return false;
+    }
+    *out_is_neg = is_neg;
+    *out_cond = cond;
+    int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+    imm19 = (imm19 ^ 0x40000) - 0x40000;
+    *out_imm19 = imm19;
+    return true;
+}
+
 // Flag-liveness classification of a single instruction observed during
 // the forward scan that runs after a CMP+B.EQ/B.NE candidate.
 typedef enum {
@@ -1053,9 +1087,11 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
 
-    // (1) Close: is this a B.EQ/B.NE consuming the pending CMP?
+    // (1) Close: is this a B.EQ/B.NE (CBZ/CBNZ form) or B.MI/PL/LT/GE
+    //     (sign-bit TBZ/TBNZ form) consuming the pending CMP?
     if (state->cmp_active) {
-        bool is_eq;
+        bool is_eq, is_neg;
+        unsigned cond;
         int32_t imm19;
         if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
             uint64_t target = insn->address
@@ -1084,6 +1120,43 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
             // beyond the branch itself).
             state->pending_active = true;
             state->pending_window = LIVENESS_WINDOW;
+        } else if (decode_b_sign_cond(op, &is_neg, &cond, &imm19)) {
+            // CMP/TST-zero followed by a sign-only B.cond (MI/PL/LT/GE).
+            // The TBZ replaces the CMP at the CMP's address (4 bytes
+            // before the B.cond), so its required imm14 is imm19 + 1.
+            int64_t tbz_disp = (int64_t)imm19 + 1;
+            if (tbz_disp >= -8192 && tbz_disp <= 8191) {
+                uint64_t target = insn->address
+                    + (uint64_t)((int64_t)imm19 * 4);
+                char w_or_x = state->cmp_is_64bit ? 'x' : 'w';
+                unsigned bit = state->cmp_is_64bit ? 63u : 31u;
+                const char *tb_mnem = is_neg ? "tbnz" : "tbz";
+                const char *bcond_mnem;
+                switch (cond) {
+                case 4:  bcond_mnem = "b.mi"; break;
+                case 5:  bcond_mnem = "b.pl"; break;
+                case 10: bcond_mnem = "b.ge"; break;
+                default: bcond_mnem = "b.lt"; break;  // case 11
+                }
+
+                armlint_finding *p = &state->pending_finding;
+                p->name = "compare-zero signed-branch foldable into TBZ/TBNZ";
+                p->start_offset = state->cmp_offset;
+                p->insn_count = 2;
+                clear_finding_strings(p);
+
+                snprintf(p->detail, sizeof(p->detail),
+                    "-> %s %c%u, #%u, 0x%" PRIx64,
+                    tb_mnem, w_or_x, state->cmp_rn, bit, target);
+
+                snprintf(p->lines[0], sizeof(p->lines[0]),
+                    "%s", state->cmp_disasm);
+                snprintf(p->lines[1], sizeof(p->lines[1]),
+                    "%s 0x%" PRIx64, bcond_mnem, target);
+
+                state->pending_active = true;
+                state->pending_window = LIVENESS_WINDOW;
+            }
         }
         // Strict adjacency: any non-matching instruction expires the CMP.
         state->cmp_active = false;

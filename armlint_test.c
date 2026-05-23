@@ -1137,6 +1137,90 @@ static void test_cmp_zero_branch(void)
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- Positive: sign-bit branch idioms. CMP/TST + B.LT/GE/MI/PL
+    //    folds to TBZ/TBNZ on the sign bit (datasize - 1). --
+
+    // cmp w0, #0 ; b.lt +8 ; ret -- B.LT after CMP-zero is "Rn < 0".
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp w0, #0 ; b.ge +8 ; ret.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 10 /* GE */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp w0, #0 ; b.mi +8 ; ret -- B.MI directly tests N.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 4 /* MI */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp w0, #0 ; b.pl +8 ; ret.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 5 /* PL */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp x5, #0 (X-form) ; b.lt +8 ; ret -> tbnz x5, #63.
+    cmp_x_imm(&code[0], 5, 0);
+    b_cond(&code[4], 11 /* LT */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst w0, w0 ; b.lt +8 ; ret -- TST-self also sets N = sign(Rn),
+    // V = 0, so the same sign-bit fold applies.
+    tst_w_reg(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp w0, wzr ; b.ge +8 ; ret.
+    cmp_w_reg(&code[0], 0, 31);
+    b_cond(&code[4], 10 /* GE */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: B.GT / B.LE -- read Z in addition to N, V; the
+    //    sign-bit-only fold doesn't apply. --
+
+    // cmp w0, #0 ; b.gt +8 ; ret -- B.GT tests "Rn > 0", not just sign.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 12 /* GT */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmp w0, #0 ; b.le +8 ; ret.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 13 /* LE */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: TBZ range. B.LT at +32 KB (imm19 = 8192) is one
+    //    past TBZ's reach. --
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8192 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Just in range (imm19 = 8190 -> tbz disp 8191).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8190 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: downstream reads N/C/V -- both CBZ and sign-bit
+    //    folds suppressed by the same liveness scan. --
+
+    // cmp w0,#0 ; b.lt L ; adcs (reads C) -- suppress.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8);
+    adcs_w(&code[8], 1, 2, 3);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
 }
 
 static void test_tst_branch(void)
@@ -2012,15 +2096,17 @@ static void test_redundant_cmp_after_s_variant(void)
     ret_(&code[16]);
     assert(run_helper_check(code, 20) == 1);
 
-    // -- Negative: B.cond is not EQ/NE. --
-
-    // adds w0, w1, w2 ; cmp w0, #0 ; b.lt ; ret -- LT not handled by
-    // either check.
+    // -- Negative for redundant-CMP, but positive for sign-bit fold:
+    //    adds w0, w1, w2 ; cmp w0, #0 ; b.lt ; ret. The redundant-CMP
+    //    check requires B.EQ/B.NE and doesn't fire here (the CMP
+    //    legitimately clears V so B.LT tests sign, not signed-overflow).
+    //    The CMP-zero+B.LT -> TBNZ-on-sign-bit check DOES fire (the
+    //    rewrite is sound: ADDS already set bit 31 = sign of result). --
     ADDS_W(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 11 /* LT */, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
     // -- Negative: downstream reads NZCV (adcs after B.eq) -- both
     //    pendings suppressed by liveness scan. --
