@@ -182,6 +182,17 @@ code, and documents corners of the A64 instruction set.
     is the canonical x86 zero idiom that occasionally bleeds into
     AArch64 toolchain output; the canonical AArch64 form is `MOV Rd,
     XZR` (eight occurrences observed in dyld at the time of writing).
+* CSEL same-operand identity (`CSEL Rd, Rn, Rn, cond`)
+  - When the CSEL's `Rn == Rm`, both branches produce `Rn`, so the
+    cond is irrelevant and the instruction is equivalent to `MOV Rd,
+    Rn`. The CSEL also reads NZCV for no reason. Both W- and X-form.
+  - Only `CSEL` (op2 = 00) is flagged. The other members of the
+    conditional-select family -- `CSINC`, `CSINV`, `CSNEG` -- have
+    different "else" branches (Rn+1, ~Rn, -Rn) and are NOT identities
+    when `Rn == Rm`. The decoder enforces `(op & 0x7FE00C00) ==
+    0x1A800000`, which fixes op2 = 00.
+  - `Rd = 31` (result discarded) and `Rn = 31` (`ZR` source) are
+    excluded for consistency with the other self-op identity check.
 * ADD/SUB #0 is redundant
   - The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a
     no-op when `Rd == Rn` and is equivalent to `MOV Rd, Rn` when

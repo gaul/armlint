@@ -148,6 +148,15 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
 bool check_self_op(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out);
 
+// Detect CSEL Rd, Rn, Rn, cond -- the same-operand case where both
+// branches of the conditional select produce Rn. The cond is
+// irrelevant, the NZCV read is wasted, and the instruction is
+// equivalent to MOV Rd, Rn. Only matches CSEL (op2 = 00); the other
+// members of the family -- CSINC / CSINV / CSNEG -- have different
+// "else" branches and are NOT identities when Rn == Rm.
+bool check_csel_self(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe

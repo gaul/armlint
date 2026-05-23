@@ -82,6 +82,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_self_op(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_csel_self(state, &insns[i], offset, &f)) {
+            findings++;
+        }
         if (check_redundant_cmp_after_s_variant(state, &insns[i], offset,
                                                 &f)) {
             findings++;
@@ -645,6 +648,36 @@ static void csel_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
                    unsigned cond)
 {
     uint32_t op = 0x1A800000u
+        | ((rm & 0x1fu) << 16)
+        | ((cond & 0xfu) << 12)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void csel_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
+                   unsigned cond)
+{
+    uint32_t op = 0x9A800000u
+        | ((rm & 0x1fu) << 16)
+        | ((cond & 0xfu) << 12)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// CSINC Wd, Wn, Wm, cond -- different from CSEL (op2 = 01 vs 00) and
+// NOT a same-operand identity (else branch is Wn + 1).
+static void csinc_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
+                    unsigned cond)
+{
+    uint32_t op = 0x1A800400u
         | ((rm & 0x1fu) << 16)
         | ((cond & 0xfu) << 12)
         | ((rn & 0x1fu) << 5)
@@ -2468,6 +2501,55 @@ static void test_self_op(void)
     assert(run_helper_check(code, 8) == 2);
 }
 
+static void test_csel_self(void)
+{
+    uint8_t code[8];
+
+    // -- Positive: CSEL Rd, Rn, Rn, cond -- cond irrelevant. --
+
+    // csel w0, w1, w1, eq -> mov w0, w1
+    csel_w(&code[0], 0, 1, 1, 0 /* EQ */);
+    assert(run_helper_check(code, 4) == 1);
+
+    // csel w0, w1, w1, lt
+    csel_w(&code[0], 0, 1, 1, 11 /* LT */);
+    assert(run_helper_check(code, 4) == 1);
+
+    // csel x5, x6, x6, ne (X-form)
+    csel_x(&code[0], 5, 6, 6, 1 /* NE */);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Negative: CSEL with Rn != Rm. --
+
+    // csel w0, w1, w2, eq -- distinct operands, genuine select.
+    csel_w(&code[0], 0, 1, 2, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: CSINC with same operands -- not an identity
+    //    (else = Rn + 1; this is CINC alias). --
+
+    csinc_w(&code[0], 0, 1, 1, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: Rd = 31 (result discarded). --
+
+    csel_w(&code[0], 31, 1, 1, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: Rn = 31 (CSEL Rd, XZR, XZR, cond -- writes 0
+    //    always; the rewrite would be MOV Rd, XZR, but we follow
+    //    check_self_op's convention of excluding ZR-source). --
+
+    csel_w(&code[0], 0, 31, 31, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Two adjacent CSEL same-operand: each fires. --
+
+    csel_w(&code[0], 0, 1, 1, 0);
+    csel_w(&code[4], 2, 3, 3, 1);
+    assert(run_helper_check(code, 8) == 2);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -2490,6 +2572,7 @@ int main(void)
     test_redundant_cmp_after_s_variant();
     test_add_sub_zero();
     test_self_op();
+    test_csel_self();
 
     cs_close(&g_handle);
     printf("all tests passed\n");
