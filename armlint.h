@@ -170,6 +170,15 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
 bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
                        size_t offset, armlint_finding *out);
 
+// Detect two adjacent unsigned-offset LDR/STR (both W or both X,
+// same direction, same base, consecutive offsets) foldable into a
+// single LDP/STP. v1 supports only the unsigned-offset form, which
+// guarantees natural alignment by construction (imm12 is scaled);
+// LDUR / pre- and post-indexed forms are deferred to avoid the
+// implementation-defined behaviour around unaligned LDP/STP.
+bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe

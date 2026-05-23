@@ -176,6 +176,21 @@ struct armlint_state {
     size_t bfx_first_offset;   // offset of whichever AND came first
     char bfx_clear_disasm[ARMLINT_FINDING_LINE_LEN];
     char bfx_isolate_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Pending unsigned-offset LDR/STR awaiting an adjacent partner
+    // for LDP/STP coalescing. The next LDR/STR with the same Rn,
+    // same direction (load/load or store/store), same access size
+    // (W/W or X/X), and imm12 = previous + 1 (in scaled units)
+    // closes the pair into an LDP/STP. Strict adjacency: any
+    // non-LDR/STR instruction expires the state.
+    bool lsp_active;
+    bool lsp_is_load;
+    bool lsp_is_64bit;
+    unsigned lsp_rt;
+    unsigned lsp_rn;
+    unsigned lsp_imm12;
+    size_t lsp_offset;
+    char lsp_disasm[ARMLINT_FINDING_LINE_LEN];
 };
 
 #define LIVENESS_WINDOW 16
@@ -330,6 +345,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->adr_recent = false;
     state->bfx_clear_seen = false;
     state->bfx_isolate_seen = false;
+    state->lsp_active = false;
     return mov_close(state, out);
 }
 
@@ -2317,6 +2333,116 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode the unsigned-offset LDR/STR (32-bit or 64-bit, general
+// register, non-atomic, non-SIMD). Encoding mask 0xBF800000, value
+// 0xB9000000 leaves bit 30 (size[0]: 0=W, 1=X) and bit 22 (opc[0]:
+// 0=STR, 1=LDR) free along with imm12, Rn, Rt. Sign-extending loads
+// (opc[1]=1) are rejected by the mask (bit 23 = 0). Byte/halfword
+// loads (size top bit = 0) are also rejected (bit 31 = 1).
+static bool decode_ldr_str_uimm(uint32_t op, bool *out_is_load,
+                                bool *out_is_64bit, unsigned *out_imm12,
+                                unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0xBF800000u) != 0xB9000000u) {
+        return false;
+    }
+    *out_is_64bit = ((op >> 30) & 1u) == 1u;
+    *out_is_load  = ((op >> 22) & 1u) == 1u;
+    *out_imm12 = (op >> 10) & 0xFFFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->lsp_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool is_load, is_64bit;
+    unsigned imm12, rn, rt;
+
+    if (!decode_ldr_str_uimm(op, &is_load, &is_64bit, &imm12, &rn, &rt)) {
+        // Non-LDR/STR expires the window (strict adjacency).
+        state->lsp_active = false;
+        return false;
+    }
+
+    bool produced = false;
+
+    // Try to close: does this LDR/STR partner the pending one?
+    //   - same direction (load/load or store/store)
+    //   - same size (W/W or X/X)
+    //   - same base Rn
+    //   - consecutive in scaled units (imm12 = prev + 1)
+    //   - distinct destination registers (LDP/STP requires Rt1 != Rt2)
+    //   - first LDR's Rt != Rn (load aliasing -- first load would
+    //     clobber the base before the second's address is computed
+    //     in the original sequence). Doesn't apply to stores.
+    //   - first imm12 fits LDP/STP imm7 (signed 7-bit, scaled),
+    //     i.e., the first imm12 must be <= 63 (unsigned).
+    if (state->lsp_active
+            && state->lsp_is_load == is_load
+            && state->lsp_is_64bit == is_64bit
+            && state->lsp_rn == rn
+            && imm12 == state->lsp_imm12 + 1
+            && rt != state->lsp_rt
+            && state->lsp_imm12 <= 63u
+            && (!is_load || state->lsp_rt != rn)) {
+        char w_or_x = is_64bit ? 'x' : 'w';
+        const char *pair_mnem = is_load ? "ldp" : "stp";
+        unsigned byte_off = state->lsp_imm12 * (is_64bit ? 8u : 4u);
+
+        out->name = is_load
+            ? "adjacent LDRs foldable into LDP"
+            : "adjacent STRs foldable into STP";
+        out->start_offset = state->lsp_offset;
+        out->insn_count = 2;
+        clear_finding_strings(out);
+
+        char rn_buf[8];
+        if (rn == 31) {
+            snprintf(rn_buf, sizeof(rn_buf), "sp");
+        } else {
+            snprintf(rn_buf, sizeof(rn_buf), "x%u", rn);
+        }
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, %c%u, [%s, #%u]",
+            pair_mnem, w_or_x, state->lsp_rt, w_or_x, rt,
+            rn_buf, byte_off);
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s", state->lsp_disasm);
+        snprintf(out->lines[1], sizeof(out->lines[1]),
+            "%s %s", insn->mnemonic, insn->op_str);
+        produced = true;
+
+        // Reset to avoid overlapping pairs (4 consecutive LDRs
+        // become 2 non-overlapping LDPs, not 3 overlapping ones).
+        state->lsp_active = false;
+    } else {
+        // Open new state with the current LDR/STR.
+        state->lsp_active = true;
+        state->lsp_is_load = is_load;
+        state->lsp_is_64bit = is_64bit;
+        state->lsp_rt = rt;
+        state->lsp_rn = rn;
+        state->lsp_imm12 = imm12;
+        state->lsp_offset = offset;
+        snprintf(state->lsp_disasm, sizeof(state->lsp_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -2465,6 +2591,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_bfxil_synth(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_ldp_stp_coalesce(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

@@ -88,6 +88,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_bfxil_synth(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_ldp_stp_coalesce(state, &insns[i], offset, &f)) {
+            findings++;
+        }
         if (check_redundant_cmp_after_s_variant(state, &insns[i], offset,
                                                 &f)) {
             findings++;
@@ -939,8 +942,11 @@ static void encode_ldr_imm(uint8_t out[4], uint32_t base, unsigned rt,
 }
 
 #define LDR_W(out, rt, rn, imm)  encode_ldr_imm(out, 0xB9400000u, rt, rn, imm)
+#define LDR_X(out, rt, rn, imm)  encode_ldr_imm(out, 0xF9400000u, rt, rn, imm)
 #define LDRH_W(out, rt, rn, imm) encode_ldr_imm(out, 0x79400000u, rt, rn, imm)
 #define LDRB_W(out, rt, rn, imm) encode_ldr_imm(out, 0x39400000u, rt, rn, imm)
+#define STR_W(out, rt, rn, imm)  encode_ldr_imm(out, 0xB9000000u, rt, rn, imm)
+#define STR_X(out, rt, rn, imm)  encode_ldr_imm(out, 0xF9000000u, rt, rn, imm)
 
 // Sign-extending integer loads, unsigned-immediate-offset form. The
 // addressing-mode bit (24) is set; mask in armlint.c leaves it free so
@@ -2695,6 +2701,118 @@ static void test_bfxil_synth(void)
     assert(run_helper_check(code, 4) == 0);
 }
 
+static void test_ldp_stp_coalesce(void)
+{
+    uint8_t code[24];
+
+    // -- Positive: adjacent loads (W-form). --
+
+    // ldr w0, [x2, #0] ; ldr w1, [x2, #4] -> ldp w0, w1, [x2, #0]
+    LDR_W(&code[0], 0, 2, 0);
+    LDR_W(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr w0, [x2, #4] ; ldr w1, [x2, #8] -> ldp at byte 4.
+    LDR_W(&code[0], 0, 2, 1);
+    LDR_W(&code[4], 1, 2, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: adjacent loads (X-form). --
+
+    // ldr x0, [x2, #0] ; ldr x1, [x2, #8] -> ldp x0, x1, [x2, #0]
+    LDR_X(&code[0], 0, 2, 0);
+    LDR_X(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: adjacent stores. --
+
+    // str w0, [x2, #0] ; str w1, [x2, #4] -> stp w0, w1, [x2, #0]
+    STR_W(&code[0], 0, 2, 0);
+    STR_W(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // str x0, [x2, #16] ; str x1, [x2, #24] -> stp x0, x1, [x2, #16]
+    STR_X(&code[0], 0, 2, 2);
+    STR_X(&code[4], 1, 2, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: store with first Rt == Rn is OK (no aliasing
+    //    concern for stores). --
+
+    STR_W(&code[0], 2, 2, 0);   // STR W2, [X2, #0]
+    STR_W(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: 4 consecutive LDRs become 2 LDPs (non-overlapping). --
+
+    LDR_W(&code[0], 0, 2, 0);
+    LDR_W(&code[4], 1, 2, 1);
+    LDR_W(&code[8], 3, 2, 2);
+    LDR_W(&code[12], 4, 2, 3);
+    assert(run_helper_check(code, 16) == 2);
+
+    // -- Positive: LDR at the highest in-range offset (imm12 = 63
+    //    for W-form -> byte 252). --
+
+    LDR_W(&code[0], 0, 2, 63);
+    LDR_W(&code[4], 1, 2, 64);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: first imm12 > 63 (out of LDP imm7 range). --
+
+    LDR_W(&code[0], 0, 2, 64);
+    LDR_W(&code[4], 1, 2, 65);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: different base register. --
+
+    LDR_W(&code[0], 0, 2, 0);
+    LDR_W(&code[4], 1, 3, 1);   // Rn = x3, not x2
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: non-adjacent offsets. --
+
+    LDR_W(&code[0], 0, 2, 0);
+    LDR_W(&code[4], 1, 2, 2);   // skips imm12=1
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: mixed W and X (size mismatch). --
+
+    LDR_W(&code[0], 0, 2, 0);
+    LDR_X(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: load + store (direction mismatch). --
+
+    LDR_W(&code[0], 0, 2, 0);
+    STR_W(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: same Rt for both LDRs (LDP Rt1 != Rt2 required). --
+
+    LDR_W(&code[0], 0, 2, 0);
+    LDR_W(&code[4], 0, 2, 1);   // Rt2 == Rt1 == w0
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: load with first Rt == Rn (aliasing). --
+
+    LDR_X(&code[0], 2, 2, 0);   // first LDR clobbers base x2
+    LDR_X(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: intervening instruction (strict adjacency). --
+
+    LDR_W(&code[0], 0, 2, 0);
+    movz_w(&code[4], 5, 1);
+    LDR_W(&code[8], 1, 2, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: lone LDR. --
+
+    LDR_W(&code[0], 0, 2, 0);
+    assert(run_helper_check(code, 4) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -2719,6 +2837,7 @@ int main(void)
     test_self_op();
     test_csel_self();
     test_bfxil_synth();
+    test_ldp_stp_coalesce();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

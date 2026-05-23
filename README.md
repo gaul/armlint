@@ -182,6 +182,36 @@ code, and documents corners of the A64 instruction set.
     is the canonical x86 zero idiom that occasionally bleeds into
     AArch64 toolchain output; the canonical AArch64 form is `MOV Rd,
     XZR` (eight occurrences observed in dyld at the time of writing).
+* adjacent LDR/STR foldable into LDP/STP
+  - Two unsigned-offset `LDR Wt, [Rn, #imm12*4]` (or X-form,
+    scale 8) to consecutive scaled offsets fold into a single
+    `LDP Wt1, Wt2, [Rn, #imm7*4]`. Analogous for stores ->
+    `STP`. Both W- and X-form supported; load+load and store+store
+    only (no mixing).
+  - v1 supports only the unsigned-offset form. The scaled imm12
+    guarantees natural alignment to the access size, which the LDP
+    encoding requires. `LDUR` (unscaled) and pre-/post-indexed forms
+    are deferred: their byte offsets aren't constrained to be a
+    multiple of the access size, and `LDP/STP` on unaligned
+    addresses has implementation-defined behaviour on AArch64
+    (some cores fault even when single `LDR/STR` works under
+    `SCTLR_EL1.A = 0`).
+  - Constraints checked: same base register `Rn`; same access size
+    (both W or both X); same direction (load/load or store/store);
+    consecutive offsets (`imm12_2 = imm12_1 + 1` in scaled units);
+    `Rt1 != Rt2` (LDP/STP requires distinct destinations); for
+    loads, `Rt1 != Rn` (else the first load clobbers the base
+    before the second load reads it). The first imm12 must also fit
+    LDP's signed-7-bit imm7 (i.e., be at most 63 for non-negative
+    unsigned-offset sources).
+  - Four consecutive LDR/STRs fold into TWO non-overlapping
+    LDP/STPs (after firing, the state resets so the second LDR
+    isn't also used as the first of a new pair).
+  - Atomicity caveat: a single LDP is NOT atomic across its two
+    halves (AArch64 doesn't guarantee single-copy atomicity for
+    pairs), but neither are two separate LDRs. So the rewrite
+    doesn't change ordering or atomicity guarantees -- acquire /
+    release variants use different opcodes.
 * BFXIL synthesis via AND-AND-ORR
   - `AND Rd, Rd, #~mask ; AND Rt, Rs, #mask ; ORR Rd, Rd, Rt` (with
     `mask = (1<<w)-1`, the two ANDs in either order, and the ORR's
