@@ -126,6 +126,32 @@ struct armlint_state {
     bool pending_active;
     unsigned pending_window;
     armlint_finding pending_finding;
+
+    // Flag-setting ALU (S-variant: ADDS/SUBS/ANDS/BICS/ADCS/SBCS)
+    // pending a CMP/TST-zero of its Rd. All members of the set put
+    // Z = (Rd == 0), so a follow-up CMP Rd, #0 / CMP Rd, ZR / TST
+    // Rd, Rd is recomputing the same Z.
+    bool sv_active;
+    bool sv_is_64bit;
+    unsigned sv_rd;
+    size_t sv_offset;
+    char sv_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // CMP/TST-zero of sv_rd observed adjacent to the S-variant,
+    // awaiting a B.EQ/B.NE consumer. v1 requires the B.EQ/B.NE so
+    // the same downstream NZCV-liveness scan as check_cmp_zero_branch
+    // can verify that dropping the CMP is sound (downstream may not
+    // observe N/C/V before they are overwritten).
+    bool sv_cmp_active;
+    size_t sv_cmp_offset;
+    char sv_cmp_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Deferred "redundant zero-CMP/TST after S-variant" finding,
+    // parallel to pending_*. Advanced by armlint_advance_pending_sv
+    // with the same classify_liveness logic.
+    bool pending_sv_active;
+    unsigned pending_sv_window;
+    armlint_finding pending_sv_finding;
 };
 
 #define LIVENESS_WINDOW 16
@@ -273,7 +299,10 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->tst_active = false;
     state->wzx_active = false;
     state->sxt_active = false;
+    state->sv_active = false;
+    state->sv_cmp_active = false;
     state->pending_active = false;
+    state->pending_sv_active = false;
     return mov_close(state, out);
 }
 
@@ -928,6 +957,32 @@ static liveness_t classify_liveness(uint32_t op)
     return LIV_UNKNOWN;
 }
 
+static bool advance_one_pending(uint32_t op, bool *active, unsigned *window,
+                                const armlint_finding *finding,
+                                armlint_finding *out)
+{
+    if (!*active) {
+        return false;
+    }
+    switch (classify_liveness(op)) {
+    case LIV_OVERWRITE:
+    case LIV_TERM_SAFE:
+        *out = *finding;
+        *active = false;
+        return true;
+    case LIV_READ:
+    case LIV_TERM_UNSAFE:
+        *active = false;
+        return false;
+    case LIV_UNKNOWN:
+        if (*window == 0 || --*window == 0) {
+            *active = false;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
                              armlint_finding *out)
 {
@@ -935,33 +990,29 @@ bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
         state->pending_active = false;
         return false;
     }
-    if (!state->pending_active) {
-        return false;
-    }
-
     uint32_t op = (uint32_t)insn->bytes[0]
         | ((uint32_t)insn->bytes[1] << 8)
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
+    return advance_one_pending(op, &state->pending_active,
+                               &state->pending_window,
+                               &state->pending_finding, out);
+}
 
-    switch (classify_liveness(op)) {
-    case LIV_OVERWRITE:
-    case LIV_TERM_SAFE:
-        *out = state->pending_finding;
-        state->pending_active = false;
-        return true;
-    case LIV_READ:
-    case LIV_TERM_UNSAFE:
-        state->pending_active = false;
-        return false;
-    case LIV_UNKNOWN:
-        if (state->pending_window == 0
-                || --state->pending_window == 0) {
-            state->pending_active = false;
-        }
+bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
+                                armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->pending_sv_active = false;
         return false;
     }
-    return false;
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+    return advance_one_pending(op, &state->pending_sv_active,
+                               &state->pending_sv_window,
+                               &state->pending_sv_finding, out);
 }
 
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
@@ -1023,6 +1074,134 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
         state->cmp_rn = rn;
         state->cmp_offset = offset;
         snprintf(state->cmp_disasm, sizeof(state->cmp_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return false;
+}
+
+// Detect an integer flag-setting "S-variant" ALU that writes Rd
+// (Rd != 31) and puts Z = (Rd == 0). Members: ADDS, SUBS, ANDS, BICS
+// (immediate and shifted-register / extended-register where defined),
+// and ADCS, SBCS. Aliases with Rd == 31 (CMP, CMN, TST) are rejected
+// here because they don't write a useful destination -- they belong
+// to the consumer side of check_redundant_cmp_after_s_variant.
+static bool decode_s_variant_alu(uint32_t op, unsigned *out_sf,
+                                 unsigned *out_rd)
+{
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31) {
+        return false;
+    }
+
+    // ADDS/SUBS immediate: bit 29 = S = 1, bits 28..23 = 100010.
+    if ((op & 0x3F800000u) == 0x31000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+    // ADDS/SUBS shifted-register and extended-register: bit 29 = 1,
+    // bits 28..24 = 01011.
+    if ((op & 0x3F000000u) == 0x2B000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+    // ANDS immediate: bits 30..29 = 11, bits 28..23 = 100100.
+    if ((op & 0x7F800000u) == 0x72000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+    // ANDS/BICS shifted-register: bits 30..29 = 11, bits 28..24 = 01010.
+    if ((op & 0x7F000000u) == 0x6A000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+    // ADCS/SBCS: bit 29 = S = 1, bits 28..21 = 11010000. (ADC/SBC have
+    // S = 0 and are not flag-setting.)
+    if ((op & 0x3FE00000u) == 0x3A000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+
+    return false;
+}
+
+bool check_redundant_cmp_after_s_variant(armlint_state *state,
+                                         const cs_insn *insn,
+                                         size_t offset,
+                                         armlint_finding *out)
+{
+    (void)out;  // emission goes through armlint_advance_pending_sv
+
+    if (insn->size != 4) {
+        state->sv_active = false;
+        state->sv_cmp_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Stage 3: B.EQ/B.NE consuming the sv+cmp chain?
+    if (state->sv_cmp_active) {
+        bool is_eq;
+        int32_t imm19;
+        if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
+            uint64_t target = insn->address
+                + (uint64_t)((int64_t)imm19 * 4);
+            const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
+
+            armlint_finding *p = &state->pending_sv_finding;
+            p->name = "redundant zero-CMP/TST after flag-setting ALU";
+            p->start_offset = state->sv_offset;
+            p->insn_count = 3;
+            clear_finding_strings(p);
+
+            snprintf(p->detail, sizeof(p->detail),
+                "drop %s -- Z already set by %s",
+                state->sv_cmp_disasm, state->sv_disasm);
+            snprintf(p->lines[0], sizeof(p->lines[0]),
+                "%s", state->sv_disasm);
+            snprintf(p->lines[1], sizeof(p->lines[1]),
+                "%s", state->sv_cmp_disasm);
+            snprintf(p->lines[2], sizeof(p->lines[2]),
+                "%s 0x%" PRIx64, bcond_mnem, target);
+
+            state->pending_sv_active = true;
+            state->pending_sv_window = LIVENESS_WINDOW;
+        }
+        state->sv_cmp_active = false;
+    }
+
+    // (2) Stage 2: CMP/TST-zero of sv_rd consuming sv_active?
+    if (state->sv_active) {
+        unsigned cmp_sf, cmp_rn;
+        if (decode_zero_test(op, &cmp_sf, &cmp_rn)
+                && cmp_rn == state->sv_rd
+                && cmp_sf == (state->sv_is_64bit ? 1u : 0u)) {
+            state->sv_cmp_active = true;
+            state->sv_cmp_offset = offset;
+            snprintf(state->sv_cmp_disasm,
+                sizeof(state->sv_cmp_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+        state->sv_active = false;
+    }
+
+    // (3) Stage 1: open S-variant pending state.
+    unsigned sf, rd;
+    if (decode_s_variant_alu(op, &sf, &rd)) {
+        state->sv_active = true;
+        state->sv_is_64bit = (sf != 0);
+        state->sv_rd = rd;
+        state->sv_offset = offset;
+        snprintf(state->sv_disasm, sizeof(state->sv_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
@@ -1628,6 +1807,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 report_finding(&finding);
                 errors++;
             }
+            if (armlint_advance_pending_sv(state, insn, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
             if (check_movz_movk_bitmask(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
@@ -1661,6 +1844,11 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_mov_reg_self(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_redundant_cmp_after_s_variant(state, insn, offset,
+                                                    &finding)) {
                 report_finding(&finding);
                 errors++;
             }

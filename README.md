@@ -133,6 +133,22 @@ code, and documents corners of the A64 instruction set.
     Counter-example: `ldrsb w0, [x1] ; sxtb x0, w0` -- producer left
     `X[63:32] = 0`, consumer would set those bits to sign of byte;
     not redundant.
+* redundant zero-CMP/TST after a flag-setting ALU
+  - `adds/subs/ands/bics/adcs/sbcs Rd, ... ; cmp Rd, #0 ; b.eq/b.ne L`
+    -- the S-variant ALU already set `Z = (Rd == 0)`, so the `CMP/TST`
+    is recomputing the same `Z`. The `B.EQ/B.NE` can read the
+    S-variant's flags directly; the `CMP/TST` is dead.
+  - v1 requires the full three-instruction window: S-variant
+    immediately followed by `CMP Rd, #0` / `CMP Rd, ZR` / `TST Rd, Rd`,
+    immediately followed by `B.EQ`/`B.NE`. The same forward
+    NZCV-liveness scan as the CMP+B.cond check confirms that
+    downstream code does not observe N/C/V (which the S-variant sets
+    differently from the `CMP`).
+  - Combines with the CMP+B.cond -> CBZ/CBNZ check above: both fire
+    on the matching pattern, giving the user a choice between
+    dropping the `CMP` (and keeping the `B.cond`) or folding the
+    `CMP`+`B.cond` pair into a `CBZ`/`CBNZ`. Both rewrites have
+    identical downstream behaviour.
 
 ## Compilation
 

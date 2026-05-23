@@ -46,6 +46,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (armlint_advance_pending(state, &insns[i], &f)) {
             findings++;
         }
+        if (armlint_advance_pending_sv(state, &insns[i], &f)) {
+            findings++;
+        }
         if (check_movz_movk_bitmask(state, &insns[i], offset, &f)) {
             findings++;
         }
@@ -71,6 +74,10 @@ static int run_check(const uint8_t *code, size_t code_size)
             findings++;
         }
         if (check_mov_reg_self(state, &insns[i], offset, &f)) {
+            findings++;
+        }
+        if (check_redundant_cmp_after_s_variant(state, &insns[i], offset,
+                                                &f)) {
             findings++;
         }
     }
@@ -364,9 +371,13 @@ static void encode_sr(uint8_t out[4], uint32_t base,
 #define ADD_W(out, rd, rn, rm)  encode_sr(out, 0x0b000000u, rd, rn, rm)
 #define ADDS_W(out, rd, rn, rm) encode_sr(out, 0x2b000000u, rd, rn, rm)
 #define SUB_W(out, rd, rn, rm)  encode_sr(out, 0x4b000000u, rd, rn, rm)
+#define SUBS_W(out, rd, rn, rm) encode_sr(out, 0x6b000000u, rd, rn, rm)
 #define ADD_X(out, rd, rn, rm)  encode_sr(out, 0x8b000000u, rd, rn, rm)
 #define SUB_X(out, rd, rn, rm)  encode_sr(out, 0xcb000000u, rd, rn, rm)
+#define SUBS_X(out, rd, rn, rm) encode_sr(out, 0xeb000000u, rd, rn, rm)
 #define AND_W(out, rd, rn, rm)  encode_sr(out, 0x0a000000u, rd, rn, rm)
+#define ANDS_W(out, rd, rn, rm) encode_sr(out, 0x6a000000u, rd, rn, rm)
+#define BICS_W(out, rd, rn, rm) encode_sr(out, 0x6a200000u, rd, rn, rm)
 #define ORR_W(out, rd, rn, rm)  encode_sr(out, 0x2a000000u, rd, rn, rm)
 #define EOR_W(out, rd, rn, rm)  encode_sr(out, 0x4a000000u, rd, rn, rm)
 
@@ -1856,6 +1867,151 @@ static void test_redundant_sext(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_redundant_cmp_after_s_variant(void)
+{
+    uint8_t code[24];
+
+    // -- Positive cases: each fires BOTH the new redundant-CMP finding
+    //    AND the existing CMP+B.cond -> CBZ finding, so expect 2. --
+
+    // adds w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
+    ADDS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // subs w0, w1, w2 ; cmp w0, #0 ; b.ne +8 ; ret.
+    SUBS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 1, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // ands w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
+    ANDS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // bics w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
+    BICS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // X-form: subs x5, x1, x2 ; cmp x5, #0 ; b.eq +8 ; ret.
+    SUBS_X(&code[0], 5, 1, 2);
+    cmp_x_imm(&code[4], 5, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // TST form: adds w0, w1, w2 ; tst w0, w0 ; b.eq +8 ; ret.
+    ADDS_W(&code[0], 0, 1, 2);
+    tst_w_reg(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // CMP-with-XZR form: adds w0, w1, w2 ; cmp w0, wzr ; b.eq +8 ; ret.
+    ADDS_W(&code[0], 0, 1, 2);
+    cmp_w_reg(&code[4], 0, 31);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // -- Negative: non-S-variant ADD; only existing check fires. --
+
+    // add w0, w1, w2 (no flag set) ; cmp w0, #0 ; b.eq ; ret.
+    ADD_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // -- Negative: CMP of a different register. --
+
+    // adds w0, w1, w2 ; cmp w5, #0 ; b.eq ; ret -- existing fires for
+    // CMP w5 + B.EQ; mine doesn't (Rn != sv_rd).
+    ADDS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 5, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // -- Negative: intervening instruction expires sv_active. --
+
+    // adds w0, w1, w2 ; movz w5, #1 ; cmp w0, #0 ; b.eq ; ret -- the
+    // intervening MOV breaks the sv chain. Existing CMP+B.EQ still
+    // fires (1 finding).
+    ADDS_W(&code[0], 0, 1, 2);
+    movz_w(&code[4], 5, 1);
+    cmp_w_imm(&code[8], 0, 0);
+    b_cond(&code[12], 0, 8);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
+
+    // -- Negative: B.cond is not EQ/NE. --
+
+    // adds w0, w1, w2 ; cmp w0, #0 ; b.lt ; ret -- LT not handled by
+    // either check.
+    ADDS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 11 /* LT */, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: downstream reads NZCV (adcs after B.eq) -- both
+    //    pendings suppressed by liveness scan. --
+
+    // adds w0, w1, w2 ; cmp w0, #0 ; b.eq ; adcs w5, w6, w7.
+    ADDS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    adcs_w(&code[12], 5, 6, 7);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // -- Negative: S-variant writes to XZR (CMN/CMP/TST alias);
+    //    sv_active not opened. --
+
+    // adds wzr, w1, w2 ; cmp w0, #0 ; b.eq ; ret -- the first instr
+    // is really CMN-like (Rd=31); existing CMP+B.EQ still fires.
+    ADDS_W(&code[0], 31, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // -- Negative: width mismatch (W S-variant, X CMP). --
+
+    // adds w0, w1, w2 ; cmp x0, #0 ; b.eq -- mine doesn't fire because
+    // CMP's sf differs from ADDS's sf. Existing CMP+B.EQ on X still
+    // fires.
+    ADDS_W(&code[0], 0, 1, 2);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // -- Negative: lone S-variant; CMP without B.cond; etc. --
+
+    // adds w0, w1, w2 ; ret -- nothing follows. No finding from either.
+    ADDS_W(&code[0], 0, 1, 2);
+    ret_(&code[4]);
+    assert(run_helper_check(code, 8) == 0);
+
+    // adds w0, w1, w2 ; cmp w0, #0 ; ret -- CMP not followed by
+    // B.EQ/B.NE; sv_cmp_active expires; neither check fires.
+    ADDS_W(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -1875,6 +2031,7 @@ int main(void)
     test_lsr_and_to_ubfx();
     test_mov_reg_self();
     test_redundant_sext();
+    test_redundant_cmp_after_s_variant();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

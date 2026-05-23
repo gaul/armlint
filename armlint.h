@@ -140,6 +140,26 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
                              armlint_finding *out);
 
+// Detect an S-variant ALU (ADDS/SUBS/ANDS/BICS/ADCS/SBCS) writing Rd,
+// followed immediately by CMP/TST-zero of Rd, followed immediately by
+// B.EQ/B.NE. All S-variants set Z = (Rd == 0), so the CMP/TST is
+// recomputing the same Z bit. The CMP/TST is flagged redundant once
+// the same downstream NZCV-liveness scan as check_cmp_zero_branch
+// confirms dropping it is sound (no N/C/V observation downstream).
+// Combines with the existing CMP+B.cond -> CBZ check: both fire for
+// the matching pattern, presenting alternative rewrites.
+bool check_redundant_cmp_after_s_variant(armlint_state *state,
+                                         const cs_insn *insn,
+                                         size_t offset,
+                                         armlint_finding *out);
+
+// Advance the deferred "redundant CMP after S-variant" finding's
+// flag-liveness scan by one instruction. Parallel to
+// armlint_advance_pending; call before per-instruction checks each
+// step.
+bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
+                                armlint_finding *out);
+
 // Close any open sequence at end-of-region. Returns true and fills *out
 // if the closed sequence is reportable.
 bool armlint_flush(armlint_state *state, armlint_finding *out);
