@@ -160,6 +160,22 @@ struct armlint_state {
     // re-linking, not a code rewrite, so it's not actionable.
     bool adr_recent;
     unsigned adr_recent_rd;
+
+    // BFXIL synthesis pattern: AND Rd, Rd, #~mask ; AND Rt, Rs, #mask
+    // ; ORR Rd, Rd, Rt -> BFXIL Rd, Rs, #0, #w. The two ANDs can
+    // appear in either order; we track them independently. Both
+    // flags being set means we are waiting for the ORR. Strict
+    // adjacency: any unrecognized instruction expires both flags.
+    bool bfx_clear_seen;
+    bool bfx_isolate_seen;
+    bool bfx_is_64bit;
+    unsigned bfx_width;
+    unsigned bfx_clear_rd;     // Rd from "AND Rd, Rd, #~mask"
+    unsigned bfx_isolate_rt;   // destination of "AND Rt, Rs, #mask"
+    unsigned bfx_isolate_rn;   // Rs (the source of the bitfield)
+    size_t bfx_first_offset;   // offset of whichever AND came first
+    char bfx_clear_disasm[ARMLINT_FINDING_LINE_LEN];
+    char bfx_isolate_disasm[ARMLINT_FINDING_LINE_LEN];
 };
 
 #define LIVENESS_WINDOW 16
@@ -312,6 +328,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_active = false;
     state->pending_sv_active = false;
     state->adr_recent = false;
+    state->bfx_clear_seen = false;
+    state->bfx_isolate_seen = false;
     return mov_close(state, out);
 }
 
@@ -2119,6 +2137,186 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// Decode AND-immediate with a "high-only" mask: ~((1<<w)-1), i.e.,
+// the top (datasize - w) bits are 1 and the low w bits are 0. The
+// bitmask-immediate encoding for this shape has immr = imms + 1
+// (R = datasize - w, S = datasize - w - 1). Returns the width w of
+// the zero region in the low bits.
+static bool decode_and_imm_highmask(uint32_t op, unsigned *out_w,
+                                    unsigned *out_rd, unsigned *out_rn)
+{
+    unsigned sf = (op >> 31) & 1u;
+    uint32_t base = sf ? 0x92400000u : 0x12000000u;
+    if ((op & 0xFFC00000u) != base) {
+        return false;
+    }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    if (immr != imms + 1) {
+        return false;
+    }
+    unsigned datasize = sf ? 64u : 32u;
+    // Exclude all-ones (w = 0) and out-of-encoding values.
+    if (sf == 0 && imms >= 31) {
+        return false;
+    }
+    if (sf == 1 && imms >= 63) {
+        return false;
+    }
+    *out_w = datasize - imms - 1;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// Decode ORR shifted-register with shift = LSL #0, N = 0 (no negation
+// of Rm). Any Rd / Rn / Rm.
+static bool decode_orr_reg_shift0(uint32_t op, unsigned *out_sf,
+                                  unsigned *out_rd, unsigned *out_rn,
+                                  unsigned *out_rm)
+{
+    if ((op & 0x7FE0FC00u) != 0x2A000000u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
+                       size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->bfx_clear_seen = false;
+        state->bfx_isolate_seen = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // Categorize the current instruction.
+    unsigned width = 0, and_rd = 0, and_rn = 0;
+    unsigned orr_sf = 0, orr_rd = 0, orr_rn = 0, orr_rm = 0;
+    unsigned sf = (op >> 31) & 1u;
+    bool is_clear = false, is_isolate = false, is_combine = false;
+
+    if (decode_and_imm_highmask(op, &width, &and_rd, &and_rn)) {
+        // CLEAR requires in-place: Rd == Rn. Excludes Rd=31.
+        if (and_rd == and_rn && and_rd != 31) {
+            is_clear = true;
+        }
+    } else if (decode_and_imm_lowmask(op, &width, &and_rd, &and_rn)) {
+        // ISOLATE: any Rd, Rn != 31.
+        if (and_rd != 31 && and_rn != 31) {
+            is_isolate = true;
+        }
+    } else if (decode_orr_reg_shift0(op, &orr_sf, &orr_rd, &orr_rn,
+                                     &orr_rm)) {
+        is_combine = true;
+    }
+
+    bool produced = false;
+
+    if (is_combine) {
+        if (state->bfx_clear_seen && state->bfx_isolate_seen
+                && state->bfx_is_64bit == (orr_sf != 0)) {
+            unsigned cd = state->bfx_clear_rd;
+            unsigned tt = state->bfx_isolate_rt;
+            unsigned rs = state->bfx_isolate_rn;
+            // ORR Rd, Rd, Rt or ORR Rd, Rt, Rd. Rd = clear.Rd.
+            bool combo_ok = orr_rd == cd &&
+                ((orr_rn == cd && orr_rm == tt) ||
+                 (orr_rn == tt && orr_rm == cd));
+            // Aliasing constraints for the rewrite to BFXIL Rd, Rs:
+            //   isolate.Rt != clear.Rd  (else the isolate clobbers
+            //     the cleared Rd in place of writing a separate temp)
+            //   isolate.Rt != isolate.Rn (Rt != Rs; the BFXIL rewrite
+            //     leaves Rs unmodified, so flagging when Rs is
+            //     modified would silently change semantics)
+            //   isolate.Rn != clear.Rd  (Rs == Rd is a degenerate
+            //     case where the isolate reads the just-cleared Rd
+            //     and yields Rt = 0, so the ORR is a no-op and the
+            //     net effect is just the clear -- not BFXIL)
+            bool alias_ok = tt != cd && tt != rs && rs != cd;
+            if (combo_ok && alias_ok) {
+                char w_or_x = state->bfx_is_64bit ? 'x' : 'w';
+                out->name = "BFXIL synthesis via AND-AND-ORR";
+                out->start_offset = state->bfx_first_offset;
+                out->insn_count = 3;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> bfxil %c%u, %c%u, #0, #%u",
+                    w_or_x, cd, w_or_x, rs, state->bfx_width);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->bfx_clear_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s", state->bfx_isolate_disasm);
+                snprintf(out->lines[2], sizeof(out->lines[2]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
+        }
+        state->bfx_clear_seen = false;
+        state->bfx_isolate_seen = false;
+    } else if (is_clear) {
+        // If isolate already pending with matching width and sf, add
+        // clear to it. Otherwise reset and open fresh clear.
+        if (state->bfx_isolate_seen
+                && state->bfx_is_64bit == (sf != 0)
+                && state->bfx_width == width) {
+            state->bfx_clear_seen = true;
+            state->bfx_clear_rd = and_rd;
+            snprintf(state->bfx_clear_disasm,
+                sizeof(state->bfx_clear_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        } else {
+            state->bfx_isolate_seen = false;
+            state->bfx_clear_seen = true;
+            state->bfx_is_64bit = (sf != 0);
+            state->bfx_width = width;
+            state->bfx_clear_rd = and_rd;
+            state->bfx_first_offset = offset;
+            snprintf(state->bfx_clear_disasm,
+                sizeof(state->bfx_clear_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    } else if (is_isolate) {
+        if (state->bfx_clear_seen
+                && state->bfx_is_64bit == (sf != 0)
+                && state->bfx_width == width) {
+            state->bfx_isolate_seen = true;
+            state->bfx_isolate_rt = and_rd;
+            state->bfx_isolate_rn = and_rn;
+            snprintf(state->bfx_isolate_disasm,
+                sizeof(state->bfx_isolate_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        } else {
+            state->bfx_clear_seen = false;
+            state->bfx_isolate_seen = true;
+            state->bfx_is_64bit = (sf != 0);
+            state->bfx_width = width;
+            state->bfx_isolate_rt = and_rd;
+            state->bfx_isolate_rn = and_rn;
+            state->bfx_first_offset = offset;
+            snprintf(state->bfx_isolate_disasm,
+                sizeof(state->bfx_isolate_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    } else {
+        // Unrecognized instruction expires the window.
+        state->bfx_clear_seen = false;
+        state->bfx_isolate_seen = false;
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -2263,6 +2461,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_csel_self(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_bfxil_synth(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

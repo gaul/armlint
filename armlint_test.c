@@ -85,6 +85,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_csel_self(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_bfxil_synth(state, &insns[i], offset, &f)) {
+            findings++;
+        }
         if (check_redundant_cmp_after_s_variant(state, &insns[i], offset,
                                                 &f)) {
             findings++;
@@ -1584,6 +1587,41 @@ static void and_x_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
     out[3] = (op >> 24) & 0xff;
 }
 
+// AND Wd, Wn, #~((1<<w)-1). Encoding: sf=0, N=0, immr=32-w,
+// imms=31-w. (Note immr = imms + 1.)
+static void and_w_highmask(uint8_t out[4], unsigned rd, unsigned rn,
+                           unsigned w)
+{
+    unsigned imms = 31u - w;
+    unsigned immr = 32u - w;
+    uint32_t op = 0x12000000u
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// AND Xd, Xn, #~((1<<w)-1). sf=1, N=1, immr=64-w, imms=63-w.
+static void and_x_highmask(uint8_t out[4], unsigned rd, unsigned rn,
+                           unsigned w)
+{
+    unsigned imms = 63u - w;
+    unsigned immr = 64u - w;
+    uint32_t op = 0x92400000u
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 // AND Wd, Wn, #0x6 (mask 0b110 -- not contiguous-low). Used to verify
 // the decoder rejects non-low-run masks.
 static void and_w_non_contig_lo(uint8_t out[4], unsigned rd, unsigned rn)
@@ -2550,6 +2588,113 @@ static void test_csel_self(void)
     assert(run_helper_check(code, 8) == 2);
 }
 
+static void test_bfxil_synth(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: canonical order clear -> isolate -> ORR. --
+
+    // and w0, w0, #~0xff ; and w5, w1, #0xff ; orr w0, w0, w5
+    // -> bfxil w0, w1, #0, #8
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 5, 1, 8);
+    ORR_W(&code[8], 0, 0, 5);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: reverse order (isolate first). --
+
+    // and w5, w1, #0xff ; and w0, w0, #~0xff ; orr w0, w0, w5
+    and_w_lowmask(&code[0], 5, 1, 8);
+    and_w_highmask(&code[4], 0, 0, 8);
+    ORR_W(&code[8], 0, 0, 5);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: ORR with commuted operands (Rd, Rt, Rd). --
+
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 5, 1, 8);
+    ORR_W(&code[8], 0, 5, 0);   // commuted
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: X-form. --
+
+    and_x_highmask(&code[0], 0, 0, 16);
+    and_x_lowmask(&code[4], 5, 1, 16);
+    ORR_X(&code[8], 0, 0, 5);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: width mismatch. --
+
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 5, 1, 16);   // different width
+    ORR_W(&code[8], 0, 0, 5);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: ORR Rd doesn't match clear's Rd. --
+
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 5, 1, 8);
+    ORR_W(&code[8], 7, 0, 5);   // Rd=7 doesn't match clear's Rd=0
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative for BFXIL: aliasing -- Rt == clear.Rd. The ORR
+    //    that closes the (broken) BFXIL pattern must be ORR W0, W0,
+    //    W0 because both clear.Rd and isolate.Rt are W0; that ORR
+    //    is itself a self-op identity and fires check_self_op (1
+    //    finding). The BFXIL check correctly rejects via alias_ok,
+    //    so the only finding is the self-op one. --
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 0, 1, 8);   // Rt == clear.Rd
+    ORR_W(&code[8], 0, 0, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: aliasing -- Rt == Rs (isolate modifies source). --
+
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 1, 1, 8);   // Rt == Rs == w1
+    ORR_W(&code[8], 0, 0, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: aliasing -- Rs == clear.Rd (degenerate). --
+
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 5, 0, 8);   // Rs == clear.Rd
+    ORR_W(&code[8], 0, 0, 5);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: clear is not in-place (Rd != Rn). --
+
+    // and w7, w0, #~0xff -- "clear" but writes to w7, not w0. Not
+    // the canonical clear-Rd-in-place pattern.
+    uint8_t clear_not_inplace[4];
+    {
+        unsigned imms = 31u - 8u, immr = 32u - 8u;
+        uint32_t op = 0x12000000u | (immr << 16) | (imms << 10)
+            | (0u << 5) | 7u;   // Rn=0, Rd=7
+        clear_not_inplace[0] = op & 0xff;
+        clear_not_inplace[1] = (op >> 8) & 0xff;
+        clear_not_inplace[2] = (op >> 16) & 0xff;
+        clear_not_inplace[3] = (op >> 24) & 0xff;
+    }
+    memcpy(&code[0], clear_not_inplace, 4);
+    and_w_lowmask(&code[4], 5, 1, 8);
+    ORR_W(&code[8], 7, 7, 5);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction (strict adjacency). --
+
+    and_w_highmask(&code[0], 0, 0, 8);
+    movz_w(&code[4], 6, 0x42);
+    and_w_lowmask(&code[8], 5, 1, 8);
+    ORR_W(&code[12], 0, 0, 5);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: ORR alone (no preceding ANDs). --
+
+    ORR_W(&code[0], 0, 0, 5);
+    assert(run_helper_check(code, 4) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -2573,6 +2718,7 @@ int main(void)
     test_add_sub_zero();
     test_self_op();
     test_csel_self();
+    test_bfxil_synth();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

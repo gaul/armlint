@@ -157,6 +157,19 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
 bool check_csel_self(armlint_state *state, const cs_insn *insn,
                      size_t offset, armlint_finding *out);
 
+// Detect the 3-instruction BFXIL synthesis pattern:
+//   AND Rd, Rd, #~mask    ; clear Rd[w-1..0]
+//   AND Rt, Rs, #mask     ; isolate Rs[w-1..0] into Rt
+//   ORR Rd, Rd, Rt        ; combine
+// (the two ANDs in either order). Equivalent to a single
+// BFXIL Rd, Rs, #0, #w. Aliasing constraints: Rt != Rd (so the
+// isolate doesn't clobber the cleared Rd in place), Rt != Rs (so
+// the isolate doesn't modify the source), and Rs != Rd (the
+// degenerate case where the source is the just-cleared register
+// yields a no-op instead of BFXIL).
+bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
+                       size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe

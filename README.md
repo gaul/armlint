@@ -182,6 +182,28 @@ code, and documents corners of the A64 instruction set.
     is the canonical x86 zero idiom that occasionally bleeds into
     AArch64 toolchain output; the canonical AArch64 form is `MOV Rd,
     XZR` (eight occurrences observed in dyld at the time of writing).
+* BFXIL synthesis via AND-AND-ORR
+  - `AND Rd, Rd, #~mask ; AND Rt, Rs, #mask ; ORR Rd, Rd, Rt` (with
+    `mask = (1<<w)-1`, the two ANDs in either order, and the ORR's
+    second-and-third operands in either order) is equivalent to a
+    single `BFXIL Rd, Rs, #0, #w`. Both W- and X-form. The check
+    detects the 3-instruction window with strict adjacency.
+  - The high-mask `AND Rd, Rd, #~mask` is identified by the
+    bitmask-immediate encoding `immr = imms + 1` (S =
+    `datasize-w-1`, R = `datasize-w`, esize = datasize). The
+    low-mask consumer reuses the existing `decode_and_imm_lowmask`
+    decoder. The ORR is logical-shifted-register with LSL #0.
+  - Aliasing constraints needed for the BFXIL rewrite to be
+    semantically equivalent: `Rt != clear.Rd` (else the isolate
+    clobbers the cleared register in place), `Rt != Rs` (else the
+    isolate modifies the source -- BFXIL leaves the source
+    unchanged), and `Rs != clear.Rd` (the degenerate case where
+    Rs is the just-cleared register yields the wrong result -- the
+    original sequence zeros Rd's low bits, but BFXIL Rd, Rd, ... is
+    a no-op).
+  - Modern compilers fuse this pattern themselves; 0 hits in the
+    system-binary sample. Useful for hand-written assembly and
+    legacy object code.
 * CSEL same-operand identity (`CSEL Rd, Rn, Rn, cond`)
   - When the CSEL's `Rn == Rm`, both branches produce `Rn`, so the
     cond is irrelevant and the instruction is equivalent to `MOV Rd,
