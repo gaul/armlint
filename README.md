@@ -54,6 +54,20 @@ code, and documents corners of the A64 instruction set.
     much shorter than `B.cond`'s 19-bit (~1 MB). The fold is
     suggested only when the target fits in the TBZ encoding.
   - Soundness: same NZCV-liveness scan as the CMP-branch check.
+* redundant zero-extension after a W-form op
+  - `add w0, w1, w2 ; uxtw x0, w0` -- the `UXTW` is a no-op because
+    W-form writes already zero bits 63..32 of the X register. Same
+    for `and x0, x0, #0xffffffff` (and any encoding Capstone aliases
+    to `ubfx x0, x0, #0, #32`).
+  - Producer side recognises common W-form data-processing classes:
+    `ADD/SUB` (immediate, shifted, extended), logical immediate,
+    `MOVZ/MOVN/MOVK`, bitfield (`SBFM/BFM/UBFM`), `EXTR`, logical
+    shifted register, `ADC/SBC`, conditional select (`CSEL` family),
+    DP-3-source (`MADD/MSUB/MUL`), DP-2-source (`UDIV/SDIV/LSLV/...`)
+    and DP-1-source (`RBIT/REV/CLZ/CLS`). Loads (`LDR/LDRB/LDRH Wt`)
+    are not yet matched. v1 requires the consumer to overwrite the
+    same register (`uxtw x0, w0`, not `uxtw x5, w0`), guaranteeing
+    the move is purely a no-op.
 
 ## Compilation
 

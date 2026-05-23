@@ -60,6 +60,13 @@ struct armlint_state {
     unsigned tst_bit;       // bit position 0..63
     size_t tst_offset;
 
+    // W-form ALU/move/bitfield result pending a redundant zero-extension
+    // consumer (UXTW Xd,Wd or AND Xd,Xd,#0xffffffff with same Rd).
+    bool wzx_active;
+    unsigned wzx_rd;
+    size_t wzx_offset;
+    char wzx_producer_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Deferred CMP/TST + B.EQ/NE finding awaiting forward NZCV-liveness
     // verification. Only one of CMP or TST can be pending at a time
     // (a CMP would overwrite or be overwritten by a TST), so the
@@ -210,6 +217,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lsl_active = false;
     state->cmp_active = false;
     state->tst_active = false;
+    state->wzx_active = false;
     state->pending_active = false;
     return mov_close(state, out);
 }
@@ -837,6 +845,144 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
     return false;
 }
 
+// UXTW Xd, Wn  =  UBFM Xd, Xn, #0, #31
+//   sf=1, N=1, immr=000000, imms=011111, opc=10 (UBFM).
+//   Fixed bits (Rn/Rd masked out): 0xD3407C00.
+static bool decode_uxtw(uint32_t op, unsigned *out_rd, unsigned *out_rn)
+{
+    if ((op & 0xFFFFFC00u) != 0xD3407C00u) {
+        return false;
+    }
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// AND Xd, Xn, #0xffffffff  =  AND-immediate with sf=1, opc=00, N=1,
+// immr=000000, imms=011111. Fixed bits: 0x92407C00.
+static bool decode_and_x_lo32_mask(uint32_t op,
+                                   unsigned *out_rd, unsigned *out_rn)
+{
+    if ((op & 0xFFFFFC00u) != 0x92407C00u) {
+        return false;
+    }
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// True if `op` is a W-form (sf=0) instruction whose Rd is at bits 4..0
+// and which therefore leaves bits 63..32 of the corresponding X register
+// zeroed. Conservative: matches well-known data-processing classes only;
+// loads are deferred.
+//
+// Masks exclude the opc bits within each class so all variants match.
+// E.g. 0x1F800000 selects bits 28..23 (the class identifier in the
+// data-processing-immediate space), leaving bits 31..29 free; 0x1FE00000
+// adds bits 22..21 (used to subdivide the data-processing-register
+// space). The early bit-31 check forces sf=0.
+static bool decode_w_form_zext(uint32_t op, unsigned *out_rd)
+{
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31) {
+        return false;
+    }
+    if ((op & 0x80000000u) != 0) {
+        return false;
+    }
+
+    // Data-processing immediate (bits 28..23 identify the class).
+    if ((op & 0x1F800000u) == 0x11000000u           // ADD/SUB imm (+S)
+            || (op & 0x1F800000u) == 0x12000000u    // AND/ORR/EOR/ANDS imm
+            || (op & 0x1F800000u) == 0x12800000u    // MOVN/MOVZ/MOVK
+            || (op & 0x1F800000u) == 0x13000000u    // SBFM/BFM/UBFM
+            || (op & 0x1F800000u) == 0x13800000u) { // EXTR
+        *out_rd = rd;
+        return true;
+    }
+    // Data-processing register.
+    //   01010 = logical shifted register
+    //   01011 = add/sub shifted or extended register
+    //   11010000 (bits 28..21) = add/sub with carry
+    //   11010100 = conditional select (CSEL/CSINC/CSINV/CSNEG)
+    //   11011    = data-processing 3-source (MADD/MSUB/MUL/...)
+    //   11010110 with bit 30=0 = data-processing 2-source
+    //   11010110 with bit 30=1 = data-processing 1-source
+    if ((op & 0x1F000000u) == 0x0A000000u
+            || (op & 0x1F000000u) == 0x0B000000u
+            || (op & 0x1FE00000u) == 0x1A000000u
+            || (op & 0x1FE00000u) == 0x1A800000u
+            || (op & 0x1F000000u) == 0x1B000000u
+            || (op & 0x7FE00000u) == 0x1AC00000u
+            || (op & 0x7FE00000u) == 0x5AC00000u) {
+        *out_rd = rd;
+        return true;
+    }
+    return false;
+}
+
+bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->wzx_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: is this a redundant UXTW or AND-#0xffffffff consumer?
+    if (state->wzx_active) {
+        unsigned c_rd, c_rn;
+        bool is_uxtw = decode_uxtw(op, &c_rd, &c_rn);
+        bool is_and  = !is_uxtw && decode_and_x_lo32_mask(op, &c_rd, &c_rn);
+
+        if ((is_uxtw || is_and)
+                && c_rd == state->wzx_rd
+                && c_rn == state->wzx_rd) {
+            out->name = "redundant zero-extension after W-form op";
+            out->start_offset = state->wzx_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            const char *mnem = is_uxtw ? "uxtw" : "and";
+            snprintf(out->detail, sizeof(out->detail),
+                "%s x%u, ... is a no-op (W-form already zero-extends)",
+                mnem, c_rd);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->wzx_producer_disasm);
+            if (is_uxtw) {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "uxtw x%u, w%u", c_rd, c_rn);
+            } else {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "and x%u, x%u, #0xffffffff", c_rd, c_rn);
+            }
+            produced = true;
+        }
+        // Strict adjacency: any non-matching instruction expires.
+        state->wzx_active = false;
+    }
+
+    // (2) Open: is this a W-form Rd-writing producer?
+    unsigned p_rd;
+    if (decode_w_form_zext(op, &p_rd)) {
+        state->wzx_active = true;
+        state->wzx_rd = p_rd;
+        state->wzx_offset = offset;
+        snprintf(state->wzx_producer_disasm,
+            sizeof(state->wzx_producer_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
 static void report_finding(const armlint_finding *finding)
 {
     if (finding->detail[0] != '\0') {
@@ -904,6 +1050,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_tst_branch(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_redundant_zext(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

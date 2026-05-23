@@ -58,6 +58,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_tst_branch(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_redundant_zext(state, &insns[i], offset, &f)) {
+            findings++;
+        }
     }
 
     armlint_finding f;
@@ -624,6 +627,43 @@ static void tst_w_run(uint8_t out[4], unsigned rn, unsigned imms)
     out[3] = (op >> 24) & 0xff;
 }
 
+// UXTW Xd, Wn = UBFM Xd, Xn, #0, #31 (sf=1, N=1, immr=0, imms=31).
+static void uxtw(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0xD3407C00u
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// AND Xd, Xn, #0xffffffff (sf=1, opc=00, N=1, immr=0, imms=31).
+static void and_x_ff32(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x92407C00u
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// UXTH Xd, Wn = UBFM Xd, Xn, #0, #15 -- different alias, must NOT match.
+static void uxth_x(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0xD3400000u
+        | (15u << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 static void test_cmp_zero_branch(void)
 {
     uint8_t code[32];
@@ -903,6 +943,94 @@ static void test_tst_branch(void)
     assert(run_helper_check(code, 16) == 1);
 }
 
+static void test_redundant_zext(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: W-form producer immediately followed by UXTW/AND. --
+
+    // add w0, w1, w2 ; uxtw x0, w0 -- shifted-register ADD W.
+    ADD_W(&code[0], 0, 1, 2);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // add w0, w1, w2 ; and x0, x0, #0xffffffff.
+    ADD_W(&code[0], 0, 1, 2);
+    and_x_ff32(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // movz w0, #0x1234 ; uxtw x0, w0 -- move-wide producer.
+    movz_w(&code[0], 0, 0x1234);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #3 ; uxtw x0, w0 -- bitfield (UBFM) producer.
+    lsl_w(&code[0], 0, 1, 3);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // csel w0, w1, w2, eq ; uxtw x0, w0 -- conditional select producer.
+    csel_w(&code[0], 0, 1, 2, 0);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // subs w0, w1, #1 ; uxtw x0, w0 -- add/sub imm with real Rd.
+    subs_w_imm(&code[0], 0, 1, 1);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: producer is X-form -- bits 63..32 not pre-zeroed.
+
+    ADD_X(&code[0], 0, 1, 2);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: consumer's Rn doesn't match producer's Rd. --
+
+    ADD_W(&code[0], 0, 1, 2);
+    uxtw(&code[4], 0, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: consumer's Rd doesn't match producer's Rd. --
+
+    ADD_W(&code[0], 0, 1, 2);
+    uxtw(&code[4], 5, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: intervening instruction expires wzx state. --
+
+    ADD_W(&code[0], 0, 1, 2);
+    movz_w(&code[4], 5, 1);
+    uxtw(&code[8], 0, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: lone UXTW with no preceding W-form producer.
+
+    uxtw(&code[0], 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: UXTH (different alias of UBFM, not zero-extend-32). --
+
+    ADD_W(&code[0], 0, 1, 2);
+    uxth_x(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: producer with Rd=31 (WZR -- result is discarded). --
+
+    // adds wzr, w1, w2 (flag-only); should not open wzx.
+    ADDS_W(&code[0], 31, 1, 2);
+    uxtw(&code[4], 31, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Interaction: LSL+ADD fold AND redundant uxtw -- two findings. --
+
+    // lsl w0, w1, #3 ; add w0, w2, w0 ; uxtw x0, w0.
+    lsl_w(&code[0], 0, 1, 3);
+    ADD_W(&code[4], 0, 2, 0);
+    uxtw(&code[8], 0, 0);
+    assert(run_helper_check(code, 12) == 2);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -917,6 +1045,7 @@ int main(void)
     test_lsl_fold();
     test_cmp_zero_branch();
     test_tst_branch();
+    test_redundant_zext();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

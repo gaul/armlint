@@ -93,6 +93,13 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
 bool check_tst_branch(armlint_state *state, const cs_insn *insn,
                       size_t offset, armlint_finding *out);
 
+// Detect a W-form ALU/move/bitfield instruction whose result Rd is
+// immediately consumed by UXTW Xd, Wd or AND Xd, Xd, #0xffffffff with
+// the same Rd. The X-form zero-extension is redundant because the
+// W-form write already zeroed bits 63..32 of the X register.
+bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe
