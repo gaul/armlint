@@ -101,11 +101,12 @@ struct armlint_state {
     // sxt_signed_from = S, the lowest bit above which the sign of bit
     // S-1 is replicated; sxt_upper = W, the (exclusive) upper bound of
     // that region (32 for W-form, 64 for X-form).
-    //   LDRSB Wt / SXTB Wd, Wn -> (S=8,  W=32)
-    //   LDRSH Wt / SXTH Wd, Wn -> (S=16, W=32)
-    //   LDRSB Xt / SXTB Xd, Wn -> (S=8,  W=64)
-    //   LDRSH Xt / SXTH Xd, Wn -> (S=16, W=64)
-    //   LDRSW Xt / SXTW Xd, Wn -> (S=32, W=64)
+    //   LDRSB Wt / SXTB Wd, Wn         -> (S=8,  W=32)
+    //   LDRSH Wt / SXTH Wd, Wn         -> (S=16, W=32)
+    //   LDRSB Xt / SXTB Xd, Wn         -> (S=8,  W=64)
+    //   LDRSH Xt / SXTH Xd, Wn         -> (S=16, W=64)
+    //   LDRSW Xt / SXTW Xd, Wn         -> (S=32, W=64)
+    //   ASR Rd, Rn, #k (W/X)           -> (S=datasize-k, W=datasize)
     // A consumer SXTB/SXTH/SXTW with thresholds (S_c, W_c) is
     // redundant iff S_p <= S_c AND W_p == W_c AND Rd == Rn ==
     // producer.Rd. W_p == W_c (not <=) is required because a W-form
@@ -1422,10 +1423,12 @@ static bool decode_sbfm_sext(uint32_t op, unsigned *out_s, unsigned *out_w,
 }
 
 // Detect a sign-extending producer for check_redundant_sext: the SBFM
-// SXT* aliases and the sign-extending integer loads LDRSB/LDRSH/LDRSW
-// in any addressing mode (the load mask leaves bit 24 free so both
-// unsigned-immediate and unscaled/pre-/post-/register-offset forms
-// match). Producers with Rd=31 are skipped (write goes to ZR).
+// SXT* aliases, the ASR (immediate) shift (which sign-extends the
+// source's top bit through bits [datasize-k, datasize)), and the
+// sign-extending integer loads LDRSB/LDRSH/LDRSW in any addressing
+// mode (the load mask leaves bit 24 free so unsigned-immediate,
+// unscaled, pre-/post-/register-offset forms all match). Producers
+// with Rd=31 are skipped (write goes to ZR).
 static bool decode_sext_producer(uint32_t op, unsigned *out_s,
                                  unsigned *out_w, unsigned *out_rd)
 {
@@ -1439,6 +1442,20 @@ static bool decode_sext_producer(uint32_t op, unsigned *out_s,
         *out_s = s;
         *out_w = w;
         *out_rd = rd;
+        return true;
+    }
+
+    // ASR (immediate): SBFM with imms = datasize-1 and immr = shift > 0.
+    // After ASR Rd, Rn, #k, bits [datasize-k, datasize) of Rd equal
+    // Rn[datasize-1] = Rd[datasize-k-1], so S = datasize-k, W = datasize
+    // (W-form additionally zeros X[63:32] but that's the zext check's
+    // concern; here we only track the sign-extended region).
+    unsigned asr_sf, asr_rd, asr_rn, asr_shift;
+    if (decode_asr_imm(op, &asr_sf, &asr_rd, &asr_rn, &asr_shift)) {
+        unsigned datasize = asr_sf ? 64u : 32u;
+        *out_s = datasize - asr_shift;
+        *out_w = datasize;
+        *out_rd = asr_rd;
         return true;
     }
 

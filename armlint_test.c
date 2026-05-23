@@ -1790,6 +1790,70 @@ static void test_redundant_sext(void)
     LDRSH_W(&code[8], 2, 1, 0);
     SXTH_W(&code[12], 2, 2);
     assert(run_helper_check(code, 16) == 2);
+
+    // -- ASR as a sign-extension producer. ASR Rd, Rn, #k yields
+    //    S = datasize - k, W = datasize. --
+
+    // asr w0, w1, #24 ; sxtb w0, w0 -- S=8, W=32 on both sides.
+    asr_w(&code[0], 0, 1, 24);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr w0, w1, #16 ; sxth w0, w0 -- S=16, W=32.
+    asr_w(&code[0], 0, 1, 16);
+    SXTH_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr x0, x1, #56 ; sxtb x0, w0 -- S=8, W=64.
+    asr_x(&code[0], 0, 1, 56);
+    SXTB_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr x0, x1, #48 ; sxth x0, w0 -- S=16, W=64.
+    asr_x(&code[0], 0, 1, 48);
+    SXTH_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr x0, x1, #32 ; sxtw x0, w0 -- S=32, W=64.
+    asr_x(&code[0], 0, 1, 32);
+    SXTW_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: ASR S_p < S_c. asr w0, w1, #25 ; sxtb w0, w0 --
+    //    S_p=7 < S_c=8, redundant. --
+
+    asr_w(&code[0], 0, 1, 25);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr w0, w1, #24 ; sxth w0, w0 -- S_p=8 < S_c=16, redundant.
+    asr_w(&code[0], 0, 1, 24);
+    SXTH_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: ASR shift too small to cover the SXT width. --
+
+    // asr w0, w1, #8 ; sxtb w0, w0 -- S_p=24 > S_c=8, not redundant.
+    asr_w(&code[0], 0, 1, 8);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // asr w0, w1, #16 ; sxtb w0, w0 -- S_p=16 > S_c=8, not redundant.
+    asr_w(&code[0], 0, 1, 16);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: width mismatch with ASR producer. --
+
+    // asr w0, w1, #24 ; sxtb x0, w0 -- W_p=32 vs W_c=64.
+    asr_w(&code[0], 0, 1, 24);
+    SXTB_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // asr x0, x1, #56 ; sxtb w0, w0 -- W_p=64 vs W_c=32.
+    asr_x(&code[0], 0, 1, 56);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 int main(void)

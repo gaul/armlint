@@ -114,11 +114,17 @@ code, and documents corners of the A64 instruction set.
     `(S_c, W_c)` is redundant iff `S_p <= S_c` AND `W_p == W_c` AND
     `Rd == Rn == producer.Rd`.
   - Recognised producers: `SXTB / SXTH / SXTW` (SBFM aliases with
-    `immr = 0`, `imms in {7, 15, 31}`) and the sign-extending integer
-    loads `LDRSB / LDRSH / LDRSW` in any addressing mode. (S, W) maps:
-    `LDRSB Wt` / `SXTB Wd,Wn` -> (8, 32); `LDRSH Wt` / `SXTH Wd,Wn` ->
-    (16, 32); `LDRSB Xt` / `SXTB Xd,Wn` -> (8, 64); `LDRSH Xt` /
-    `SXTH Xd,Wn` -> (16, 64); `LDRSW Xt` / `SXTW Xd,Wn` -> (32, 64).
+    `immr = 0`, `imms in {7, 15, 31}`); the sign-extending integer
+    loads `LDRSB / LDRSH / LDRSW` in any addressing mode; and `ASR
+    Rd, Rn, #k` (SBFM with `imms = datasize-1`, `immr = k > 0`), which
+    replicates `Rn[datasize-1]` through bits `[datasize-k, datasize)`
+    of `Rd`, so `S = datasize-k`. (S, W) maps for the canonical SXT*
+    pairs: `LDRSB Wt` / `SXTB Wd,Wn` -> (8, 32); `LDRSH Wt` /
+    `SXTH Wd,Wn` -> (16, 32); `LDRSB Xt` / `SXTB Xd,Wn` -> (8, 64);
+    `LDRSH Xt` / `SXTH Xd,Wn` -> (16, 64); `LDRSW Xt` /
+    `SXTW Xd,Wn` -> (32, 64). Example flagged ASR pair: `asr w0, w1,
+    #24 ; sxtb w0, w0` (S_p=8 = S_c=8); `asr x0, x1, #48 ; sxth x0,
+    w0`.
   - `W_p == W_c` (not `<=`) because a W-form consumer writes back
     through `Wd` and zeros `X[63:32]`, which differs from an X-form
     producer's sign-extended upper half. Example flagged: `ldrsb w0,
