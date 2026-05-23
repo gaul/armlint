@@ -1509,12 +1509,33 @@ static void test_lsl_lsr_to_ubfx(void)
     asr_x(&code[4], 0, 0, 56);
     assert(run_helper_check(code, 8) == 1);
 
-    // -- Negative: b < a -- this is UBFIZ/SBFIZ, v1 skips it. --
+    // -- Positive: b < a -- UBFIZ/SBFIZ insertion form. --
 
-    // lsl w0, w1, #12 ; lsr w0, w0, #4 (b < a).
+    // lsl w0, w1, #12 ; lsr w0, w0, #4 -> ubfiz w0, w1, #8, #20.
     lsl_w(&code[0], 0, 1, 12);
     lsr_w(&code[4], 0, 0, 4);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl x0, x1, #40 ; lsr x0, x0, #8 -> ubfiz x0, x1, #32, #24.
+    lsl_x(&code[0], 0, 1, 40);
+    lsr_x(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #20 ; asr w0, w0, #4 -> sbfiz w0, w1, #16, #12.
+    lsl_w(&code[0], 0, 1, 20);
+    asr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl x0, x1, #56 ; asr x0, x0, #8 -> sbfiz x0, x1, #48, #8.
+    lsl_x(&code[0], 0, 1, 56);
+    asr_x(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #31 ; lsr w0, w0, #1 -> ubfiz w0, w1, #30, #1
+    // (a=datasize-1; single-bit insert at the top minus one).
+    lsl_w(&code[0], 0, 1, 31);
+    lsr_w(&code[4], 0, 0, 1);
+    assert(run_helper_check(code, 8) == 1);
 
     // -- Negative: Rd mismatch. --
 

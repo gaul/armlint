@@ -676,16 +676,31 @@ bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
         if ((is_lsr || is_asr)
                 && c_sf == (state->bsx_is_64bit ? 1u : 0u)
                 && c_rd == state->bsx_rd
-                && c_rn == state->bsx_rd
-                && c_shift >= state->bsx_shift) {
+                && c_rn == state->bsx_rd) {
             unsigned datasize = state->bsx_is_64bit ? 64u : 32u;
-            unsigned lsb = c_shift - state->bsx_shift;
-            unsigned width = datasize - c_shift;
+            unsigned a = state->bsx_shift;
+            unsigned b = c_shift;
+            unsigned lsb, width;
+            const char *fold_mnem;
+            // b >= a -> bitfield extraction: bits Rs[datasize-a-1 .. b-a]
+            //   become Rd[datasize-b-1 .. 0], rest zero/sign-fill.
+            // b < a  -> bitfield insertion: bits Rs[datasize-a-1 .. 0]
+            //   become Rd[datasize-b-1 .. a-b], with Rd[a-b-1 .. 0] = 0
+            //   and Rd above filled by zero (LSR) or sign of Rs[datasize-
+            //   a-1] (ASR).
+            if (b < a) {
+                lsb = a - b;
+                width = datasize - a;
+                fold_mnem = is_asr ? "sbfiz" : "ubfiz";
+            } else {
+                lsb = b - a;
+                width = datasize - b;
+                fold_mnem = is_asr ? "sbfx" : "ubfx";
+            }
             char w_or_x = state->bsx_is_64bit ? 'x' : 'w';
-            const char *fold_mnem = is_asr ? "sbfx" : "ubfx";
             const char *shift_mnem = is_asr ? "asr" : "lsr";
 
-            out->name = "LSL+LSR/ASR foldable into UBFX/SBFX";
+            out->name = "LSL+LSR/ASR foldable into bitfield op";
             out->start_offset = state->bsx_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
@@ -697,11 +712,10 @@ bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
 
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "lsl %c%u, %c%u, #%u",
-                w_or_x, state->bsx_rd, w_or_x, state->bsx_rn,
-                state->bsx_shift);
+                w_or_x, state->bsx_rd, w_or_x, state->bsx_rn, a);
             snprintf(out->lines[1], sizeof(out->lines[1]),
                 "%s %c%u, %c%u, #%u",
-                shift_mnem, w_or_x, c_rd, w_or_x, c_rn, c_shift);
+                shift_mnem, w_or_x, c_rd, w_or_x, c_rn, b);
             produced = true;
         }
         // Strict adjacency: any non-matching instruction expires.

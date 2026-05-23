@@ -55,16 +55,21 @@ code, and documents corners of the A64 instruction set.
     much shorter than `B.cond`'s 19-bit (~1 MB). The fold is
     suggested only when the target fits in the TBZ encoding.
   - Soundness: same NZCV-liveness scan as the CMP-branch check.
-* bitfield extraction via two shifts foldable into UBFX/SBFX
-  - `lsl wd, ws, #a ; lsr wd, wd, #b` with `b >= a` is equivalent to
-    `ubfx wd, ws, #(b-a), #(datasize-b)`; with `asr` it folds to
-    `sbfx` (sign-extending). Same for X-form. Compilers occasionally
-    leave the two-shift form when bit-tracking can't prove the LSL
-    invariant; armlint flags such pairs as a missed combine.
+* bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
+  - `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the
+    relationship between `a` and `b`:
+    - `b >= a`: extraction. `ubfx wd, ws, #(b-a), #(datasize-b)`.
+      With `asr` it folds to `sbfx` (sign-extending).
+    - `b < a`: insertion. `ubfiz wd, ws, #(a-b), #(datasize-a)` --
+      places `ws[datasize-a-1 .. 0]` at `wd[datasize-b-1 .. a-b]` with
+      bits below `a-b` zeroed. With `asr` it folds to `sbfiz`
+      (sign-extending the high bits from `ws[datasize-a-1]`).
+    - Same for X-form.
+  - Compilers occasionally leave the two-shift form when bit-tracking
+    can't prove the LSL invariant; armlint flags such pairs as a
+    missed combine.
   - v1 requires the consumer's `Rd` and `Rn` to equal the LSL's `Rd`
-    so the LSL result is dead after the rewrite. The `b < a` case
-    (which would fold to `UBFIZ`/`SBFIZ`) is deferred -- the rewrite
-    is structurally different (insertion, not extraction).
+    so the LSL result is dead after the rewrite.
 * shift-and-mask bitfield extraction foldable into UBFX
   - `lsr wd, ws, #n ; and wd, wd, #((1<<w)-1)` extracts bits
     `ws[n+w-1 .. n]`; equivalent to `ubfx wd, ws, #n, #w` (capping
