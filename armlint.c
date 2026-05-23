@@ -152,6 +152,14 @@ struct armlint_state {
     bool pending_sv_active;
     unsigned pending_sv_window;
     armlint_finding pending_sv_finding;
+
+    // Most-recent instruction was ADR / ADRP with the recorded Rd.
+    // Used by check_add_sub_zero to skip the canonical
+    // "ADRP Rd, page ; ADD Rd, Rd, #pageoff" addressing pair when
+    // the linker resolved pageoff to 0: removing the ADD requires
+    // re-linking, not a code rewrite, so it's not actionable.
+    bool adr_recent;
+    unsigned adr_recent_rd;
 };
 
 #define LIVENESS_WINDOW 16
@@ -303,6 +311,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->sv_cmp_active = false;
     state->pending_active = false;
     state->pending_sv_active = false;
+    state->adr_recent = false;
     return mov_close(state, out);
 }
 
@@ -1712,6 +1721,81 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->adr_recent = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // ADD/SUB immediate, S=0: bits 28..24 = 10001, bit 29 (S) = 0; sf
+    // (bit 31) and op (bit 30) are free.
+    if ((op & 0x3F000000u) == 0x11000000u
+            && ((op >> 29) & 1u) == 0) {
+        unsigned sh = (op >> 22) & 0x3u;
+        unsigned imm12 = (op >> 10) & 0xFFFu;
+        // sh=00 (LSL #0) and sh=01 (LSL #12) both yield imm=0 when
+        // imm12=0. sh in {10, 11} is UNALLOCATED.
+        if (imm12 == 0 && sh < 2) {
+            unsigned rn = (op >> 5) & 0x1Fu;
+            unsigned rd = op & 0x1Fu;
+            // ADD/SUB immediate uses SP encoding for Rd=31 and Rn=31:
+            // those are the canonical MOV (to/from SP) alias.
+            // The Rd == Rn case is suppressed when preceded by an
+            // ADR/ADRP with the same Rd: that's the linker-resolved
+            // "page address + zero offset" pair, removable only by
+            // re-linking, not by an assembler rewrite.
+            bool is_adr_pair = state->adr_recent
+                && state->adr_recent_rd == rd
+                && rd == rn;
+            if (rd != 31 && rn != 31 && !is_adr_pair) {
+                unsigned sf = (op >> 31) & 1u;
+                char w_or_x = sf ? 'x' : 'w';
+                bool is_sub = ((op >> 30) & 1u) != 0;
+                const char *mnem = is_sub ? "sub" : "add";
+
+                out->name = "ADD/SUB #0 is redundant";
+                out->start_offset = offset;
+                out->insn_count = 1;
+                clear_finding_strings(out);
+
+                if (rd == rn) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "%s %c%u, %c%u, #0 is a no-op",
+                        mnem, w_or_x, rd, w_or_x, rn);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "%s %c%u, %c%u, #0 -> mov %c%u, %c%u",
+                        mnem, w_or_x, rd, w_or_x, rn,
+                        w_or_x, rd, w_or_x, rn);
+                }
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
+        }
+    }
+
+    // Update the ADR/ADRP tracking for the NEXT call. ADR and ADRP
+    // share bits 28..24 = 10000; bit 31 = 0 for ADR, 1 for ADRP.
+    if ((op & 0x1F000000u) == 0x10000000u) {
+        state->adr_recent = true;
+        state->adr_recent_rd = op & 0x1Fu;
+    } else {
+        state->adr_recent = false;
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -1844,6 +1928,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_mov_reg_self(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_add_sub_zero(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

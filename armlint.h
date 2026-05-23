@@ -129,6 +129,17 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);
 
+// Detect ADD/SUB (immediate) with imm = 0 and the non-flag-setting
+// variant (S = 0). When Rd == Rn the instruction is a no-op; when
+// Rd != Rn it is equivalent to MOV Rd, Rn. The SP encoding (Rd = 31
+// or Rn = 31) is excluded because that's the canonical MOV-to/from-SP
+// alias. The Rd == Rn case immediately following an ADR/ADRP with
+// the same Rd is also excluded: that's the linker-resolved
+// "page-relative addressing" pair where the offset happened to be 0,
+// removable only by re-linking.
+bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe

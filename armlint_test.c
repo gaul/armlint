@@ -76,6 +76,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_mov_reg_self(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_add_sub_zero(state, &insns[i], offset, &f)) {
+            findings++;
+        }
         if (check_redundant_cmp_after_s_variant(state, &insns[i], offset,
                                                 &f)) {
             findings++;
@@ -106,6 +109,7 @@ do { \
     } \
     assert(findings == (expected)); \
 } while (0)
+
 
 static void test_is_bitmask_immediate_32(void)
 {
@@ -529,6 +533,39 @@ static void subs_w_imm(uint8_t out[4], unsigned rd, unsigned rn,
         | ((imm12 & 0xfffu) << 10)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// ADD/SUB immediate (non-flag-setting, S=0). bases:
+//   ADD Wd: 0x11000000   ADD Xd: 0x91000000
+//   SUB Wd: 0x51000000   SUB Xd: 0xD1000000
+static void encode_addsub_imm(uint8_t out[4], uint32_t base,
+                              unsigned rd, unsigned rn, unsigned imm12)
+{
+    uint32_t op = base
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+#define ADD_W_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x11000000u, rd, rn, imm)
+#define SUB_W_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x51000000u, rd, rn, imm)
+#define ADD_X_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x91000000u, rd, rn, imm)
+#define SUB_X_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0xD1000000u, rd, rn, imm)
+
+// ADRP Xd, page_count. immlo in bits 30..29, immhi in bits 23..5.
+static void adrp_x(uint8_t out[4], unsigned rd, int imm)
+{
+    uint32_t op = 0x90000000u
+        | (((uint32_t)imm & 0x3u) << 29)
+        | ((((uint32_t)imm >> 2) & 0x7FFFFu) << 5)
+        | (rd & 0x1Fu);
     out[0] = op & 0xff;
     out[1] = (op >> 8) & 0xff;
     out[2] = (op >> 16) & 0xff;
@@ -2012,6 +2049,102 @@ static void test_redundant_cmp_after_s_variant(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+static void test_add_sub_zero(void)
+{
+    uint8_t code[12];
+
+    // -- Positive: Rd != Rn, equivalent to MOV. --
+
+    // add w0, w1, #0
+    ADD_W_IMM(&code[0], 0, 1, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // sub w0, w1, #0
+    SUB_W_IMM(&code[0], 0, 1, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // add x5, x6, #0 -- X-form.
+    ADD_X_IMM(&code[0], 5, 6, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // sub x5, x6, #0
+    SUB_X_IMM(&code[0], 5, 6, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Positive: Rd == Rn, completely no-op. --
+
+    // add w0, w0, #0
+    ADD_W_IMM(&code[0], 0, 0, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // sub x3, x3, #0
+    SUB_X_IMM(&code[0], 3, 3, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Negative: imm != 0. --
+
+    // add w0, w1, #1
+    ADD_W_IMM(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: Rd = 31 (SP encoding -- MOV-to-SP alias). --
+
+    // add sp, x1, #0
+    ADD_X_IMM(&code[0], 31, 1, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: Rn = 31 (SP encoding -- MOV-from-SP alias). --
+
+    // add x0, sp, #0
+    ADD_X_IMM(&code[0], 0, 31, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: ADDS (S=1, flag-setting) -- intentional zero-test
+    //    that also writes Rd. --
+
+    // adds w0, w1, #0
+    subs_w_imm(&code[0], 0, 1, 0);   // SUBS form; same logic for ADDS
+    // (We don't have an adds_w_imm helper; SUBS form proves the
+    // negative case since both S-variants of imm have S=1 set.)
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: shifted-register ADD (not the immediate form). --
+
+    // add w0, w1, w2 -- not flagged by this check.
+    ADD_W(&code[0], 0, 1, 2);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Two adjacent: each fires independently. --
+
+    ADD_W_IMM(&code[0], 0, 1, 0);
+    SUB_W_IMM(&code[4], 2, 3, 0);
+    assert(run_helper_check(code, 8) == 2);
+
+    // -- Negative: ADRP+ADD #0 page-relative addressing pair (linker
+    //    resolved offset to 0); not actionable without re-linking. --
+
+    // adrp x8, 1 ; add x8, x8, #0
+    adrp_x(&code[0], 8, 1);
+    ADD_X_IMM(&code[4], 8, 8, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Positive: ADRP+ADD #0 with Rd != Rn -- not the canonical
+    //    addressing pair, so still flagged. --
+
+    // adrp x8, 1 ; add x9, x8, #0
+    adrp_x(&code[0], 8, 1);
+    ADD_X_IMM(&code[4], 9, 8, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: ADRP+(intervening MOV)+ADD #0 -- strict adjacency
+    //    means the ADD is no longer protected by the ADRP. --
+
+    adrp_x(&code[0], 8, 1);
+    movz_x(&code[4], 5, 1, 0);   // intervening
+    ADD_X_IMM(&code[8], 8, 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -2032,6 +2165,7 @@ int main(void)
     test_mov_reg_self();
     test_redundant_sext();
     test_redundant_cmp_after_s_variant();
+    test_add_sub_zero();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

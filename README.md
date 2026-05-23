@@ -133,6 +133,24 @@ code, and documents corners of the A64 instruction set.
     Counter-example: `ldrsb w0, [x1] ; sxtb x0, w0` -- producer left
     `X[63:32] = 0`, consumer would set those bits to sign of byte;
     not redundant.
+* ADD/SUB #0 is redundant
+  - The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a
+    no-op when `Rd == Rn` and is equivalent to `MOV Rd, Rn` when
+    `Rd != Rn`. Modern toolchains usually emit the `MOV` (ORR-alias)
+    form directly, but the explicit `ADD #0` shows up occasionally in
+    real code, notably as a way to set up a function argument from a
+    callee-saved register.
+  - The `ADDS`/`SUBS` flag-setting variants are not flagged: writing
+    `Rd` and setting `Z = (Rn == 0)` may both be wanted. The SP
+    encoding (`Rd = 31` or `Rn = 31`) is also excluded because that's
+    the canonical `MOV (to/from SP)` alias and the only way to spell
+    `MOV X0, SP` / `MOV SP, X0`.
+  - The `Rd == Rn` case is further suppressed when immediately
+    preceded by `ADR`/`ADRP` with the same `Rd`: that's a
+    page-relative addressing pair (`adrp x8, page ; add x8, x8,
+    #pageoff`) where the linker happened to resolve `pageoff` to 0.
+    Removing the `ADD` requires re-linking, not an assembler rewrite,
+    so it's not actionable.
 * redundant zero-CMP/TST after a flag-setting ALU
   - `adds/subs/ands/bics/adcs/sbcs Rd, ... ; cmp Rd, #0 ; b.eq/b.ne L`
     -- the S-variant ALU already set `Z = (Rd == 0)`, so the `CMP/TST`
