@@ -96,6 +96,28 @@ struct armlint_state {
     size_t wzx_offset;
     char wzx_producer_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Producer of "Rd[W-1..S] = sign(Rd[S-1])" pending a redundant
+    // sign-extension consumer. Parallel to wzx_* but tracks two values:
+    // sxt_signed_from = S, the lowest bit above which the sign of bit
+    // S-1 is replicated; sxt_upper = W, the (exclusive) upper bound of
+    // that region (32 for W-form, 64 for X-form).
+    //   LDRSB Wt / SXTB Wd, Wn -> (S=8,  W=32)
+    //   LDRSH Wt / SXTH Wd, Wn -> (S=16, W=32)
+    //   LDRSB Xt / SXTB Xd, Wn -> (S=8,  W=64)
+    //   LDRSH Xt / SXTH Xd, Wn -> (S=16, W=64)
+    //   LDRSW Xt / SXTW Xd, Wn -> (S=32, W=64)
+    // A consumer SXTB/SXTH/SXTW with thresholds (S_c, W_c) is
+    // redundant iff S_p <= S_c AND W_p == W_c AND Rd == Rn ==
+    // producer.Rd. W_p == W_c (not <=) is required because a W-form
+    // consumer zeros X[63:32], differing from an X-form producer's
+    // sign-extended high half.
+    bool sxt_active;
+    unsigned sxt_rd;
+    unsigned sxt_signed_from;
+    unsigned sxt_upper;
+    size_t sxt_offset;
+    char sxt_producer_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Deferred CMP/TST + B.EQ/NE finding awaiting forward NZCV-liveness
     // verification. Only one of CMP or TST can be pending at a time
     // (a CMP would overwrite or be overwritten by a TST), so the
@@ -249,6 +271,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->cmp_active = false;
     state->tst_active = false;
     state->wzx_active = false;
+    state->sxt_active = false;
     state->pending_active = false;
     return mov_close(state, out);
 }
@@ -1359,6 +1382,140 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode an SBFM sign-extending alias (SXTB / SXTH / SXTW). Returns
+// the threshold pair (S, W): the alias produces "bits >= S of Rd are
+// = sign(bit S-1)" within the upper bound W (32 for the W-form alias,
+// 64 for the X-form). The sf=0, imms=31 case is the "full-W copy"
+// alias (SBFM Wd, Wn, #0, #31), not an SXT, and is rejected.
+static bool decode_sbfm_sext(uint32_t op, unsigned *out_s, unsigned *out_w,
+                             unsigned *out_rd, unsigned *out_rn)
+{
+    unsigned sf = (op >> 31) & 1u;
+    uint32_t base = sf ? 0x93400000u : 0x13000000u;
+    if ((op & 0xFFC00000u) != base) {
+        return false;
+    }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    if (immr != 0) {
+        return false;
+    }
+    unsigned s;
+    unsigned w = sf ? 64u : 32u;
+    switch (imms) {
+    case 7:  s = 8;  break;
+    case 15: s = 16; break;
+    case 31:
+        if (!sf) {
+            return false;
+        }
+        s = 32;
+        break;
+    default:
+        return false;
+    }
+    *out_s = s;
+    *out_w = w;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// Detect a sign-extending producer for check_redundant_sext: the SBFM
+// SXT* aliases and the sign-extending integer loads LDRSB/LDRSH/LDRSW
+// in any addressing mode (the load mask leaves bit 24 free so both
+// unsigned-immediate and unscaled/pre-/post-/register-offset forms
+// match). Producers with Rd=31 are skipped (write goes to ZR).
+static bool decode_sext_producer(uint32_t op, unsigned *out_s,
+                                 unsigned *out_w, unsigned *out_rd)
+{
+    unsigned rd_field = op & 0x1Fu;
+    if (rd_field == 31) {
+        return false;
+    }
+
+    unsigned s, w, rd, dummy_rn;
+    if (decode_sbfm_sext(op, &s, &w, &rd, &dummy_rn)) {
+        *out_s = s;
+        *out_w = w;
+        *out_rd = rd;
+        return true;
+    }
+
+    // Sign-extending loads. (size, opc) -> (S, W):
+    //   LDRSB Xt: (00, 10) -> (8,  64)
+    //   LDRSB Wt: (00, 11) -> (8,  32)
+    //   LDRSH Xt: (01, 10) -> (16, 64)
+    //   LDRSH Wt: (01, 11) -> (16, 32)
+    //   LDRSW Xt: (10, 10) -> (32, 64)
+    if ((op & 0xFEC00000u) == 0x38800000u) { *out_s = 8;  *out_w = 64; *out_rd = rd_field; return true; }
+    if ((op & 0xFEC00000u) == 0x38C00000u) { *out_s = 8;  *out_w = 32; *out_rd = rd_field; return true; }
+    if ((op & 0xFEC00000u) == 0x78800000u) { *out_s = 16; *out_w = 64; *out_rd = rd_field; return true; }
+    if ((op & 0xFEC00000u) == 0x78C00000u) { *out_s = 16; *out_w = 32; *out_rd = rd_field; return true; }
+    if ((op & 0xFEC00000u) == 0xB8800000u) { *out_s = 32; *out_w = 64; *out_rd = rd_field; return true; }
+
+    return false;
+}
+
+bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->sxt_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: is this an SXT consumer compatible with the open
+    //     producer state?
+    if (state->sxt_active) {
+        unsigned c_s, c_w, c_rd, c_rn;
+        if (decode_sbfm_sext(op, &c_s, &c_w, &c_rd, &c_rn)
+                && c_rd == state->sxt_rd
+                && c_rn == state->sxt_rd
+                && state->sxt_signed_from <= c_s
+                && state->sxt_upper == c_w) {
+            out->name = "redundant sign-extension after sign-extending op";
+            out->start_offset = state->sxt_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "%s %s is a no-op (sign already extended from bit %u)",
+                insn->mnemonic, insn->op_str,
+                state->sxt_signed_from - 1);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->sxt_producer_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            produced = true;
+        }
+        // Strict adjacency: any non-matching instruction expires.
+        state->sxt_active = false;
+    }
+
+    // (2) Open: is this a sign-extending producer?
+    unsigned p_s, p_w, p_rd;
+    if (decode_sext_producer(op, &p_s, &p_w, &p_rd)) {
+        state->sxt_active = true;
+        state->sxt_rd = p_rd;
+        state->sxt_signed_from = p_s;
+        state->sxt_upper = p_w;
+        state->sxt_offset = offset;
+        snprintf(state->sxt_producer_disasm,
+            sizeof(state->sxt_producer_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -1471,6 +1628,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_redundant_zext(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_redundant_sext(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

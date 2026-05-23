@@ -100,6 +100,14 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
 bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect a sign-extending producer (LDRSB / LDRSH / LDRSW or SXTB /
+// SXTH / SXTW) immediately followed by an SXTB / SXTH / SXTW consumer
+// whose destination width matches the producer's and whose sign
+// threshold is at least the producer's. The consumer is redundant: the
+// producer already replicated the sign bit through the same upper bits.
+bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect LSL Rd, Rs, #a immediately followed by LSR/ASR Rd, Rd, #b
 // with b >= a. The pair extracts bits Rs[datasize-a-1 .. b-a] and
 // zero- or sign-extends them; equivalent to a single UBFX/SBFX

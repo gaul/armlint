@@ -107,6 +107,26 @@ code, and documents corners of the A64 instruction set.
     clears `X[63:32]`. It is handled instead as a consumer of the
     redundant-zero-extension check above, where it fires only when a
     preceding producer already zeroed those bits.
+* redundant sign-extension after a producer that already replicated the sign
+  - Mirror of the zero-extension framework above. The check tracks two
+    thresholds `(S, W)`: the producer guarantees `Rd[W-1:S] =
+    sign(Rd[S-1])`. A consumer `SXTB / SXTH / SXTW` with thresholds
+    `(S_c, W_c)` is redundant iff `S_p <= S_c` AND `W_p == W_c` AND
+    `Rd == Rn == producer.Rd`.
+  - Recognised producers: `SXTB / SXTH / SXTW` (SBFM aliases with
+    `immr = 0`, `imms in {7, 15, 31}`) and the sign-extending integer
+    loads `LDRSB / LDRSH / LDRSW` in any addressing mode. (S, W) maps:
+    `LDRSB Wt` / `SXTB Wd,Wn` -> (8, 32); `LDRSH Wt` / `SXTH Wd,Wn` ->
+    (16, 32); `LDRSB Xt` / `SXTB Xd,Wn` -> (8, 64); `LDRSH Xt` /
+    `SXTH Xd,Wn` -> (16, 64); `LDRSW Xt` / `SXTW Xd,Wn` -> (32, 64).
+  - `W_p == W_c` (not `<=`) because a W-form consumer writes back
+    through `Wd` and zeros `X[63:32]`, which differs from an X-form
+    producer's sign-extended upper half. Example flagged: `ldrsb w0,
+    [x1] ; sxtb w0, w0`; `ldrsh x0, [x1] ; sxth x0, w0`; `ldrsb w0,
+    [x1] ; sxth w0, w0` (S_p=8 subsumes S_c=16 within W=32).
+    Counter-example: `ldrsb w0, [x1] ; sxtb x0, w0` -- producer left
+    `X[63:32] = 0`, consumer would set those bits to sign of byte;
+    not redundant.
 
 ## Compilation
 

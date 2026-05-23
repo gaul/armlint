@@ -61,6 +61,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_redundant_zext(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_redundant_sext(state, &insns[i], offset, &f)) {
+            findings++;
+        }
         if (check_lsl_lsr_to_ubfx(state, &insns[i], offset, &f)) {
             findings++;
         }
@@ -844,6 +847,44 @@ static void encode_ldr_imm(uint8_t out[4], uint32_t base, unsigned rt,
 #define LDRH_W(out, rt, rn, imm) encode_ldr_imm(out, 0x79400000u, rt, rn, imm)
 #define LDRB_W(out, rt, rn, imm) encode_ldr_imm(out, 0x39400000u, rt, rn, imm)
 
+// Sign-extending integer loads, unsigned-immediate-offset form. The
+// addressing-mode bit (24) is set; mask in armlint.c leaves it free so
+// other addressing modes match the same producer pattern.
+//   LDRSB Xt: size=00, opc=10 -> base 0x39800000
+//   LDRSB Wt: size=00, opc=11 -> base 0x39C00000
+//   LDRSH Xt: size=01, opc=10 -> base 0x79800000
+//   LDRSH Wt: size=01, opc=11 -> base 0x79C00000
+//   LDRSW Xt: size=10, opc=10 -> base 0xB9800000
+#define LDRSB_X(out, rt, rn, imm) encode_ldr_imm(out, 0x39800000u, rt, rn, imm)
+#define LDRSB_W(out, rt, rn, imm) encode_ldr_imm(out, 0x39C00000u, rt, rn, imm)
+#define LDRSH_X(out, rt, rn, imm) encode_ldr_imm(out, 0x79800000u, rt, rn, imm)
+#define LDRSH_W(out, rt, rn, imm) encode_ldr_imm(out, 0x79C00000u, rt, rn, imm)
+#define LDRSW_X(out, rt, rn, imm) encode_ldr_imm(out, 0xB9800000u, rt, rn, imm)
+
+// SBFM SXT* aliases. SXTB/SXTH (W- and X-form) and SXTW (X-form only).
+//   SXTB Wd, Wn: SBFM Wd, Wn, #0, #7  -> sf=0, N=0, imms=7  -> 0x13001C00
+//   SXTH Wd, Wn: SBFM Wd, Wn, #0, #15 -> sf=0, N=0, imms=15 -> 0x13003C00
+//   SXTB Xd, Wn: SBFM Xd, Xn, #0, #7  -> sf=1, N=1, imms=7  -> 0x93401C00
+//   SXTH Xd, Wn: SBFM Xd, Xn, #0, #15 -> sf=1, N=1, imms=15 -> 0x93403C00
+//   SXTW Xd, Wn: SBFM Xd, Xn, #0, #31 -> sf=1, N=1, imms=31 -> 0x93407C00
+static void encode_sbfm_zero_immr(uint8_t out[4], uint32_t base,
+                                  unsigned rd, unsigned rn)
+{
+    uint32_t op = base
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+#define SXTB_W(out, rd, rn) encode_sbfm_zero_immr(out, 0x13001C00u, rd, rn)
+#define SXTH_W(out, rd, rn) encode_sbfm_zero_immr(out, 0x13003C00u, rd, rn)
+#define SXTB_X(out, rd, rn) encode_sbfm_zero_immr(out, 0x93401C00u, rd, rn)
+#define SXTH_X(out, rd, rn) encode_sbfm_zero_immr(out, 0x93403C00u, rd, rn)
+#define SXTW_X(out, rd, rn) encode_sbfm_zero_immr(out, 0x93407C00u, rd, rn)
+
 static void test_cmp_zero_branch(void)
 {
     uint8_t code[32];
@@ -1592,6 +1633,165 @@ static void test_mov_reg_self(void)
     assert(run_helper_check(code, 8) == 2);
 }
 
+static void test_redundant_sext(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: sign-extending load + matching SXT* (same S, same W). --
+
+    // ldrsb w0, [x1] ; sxtb w0, w0 -- S=8, W=32 on both sides.
+    LDRSB_W(&code[0], 0, 1, 0);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsh w0, [x1] ; sxth w0, w0 -- S=16, W=32.
+    LDRSH_W(&code[0], 0, 1, 0);
+    SXTH_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsb x0, [x1] ; sxtb x0, w0 -- S=8, W=64.
+    LDRSB_X(&code[0], 0, 1, 0);
+    SXTB_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsh x0, [x1] ; sxth x0, w0 -- S=16, W=64.
+    LDRSH_X(&code[0], 0, 1, 0);
+    SXTH_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsw x0, [x1] ; sxtw x0, w0 -- S=32, W=64.
+    LDRSW_X(&code[0], 0, 1, 0);
+    SXTW_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: S_p < S_c, same W. The producer's stricter
+    //    sign-extension subsumes the consumer's wider one. --
+
+    // ldrsb w0, [x1] ; sxth w0, w0 -- S_p=8 < S_c=16, W=32.
+    LDRSB_W(&code[0], 0, 1, 0);
+    SXTH_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsb x0, [x1] ; sxth x0, w0 -- S_p=8 < S_c=16, W=64.
+    LDRSB_X(&code[0], 0, 1, 0);
+    SXTH_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsh x0, [x1] ; sxtw x0, w0 -- S_p=16 < S_c=32, W=64.
+    LDRSH_X(&code[0], 0, 1, 0);
+    SXTW_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: SXT* producer paired with SXT* consumer. --
+
+    // sxtb w0, w1 ; sxtb w0, w0 (same S, same W).
+    SXTB_W(&code[0], 0, 1);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxtb x0, w1 ; sxtb x0, w0 -- X-form chain.
+    SXTB_X(&code[0], 0, 1);
+    SXTB_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Three adjacent SXT*: each consumer fires against the previous. --
+
+    SXTB_W(&code[0], 0, 1);
+    SXTB_W(&code[4], 0, 0);
+    SXTB_W(&code[8], 0, 0);
+    assert(run_helper_check(code, 12) == 2);
+
+    // -- Negative: width mismatch. --
+
+    // ldrsb w0, [x1] ; sxtb x0, w0 -- W=32 vs W=64.
+    LDRSB_W(&code[0], 0, 1, 0);
+    SXTB_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ldrsb x0, [x1] ; sxtb w0, w0 -- W=64 vs W=32.
+    LDRSB_X(&code[0], 0, 1, 0);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: S_p > S_c (producer wider, consumer narrower). --
+
+    // ldrsh w0, [x1] ; sxtb w0, w0 -- S_p=16 > S_c=8.
+    LDRSH_W(&code[0], 0, 1, 0);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ldrsw x0, [x1] ; sxth x0, w0 -- S_p=32 > S_c=16.
+    LDRSW_X(&code[0], 0, 1, 0);
+    SXTH_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: zero-extending load is not a sign-ext producer. --
+
+    // ldr w0, [x1] ; sxtb w0, w0 -- LDR W zero-extends, not sign-extends.
+    LDR_W(&code[0], 0, 1, 0);
+    SXTB_W(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: Rd mismatch on consumer. --
+
+    LDRSB_W(&code[0], 0, 1, 0);
+    SXTB_W(&code[4], 5, 0);     // consumer Rd != sxt_rd
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: Rn mismatch on consumer (reads a different reg). --
+
+    LDRSB_W(&code[0], 0, 1, 0);
+    SXTB_W(&code[4], 0, 5);     // consumer Rn != sxt_rd
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: intervening instruction expires sxt state. --
+
+    LDRSB_W(&code[0], 0, 1, 0);
+    movz_w(&code[4], 5, 1);
+    SXTB_W(&code[8], 0, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: lone SXTB with no preceding sign-ext producer. --
+
+    SXTB_W(&code[0], 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: producer with Rt=31 (LDRSB Wzr). --
+
+    LDRSB_W(&code[0], 31, 1, 0);
+    SXTB_W(&code[4], 31, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: SXTB Wzr, Wn (Rd=31 producer skipped). --
+
+    SXTB_W(&code[0], 31, 1);
+    SXTB_W(&code[4], 31, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Interaction: SXT producer also opens zext state, but a UBFM
+    //    zero-ext consumer doesn't match SBFM and vice versa. --
+
+    // ldrsb w0, [x1] ; uxtw x0, w0 -- zext (P=32, C=32) fires; sxt
+    // does not (UXTW is UBFM, not SBFM).
+    LDRSB_W(&code[0], 0, 1, 0);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsb x0, [x1] ; sxtb x0, w0 -- sxt fires; zext does not
+    // (LDRSB X is not a W-form producer, so wzx not opened).
+    LDRSB_X(&code[0], 0, 1, 0);
+    SXTB_X(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Two adjacent independent patterns: both flag. --
+
+    LDRSB_W(&code[0], 0, 1, 0);
+    SXTB_W(&code[4], 0, 0);
+    LDRSH_W(&code[8], 2, 1, 0);
+    SXTH_W(&code[12], 2, 2);
+    assert(run_helper_check(code, 16) == 2);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -1610,6 +1810,7 @@ int main(void)
     test_lsl_lsr_to_ubfx();
     test_lsr_and_to_ubfx();
     test_mov_reg_self();
+    test_redundant_sext();
 
     cs_close(&g_handle);
     printf("all tests passed\n");
