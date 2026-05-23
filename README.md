@@ -65,6 +65,15 @@ code, and documents corners of the A64 instruction set.
     so the LSL result is dead after the rewrite. The `b < a` case
     (which would fold to `UBFIZ`/`SBFIZ`) is deferred -- the rewrite
     is structurally different (insertion, not extraction).
+* shift-and-mask bitfield extraction foldable into UBFX
+  - `lsr wd, ws, #n ; and wd, wd, #((1<<w)-1)` extracts bits
+    `ws[n+w-1 .. n]`; equivalent to `ubfx wd, ws, #n, #w` (capping
+    `w` at `datasize-n` when the mask is wider than the LSR-fillable
+    bits). Same for X-form.
+  - Mask must be a contiguous run of low bits with no rotation
+    (`immr=0` and `(N, imms)` encoding `S+1=w` ones at the
+    appropriate element size); rotated/non-contiguous masks like
+    `#0x6` are correctly skipped.
 * redundant zero-extension after a producer that already zeroed those bits
   - Generalises the previous "redundant UXTW after W-form ALU" rule
     to size-aware producer/consumer pairs. The check tracks the

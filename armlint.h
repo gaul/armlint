@@ -107,6 +107,13 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
 bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// Detect LSR Rd, Rs, #n immediately followed by AND Rd, Rd, #((1<<w)-1)
+// (any width 1..datasize-1). The pair extracts bits Rs[n+w-1 .. n] and
+// zero-extends; equivalent to a single UBFX Rd, Rs, #n, #w (capping
+// width at datasize-n if the mask is wider than the LSR-fillable bits).
+bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe

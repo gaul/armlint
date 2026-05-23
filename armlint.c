@@ -58,6 +58,16 @@ struct armlint_state {
     unsigned bsx_shift;
     size_t bsx_offset;
 
+    // LSR pending an AND-mask consumer for the "shift-right then mask"
+    // UBFX idiom. Separate from bsx_* because that check is keyed on
+    // an LSL producer; here we want an LSR producer.
+    bool lra_active;
+    bool lra_is_64bit;
+    unsigned lra_rd;
+    unsigned lra_rn;
+    unsigned lra_shift;
+    size_t lra_offset;
+
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / TST Rn,Rn) pending a
     // B.EQ/B.NE consumer.
     bool cmp_active;
@@ -235,6 +245,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     // prove the fold is sound.
     state->lsl_active = false;
     state->bsx_active = false;
+    state->lra_active = false;
     state->cmp_active = false;
     state->tst_active = false;
     state->wzx_active = false;
@@ -645,6 +656,88 @@ bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
         state->bsx_rn = rn;
         state->bsx_shift = shift;
         state->bsx_offset = offset;
+    }
+
+    return produced;
+}
+
+static bool decode_and_imm_lowmask(uint32_t op, unsigned *out_c,
+                                   unsigned *out_rd, unsigned *out_rn);
+
+bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->lra_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: AND Rd, Rd, #(1<<w)-1 consuming the pending LSR?
+    if (state->lra_active) {
+        unsigned width, c_rd, c_rn;
+        unsigned consumer_sf = (op >> 31) & 1u;
+        if (decode_and_imm_lowmask(op, &width, &c_rd, &c_rn)
+                && consumer_sf == (state->lra_is_64bit ? 1u : 0u)
+                && c_rd == state->lra_rd
+                && c_rn == state->lra_rd) {
+            unsigned datasize = state->lra_is_64bit ? 64u : 32u;
+            // Cap the UBFX width at the number of valid bits in the
+            // LSR output: bits >= datasize-shift are zero from the
+            // LSR, so a wider mask doesn't extract more.
+            unsigned ubfx_width = width;
+            if (ubfx_width + state->lra_shift > datasize) {
+                ubfx_width = datasize - state->lra_shift;
+            }
+            char w_or_x = state->lra_is_64bit ? 'x' : 'w';
+
+            out->name = "LSR+AND foldable into UBFX";
+            out->start_offset = state->lra_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "-> ubfx %c%u, %c%u, #%u, #%u",
+                w_or_x, c_rd, w_or_x, state->lra_rn,
+                state->lra_shift, ubfx_width);
+
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "lsr %c%u, %c%u, #%u",
+                w_or_x, state->lra_rd, w_or_x, state->lra_rn,
+                state->lra_shift);
+
+            uint64_t mask = (width >= 64) ? ~(uint64_t)0
+                                          : ((uint64_t)1 << width) - 1;
+            if (state->lra_is_64bit && mask > 0xFFFFFFFFull) {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "and %c%u, %c%u, #0x%" PRIx64,
+                    w_or_x, c_rd, w_or_x, c_rn, mask);
+            } else {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "and %c%u, %c%u, #0x%x",
+                    w_or_x, c_rd, w_or_x, c_rn, (unsigned)mask);
+            }
+            produced = true;
+        }
+        // Strict adjacency.
+        state->lra_active = false;
+    }
+
+    // (2) Open: is this LSR Rd, Rs, #n (Rd != XZR)?
+    unsigned sf, rd, rn, shift;
+    if (decode_lsr_imm(op, &sf, &rd, &rn, &shift) && rd != 31) {
+        state->lra_active = true;
+        state->lra_is_64bit = (sf != 0);
+        state->lra_rd = rd;
+        state->lra_rn = rn;
+        state->lra_shift = shift;
+        state->lra_offset = offset;
     }
 
     return produced;
@@ -1074,20 +1167,19 @@ static bool decode_ubfm_zext(uint32_t op, unsigned *out_c,
     return true;
 }
 
-// Decode an AND-immediate consumer with mask 0xFF / 0xFFFF / 0xFFFFFFFF
-// (X-form), or 0xFF / 0xFFFF (W-form). Returns C: the bit position
-// above which all bits become zero.
+// Decode an AND-immediate consumer with mask (1<<w) - 1 (a contiguous
+// run of w low bits, no rotation), for any width w in 1..datasize-1.
 //
-// Encoding: sf 00 100100 N immr imms Rn Rd, with immr=0 and the
-// (N, imms) pair encoding a low-run of 8, 16 or 32 ones:
-//   sf=0, N=0, imms=000111  -> AND Wd, Wn, #0xFF       (C=8)
-//   sf=0, N=0, imms=001111  -> AND Wd, Wn, #0xFFFF     (C=16)
-//   sf=1, N=1, imms=000111  -> AND Xd, Xn, #0xFF       (C=8)
-//   sf=1, N=1, imms=001111  -> AND Xd, Xn, #0xFFFF     (C=16)
-//   sf=1, N=1, imms=011111  -> AND Xd, Xn, #0xFFFFFFFF (C=32)
+// Encoding: sf 00 100100 N immr imms Rn Rd, with immr=0 and (N, imms)
+// encoding S=w-1 at the appropriate element size. For sf=1, N must be
+// 1 (esize=64) and imms ranges over [0, 62]. For sf=0, N must be 0 and
+// imms[5] must be 0 (esize=32), with imms in [0, 30]; both all-ones
+// boundaries (imms=31 in W, imms=63 in X) are excluded by the
+// bitmask-immediate rules.
 //
-// AND Wd, Wn, #0xFFFFFFFF would be the excluded "all ones" pattern --
-// not encodable as a logical immediate.
+// Returns w in *out_c so the caller can compute "bits >= w are zero"
+// (the consumer's clearing threshold for check_redundant_zext) or use
+// it directly as the UBFX width (for check_lsr_and_to_ubfx).
 static bool decode_and_imm_lowmask(uint32_t op, unsigned *out_c,
                                    unsigned *out_rd, unsigned *out_rn)
 {
@@ -1101,21 +1193,19 @@ static bool decode_and_imm_lowmask(uint32_t op, unsigned *out_c,
     if (immr != 0) {
         return false;
     }
-    unsigned c;
-    switch (imms) {
-    case 7:  c = 8;  break;
-    case 15: c = 16; break;
-    case 31:
-        // sf=0 cannot encode #0xFFFFFFFF (all-ones is excluded).
-        if (sf == 0) {
+    unsigned width;
+    if (sf) {
+        if (imms >= 63) {
             return false;
         }
-        c = 32;
-        break;
-    default:
-        return false;
+        width = imms + 1;
+    } else {
+        if (imms >= 31) {
+            return false;
+        }
+        width = imms + 1;
     }
-    *out_c = c;
+    *out_c = width;
     *out_rd = op & 0x1Fu;
     *out_rn = (op >> 5) & 0x1Fu;
     return true;
@@ -1313,6 +1403,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_lsl_lsr_to_ubfx(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_lsr_and_to_ubfx(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

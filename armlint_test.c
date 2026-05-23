@@ -64,6 +64,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_lsl_lsr_to_ubfx(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_lsr_and_to_ubfx(state, &insns[i], offset, &f)) {
+            findings++;
+        }
     }
 
     armlint_finding f;
@@ -1283,6 +1286,54 @@ static void test_redundant_zext(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// AND Wd, Wn, #imm where imm = (1<<w) - 1. sf=0, N=0, immr=0, imms=w-1.
+static void and_w_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
+                          unsigned w)
+{
+    unsigned imms = w - 1u;
+    uint32_t op = 0x12000000u
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// AND Xd, Xn, #imm where imm = (1<<w) - 1. sf=1, N=1, immr=0, imms=w-1.
+static void and_x_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
+                          unsigned w)
+{
+    unsigned imms = w - 1u;
+    uint32_t op = 0x92400000u
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// AND Wd, Wn, #0x6 (mask 0b110 -- not contiguous-low). Used to verify
+// the decoder rejects non-low-run masks.
+static void and_w_non_contig_lo(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    // AND Wd, Wn, #0x6 (mask = 0b110, a 2-bit run rotated up by 1).
+    // sf=0, N=0, esize=32: imms=1 (S=1 -> 2 ones), immr=31 (ROR by 31
+    // moves the bottom-two-ones run up by 1 bit position).
+    uint32_t op = 0x12000000u
+        | (31u << 16)   // immr = 31
+        | (1u << 10)    // imms = 1
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 static void test_lsl_lsr_to_ubfx(void)
 {
     uint8_t code[12];
@@ -1370,6 +1421,80 @@ static void test_lsl_lsr_to_ubfx(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+static void test_lsr_and_to_ubfx(void)
+{
+    uint8_t code[12];
+
+    // -- Positive: LSR + AND with contiguous-low-bit mask -> UBFX. --
+
+    // lsr w0, w1, #4 ; and w0, w0, #0xff -> ubfx w0, w1, #4, #8.
+    lsr_w(&code[0], 0, 1, 4);
+    and_w_lowmask(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsr w0, w1, #8 ; and w0, w0, #0xfffff -> ubfx w0, w1, #8, #20.
+    lsr_w(&code[0], 0, 1, 8);
+    and_w_lowmask(&code[4], 0, 0, 20);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsr x0, x1, #20 ; and x0, x0, #0xfffff (20 bits) -> ubfx x0, x1, #20, #20.
+    lsr_x(&code[0], 0, 1, 20);
+    and_x_lowmask(&code[4], 0, 0, 20);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: AND mask wider than the LSR-fillable bits.
+    //    The UBFX width is capped at datasize - shift.
+
+    // lsr w0, w1, #28 ; and w0, w0, #0xffff (16) > 32-28=4.
+    // Suggested ubfx w0, w1, #28, #4.
+    lsr_w(&code[0], 0, 1, 28);
+    and_w_lowmask(&code[4], 0, 0, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: non-contiguous-low mask (e.g., #0x6). --
+
+    lsr_w(&code[0], 0, 1, 4);
+    and_w_non_contig_lo(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: Rd mismatch on consumer. --
+
+    // lsr w0, w1, #4 ; and w5, w0, #0xff -- consumer Rd != lra_rd.
+    lsr_w(&code[0], 0, 1, 4);
+    and_w_lowmask(&code[4], 5, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: Rn mismatch on consumer. --
+
+    // lsr w0, w1, #4 ; and w0, w5, #0xff -- consumer Rn != lra_rd.
+    lsr_w(&code[0], 0, 1, 4);
+    and_w_lowmask(&code[4], 0, 5, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: width mismatch (W LSR + X AND). --
+
+    lsr_w(&code[0], 0, 1, 4);
+    and_x_lowmask(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: intervening instruction expires lra_active. --
+
+    lsr_w(&code[0], 0, 1, 4);
+    movz_w(&code[4], 5, 1);
+    and_w_lowmask(&code[8], 0, 0, 8);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: AND without preceding LSR. --
+
+    and_w_lowmask(&code[0], 0, 0, 8);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: LSR with no consumer. --
+
+    lsr_w(&code[0], 0, 1, 4);
+    assert(run_helper_check(code, 4) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -1386,6 +1511,7 @@ int main(void)
     test_tst_branch();
     test_redundant_zext();
     test_lsl_lsr_to_ubfx();
+    test_lsr_and_to_ubfx();
 
     cs_close(&g_handle);
     printf("all tests passed\n");
