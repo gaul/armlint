@@ -2014,6 +2014,97 @@ static void test_redundant_sext(void)
     asr_x(&code[0], 0, 1, 56);
     SXTB_W(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Positive: sign-extension dead because a following zero-ext
+    //    consumer masks the sign-extended bits. Fires when C_c <= S_p
+    //    (consumer clears at least the producer's sign-extended
+    //    region). --
+
+    // sxtb w0, w1 ; uxtb w0, w0 -- S=8, C=8: dead.
+    SXTB_W(&code[0], 0, 1);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxth w0, w1 ; uxtb w0, w0 -- S=16, C=8: dead.
+    SXTH_W(&code[0], 0, 1);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxth w0, w1 ; uxth w0, w0 -- S=16, C=16: dead.
+    SXTH_W(&code[0], 0, 1);
+    uxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxtw x0, w1 ; uxtw x0, w0 -- S=32, C=32: dead (X-form pair).
+    SXTW_X(&code[0], 0, 1);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxtb x0, w1 ; uxtb w0, w0 -- X-form producer (S=8, W=64) +
+    // W-form consumer (C=8, W=32). W-form auto-zero of X[63:32] clears
+    // the high half of the sign-ext; UXTB clears bits 31..8. Dead.
+    SXTB_X(&code[0], 0, 1);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsb w0, [x1] ; uxtb w0, w0 -- dead (could be ldrb w0, [x1]).
+    LDRSB_W(&code[0], 0, 1, 0);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrsw x0, [x1] ; uxtw x0, w0 -- dead (could be ldr w0, [x1]).
+    LDRSW_X(&code[0], 0, 1, 0);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxtb w0, w1 ; and w0, w0, #0xff -- dead (AND mask C=8 <= S=8).
+    SXTB_W(&code[0], 0, 1);
+    and_w_ff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxtw x0, w1 ; mov w0, w0 -- dead (MOV W self C=32 == S=32,
+    // and the W-form write clears X[63:32] including sign-ext bits).
+    SXTW_X(&code[0], 0, 1);
+    mov_w_reg(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr w0, w1, #24 ; uxtb w0, w0 -- ASR S=8, UXTB C=8: dead.
+    asr_w(&code[0], 0, 1, 24);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: C_c > S_p (sign-extension partially survives). --
+
+    // sxth w0, w1 ; uxtw x0, w0 -- S=16, C=32. UXTW preserves
+    // bits 31..16 = sign(bit 15). Sign-ext NOT dead (it actually
+    // shows up in the result). But the existing zext check fires
+    // (P=32 <= C=32, redundant UXTW). One finding from zext side.
+    SXTH_W(&code[0], 0, 1);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxth w0, w1 ; mov w0, w0 -- S=16, MOV W self C=32 > 16.
+    // The existing zext check fires (P=32 <= C=32), not my new check.
+    SXTH_W(&code[0], 0, 1);
+    mov_w_reg(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: Rd mismatch / Rn mismatch on consumer. --
+
+    SXTB_W(&code[0], 0, 1);
+    uxtb_w(&code[4], 5, 0);   // consumer Rd != sxt_rd
+    assert(run_helper_check(code, 8) == 0);
+
+    SXTB_W(&code[0], 0, 1);
+    uxtb_w(&code[4], 0, 5);   // consumer Rn != sxt_rd
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: intervening instruction expires sxt state. --
+
+    SXTB_W(&code[0], 0, 1);
+    movz_w(&code[4], 5, 1);
+    uxtb_w(&code[8], 0, 0);
+    assert(run_helper_check(code, 12) == 0);
 }
 
 static void test_redundant_cmp_after_s_variant(void)

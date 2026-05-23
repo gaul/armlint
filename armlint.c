@@ -1764,8 +1764,8 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
 
-    // (1) Close: is this an SXT consumer compatible with the open
-    //     producer state?
+    // (1) Close: is this a SXT consumer (sign re-extension), or a
+    //     zero-extension consumer that masks the sign-extension?
     if (state->sxt_active) {
         unsigned c_s, c_w, c_rd, c_rn;
         if (decode_sbfm_sext(op, &c_s, &c_w, &c_rd, &c_rn)
@@ -1787,6 +1787,47 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
             snprintf(out->lines[1], sizeof(out->lines[1]),
                 "%s %s", insn->mnemonic, insn->op_str);
             produced = true;
+        } else {
+            // Zero-extension consumer (UBFM-zext / AND-imm low-mask /
+            // MOV W self) that masks the sign-extension. The producer
+            // wrote bits [S_p, W_p) = sign(bit S_p - 1); the consumer
+            // clears bits >= C_c. When C_c <= S_p the consumer covers
+            // (and overwrites with zero) every sign-extended bit:
+            //   - within the consumer's destination width, by mask.
+            //   - above the destination width (X[63:32]), by W-form
+            //     auto-zero when the consumer is W-form.
+            // No explicit width-matching constraint is needed.
+            unsigned z_c, z_rd, z_rn;
+            bool is_uxtm = decode_ubfm_zext(op, &z_c, &z_rd, &z_rn);
+            bool is_andm = !is_uxtm
+                && decode_and_imm_lowmask(op, &z_c, &z_rd, &z_rn);
+            bool is_movs = false;
+            if (!is_uxtm && !is_andm) {
+                is_movs = decode_mov_w_self(op, &z_c, &z_rd);
+                if (is_movs) {
+                    z_rn = z_rd;
+                }
+            }
+            if ((is_uxtm || is_andm || is_movs)
+                    && z_rd == state->sxt_rd
+                    && z_rn == state->sxt_rd
+                    && z_c <= state->sxt_signed_from) {
+                out->name = "dead sign-extension masked by zero-extension";
+                out->start_offset = state->sxt_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "%s is dead -- %s %s clears bits >= %u (S = %u)",
+                    state->sxt_producer_disasm,
+                    insn->mnemonic, insn->op_str,
+                    z_c, state->sxt_signed_from);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->sxt_producer_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
         }
         // Strict adjacency: any non-matching instruction expires.
         state->sxt_active = false;

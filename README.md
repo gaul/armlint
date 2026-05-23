@@ -154,6 +154,16 @@ code, and documents corners of the A64 instruction set.
     Counter-example: `ldrsb w0, [x1] ; sxtb x0, w0` -- producer left
     `X[63:32] = 0`, consumer would set those bits to sign of byte;
     not redundant.
+  - Same producer state also feeds a "dead sign-extension" path: if
+    the next instruction is a zero-ext consumer (`UXTB`/`UXTH`/`UXTW`,
+    `AND` with low-mask, or `MOV Wd, Wd`) that clears bits `>= C_c`
+    with `C_c <= S_p`, the consumer overwrites every sign-extended
+    bit and the sign-extension is dead. No width-matching constraint
+    is needed -- when widths mismatch, the W-form auto-zero of
+    `X[63:32]` covers the upper half. Example flagged: `sxtb w0, w1 ;
+    uxtb w0, w0` (replace with `uxtb w0, w1`); `ldrsb w0, [x1] ;
+    uxtb w0, w0` (replace with `ldrb w0, [x1]`); `ldrsw x0, [x1] ;
+    uxtw x0, w0` (replace with `ldr w0, [x1]`).
 * self-op identities (`AND/ORR/EOR/SUB Rd, Rs, Rs`)
   - `AND Rd, Rs, Rs` and `ORR Rd, Rs, Rs` (shifted-register, LSL #0)
     are equivalent to `MOV Rd, Rs`. `EOR Rd, Rs, Rs` and `SUB Rd, Rs,
