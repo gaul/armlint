@@ -135,6 +135,7 @@ arbitrary AArch64 binaries (ELF, thin Mach-O, or universal/fat Mach-O):
 * [Arm Architecture Reference Manual](https://developer.arm.com/documentation/ddi0487/latest/) - A64 instruction set
 * [Arm Cortex-A optimization guides](https://developer.arm.com/documentation) - per-microarchitecture tuning notes
 * [Capstone disassembly framework](https://www.capstone-engine.org/) - library to parse instructions
+* [x86lint](https://github.com/gaul/x86lint) - x86-64 equivalent of asmlint
 
 ## License
 
