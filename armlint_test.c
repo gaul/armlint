@@ -61,6 +61,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_redundant_zext(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_lsl_lsr_to_ubfx(state, &insns[i], offset, &f)) {
+            findings++;
+        }
     }
 
     armlint_finding f;
@@ -751,6 +754,45 @@ static void tst_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
     out[3] = (op >> 24) & 0xff;
 }
 
+// LSR (immediate) Wd, Wn, #b -- UBFM Wd, Wn, #b, #31 (already have
+// lsr_w; here too in X form).
+static void lsr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
+{
+    uint32_t op = 0xD340FC00u
+        | ((shift & 0x3Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// ASR (immediate) -- SBFM with imms = datasize-1.
+static void asr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
+{
+    uint32_t op = 0x13007C00u
+        | ((shift & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
+{
+    uint32_t op = 0x9340FC00u
+        | ((shift & 0x3Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 // LDR/LDRH/LDRB Wt with unsigned-immediate offset.
 //   LDR  Wt: size=10, opc=01 -> base 0xB9400000
 //   LDRH Wt: size=01, opc=01 -> base 0x79400000
@@ -1241,6 +1283,93 @@ static void test_redundant_zext(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_lsl_lsr_to_ubfx(void)
+{
+    uint8_t code[12];
+
+    // -- Positive: LSL #a + LSR #b with b > a -> UBFX (zero-extending). --
+
+    // lsl w0, w1, #4 ; lsr w0, w0, #12 -> ubfx w0, w1, #8, #20.
+    lsl_w(&code[0], 0, 1, 4);
+    lsr_w(&code[4], 0, 0, 12);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl x5, x6, #8 ; lsr x5, x5, #16 -> ubfx x5, x6, #8, #48.
+    lsl_x(&code[0], 5, 6, 8);
+    lsr_x(&code[4], 5, 5, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: LSL #a + LSR #a (b == a) -> UBFX with lsb=0 (= AND mask).
+
+    // lsl w0, w1, #8 ; lsr w0, w0, #8 -> ubfx w0, w1, #0, #24.
+    lsl_w(&code[0], 0, 1, 8);
+    lsr_w(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: LSL + ASR -> SBFX (sign-extending). --
+
+    // lsl w0, w1, #16 ; asr w0, w0, #24 -> sbfx w0, w1, #8, #8.
+    lsl_w(&code[0], 0, 1, 16);
+    asr_w(&code[4], 0, 0, 24);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl x0, x1, #40 ; asr x0, x0, #56 -> sbfx x0, x1, #16, #8.
+    lsl_x(&code[0], 0, 1, 40);
+    asr_x(&code[4], 0, 0, 56);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: b < a -- this is UBFIZ/SBFIZ, v1 skips it. --
+
+    // lsl w0, w1, #12 ; lsr w0, w0, #4 (b < a).
+    lsl_w(&code[0], 0, 1, 12);
+    lsr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: Rd mismatch. --
+
+    // lsl w0, w1, #4 ; lsr w5, w0, #12 -- consumer Rd != bsx_rd.
+    lsl_w(&code[0], 0, 1, 4);
+    lsr_w(&code[4], 5, 0, 12);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: Rn mismatch (consumer reads a different register). --
+
+    // lsl w0, w1, #4 ; lsr w0, w5, #12 -- consumer Rn != bsx_rd.
+    lsl_w(&code[0], 0, 1, 4);
+    lsr_w(&code[4], 0, 5, 12);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: width mismatch. --
+
+    // lsl w0, w1, #4 ; lsr x0, x0, #12 -- W LSL then X LSR; widths differ.
+    lsl_w(&code[0], 0, 1, 4);
+    lsr_x(&code[4], 0, 0, 12);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: intervening instruction expires bsx_active. --
+
+    lsl_w(&code[0], 0, 1, 4);
+    movz_w(&code[4], 5, 1);
+    lsr_w(&code[8], 0, 0, 12);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: LSL with no consumer. --
+
+    lsl_w(&code[0], 0, 1, 4);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: LSR without preceding LSL. --
+
+    lsr_w(&code[0], 0, 0, 12);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Interaction: LSL+LSR pattern; the LSL fold check doesn't fire
+    //    because LSR isn't a shifted-register consumer. Only bsx flags.
+    lsl_w(&code[0], 0, 1, 4);
+    lsr_w(&code[4], 0, 0, 12);
+    assert(run_helper_check(code, 8) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -1256,6 +1385,7 @@ int main(void)
     test_cmp_zero_branch();
     test_tst_branch();
     test_redundant_zext();
+    test_lsl_lsr_to_ubfx();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

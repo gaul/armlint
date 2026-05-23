@@ -100,6 +100,13 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
 bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect LSL Rd, Rs, #a immediately followed by LSR/ASR Rd, Rd, #b
+// with b >= a. The pair extracts bits Rs[datasize-a-1 .. b-a] and
+// zero- or sign-extends them; equivalent to a single UBFX/SBFX
+// Rd, Rs, #(b-a), #(datasize-b).
+bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe

@@ -55,6 +55,16 @@ code, and documents corners of the A64 instruction set.
     much shorter than `B.cond`'s 19-bit (~1 MB). The fold is
     suggested only when the target fits in the TBZ encoding.
   - Soundness: same NZCV-liveness scan as the CMP-branch check.
+* bitfield extraction via two shifts foldable into UBFX/SBFX
+  - `lsl wd, ws, #a ; lsr wd, wd, #b` with `b >= a` is equivalent to
+    `ubfx wd, ws, #(b-a), #(datasize-b)`; with `asr` it folds to
+    `sbfx` (sign-extending). Same for X-form. Compilers occasionally
+    leave the two-shift form when bit-tracking can't prove the LSL
+    invariant; armlint flags such pairs as a missed combine.
+  - v1 requires the consumer's `Rd` and `Rn` to equal the LSL's `Rd`
+    so the LSL result is dead after the rewrite. The `b < a` case
+    (which would fold to `UBFIZ`/`SBFIZ`) is deferred -- the rewrite
+    is structurally different (insertion, not extraction).
 * redundant zero-extension after a producer that already zeroed those bits
   - Generalises the previous "redundant UXTW after W-form ALU" rule
     to size-aware producer/consumer pairs. The check tracks the

@@ -47,6 +47,17 @@ struct armlint_state {
     unsigned lsl_shift;
     size_t lsl_offset;
 
+    // LSL pending an LSR/ASR consumer for UBFX/SBFX folding. The state
+    // is tracked separately from lsl_* because that check expects a
+    // shifted-register consumer while this one expects a bitfield
+    // consumer; a non-matching follow-up should not affect the other.
+    bool bsx_active;
+    bool bsx_is_64bit;
+    unsigned bsx_rd;
+    unsigned bsx_rn;
+    unsigned bsx_shift;
+    size_t bsx_offset;
+
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / TST Rn,Rn) pending a
     // B.EQ/B.NE consumer.
     bool cmp_active;
@@ -223,6 +234,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     // without seeing a safe stopper before end-of-region, we cannot
     // prove the fold is sound.
     state->lsl_active = false;
+    state->bsx_active = false;
     state->cmp_active = false;
     state->tst_active = false;
     state->wzx_active = false;
@@ -493,6 +505,146 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
             state->lsl_shift = shift;
             state->lsl_offset = offset;
         }
+    }
+
+    return produced;
+}
+
+// LSR (immediate) is UBFM with imms = datasize-1 and any non-zero immr;
+// the shift amount equals immr. Decoder rejects immr=0 (which is the
+// MOV-of-whole-register alias).
+static bool decode_lsr_imm(uint32_t op, unsigned *out_sf,
+                           unsigned *out_rd, unsigned *out_rn,
+                           unsigned *out_shift)
+{
+    unsigned sf = (op >> 31) & 1u;
+    unsigned N = (op >> 22) & 1u;
+    if (N != sf) {
+        return false;
+    }
+    uint32_t base = sf ? 0xD3400000u : 0x53000000u;
+    if ((op & 0xFFC00000u) != base) {
+        return false;
+    }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    unsigned datasize = sf ? 64u : 32u;
+    if (imms != datasize - 1) {
+        return false;
+    }
+    if (immr == 0) {
+        return false;
+    }
+    if (!sf && (immr >= 32 || imms >= 32)) {
+        return false;
+    }
+    *out_sf = sf;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_shift = immr;
+    return true;
+}
+
+// ASR (immediate) is SBFM with imms = datasize-1 and any non-zero immr.
+static bool decode_asr_imm(uint32_t op, unsigned *out_sf,
+                           unsigned *out_rd, unsigned *out_rn,
+                           unsigned *out_shift)
+{
+    unsigned sf = (op >> 31) & 1u;
+    unsigned N = (op >> 22) & 1u;
+    if (N != sf) {
+        return false;
+    }
+    uint32_t base = sf ? 0x93400000u : 0x13000000u;
+    if ((op & 0xFFC00000u) != base) {
+        return false;
+    }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    unsigned datasize = sf ? 64u : 32u;
+    if (imms != datasize - 1) {
+        return false;
+    }
+    if (immr == 0) {
+        return false;
+    }
+    if (!sf && (immr >= 32 || imms >= 32)) {
+        return false;
+    }
+    *out_sf = sf;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_shift = immr;
+    return true;
+}
+
+bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->bsx_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: is this LSR/ASR Rd, Rd, #b consuming the pending LSL?
+    if (state->bsx_active) {
+        unsigned c_sf, c_rd, c_rn, c_shift;
+        bool is_lsr = decode_lsr_imm(op, &c_sf, &c_rd, &c_rn, &c_shift);
+        bool is_asr = !is_lsr
+            && decode_asr_imm(op, &c_sf, &c_rd, &c_rn, &c_shift);
+
+        if ((is_lsr || is_asr)
+                && c_sf == (state->bsx_is_64bit ? 1u : 0u)
+                && c_rd == state->bsx_rd
+                && c_rn == state->bsx_rd
+                && c_shift >= state->bsx_shift) {
+            unsigned datasize = state->bsx_is_64bit ? 64u : 32u;
+            unsigned lsb = c_shift - state->bsx_shift;
+            unsigned width = datasize - c_shift;
+            char w_or_x = state->bsx_is_64bit ? 'x' : 'w';
+            const char *fold_mnem = is_asr ? "sbfx" : "ubfx";
+            const char *shift_mnem = is_asr ? "asr" : "lsr";
+
+            out->name = "LSL+LSR/ASR foldable into UBFX/SBFX";
+            out->start_offset = state->bsx_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, %c%u, #%u, #%u",
+                fold_mnem, w_or_x, c_rd, w_or_x, state->bsx_rn,
+                lsb, width);
+
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "lsl %c%u, %c%u, #%u",
+                w_or_x, state->bsx_rd, w_or_x, state->bsx_rn,
+                state->bsx_shift);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %c%u, %c%u, #%u",
+                shift_mnem, w_or_x, c_rd, w_or_x, c_rn, c_shift);
+            produced = true;
+        }
+        // Strict adjacency: any non-matching instruction expires.
+        state->bsx_active = false;
+    }
+
+    // (2) Open: is this LSL Rd, Rs, #a (shift > 0, Rd != XZR)?
+    unsigned sf, rd, rn, shift;
+    if (decode_lsl_imm(op, &sf, &rd, &rn, &shift)
+            && rd != 31 && shift > 0) {
+        state->bsx_active = true;
+        state->bsx_is_64bit = (sf != 0);
+        state->bsx_rd = rd;
+        state->bsx_rn = rn;
+        state->bsx_shift = shift;
+        state->bsx_offset = offset;
     }
 
     return produced;
@@ -1157,6 +1309,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_redundant_zext(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_lsl_lsr_to_ubfx(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }
