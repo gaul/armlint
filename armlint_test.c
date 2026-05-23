@@ -79,6 +79,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_add_sub_zero(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_self_op(state, &insns[i], offset, &f)) {
+            findings++;
+        }
         if (check_redundant_cmp_after_s_variant(state, &insns[i], offset,
                                                 &f)) {
             findings++;
@@ -380,10 +383,14 @@ static void encode_sr(uint8_t out[4], uint32_t base,
 #define SUB_X(out, rd, rn, rm)  encode_sr(out, 0xcb000000u, rd, rn, rm)
 #define SUBS_X(out, rd, rn, rm) encode_sr(out, 0xeb000000u, rd, rn, rm)
 #define AND_W(out, rd, rn, rm)  encode_sr(out, 0x0a000000u, rd, rn, rm)
+#define AND_X(out, rd, rn, rm)  encode_sr(out, 0x8a000000u, rd, rn, rm)
 #define ANDS_W(out, rd, rn, rm) encode_sr(out, 0x6a000000u, rd, rn, rm)
+#define BIC_W(out, rd, rn, rm)  encode_sr(out, 0x0a200000u, rd, rn, rm)
 #define BICS_W(out, rd, rn, rm) encode_sr(out, 0x6a200000u, rd, rn, rm)
 #define ORR_W(out, rd, rn, rm)  encode_sr(out, 0x2a000000u, rd, rn, rm)
+#define ORR_X(out, rd, rn, rm)  encode_sr(out, 0xaa000000u, rd, rn, rm)
 #define EOR_W(out, rd, rn, rm)  encode_sr(out, 0x4a000000u, rd, rn, rm)
+#define EOR_X(out, rd, rn, rm)  encode_sr(out, 0xca000000u, rd, rn, rm)
 
 // Arithmetic shifted-register with imm6 = 1 (existing shift). Used to
 // verify we do NOT fold into a consumer that already has a shift.
@@ -2252,6 +2259,98 @@ static void test_add_sub_zero(void)
     assert(run_helper_check(code, 12) == 1);
 }
 
+static void test_self_op(void)
+{
+    uint8_t code[8];
+
+    // -- Positive: identity AND/ORR (Rd != Rn). --
+
+    // and w0, w1, w1 -> mov w0, w1
+    AND_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // orr w0, w1, w1 -> mov w0, w1
+    ORR_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // and x5, x6, x6 -> mov x5, x6 (X-form)
+    AND_X(&code[0], 5, 6, 6);
+    assert(run_helper_check(code, 4) == 1);
+
+    // orr x5, x6, x6
+    ORR_X(&code[0], 5, 6, 6);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Positive: zero result EOR/SUB. --
+
+    // eor w0, w1, w1 -> mov w0, wzr
+    EOR_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // sub w0, w1, w1 -> mov w0, wzr
+    SUB_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // eor x5, x6, x6
+    EOR_X(&code[0], 5, 6, 6);
+    assert(run_helper_check(code, 4) == 1);
+
+    // sub x5, x6, x6
+    SUB_X(&code[0], 5, 6, 6);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Positive: Rd == Rn case still fires. --
+
+    // and w0, w0, w0 (X-form would be a true no-op; W-form also zeros
+    // X[63:32] but the canonical idiom is MOV W0, W0).
+    AND_W(&code[0], 0, 0, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Negative: ANDS (flag-setting, intentional). --
+
+    ANDS_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: SUBS (flag-setting). --
+
+    subs_w_imm(&code[0], 0, 1, 0);   // SUBS Wd, Wn, #0 (different
+    // encoding from shifted-reg SUBS, but verifies that S-variant
+    // SUBs aren't flagged by check_self_op).
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: Rn != Rm (not a self-op). --
+
+    AND_W(&code[0], 0, 1, 2);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: BIC (N=1, skipped in v1). --
+
+    BIC_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: Rd = 31 (result discarded). --
+
+    AND_W(&code[0], 31, 1, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: Rn = 31 (ZR operand, not a real self-op). --
+
+    AND_W(&code[0], 0, 31, 31);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: ADD Rd, Rs, Rs -- not a self-op identity
+    //    (doubles Rs). --
+
+    ADD_W(&code[0], 0, 1, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Two adjacent: each fires independently. --
+
+    AND_W(&code[0], 0, 1, 1);
+    EOR_W(&code[4], 2, 3, 3);
+    assert(run_helper_check(code, 8) == 2);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -2273,6 +2372,7 @@ int main(void)
     test_redundant_sext();
     test_redundant_cmp_after_s_variant();
     test_add_sub_zero();
+    test_self_op();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

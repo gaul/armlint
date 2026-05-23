@@ -154,6 +154,22 @@ code, and documents corners of the A64 instruction set.
     Counter-example: `ldrsb w0, [x1] ; sxtb x0, w0` -- producer left
     `X[63:32] = 0`, consumer would set those bits to sign of byte;
     not redundant.
+* self-op identities (`AND/ORR/EOR/SUB Rd, Rs, Rs`)
+  - `AND Rd, Rs, Rs` and `ORR Rd, Rs, Rs` (shifted-register, LSL #0)
+    are equivalent to `MOV Rd, Rs`. `EOR Rd, Rs, Rs` and `SUB Rd, Rs,
+    Rs` zero `Rd`, equivalent to `MOV Rd, XZR`. Both W- and X-form.
+  - The flag-setting variants `ANDS Rd, Rs, Rs` and `SUBS Rd, Rs, Rs`
+    are deliberately NOT flagged: writing `Rd` while setting flags
+    is the user's intent (a combined zero-test + register copy or
+    register zero). `BIC/ORN/EON` (logical with `N=1`) are skipped
+    for v1.
+  - `Rd = 31` (result discarded) and `Rn = 31` (`ZR` source, not a
+    real self-op) are excluded.
+  - On uarches with move elimination, `MOV Rd, Rs` is zero-cycle
+    while `AND/ORR Rd, Rs, Rs` goes through the ALU. `EOR Rd, Rs, Rs`
+    is the canonical x86 zero idiom that occasionally bleeds into
+    AArch64 toolchain output; the canonical AArch64 form is `MOV Rd,
+    XZR` (eight occurrences observed in dyld at the time of writing).
 * ADD/SUB #0 is redundant
   - The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a
     no-op when `Rd == Rn` and is equivalent to `MOV Rd, Rn` when

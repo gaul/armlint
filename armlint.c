@@ -1883,6 +1883,123 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Detect the logical shifted-register self-op:
+//   AND/ORR/EOR Rd, Rs, Rs (shift = LSL #0, N = 0, opc != 11)
+// with Rn == Rm. ANDS (opc=11) is skipped: the flag-set is intentional.
+// BIC/ORN/EON (N=1) are skipped for v1.
+//
+// Mask fixes bits 28..21 (class + LSL + N=0) and bits 15..10 (imm6=0);
+// bits 31 (sf), 30..29 (opc), 20..16 (Rm), 9..5 (Rn), 4..0 (Rd) are free.
+static bool decode_logical_self_op(uint32_t op, unsigned *out_sf,
+                                   unsigned *out_opc, unsigned *out_rd,
+                                   unsigned *out_rn)
+{
+    if ((op & 0x1FE0FC00u) != 0x0A000000u) {
+        return false;
+    }
+    unsigned opc = (op >> 29) & 0x3u;
+    if (opc == 3) {
+        return false;  // ANDS: flag-set is intentional
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    if (rm != rn) {
+        return false;
+    }
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31 || rn == 31) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_opc = opc;
+    *out_rd = rd;
+    *out_rn = rn;
+    return true;
+}
+
+// Detect SUB Rd, Rs, Rs (arithmetic shifted-register, S = 0, shift =
+// LSL #0). The SUBS (S=1) variant is skipped -- the flag-set form is
+// the intentional way to test or zero-with-flags.
+//
+// Mask fixes bits 30..21 (op=1, S=0, class 01011, LSL, fixed-0) and
+// bits 15..10 (imm6=0).
+static bool decode_sub_self_op(uint32_t op, unsigned *out_sf,
+                               unsigned *out_rd, unsigned *out_rn)
+{
+    if ((op & 0x7FE0FC00u) != 0x4B000000u) {
+        return false;
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    if (rm != rn) {
+        return false;
+    }
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31 || rn == 31) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = rd;
+    *out_rn = rn;
+    return true;
+}
+
+bool check_self_op(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    unsigned sf, rd, rn;
+    const char *mnem;
+    bool is_zero_result;
+
+    unsigned opc;
+    if (decode_logical_self_op(op, &sf, &opc, &rd, &rn)) {
+        switch (opc) {
+        case 0: mnem = "and"; is_zero_result = false; break;
+        case 1: mnem = "orr"; is_zero_result = false; break;
+        case 2: mnem = "eor"; is_zero_result = true;  break;
+        default: return false;  // unreachable: opc=3 rejected by decoder
+        }
+    } else if (decode_sub_self_op(op, &sf, &rd, &rn)) {
+        mnem = "sub";
+        is_zero_result = true;
+    } else {
+        return false;
+    }
+
+    char w_or_x = sf ? 'x' : 'w';
+
+    out->name = "self-op identity";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+
+    if (is_zero_result) {
+        snprintf(out->detail, sizeof(out->detail),
+            "%s %c%u, %c%u, %c%u -> mov %c%u, %czr",
+            mnem, w_or_x, rd, w_or_x, rn, w_or_x, rn,
+            w_or_x, rd, w_or_x);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "%s %c%u, %c%u, %c%u -> mov %c%u, %c%u",
+            mnem, w_or_x, rd, w_or_x, rn, w_or_x, rn,
+            w_or_x, rd, w_or_x, rn);
+    }
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -2019,6 +2136,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_add_sub_zero(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_self_op(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

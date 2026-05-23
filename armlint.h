@@ -140,6 +140,13 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
 bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);
 
+// Detect self-op identities: AND/ORR Rd, Rs, Rs (shifted-register,
+// LSL #0, Rn == Rm) collapses to MOV Rd, Rs; EOR/SUB Rd, Rs, Rs
+// collapses to MOV Rd, XZR. Flag-setting variants (ANDS/SUBS) are
+// skipped because the flag-set is the user's intent.
+bool check_self_op(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe
