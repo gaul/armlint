@@ -1211,6 +1211,27 @@ static bool decode_and_imm_lowmask(uint32_t op, unsigned *out_c,
     return true;
 }
 
+// Decode the W-form MOV-to-self consumer: ORR Wd, WZR, Wd, LSL #0
+// (the MOV Wd, Wm register alias with Rm == Rd). Writing any W-form
+// register zeros bits 63..32 of the underlying X register, so this is
+// the C=32 consumer of the redundant-zero-extension check. Rejects
+// Rd=31 (MOV WZR, WZR has no observable effect either way and the
+// producer side already excludes Rd=31).
+static bool decode_mov_w_self(uint32_t op, unsigned *out_c, unsigned *out_rd)
+{
+    if ((op & 0xFFE0FFE0u) != 0x2A0003E0u) {
+        return false;
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rd = op & 0x1Fu;
+    if (rm != rd || rd == 31) {
+        return false;
+    }
+    *out_c = 32;
+    *out_rd = rd;
+    return true;
+}
+
 // True if `op` is an instruction whose Rd/Rt is at bits 4..0 and which
 // leaves bits 63..P of the corresponding X register zeroed for the
 // returned P. Conservative: matches W-form data-processing instructions
@@ -1284,14 +1305,24 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
 
-    // (1) Close: is this a UBFM/AND-imm consumer that clears bits
-    //     already known zero?
+    // (1) Close: is this a UBFM/AND-imm/MOV-self consumer that clears
+    //     bits already known zero?
     if (state->wzx_active) {
         unsigned c, c_rd, c_rn;
         bool is_ubfm = decode_ubfm_zext(op, &c, &c_rd, &c_rn);
         bool is_and  = !is_ubfm && decode_and_imm_lowmask(op, &c, &c_rd, &c_rn);
+        bool is_mov  = false;
+        if (!is_ubfm && !is_and) {
+            is_mov = decode_mov_w_self(op, &c, &c_rd);
+            if (is_mov) {
+                // MOV Wd, Wd has Rn=WZR in the encoding; Rm==Rd is
+                // enforced by the decoder, so the "operand register"
+                // that must match the producer's Rd is Rd itself.
+                c_rn = c_rd;
+            }
+        }
 
-        if ((is_ubfm || is_and)
+        if ((is_ubfm || is_and || is_mov)
                 && c_rd == state->wzx_rd
                 && c_rn == state->wzx_rd
                 && state->wzx_zero_from <= c) {
@@ -1326,6 +1357,47 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
     }
 
     return produced;
+}
+
+bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // X-form MOV Xd, Xm = ORR Xd, XZR, Xm with shift=LSL #0. Base
+    // 0xAA0003E0 carries sf=1, opc=01 (ORR), class=01010, shift=LSL,
+    // N=0, imm6=0, Rn=XZR; free fields are Rm (bits 20..16) and Rd
+    // (bits 4..0). We only flag Rm == Rd: that case is the literal
+    // no-op. Rd=31 (MOV XZR, XZR) discards the value and is not
+    // actionable.
+    if ((op & 0xFFE0FFE0u) != 0xAA0003E0u) {
+        return false;
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rd = op & 0x1Fu;
+    if (rm != rd || rd == 31) {
+        return false;
+    }
+
+    out->name = "redundant MOV to self";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "%s %s is a no-op", insn->mnemonic, insn->op_str);
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
 }
 
 static void report_finding(const armlint_finding *finding)
@@ -1407,6 +1479,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                 errors++;
             }
             if (check_lsr_and_to_ubfx(state, insn, offset, &finding)) {
+                report_finding(&finding);
+                errors++;
+            }
+            if (check_mov_reg_self(state, insn, offset, &finding)) {
                 report_finding(&finding);
                 errors++;
             }

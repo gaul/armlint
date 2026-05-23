@@ -82,9 +82,11 @@ code, and documents corners of the A64 instruction set.
     16 for `LDRH Wt`, 8 for `LDRB Wt`. A consumer that clears bits
     above `C` is redundant when `P <= C`.
   - Recognised consumers: `UXTB / UXTH / UXTW` (W- or X-form UBFM
-    aliases with `immr=0`, `imms ∈ {7,15,31}`, `N=sf`) and AND-imm
-    with mask `0xff` / `0xffff` / `0xffffffff` -- both forms in W and
-    X register variants.
+    aliases with `immr=0`, `imms ∈ {7,15,31}`, `N=sf`), AND-imm
+    with mask `0xff` / `0xffff` / `0xffffffff` (both forms in W and
+    X register variants), and `MOV Wd, Wd` (`ORR Wd, WZR, Wd` with
+    `Rm = Rd`; the W-form register MOV writes back through the W
+    register and so clears X[63:32], giving `C = 32`).
   - Example flags: `add w0,w1,w2 ; uxtw x0,w0`, `ldrh w0,[x1] ; uxth
     w0,w0`, `ldrb w8,[x9] ; and w8,w8,#0xff`. Counter-example (`P >
     C`, not flagged): `ldr w0,[x1] ; uxth w0,w0` -- LDR W loads 32
@@ -95,6 +97,16 @@ code, and documents corners of the A64 instruction set.
     bitfield `SBFM/BFM/UBFM`, `EXTR`, logical shifted register,
     `ADC/SBC`, conditional select, DP-3/2/1-source) plus integer
     loads with `Wt` destination in any addressing mode.
+* `MOV Xd, Xd` is a literal no-op
+  - The X-form register MOV alias (`ORR Xd, XZR, Xm, LSL #0`) with
+    `Rm = Rd` reads `Xd` and writes the same 64 bits back; the
+    instruction has no architectural effect and can be removed. Modern
+    optimisers almost never emit this, but it shows up occasionally in
+    hand-written assembly and in legacy object code.
+  - The W-form `MOV Wd, Wd` is NOT a no-op: writing through `Wd`
+    clears `X[63:32]`. It is handled instead as a consumer of the
+    redundant-zero-extension check above, where it fires only when a
+    preceding producer already zeroed those bits.
 
 ## Compilation
 

@@ -67,6 +67,9 @@ static int run_check(const uint8_t *code, size_t code_size)
         if (check_lsr_and_to_ubfx(state, &insns[i], offset, &f)) {
             findings++;
         }
+        if (check_mov_reg_self(state, &insns[i], offset, &f)) {
+            findings++;
+        }
     }
 
     armlint_finding f;
@@ -697,6 +700,30 @@ static void uxtb_w(uint8_t out[4], unsigned rd, unsigned rn)
     out[3] = (op >> 24) & 0xff;
 }
 
+// MOV Xd, Xm = ORR Xd, XZR, Xm, LSL #0. Base 0xAA0003E0.
+static void mov_x(uint8_t out[4], unsigned rd, unsigned rm)
+{
+    uint32_t op = 0xAA0003E0u
+        | ((rm & 0x1Fu) << 16)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MOV Wd, Wm = ORR Wd, WZR, Wm, LSL #0. Base 0x2A0003E0.
+static void mov_w_reg(uint8_t out[4], unsigned rd, unsigned rm)
+{
+    uint32_t op = 0x2A0003E0u
+        | ((rm & 0x1Fu) << 16)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 // AND Wd, Wn, #0xFF -- sf=0, N=0, immr=0, imms=7.
 static void and_w_ff(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -1284,6 +1311,30 @@ static void test_redundant_zext(void)
     ADD_W(&code[0], 0, 1, 2);
     uxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- W-form MOV-to-self as the consumer. --
+
+    // add w0, w1, w2 ; mov w0, w0 -- W-form ALU (P=32) + ORR Wd,WZR,Wd (C=32).
+    ADD_W(&code[0], 0, 1, 2);
+    mov_w_reg(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w0, [x1] ; mov w0, w0 -- LDRH (P=16) + MOV self (C=32).
+    LDRH_W(&code[0], 0, 1, 0);
+    mov_w_reg(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrb w0, [x1] ; mov w0, w0 -- LDRB (P=8) + MOV self (C=32).
+    LDRB_W(&code[0], 0, 1, 0);
+    mov_w_reg(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: MOV w0, w5 -- different source register, not self-MOV.
+    //    Producer's wzx state should not match.
+
+    ADD_W(&code[0], 0, 1, 2);
+    mov_w_reg(&code[4], 0, 5);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // AND Wd, Wn, #imm where imm = (1<<w) - 1. sf=0, N=0, immr=0, imms=w-1.
@@ -1495,6 +1546,52 @@ static void test_lsr_and_to_ubfx(void)
     assert(run_helper_check(code, 4) == 0);
 }
 
+static void test_mov_reg_self(void)
+{
+    uint8_t code[8];
+
+    // -- Positive: MOV Xd, Xd is a literal no-op. --
+
+    mov_x(&code[0], 0, 0);          // mov x0, x0
+    assert(run_helper_check(code, 4) == 1);
+
+    mov_x(&code[0], 5, 5);          // mov x5, x5
+    assert(run_helper_check(code, 4) == 1);
+
+    mov_x(&code[0], 30, 30);        // mov x30, x30
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Negative: MOV Xd, Xm with d != m -- not a no-op. --
+
+    mov_x(&code[0], 0, 1);          // mov x0, x1
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: MOV X0, XZR -- Rm=31, decoder rejects (Rm != Rd). --
+
+    mov_x(&code[0], 0, 31);         // mov x0, xzr
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: MOV XZR, XZR -- Rd=31 excluded (discarded result). --
+
+    mov_x(&code[0], 31, 31);        // mov xzr, xzr
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: MOV Wd, Wd is NOT this check's pattern -- the W-form
+    //    has the zero-extension side effect and is handled by
+    //    check_redundant_zext when a preceding producer already zeroed
+    //    bits 63..32. A lone MOV Wd, Wd should produce 0 findings: the
+    //    W-form opens wzx as a producer, but no consumer follows. --
+
+    mov_w_reg(&code[0], 0, 0);      // mov w0, w0 (alone)
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Two adjacent MOV Xd, Xd: each fires independently. --
+
+    mov_x(&code[0], 0, 0);
+    mov_x(&code[4], 1, 1);
+    assert(run_helper_check(code, 8) == 2);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -1512,6 +1609,7 @@ int main(void)
     test_redundant_zext();
     test_lsl_lsr_to_ubfx();
     test_lsr_and_to_ubfx();
+    test_mov_reg_self();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

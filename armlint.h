@@ -114,6 +114,13 @@ bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
 bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// Detect MOV Xd, Xd encoded as ORR Xd, XZR, Xd, LSL #0 -- a literal
+// no-op that reads and writes the same 64 bits. The W-form MOV Wd, Wd
+// is NOT flagged here: it zero-extends X[63:32] and is handled as a
+// consumer in check_redundant_zext.
+bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe
