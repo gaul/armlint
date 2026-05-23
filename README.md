@@ -31,9 +31,10 @@ code, and documents corners of the A64 instruction set.
     result is dead.
 * compare-zero branch foldable into CBZ/CBNZ
   - `cmp w0, #0 ; b.eq target` instead of `cbz w0, target`. Same for
-    `b.ne` -> `cbnz`. v1 matches only the canonical `CMP Rn, #0`
-    encoding (SUBS XZR, Rn, #0); does not catch `cmp Rn, xzr` or
-    `tst Rn, Rn` (other zero-test idioms).
+    `b.ne` -> `cbnz`. Also matches the equivalent zero-test idioms
+    `cmp Rn, xzr` (SUBS XZR, Rn, XZR) and `tst Rn, Rn`
+    (ANDS XZR, Rn, Rn): all three set `Z=1` iff `Rn==0` and so fold
+    identically.
   - Soundness: `CBZ`/`CBNZ` does not write NZCV, but `CMP Rn, #0`
     writes all four flags. Folding is unsound if subsequent code
     reads N, C, or V (e.g. `ADCS`, `CSEL`, `B.LT`, `CCMP`). armlint
@@ -54,20 +55,27 @@ code, and documents corners of the A64 instruction set.
     much shorter than `B.cond`'s 19-bit (~1 MB). The fold is
     suggested only when the target fits in the TBZ encoding.
   - Soundness: same NZCV-liveness scan as the CMP-branch check.
-* redundant zero-extension after a W-form op
-  - `add w0, w1, w2 ; uxtw x0, w0` -- the `UXTW` is a no-op because
-    W-form writes already zero bits 63..32 of the X register. Same
-    for `and x0, x0, #0xffffffff` (and any encoding Capstone aliases
-    to `ubfx x0, x0, #0, #32`).
-  - Producer side recognises common W-form data-processing classes:
-    `ADD/SUB` (immediate, shifted, extended), logical immediate,
-    `MOVZ/MOVN/MOVK`, bitfield (`SBFM/BFM/UBFM`), `EXTR`, logical
-    shifted register, `ADC/SBC`, conditional select (`CSEL` family),
-    DP-3-source (`MADD/MSUB/MUL`), DP-2-source (`UDIV/SDIV/LSLV/...`)
-    and DP-1-source (`RBIT/REV/CLZ/CLS`). Loads (`LDR/LDRB/LDRH Wt`)
-    are not yet matched. v1 requires the consumer to overwrite the
-    same register (`uxtw x0, w0`, not `uxtw x5, w0`), guaranteeing
-    the move is purely a no-op.
+* redundant zero-extension after a producer that already zeroed those bits
+  - Generalises the previous "redundant UXTW after W-form ALU" rule
+    to size-aware producer/consumer pairs. The check tracks the
+    threshold `P` at which the producer guarantees `Rt[63:P] == 0`:
+    32 for W-form data-processing or `LDR Wt` / `LDRSB Wt` / `LDRSH Wt`,
+    16 for `LDRH Wt`, 8 for `LDRB Wt`. A consumer that clears bits
+    above `C` is redundant when `P <= C`.
+  - Recognised consumers: `UXTB / UXTH / UXTW` (W- or X-form UBFM
+    aliases with `immr=0`, `imms ∈ {7,15,31}`, `N=sf`) and AND-imm
+    with mask `0xff` / `0xffff` / `0xffffffff` -- both forms in W and
+    X register variants.
+  - Example flags: `add w0,w1,w2 ; uxtw x0,w0`, `ldrh w0,[x1] ; uxth
+    w0,w0`, `ldrb w8,[x9] ; and w8,w8,#0xff`. Counter-example (`P >
+    C`, not flagged): `ldr w0,[x1] ; uxth w0,w0` -- LDR W loads 32
+    valid bits, so UXTH would actually clear bits 31..16.
+  - v1 still requires `Rd == Rn == producer.Rd` so the consumer is
+    purely dead. Producer set covers all W-form DP classes (`ADD/SUB`
+    immediate/shifted/extended, logical immediate, `MOVZ/MOVN/MOVK`,
+    bitfield `SBFM/BFM/UBFM`, `EXTR`, logical shifted register,
+    `ADC/SBC`, conditional select, DP-3/2/1-source) plus integer
+    loads with `Wt` destination in any addressing mode.
 
 ## Compilation
 

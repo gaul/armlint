@@ -47,11 +47,13 @@ struct armlint_state {
     unsigned lsl_shift;
     size_t lsl_offset;
 
-    // CMP Rn, #0 pending a B.EQ/B.NE consumer.
+    // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / TST Rn,Rn) pending a
+    // B.EQ/B.NE consumer.
     bool cmp_active;
     bool cmp_is_64bit;
     unsigned cmp_rn;
     size_t cmp_offset;
+    char cmp_disasm[ARMLINT_FINDING_LINE_LEN];
 
     // TST Rn, #(1<<k) pending a B.EQ/B.NE consumer.
     bool tst_active;
@@ -60,10 +62,16 @@ struct armlint_state {
     unsigned tst_bit;       // bit position 0..63
     size_t tst_offset;
 
-    // W-form ALU/move/bitfield result pending a redundant zero-extension
-    // consumer (UXTW Xd,Wd or AND Xd,Xd,#0xffffffff with same Rd).
+    // Producer of bits-above-N guaranteed zero, pending a redundant
+    // zero-extension consumer that re-zeros those bits. wzx_zero_from
+    // is the threshold P: the producer guarantees bits >= P are zero.
+    //   W-form ALU / LDR Wt / LDRSB/LDRSH Wt -> P=32
+    //   LDRH Wt -> P=16
+    //   LDRB Wt -> P=8
+    // A consumer that clears bits >= C is redundant iff P <= C.
     bool wzx_active;
     unsigned wzx_rd;
+    unsigned wzx_zero_from;
     size_t wzx_offset;
     char wzx_producer_disasm[ARMLINT_FINDING_LINE_LEN];
 
@@ -490,24 +498,47 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
-// Detect CMP Rn, #0, i.e. SUBS XZR, Rn, #0 in the immediate form with
-// no LSL #12 shift.
+// Detect an instruction that sets Z=1 iff Rn==0, leaving NZCV in a state
+// usable only for an equality-with-zero branch. Three encodings count:
 //
-//   sf | 1 | 1 | 100010 | sh | imm12 | Rn | Rd
+//   CMP Rn, #0     = SUBS X/WZR, Rn, #0       (immediate; sh=0, imm12=0)
+//   CMP Rn, X/WZR  = SUBS X/WZR, Rn, X/WZR    (shifted-reg; Rm=31,
+//                                              shift=LSL, imm6=0)
+//   TST Rn, Rn     = ANDS X/WZR, Rn, Rn       (logical shifted-reg;
+//                                              Rm=Rn, shift=LSL, N=0,
+//                                              imm6=0)
 //
-// We require op=1 (SUB), S=1 (set flags), sh=0, imm12=0, Rd=31.
-static bool decode_cmp_imm_zero(uint32_t op,
-                                unsigned *out_sf, unsigned *out_rn)
+// All three have Rd=31. Bit 31 (sf) is left free so either operand
+// width matches; for the TST form Rm and Rn must agree, which is
+// verified after the mask check.
+static bool decode_zero_test(uint32_t op,
+                             unsigned *out_sf, unsigned *out_rn)
 {
-    // Mask covers bit 30 (op), bit 29 (S), bits 28..23 (encoding class),
-    // bit 22 (sh), bits 21..10 (imm12), bits 4..0 (Rd). Bit 31 (sf) is
-    // left out so the comparison matches either operand width.
-    if ((op & 0x7FFFFC1Fu) != 0x7100001Fu) {
-        return false;
+    // CMP Rn, #0 (SUBS-imm with Rd=31, sh=0, imm12=0).
+    if ((op & 0x7FFFFC1Fu) == 0x7100001Fu) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rn = (op >> 5) & 0x1Fu;
+        return true;
     }
-    *out_sf = (op >> 31) & 0x1u;
-    *out_rn = (op >> 5) & 0x1Fu;
-    return true;
+    // CMP Rn, XZR/WZR (SUBS shifted-reg with Rd=31, Rm=31, shift=LSL,
+    // imm6=0).
+    if ((op & 0x7FFFFC1Fu) == 0x6B1F001Fu) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rn = (op >> 5) & 0x1Fu;
+        return true;
+    }
+    // TST Rn, Rn (ANDS shifted-reg with Rd=31, shift=LSL, N=0, imm6=0,
+    // and Rm == Rn).
+    if ((op & 0x7FE0FC1Fu) == 0x6A00001Fu) {
+        unsigned rm = (op >> 16) & 0x1Fu;
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if (rm == rn) {
+            *out_sf = (op >> 31) & 1u;
+            *out_rn = rn;
+            return true;
+        }
+    }
+    return false;
 }
 
 // Detect B.cond with cond in {EQ, NE}. Returns the (sign-extended)
@@ -701,7 +732,7 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                 cb_mnem, w_or_x, state->cmp_rn, target);
 
             snprintf(p->lines[0], sizeof(p->lines[0]),
-                "cmp %c%u, #0", w_or_x, state->cmp_rn);
+                "%s", state->cmp_disasm);
             snprintf(p->lines[1], sizeof(p->lines[1]),
                 "%s 0x%" PRIx64, bcond_mnem, target);
 
@@ -715,13 +746,15 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
         state->cmp_active = false;
     }
 
-    // (2) Open: is this a CMP Rn, #0 (Rn != XZR)?
+    // (2) Open: is this a zero-test of Rn (Rn != XZR)?
     unsigned sf, rn;
-    if (decode_cmp_imm_zero(op, &sf, &rn) && rn != 31) {
+    if (decode_zero_test(op, &sf, &rn) && rn != 31) {
         state->cmp_active = true;
         state->cmp_is_64bit = (sf != 0);
         state->cmp_rn = rn;
         state->cmp_offset = offset;
+        snprintf(state->cmp_disasm, sizeof(state->cmp_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
     }
 
     return false;
@@ -845,79 +878,152 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
     return false;
 }
 
-// UXTW Xd, Wn  =  UBFM Xd, Xn, #0, #31
-//   sf=1, N=1, immr=000000, imms=011111, opc=10 (UBFM).
-//   Fixed bits (Rn/Rd masked out): 0xD3407C00.
-static bool decode_uxtw(uint32_t op, unsigned *out_rd, unsigned *out_rn)
+// Decode a zero-extending UBFM alias (UXTB / UXTH / UXTW or the X-form
+// "UBFM Xd, Xn, #0, #K-1" variants). On match returns C, the bit
+// position above which the consumer guarantees zeros: 8 (UXTB), 16
+// (UXTH) or 32 (UXTW). The W-form (sf=0, N=0) and X-form (sf=1, N=1)
+// share the same low 22 bits; both forms produce the same zero-extended
+// result. The imms-31 W-form (which would be "UXT-W" with sf=0) is
+// excluded because that's the MOV/UBFX-of-the-whole-register alias and
+// belongs to a different check.
+static bool decode_ubfm_zext(uint32_t op, unsigned *out_c,
+                             unsigned *out_rd, unsigned *out_rn)
 {
-    if ((op & 0xFFFFFC00u) != 0xD3407C00u) {
+    // UBFM general: sf 10 100110 N immr imms Rn Rd, with N == sf.
+    // Mask bits 31..22 (class + N), leaving immr/imms/Rn/Rd free.
+    unsigned sf = (op >> 31) & 1u;
+    uint32_t base_val = sf ? 0xD3400000u : 0x53000000u;
+    if ((op & 0xFFC00000u) != base_val) {
         return false;
     }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    if (immr != 0) {
+        return false;
+    }
+    unsigned c;
+    switch (imms) {
+    case 7:  c = 8;  break;
+    case 15: c = 16; break;
+    case 31:
+        // sf=0 with imms=31 is "MOV Wd, Wn" (UBFM all-of-W) -- not
+        // really a zero-extension consumer in the sense we want.
+        if (sf == 0) {
+            return false;
+        }
+        c = 32;
+        break;
+    default:
+        return false;
+    }
+    *out_c = c;
     *out_rd = op & 0x1Fu;
     *out_rn = (op >> 5) & 0x1Fu;
     return true;
 }
 
-// AND Xd, Xn, #0xffffffff  =  AND-immediate with sf=1, opc=00, N=1,
-// immr=000000, imms=011111. Fixed bits: 0x92407C00.
-static bool decode_and_x_lo32_mask(uint32_t op,
+// Decode an AND-immediate consumer with mask 0xFF / 0xFFFF / 0xFFFFFFFF
+// (X-form), or 0xFF / 0xFFFF (W-form). Returns C: the bit position
+// above which all bits become zero.
+//
+// Encoding: sf 00 100100 N immr imms Rn Rd, with immr=0 and the
+// (N, imms) pair encoding a low-run of 8, 16 or 32 ones:
+//   sf=0, N=0, imms=000111  -> AND Wd, Wn, #0xFF       (C=8)
+//   sf=0, N=0, imms=001111  -> AND Wd, Wn, #0xFFFF     (C=16)
+//   sf=1, N=1, imms=000111  -> AND Xd, Xn, #0xFF       (C=8)
+//   sf=1, N=1, imms=001111  -> AND Xd, Xn, #0xFFFF     (C=16)
+//   sf=1, N=1, imms=011111  -> AND Xd, Xn, #0xFFFFFFFF (C=32)
+//
+// AND Wd, Wn, #0xFFFFFFFF would be the excluded "all ones" pattern --
+// not encodable as a logical immediate.
+static bool decode_and_imm_lowmask(uint32_t op, unsigned *out_c,
                                    unsigned *out_rd, unsigned *out_rn)
 {
-    if ((op & 0xFFFFFC00u) != 0x92407C00u) {
+    unsigned sf = (op >> 31) & 1u;
+    uint32_t base = sf ? 0x92400000u : 0x12000000u;
+    if ((op & 0xFFC00000u) != base) {
         return false;
     }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    if (immr != 0) {
+        return false;
+    }
+    unsigned c;
+    switch (imms) {
+    case 7:  c = 8;  break;
+    case 15: c = 16; break;
+    case 31:
+        // sf=0 cannot encode #0xFFFFFFFF (all-ones is excluded).
+        if (sf == 0) {
+            return false;
+        }
+        c = 32;
+        break;
+    default:
+        return false;
+    }
+    *out_c = c;
     *out_rd = op & 0x1Fu;
     *out_rn = (op >> 5) & 0x1Fu;
     return true;
 }
 
-// True if `op` is a W-form (sf=0) instruction whose Rd is at bits 4..0
-// and which therefore leaves bits 63..32 of the corresponding X register
-// zeroed. Conservative: matches well-known data-processing classes only;
-// loads are deferred.
-//
-// Masks exclude the opc bits within each class so all variants match.
-// E.g. 0x1F800000 selects bits 28..23 (the class identifier in the
-// data-processing-immediate space), leaving bits 31..29 free; 0x1FE00000
-// adds bits 22..21 (used to subdivide the data-processing-register
-// space). The early bit-31 check forces sf=0.
-static bool decode_w_form_zext(uint32_t op, unsigned *out_rd)
+// True if `op` is an instruction whose Rd/Rt is at bits 4..0 and which
+// leaves bits 63..P of the corresponding X register zeroed for the
+// returned P. Conservative: matches W-form data-processing instructions
+// (P=32) and W-form integer loads (P=8 for LDRB, 16 for LDRH, 32 for
+// LDR / LDRSB / LDRSH).
+static bool decode_w_form_zext(uint32_t op, unsigned *out_rd,
+                               unsigned *out_zero_from)
 {
     unsigned rd = op & 0x1Fu;
     if (rd == 31) {
         return false;
     }
-    if ((op & 0x80000000u) != 0) {
-        return false;
+
+    // W-form data processing (sf=0). See the table in the comment for
+    // the per-class masks; the early bit-31 check forces sf=0.
+    if ((op & 0x80000000u) == 0) {
+        if ((op & 0x1F800000u) == 0x11000000u           // ADD/SUB imm
+                || (op & 0x1F800000u) == 0x12000000u    // logical imm
+                || (op & 0x1F800000u) == 0x12800000u    // move wide imm
+                || (op & 0x1F800000u) == 0x13000000u    // bitfield
+                || (op & 0x1F800000u) == 0x13800000u    // extract
+                || (op & 0x1F000000u) == 0x0A000000u    // logical sh reg
+                || (op & 0x1F000000u) == 0x0B000000u    // add/sub sh/ext
+                || (op & 0x1FE00000u) == 0x1A000000u    // adc/sbc
+                || (op & 0x1FE00000u) == 0x1A800000u    // cond select
+                || (op & 0x1F000000u) == 0x1B000000u    // DP 3-source
+                || (op & 0x7FE00000u) == 0x1AC00000u    // DP 2-source
+                || (op & 0x7FE00000u) == 0x5AC00000u) { // DP 1-source
+            *out_rd = rd;
+            *out_zero_from = 32;
+            return true;
+        }
     }
 
-    // Data-processing immediate (bits 28..23 identify the class).
-    if ((op & 0x1F800000u) == 0x11000000u           // ADD/SUB imm (+S)
-            || (op & 0x1F800000u) == 0x12000000u    // AND/ORR/EOR/ANDS imm
-            || (op & 0x1F800000u) == 0x12800000u    // MOVN/MOVZ/MOVK
-            || (op & 0x1F800000u) == 0x13000000u    // SBFM/BFM/UBFM
-            || (op & 0x1F800000u) == 0x13800000u) { // EXTR
-        *out_rd = rd;
-        return true;
-    }
-    // Data-processing register.
-    //   01010 = logical shifted register
-    //   01011 = add/sub shifted or extended register
-    //   11010000 (bits 28..21) = add/sub with carry
-    //   11010100 = conditional select (CSEL/CSINC/CSINV/CSNEG)
-    //   11011    = data-processing 3-source (MADD/MSUB/MUL/...)
-    //   11010110 with bit 30=0 = data-processing 2-source
-    //   11010110 with bit 30=1 = data-processing 1-source
-    if ((op & 0x1F000000u) == 0x0A000000u
-            || (op & 0x1F000000u) == 0x0B000000u
-            || (op & 0x1FE00000u) == 0x1A000000u
-            || (op & 0x1FE00000u) == 0x1A800000u
-            || (op & 0x1F000000u) == 0x1B000000u
-            || (op & 0x7FE00000u) == 0x1AC00000u
-            || (op & 0x7FE00000u) == 0x5AC00000u) {
-        *out_rd = rd;
-        return true;
-    }
+    // Integer loads with Wt destination. The "load/store register"
+    // family shares bits 29..27 = 111 and bit 26 = 0 (V=0, general
+    // register). bits 31..30 = size, bits 23..22 = opc select the
+    // operation; bits 25..24 distinguish addressing modes (00 covers
+    // unscaled / pre-/post-index / register offset, 01 is the
+    // unsigned-immediate offset). The mask 0xFEC00000 leaves bit 24
+    // free so all modes match; we exclude bit 25 = 1 (which selects
+    // SIMD/FP or atomic-op families).
+    //
+    //   LDRB  Wt: size=00, opc=01  -> P=8
+    //   LDRH  Wt: size=01, opc=01  -> P=16
+    //   LDR   Wt: size=10, opc=01  -> P=32
+    //   LDRSB Wt: size=00, opc=11  -> P=32 (sign-ext within W;
+    //                                       W-form still zeros X63..32)
+    //   LDRSH Wt: size=01, opc=11  -> P=32
+    if ((op & 0xFEC00000u) == 0x38400000u) { *out_rd = rd; *out_zero_from = 8;  return true; }  // LDRB W
+    if ((op & 0xFEC00000u) == 0x78400000u) { *out_rd = rd; *out_zero_from = 16; return true; }  // LDRH W
+    if ((op & 0xFEC00000u) == 0xB8400000u) { *out_rd = rd; *out_zero_from = 32; return true; }  // LDR W
+    if ((op & 0xFEC00000u) == 0x38C00000u) { *out_rd = rd; *out_zero_from = 32; return true; }  // LDRSB W
+    if ((op & 0xFEC00000u) == 0x78C00000u) { *out_rd = rd; *out_zero_from = 32; return true; }  // LDRSH W
+
     return false;
 }
 
@@ -936,44 +1042,41 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
 
-    // (1) Close: is this a redundant UXTW or AND-#0xffffffff consumer?
+    // (1) Close: is this a UBFM/AND-imm consumer that clears bits
+    //     already known zero?
     if (state->wzx_active) {
-        unsigned c_rd, c_rn;
-        bool is_uxtw = decode_uxtw(op, &c_rd, &c_rn);
-        bool is_and  = !is_uxtw && decode_and_x_lo32_mask(op, &c_rd, &c_rn);
+        unsigned c, c_rd, c_rn;
+        bool is_ubfm = decode_ubfm_zext(op, &c, &c_rd, &c_rn);
+        bool is_and  = !is_ubfm && decode_and_imm_lowmask(op, &c, &c_rd, &c_rn);
 
-        if ((is_uxtw || is_and)
+        if ((is_ubfm || is_and)
                 && c_rd == state->wzx_rd
-                && c_rn == state->wzx_rd) {
+                && c_rn == state->wzx_rd
+                && state->wzx_zero_from <= c) {
             out->name = "redundant zero-extension after W-form op";
             out->start_offset = state->wzx_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
 
-            const char *mnem = is_uxtw ? "uxtw" : "and";
             snprintf(out->detail, sizeof(out->detail),
-                "%s x%u, ... is a no-op (W-form already zero-extends)",
-                mnem, c_rd);
+                "%s %s is a no-op (bits >= %u already zero)",
+                insn->mnemonic, insn->op_str, state->wzx_zero_from);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->wzx_producer_disasm);
-            if (is_uxtw) {
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "uxtw x%u, w%u", c_rd, c_rn);
-            } else {
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "and x%u, x%u, #0xffffffff", c_rd, c_rn);
-            }
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
             produced = true;
         }
         // Strict adjacency: any non-matching instruction expires.
         state->wzx_active = false;
     }
 
-    // (2) Open: is this a W-form Rd-writing producer?
-    unsigned p_rd;
-    if (decode_w_form_zext(op, &p_rd)) {
+    // (2) Open: is this a producer that zeros some high-bit region?
+    unsigned p_rd, p_zero_from;
+    if (decode_w_form_zext(op, &p_rd, &p_zero_from)) {
         state->wzx_active = true;
         state->wzx_rd = p_rd;
+        state->wzx_zero_from = p_zero_from;
         state->wzx_offset = offset;
         snprintf(state->wzx_producer_disasm,
             sizeof(state->wzx_producer_disasm),

@@ -651,7 +651,8 @@ static void and_x_ff32(uint8_t out[4], unsigned rd, unsigned rn)
     out[3] = (op >> 24) & 0xff;
 }
 
-// UXTH Xd, Wn = UBFM Xd, Xn, #0, #15 -- different alias, must NOT match.
+// UXTH Xd, Wn = UBFM Xd, Xn, #0, #15 (sf=1, N=1, immr=0, imms=15).
+// This is now a valid consumer matching to C=16.
 static void uxth_x(uint8_t out[4], unsigned rd, unsigned rn)
 {
     uint32_t op = 0xD3400000u
@@ -663,6 +664,113 @@ static void uxth_x(uint8_t out[4], unsigned rd, unsigned rn)
     out[2] = (op >> 16) & 0xff;
     out[3] = (op >> 24) & 0xff;
 }
+
+// UXTH Wd, Wn = UBFM Wd, Wn, #0, #15 (sf=0, N=0, immr=0, imms=15).
+static void uxth_w(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x53000000u
+        | (15u << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// UXTB Wd, Wn = UBFM Wd, Wn, #0, #7 (sf=0, N=0, immr=0, imms=7).
+static void uxtb_w(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x53000000u
+        | (7u << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// AND Wd, Wn, #0xFF -- sf=0, N=0, immr=0, imms=7.
+static void and_w_ff(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x12001C00u
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// CMP Rn, Rm (shifted-register form, shift=LSL, imm6=0).
+//   sf 1 1 01011 00 0 Rm 000000 Rn 11111
+static void cmp_w_reg(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x6B00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void cmp_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0xEB00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// TST Rn, Rm (logical shifted-register form, shift=LSL, N=0, imm6=0).
+//   sf 11 01010 00 0 Rm 000000 Rn 11111
+static void tst_w_reg(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x6A00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void tst_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0xEA00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// LDR/LDRH/LDRB Wt with unsigned-immediate offset.
+//   LDR  Wt: size=10, opc=01 -> base 0xB9400000
+//   LDRH Wt: size=01, opc=01 -> base 0x79400000
+//   LDRB Wt: size=00, opc=01 -> base 0x39400000
+static void encode_ldr_imm(uint8_t out[4], uint32_t base, unsigned rt,
+                           unsigned rn, unsigned imm12)
+{
+    uint32_t op = base
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+#define LDR_W(out, rt, rn, imm)  encode_ldr_imm(out, 0xB9400000u, rt, rn, imm)
+#define LDRH_W(out, rt, rn, imm) encode_ldr_imm(out, 0x79400000u, rt, rn, imm)
+#define LDRB_W(out, rt, rn, imm) encode_ldr_imm(out, 0x39400000u, rt, rn, imm)
 
 static void test_cmp_zero_branch(void)
 {
@@ -818,6 +926,56 @@ static void test_cmp_zero_branch(void)
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- New zero-test idioms: CMP Rn, XZR / TST Rn, Rn. --
+
+    // cmp w0, wzr ; b.eq ; ret -- shifted-reg form folds same as #0.
+    cmp_w_reg(&code[0], 0, 31);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp x5, xzr ; b.ne ; ret
+    cmp_x_reg(&code[0], 5, 31);
+    b_cond(&code[4], 1, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst w0, w0 ; b.eq ; ret -- ANDS XZR, w0, w0 form.
+    tst_w_reg(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst x5, x5 ; b.ne ; ret
+    tst_x_reg(&code[0], 5, 5);
+    b_cond(&code[4], 1, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst w0, w1 ; b.eq -- not a self-AND, no fold.
+    tst_w_reg(&code[0], 0, 1);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmp w0, w1 ; b.eq -- Rm != XZR, no fold (it's a register compare).
+    cmp_w_reg(&code[0], 0, 1);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // tst wzr, wzr ; b.eq -- Rn=31 excluded.
+    tst_w_reg(&code[0], 31, 31);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmp wzr, wzr ; b.eq -- Rn=31 excluded.
+    cmp_w_reg(&code[0], 31, 31);
+    b_cond(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 }
 
 static void test_tst_branch(void)
@@ -1029,6 +1187,58 @@ static void test_redundant_zext(void)
     ADD_W(&code[4], 0, 2, 0);
     uxtw(&code[8], 0, 0);
     assert(run_helper_check(code, 12) == 2);
+
+    // -- Load producers: P depends on access width. --
+
+    // ldr w0, [x1] ; uxtw x0, w0 -- LDR W (P=32) + UXTW (C=32).
+    LDR_W(&code[0], 0, 1, 0);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w0, [x1] ; uxth w0, w0 -- LDRH (P=16) + UXTH W (C=16).
+    LDRH_W(&code[0], 0, 1, 0);
+    uxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w0, [x1] ; uxtw x0, w0 -- LDRH (P=16) + UXTW (C=32), still redundant.
+    LDRH_W(&code[0], 0, 1, 0);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w0, [x1] ; uxth x0, w0 -- LDRH + UXTH X form (C=16).
+    LDRH_W(&code[0], 0, 1, 0);
+    uxth_x(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrb w0, [x1] ; uxtb w0, w0 -- LDRB (P=8) + UXTB (C=8).
+    LDRB_W(&code[0], 0, 1, 0);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrb w0, [x1] ; uxth w0, w0 -- LDRB (P=8) + UXTH (C=16), still redundant.
+    LDRB_W(&code[0], 0, 1, 0);
+    uxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrb w0, [x1] ; and w0, w0, #0xff -- LDRB (P=8) + AND W #0xFF (C=8).
+    LDRB_W(&code[0], 0, 1, 0);
+    and_w_ff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w0, [x1] ; uxtb w0, w0 -- LDRH (P=16) > UXTB (C=8); NOT redundant.
+    LDRH_W(&code[0], 0, 1, 0);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ldr w0, [x1] ; uxth w0, w0 -- LDR W (P=32) > UXTH (C=16); NOT redundant.
+    LDR_W(&code[0], 0, 1, 0);
+    uxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // add w0, w1, w2 ; uxth w0, w0 -- ADD (P=32) > UXTH (C=16); NOT redundant.
+    ADD_W(&code[0], 0, 1, 2);
+    uxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 int main(void)
