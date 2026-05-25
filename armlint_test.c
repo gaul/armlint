@@ -347,6 +347,7 @@ static void encode_sr(uint8_t out[4], uint32_t base,
 #define AND_W(out, rd, rn, rm)  encode_sr(out, 0x0a000000u, rd, rn, rm)
 #define AND_X(out, rd, rn, rm)  encode_sr(out, 0x8a000000u, rd, rn, rm)
 #define ANDS_W(out, rd, rn, rm) encode_sr(out, 0x6a000000u, rd, rn, rm)
+#define ANDS_X(out, rd, rn, rm) encode_sr(out, 0xea000000u, rd, rn, rm)
 #define BIC_W(out, rd, rn, rm)  encode_sr(out, 0x0a200000u, rd, rn, rm)
 #define BICS_W(out, rd, rn, rm) encode_sr(out, 0x6a200000u, rd, rn, rm)
 #define ORN_W(out, rd, rn, rm)  encode_sr(out, 0x2a200000u, rd, rn, rm)
@@ -3302,6 +3303,112 @@ static void test_mov_add_sub_imm_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_mov_logic_imm_fold(void)
+{
+    uint8_t code[16];
+
+    // AND: movz x0, #0xff ; and x3, x2, x0  -> and x3, x2, #0xff.
+    movz_x(&code[0], 0, 0xFF, 0);
+    AND_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Commutativity (Rn from MOV).
+    movz_x(&code[0], 0, 0xFF, 0);
+    AND_X(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W form.
+    movz_w(&code[0], 0, 0xFF);
+    AND_W(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ORR.
+    movz_x(&code[0], 0, 0xFF, 0);
+    ORR_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // EOR.
+    movz_x(&code[0], 0, 0xFF, 0);
+    EOR_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ANDS.
+    movz_x(&code[0], 0, 0xFF, 0);
+    ANDS_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // TST alias (ANDS with Rd = XZR).
+    movz_x(&code[0], 0, 0xFF, 0);
+    ANDS_X(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 16-bit bitmask: movz x0, #0xffff ; and x3, x2, x0.
+    movz_x(&code[0], 0, 0xFFFF, 0);
+    AND_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Two-MOV chain producing 0xffff0000ffff0000 (esize=32 bitmask).
+    // 0xFFFF0000 in 64-bit also has a bitmask encoding (rotated run).
+    // First check via a single MOVZ at shift 16 giving 0xFFFF0000.
+    movz_x(&code[0], 0, 0xFFFF, 1);
+    AND_X(&code[4], 3, 2, 0);
+    // This is a single MOVZ + AND -- 1 finding from our check;
+    // check_movz_movk_bitmask requires chain >= 2 so it doesn't fire.
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: C = 5 (binary 101) is not a bitmask immediate
+    // (non-contiguous bits, no replicated-run encoding).
+    movz_x(&code[0], 0, 5, 0);
+    AND_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: C = 0 (excluded from bitmask immediates).
+    movz_x(&code[0], 0, 0, 0);
+    AND_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: BIC (N = 1 in the encoding) has no immediate form.
+    movz_x(&code[0], 0, 0xFF, 0);
+    BIC_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ORN (N = 1).
+    movz_x(&code[0], 0, 0xFF, 0);
+    ORN_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch.
+    movz_w(&code[0], 0, 0xFF);
+    AND_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: MOV does not feed the AND.
+    movz_x(&code[0], 0, 0xFF, 0);
+    AND_X(&code[4], 3, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening instruction closes the chain.
+    movz_x(&code[0], 0, 0xFF, 0);
+    ADD_X(&code[4], 5, 5, 6);
+    AND_X(&code[8], 3, 2, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: non-ANDS write to ZR (dead code).
+    movz_x(&code[0], 0, 0xFF, 0);
+    AND_X(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: shifted AND (imm6 != 0).
+    movz_x(&code[0], 0, 0xFF, 0);
+    uint32_t op_and_lsl2 = 0x8A000000u
+        | (0u << 16) | (2u << 10) | (2u << 5) | 3u;
+    code[4] = op_and_lsl2 & 0xff;
+    code[5] = (op_and_lsl2 >> 8) & 0xff;
+    code[6] = (op_and_lsl2 >> 16) & 0xff;
+    code[7] = (op_and_lsl2 >> 24) & 0xff;
+    assert(run_helper_check(code, 8) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -3330,6 +3437,7 @@ int main(void)
     test_mul_strength_reduce();
     test_mneg_strength_reduce();
     test_mov_add_sub_imm_fold();
+    test_mov_logic_imm_fold();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

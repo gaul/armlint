@@ -2804,6 +2804,161 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// Logical shifted-register (AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS) with
+// LSL #0 and the N bit clear -- i.e., AND/ORR/EOR/ANDS only. The
+// N = 1 family (BIC/ORN/EON/BICS) has no immediate-form equivalent
+// in AArch64, so it's filtered out here. Fixed-bit mask 0x1F000000,
+// value 0x0A000000; shift_type at bits 23..22 must be 00 (LSL); N at
+// bit 21 must be 0; imm6 at bits 15..10 must be 0. opc at bits 30..29
+// selects: 00=AND, 01=ORR, 10=EOR, 11=ANDS.
+static bool decode_logic_shifted_lsl0(uint32_t op,
+                                      unsigned *out_sf,
+                                      unsigned *out_opc,
+                                      unsigned *out_rd,
+                                      unsigned *out_rn,
+                                      unsigned *out_rm)
+{
+    if ((op & 0x1F000000u) != 0x0A000000u) {
+        return false;
+    }
+    unsigned shift_type = (op >> 22) & 0x3u;
+    if (shift_type != 0) {
+        return false;
+    }
+    unsigned N = (op >> 21) & 0x1u;
+    if (N != 0) {
+        return false;
+    }
+    unsigned imm6 = (op >> 10) & 0x3Fu;
+    if (imm6 != 0) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_opc = (op >> 29) & 0x3u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    unsigned sf, opc, rd, rn, rm;
+    if (!decode_logic_shifted_lsl0(op, &sf, &opc, &rd, &rn, &rm)) {
+        return false;
+    }
+
+    bool is_64bit = (sf != 0);
+    if (is_64bit != state->mov_is_64bit) {
+        return false;
+    }
+
+    // ANDS (opc=3) with Rd=ZR is TST -- a meaningful flag-setting
+    // instruction. Other variants writing ZR are dead and skipped.
+    bool is_ands = (opc == 3);
+    if (rd == 31 && !is_ands) {
+        return false;
+    }
+
+    // AND/ORR/EOR/ANDS are all commutative -- either operand may be
+    // the MOV destination.
+    unsigned other;
+    if (rm == state->mov_rd) {
+        other = rn;
+    } else if (rn == state->mov_rd) {
+        other = rm;
+    } else {
+        return false;
+    }
+
+    // ZR as the non-MOV operand makes the op degenerate:
+    //   AND/ANDS Rd, ZR, X<C>  = MOV Rd, ZR (always zero)
+    //   ORR Rd, ZR, X<C>       = MOV Rd, X<C>  (the canonical MOV)
+    //   EOR Rd, ZR, X<C>       = MOV Rd, X<C>
+    // None match the typical bitmask-imm fold pattern.
+    if (other == 31) {
+        return false;
+    }
+
+    uint64_t c = state->mov_value;
+    unsigned reg_width = is_64bit ? 64u : 32u;
+    if (!is_bitmask_immediate(c, reg_width)) {
+        return false;
+    }
+
+    char w_or_x = is_64bit ? 'x' : 'w';
+    const char *mnem;
+    const char *alias = NULL;
+    switch (opc) {
+        case 0: mnem = "and"; break;
+        case 1: mnem = "orr"; break;
+        case 2: mnem = "eor"; break;
+        case 3:
+            mnem = "ands";
+            if (rd == 31) {
+                alias = "tst";
+            }
+            break;
+        default:
+            return false;
+    }
+
+    out->name = "MOV + AND/ORR/EOR foldable to bitmask immediate";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    if (alias != NULL) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, #0x%" PRIx64,
+            alias, w_or_x, other, c);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, %c%u, #0x%" PRIx64,
+            mnem, w_or_x, rd, w_or_x, other, c);
+    }
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %c%u, %c%u, %c%u",
+        mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+
+    return true;
+}
+
 // Decode the unsigned-offset LDR/STR (32-bit or 64-bit, general
 // register, non-atomic, non-SIMD). Encoding mask 0xBF800000, value
 // 0xB9000000 leaves bit 30 (size[0]: 0=W, 1=X) and bit 22 (opc[0]:
@@ -3043,6 +3198,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mul_strength_reduce,
     check_mneg_strength_reduce,
     check_mov_add_sub_imm_fold,
+    check_mov_logic_imm_fold,
     check_movz_movk_bitmask,
     check_lsl_fold,
     check_cmp_zero_branch,

@@ -255,6 +255,25 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
 bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
+// Detect AND/ORR/EOR/ANDS (shifted-register, LSL #0, N = 0) where one
+// operand is set by an immediately preceding MOV chain to a constant
+// C that is a valid AArch64 bitmask immediate at the consumer's width.
+// The pair folds to the immediate form:
+//   mov xc, #C ; and  xd, xn, xc -> and  xd, xn, #C
+//   mov xc, #C ; orr  xd, xn, xc -> orr  xd, xn, #C
+//   mov xc, #C ; eor  xd, xn, xc -> eor  xd, xn, #C
+//   mov xc, #C ; ands xd, xn, xc -> ands xd, xn, #C   (TST when Rd=ZR)
+// is_bitmask_immediate is used as the encodability predicate; values
+// 0 and the all-ones-at-width are not bitmask immediates, so the
+// trivial-constant cases naturally skip.
+//
+// The N = 1 family (BIC/ORN/EON/BICS) has no immediate-form
+// equivalent in AArch64 and is not folded. AND/ORR/EOR/ANDS are all
+// commutative, so either Rn or Rm may be the MOV destination. ZR as
+// the non-MOV operand is excluded (degenerate).
+bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

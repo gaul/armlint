@@ -352,6 +352,24 @@ code, and documents corners of the A64 instruction set.
     Go-compiled binaries (`kubectl`, `docker`) and Firefox's `XUL`
     leak the pattern often; survey found 230 hits in XUL, 35 each
     in kubectl/docker, 12 in dyld, with smaller counts elsewhere.
+* MOV + AND/ORR/EOR/ANDS foldable to bitmask immediate
+  - `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when
+    `C` is a valid AArch64 bitmask immediate (a rotated run of
+    consecutive 1s at one of esize=2/4/8/16/32/64). Same for
+    `ORR`, `EOR`, and `ANDS` -- and the `TST` alias (`ANDS` with
+    `Rd == ZR`).
+  - Reuses `is_bitmask_immediate` as the encodability predicate; 0
+    and the all-ones-at-width are not bitmask immediates, so those
+    trivial constants naturally skip.
+  - The N = 1 family (`BIC`, `ORN`, `EON`, `BICS`) has no
+    immediate form in AArch64 and is excluded by the decoder.
+  - All four are commutative; either Rn or Rm may be the MOV
+    destination.
+  - Real-binary survey: 187 hits in Firefox's XUL (mostly single-bit
+    or shifted-bit OR patterns like `orr xd, xn, #(1<<40)`), 0 in
+    kubectl/docker/dyld/git/python3/openssl. Different distribution
+    from the ADD/SUB-imm check because the bitmask-imm encoding
+    excludes most arbitrary small constants.
 
 ## Compilation
 
