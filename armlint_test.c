@@ -2811,6 +2811,49 @@ static void test_ldp_stp_coalesce(void)
 
     LDR_W(&code[0], 0, 2, 0);
     assert(run_helper_check(code, 4) == 0);
+
+    // -- Positive: adjacent LDRSWs become LDPSW. --
+
+    // ldrsw x0, [x2, #0] ; ldrsw x1, [x2, #4] -> ldpsw x0, x1, [x2, #0]
+    LDRSW_X(&code[0], 0, 2, 0);
+    LDRSW_X(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: LDPSW at the highest in-range offset (imm12 = 63
+    //    for word transfer -> byte 252). --
+
+    LDRSW_X(&code[0], 0, 2, 63);
+    LDRSW_X(&code[4], 1, 2, 64);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: first LDRSW imm12 > 63. --
+
+    LDRSW_X(&code[0], 0, 2, 64);
+    LDRSW_X(&code[4], 1, 2, 65);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: kind mismatch -- LDR (zext) does not pair with
+    //    LDRSW (sext). --
+
+    LDR_W(&code[0], 0, 2, 0);
+    LDRSW_X(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    LDRSW_X(&code[0], 0, 2, 0);
+    LDR_W(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: same Rt for both LDRSWs. --
+
+    LDRSW_X(&code[0], 0, 2, 0);
+    LDRSW_X(&code[4], 0, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: LDRSW load aliasing (first Rt == Rn). --
+
+    LDRSW_X(&code[0], 2, 2, 0);   // first LDRSW clobbers base x2
+    LDRSW_X(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 int main(void)

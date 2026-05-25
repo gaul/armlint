@@ -177,15 +177,19 @@ struct armlint_state {
     char bfx_clear_disasm[ARMLINT_FINDING_LINE_LEN];
     char bfx_isolate_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // Pending unsigned-offset LDR/STR awaiting an adjacent partner
-    // for LDP/STP coalescing. The next LDR/STR with the same Rn,
-    // same direction (load/load or store/store), same access size
-    // (W/W or X/X), and imm12 = previous + 1 (in scaled units)
-    // closes the pair into an LDP/STP. Strict adjacency: any
-    // non-LDR/STR instruction expires the state.
+    // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
+    // partner for LDP/STP/LDPSW coalescing. The next instruction of
+    // the same kind (sext or zext) with the same Rn, same direction
+    // (load/load or store/store), same access size (W/W or X/X), and
+    // imm12 = previous + 1 (in scaled units) closes the pair into an
+    // LDP/STP/LDPSW. Strict adjacency: any non-matching instruction
+    // expires the state. lsp_is_sext flags an LDRSW (always Xt, load,
+    // 4-byte transfer); otherwise lsp_is_64bit selects W/X and
+    // lsp_is_load selects load/store.
     bool lsp_active;
     bool lsp_is_load;
     bool lsp_is_64bit;
+    bool lsp_is_sext;
     unsigned lsp_rt;
     unsigned lsp_rn;
     unsigned lsp_imm12;
@@ -2354,6 +2358,24 @@ static bool decode_ldr_str_uimm(uint32_t op, bool *out_is_load,
     return true;
 }
 
+// Decode the unsigned-offset LDRSW (X-form, 32-bit load sign-extended
+// to 64-bit). Encoding: size=10 (word), V=0, opc=10 (sign-extend to
+// X). Mask 0xFFC00000, value 0xB9800000 fully constrains the family;
+// imm12 is scaled by 4 like LDR W. The destination is always Xt and
+// the operation is always load, so no direction or size fields are
+// returned.
+static bool decode_ldrsw_uimm(uint32_t op, unsigned *out_imm12,
+                              unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0xFFC00000u) != 0xB9800000u) {
+        return false;
+    }
+    *out_imm12 = (op >> 10) & 0xFFFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
 bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -2367,18 +2389,25 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         | ((uint32_t)insn->bytes[2] << 16)
         | ((uint32_t)insn->bytes[3] << 24);
 
-    bool is_load, is_64bit;
+    bool is_load = false, is_64bit = false, is_sext = false;
     unsigned imm12, rn, rt;
 
-    if (!decode_ldr_str_uimm(op, &is_load, &is_64bit, &imm12, &rn, &rt)) {
-        // Non-LDR/STR expires the window (strict adjacency).
+    if (decode_ldrsw_uimm(op, &imm12, &rn, &rt)) {
+        // LDRSW: always load, always Xt, transfer = 4 bytes.
+        is_load = true;
+        is_64bit = true;
+        is_sext = true;
+    } else if (!decode_ldr_str_uimm(op, &is_load, &is_64bit, &imm12,
+                                    &rn, &rt)) {
+        // Non-LDR/STR/LDRSW expires the window (strict adjacency).
         state->lsp_active = false;
         return false;
     }
 
     bool produced = false;
 
-    // Try to close: does this LDR/STR partner the pending one?
+    // Try to close: does this instruction partner the pending one?
+    //   - same kind (sext/zext) -- LDR cannot pair with LDRSW
     //   - same direction (load/load or store/store)
     //   - same size (W/W or X/X)
     //   - same base Rn
@@ -2390,6 +2419,7 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     //   - first imm12 fits LDP/STP imm7 (signed 7-bit, scaled),
     //     i.e., the first imm12 must be <= 63 (unsigned).
     if (state->lsp_active
+            && state->lsp_is_sext == is_sext
             && state->lsp_is_load == is_load
             && state->lsp_is_64bit == is_64bit
             && state->lsp_rn == rn
@@ -2397,13 +2427,25 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
             && rt != state->lsp_rt
             && state->lsp_imm12 <= 63u
             && (!is_load || state->lsp_rt != rn)) {
-        char w_or_x = is_64bit ? 'x' : 'w';
-        const char *pair_mnem = is_load ? "ldp" : "stp";
-        unsigned byte_off = state->lsp_imm12 * (is_64bit ? 8u : 4u);
+        // LDPSW always loads Xt with 4-byte transfer; otherwise the
+        // register width follows is_64bit and transfer size matches.
+        char w_or_x = is_sext ? 'x' : (is_64bit ? 'x' : 'w');
+        unsigned xfer = is_sext ? 4u : (is_64bit ? 8u : 4u);
+        const char *pair_mnem;
+        if (is_sext) {
+            pair_mnem = "ldpsw";
+        } else {
+            pair_mnem = is_load ? "ldp" : "stp";
+        }
+        unsigned byte_off = state->lsp_imm12 * xfer;
 
-        out->name = is_load
-            ? "adjacent LDRs foldable into LDP"
-            : "adjacent STRs foldable into STP";
+        if (is_sext) {
+            out->name = "adjacent LDRSWs foldable into LDPSW";
+        } else {
+            out->name = is_load
+                ? "adjacent LDRs foldable into LDP"
+                : "adjacent STRs foldable into STP";
+        }
         out->start_offset = state->lsp_offset;
         out->insn_count = 2;
         clear_finding_strings(out);
@@ -2424,14 +2466,15 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
             "%s %s", insn->mnemonic, insn->op_str);
         produced = true;
 
-        // Reset to avoid overlapping pairs (4 consecutive LDRs
-        // become 2 non-overlapping LDPs, not 3 overlapping ones).
+        // Reset to avoid overlapping pairs (4 consecutive loads
+        // become 2 non-overlapping pairs, not 3 overlapping ones).
         state->lsp_active = false;
     } else {
-        // Open new state with the current LDR/STR.
+        // Open new state with the current instruction.
         state->lsp_active = true;
         state->lsp_is_load = is_load;
         state->lsp_is_64bit = is_64bit;
+        state->lsp_is_sext = is_sext;
         state->lsp_rt = rt;
         state->lsp_rn = rn;
         state->lsp_imm12 = imm12;

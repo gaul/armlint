@@ -212,6 +212,16 @@ code, and documents corners of the A64 instruction set.
     pairs), but neither are two separate LDRs. So the rewrite
     doesn't change ordering or atomicity guarantees -- acquire /
     release variants use different opcodes.
+  - Adjacent unsigned-offset `LDRSW Xt, [Rn, #imm12*4]` pairs fold
+    analogously into a single `LDPSW Xt1, Xt2, [Rn, #imm7*4]`. Same
+    constraints (same base, consecutive offsets, distinct Rts, first
+    `Rt != Rn`, first imm12 <= 63), with the added requirement that
+    the kind matches: a pending `LDR` does not pair with an `LDRSW`
+    (different opcode, different sign-extension semantics). LDPSW is
+    always 64-bit destination, load-only, 4-byte transfer. LLVM is
+    aggressive about emitting LDPSW directly, so LLVM-built system
+    binaries show 0 hits; Go-compiled binaries (`kubectl`, `docker`,
+    ...) commonly leave un-coalesced LDRSW pairs.
 * BFXIL synthesis via AND-AND-ORR
   - `AND Rd, Rd, #~mask ; AND Rt, Rs, #mask ; ORR Rd, Rd, Rt` (with
     `mask = (1<<w)-1`, the two ANDs in either order, and the ORR's
