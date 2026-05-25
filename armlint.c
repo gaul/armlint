@@ -1079,8 +1079,9 @@ static bool advance_one_pending(uint32_t op, bool *active, unsigned *window,
 }
 
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
-                             armlint_finding *out)
+                             size_t offset, armlint_finding *out)
 {
+    (void)offset;
     if (insn->size != 4) {
         state->pending_active = false;
         return false;
@@ -1095,8 +1096,9 @@ bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
 }
 
 bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
-                                armlint_finding *out)
+                                size_t offset, armlint_finding *out)
 {
+    (void)offset;
     if (insn->size != 4) {
         state->pending_sv_active = false;
         return false;
@@ -2545,6 +2547,34 @@ static void report_finding(const armlint_finding *finding)
     printf("\n");
 }
 
+// Single ordered list of every per-instruction action the driver
+// runs. The pre-instruction advancers come first (see the comment on
+// armlint_advance_pending); the rest are per-instruction checks. The
+// test harness's run_check iterates the same list, so adding a check
+// or advancer is a single-line edit here.
+const armlint_check_fn armlint_check_registry[] = {
+    armlint_advance_pending,
+    armlint_advance_pending_sv,
+    check_movz_movk_bitmask,
+    check_lsl_fold,
+    check_cmp_zero_branch,
+    check_tst_branch,
+    check_redundant_zext,
+    check_redundant_sext,
+    check_lsl_lsr_to_ubfx,
+    check_lsr_and_to_ubfx,
+    check_mov_reg_self,
+    check_add_sub_zero,
+    check_self_op,
+    check_csel_self,
+    check_bfxil_synth,
+    check_ldp_stp_coalesce,
+    check_redundant_cmp_after_s_variant,
+};
+
+const size_t armlint_check_registry_count =
+    sizeof(armlint_check_registry) / sizeof(armlint_check_registry[0]);
+
 // Stream the byte buffer one instruction at a time. cs_disasm would
 // require allocating a cs_insn for every instruction up front (5+ GB on
 // a 100 MB text section) and silently stops at the first undecodable
@@ -2571,80 +2601,14 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     while (size >= 4) {
         uint64_t insn_addr = address;
         if (cs_disasm_iter(handle, &code, &size, &address, insn)) {
-            armlint_finding finding;
             size_t offset = (size_t)(insn_addr - base_addr);
-            // Advance deferred CMP/TST findings before running the
-            // per-instruction checks, so that a check setting a new
-            // pending in its step (1) isn't immediately re-advanced
-            // against the same instruction.
-            if (armlint_advance_pending(state, insn, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (armlint_advance_pending_sv(state, insn, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_movz_movk_bitmask(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_lsl_fold(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_cmp_zero_branch(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_tst_branch(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_redundant_zext(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_redundant_sext(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_lsl_lsr_to_ubfx(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_lsr_and_to_ubfx(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_mov_reg_self(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_add_sub_zero(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_self_op(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_csel_self(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_bfxil_synth(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_ldp_stp_coalesce(state, insn, offset, &finding)) {
-                report_finding(&finding);
-                errors++;
-            }
-            if (check_redundant_cmp_after_s_variant(state, insn, offset,
-                                                    &finding)) {
-                report_finding(&finding);
-                errors++;
+            for (size_t k = 0; k < armlint_check_registry_count; k++) {
+                armlint_finding finding;
+                if (armlint_check_registry[k](state, insn, offset,
+                                              &finding)) {
+                    report_finding(&finding);
+                    errors++;
+                }
             }
         } else {
             // Treat the slot as opaque data and skip a single A64

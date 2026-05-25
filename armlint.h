@@ -61,6 +61,24 @@ typedef struct {
     char lines[ARMLINT_FINDING_LINES][ARMLINT_FINDING_LINE_LEN];
 } armlint_finding;
 
+// Shared signature for per-instruction checks and pre-instruction
+// pending-state advancers. Each returns true and fills *out when it
+// produces a finding for the given instruction; the advancers ignore
+// offset (their finding's offset was recorded when the deferred state
+// was opened).
+typedef bool (*armlint_check_fn)(armlint_state *state, const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
+
+// Ordered table of every check the driver runs per instruction. The
+// pre-instruction advancers (armlint_advance_pending*) appear at the
+// front of the list and must run before the per-instruction checks --
+// see the comment on armlint_advance_pending for why ordering matters.
+// Iterate from 0 to armlint_check_registry_count - 1; both
+// check_instructions (driver) and the test harness drive findings off
+// this single list, so adding a check requires editing only one place.
+extern const armlint_check_fn armlint_check_registry[];
+extern const size_t armlint_check_registry_count;
+
 // Examine insn (already decoded by Capstone) in the context of recent
 // instructions. Returns true if a finding is produced (in *out); false
 // otherwise. May produce a finding when a non-matching instruction
@@ -189,9 +207,10 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
 // once per instruction BEFORE running the per-instruction checks; if
 // it were called after, a check setting a new pending in its step (1)
 // would be immediately advanced against the same instruction and
-// likely suppressed.
+// likely suppressed. The offset parameter exists for compatibility
+// with the shared armlint_check_fn signature; it is unused.
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
-                             armlint_finding *out);
+                             size_t offset, armlint_finding *out);
 
 // Detect an S-variant ALU (ADDS/SUBS/ANDS/BICS/ADCS/SBCS) writing Rd,
 // followed immediately by CMP/TST-zero of Rd, followed immediately by
@@ -209,9 +228,10 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 // Advance the deferred "redundant CMP after S-variant" finding's
 // flag-liveness scan by one instruction. Parallel to
 // armlint_advance_pending; call before per-instruction checks each
-// step.
+// step. The offset parameter exists for compatibility with the shared
+// armlint_check_fn signature; it is unused.
 bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
-                                armlint_finding *out);
+                                size_t offset, armlint_finding *out);
 
 // Close any open sequence at end-of-region. Returns true and fills *out
 // if the closed sequence is reportable.

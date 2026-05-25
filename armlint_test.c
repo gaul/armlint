@@ -41,59 +41,12 @@ static int run_check(const uint8_t *code, size_t code_size)
 
     int findings = 0;
     for (size_t i = 0; i < count; i++) {
-        armlint_finding f;
         size_t offset = (size_t)insns[i].address;
-        if (armlint_advance_pending(state, &insns[i], &f)) {
-            findings++;
-        }
-        if (armlint_advance_pending_sv(state, &insns[i], &f)) {
-            findings++;
-        }
-        if (check_movz_movk_bitmask(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_lsl_fold(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_cmp_zero_branch(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_tst_branch(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_redundant_zext(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_redundant_sext(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_lsl_lsr_to_ubfx(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_lsr_and_to_ubfx(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_mov_reg_self(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_add_sub_zero(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_self_op(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_csel_self(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_bfxil_synth(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_ldp_stp_coalesce(state, &insns[i], offset, &f)) {
-            findings++;
-        }
-        if (check_redundant_cmp_after_s_variant(state, &insns[i], offset,
-                                                &f)) {
-            findings++;
+        for (size_t k = 0; k < armlint_check_registry_count; k++) {
+            armlint_finding f;
+            if (armlint_check_registry[k](state, &insns[i], offset, &f)) {
+                findings++;
+            }
         }
     }
 
