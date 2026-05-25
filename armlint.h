@@ -274,6 +274,32 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// Detect a MOV chain that materialises the constant 0, immediately
+// followed by an instruction that reads that register. The read can
+// be replaced by XZR/WZR (the architectural zero register), making
+// the MOV dead. Three consumer families are covered:
+//   - STR (B/H/W/X, unsigned-offset) with Rt == mov_rd
+//       -> str <wzr/xzr>, [...]
+//   - ADD/SUB/ADDS/SUBS (shifted-register, LSL #0) with Rn or Rm ==
+//     mov_rd  -> the same op with that operand replaced by ZR. CMP /
+//     CMN aliases (S-variant + Rd == ZR) are rendered as the alias.
+//   - AND/ORR/EOR/ANDS (shifted-register, LSL #0, N == 0) with Rn or
+//     Rm == mov_rd -> the same op with that operand replaced by ZR.
+//     TST alias (ANDS + Rd == ZR) is rendered as the alias.
+//
+// The consumer's instruction count does not change; the savings come
+// from the now-dead MOV (assuming Xd is not read elsewhere). The
+// rewrite suggestion shows the literal "use ZR" form; further
+// simplification (e.g. ADD Rd, Rn, XZR -> MOV Rd, Rn, or
+// SUB Rd, XZR, Rm -> NEG Rd, Rm) is left to the reader.
+//
+// Rn = 31 in addressing means SP (not ZR), so the STR base register
+// is intentionally not considered a fold candidate -- only the Rt
+// data slot. For arithmetic/logical shifted-register forms,
+// Rn = Rm = 31 both denote ZR, so either operand is foldable.
+bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

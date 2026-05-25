@@ -2959,6 +2959,246 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// Decode unsigned-offset STR (any size: B/H/W/X), integer-register
+// form only. Mask 0x3FC00000 covers bits 29..22 (the LDR/STR opcode
+// block plus V bit and opc bits). Value 0x39000000 fixes V=0,
+// opc=00 (STR). Size at bits 31..30 is left free so all four widths
+// match; bit 24 = 1 selects the unsigned-offset addressing form.
+static bool decode_str_uimm_any_size(uint32_t op,
+                                     unsigned *out_size,
+                                     unsigned *out_imm12,
+                                     unsigned *out_rn,
+                                     unsigned *out_rt)
+{
+    if ((op & 0x3FC00000u) != 0x39000000u) {
+        return false;
+    }
+    *out_size = (op >> 30) & 0x3u;
+    *out_imm12 = (op >> 10) & 0xFFFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// Render the MOV chain into out->lines[0 .. chain_n-1] and the
+// consumer disassembly into out->lines[chain_n]. Shared by the three
+// branches of check_mov_zero_to_xzr.
+static void mov_zero_finding_render_lines(const armlint_state *state,
+                                          armlint_finding *out,
+                                          const char *consumer_line)
+{
+    char mov_w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, mov_w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, mov_w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s", consumer_line);
+}
+
+// Format a register name as "<wx>NN" or "<wx>zr" (when reg == 31).
+static void format_reg(char *buf, size_t bufsz, char w_or_x, unsigned reg)
+{
+    if (reg == 31) {
+        snprintf(buf, bufsz, "%czr", w_or_x);
+    } else {
+        snprintf(buf, bufsz, "%c%u", w_or_x, reg);
+    }
+}
+
+bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+    if (state->mov_value != 0) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (a) STR (any size, unsigned-offset) with Rt == mov_rd.
+    {
+        unsigned size, imm12, rn, rt;
+        if (decode_str_uimm_any_size(op, &size, &imm12, &rn, &rt)
+                && rt == state->mov_rd) {
+            const char *str_mnem;
+            char rt_wx;
+            unsigned scale_shift;
+            switch (size) {
+                case 0: str_mnem = "strb"; rt_wx = 'w'; scale_shift = 0; break;
+                case 1: str_mnem = "strh"; rt_wx = 'w'; scale_shift = 1; break;
+                case 2: str_mnem = "str";  rt_wx = 'w'; scale_shift = 2; break;
+                case 3: str_mnem = "str";  rt_wx = 'x'; scale_shift = 3; break;
+                default: return false;
+            }
+            unsigned bytes = imm12 << scale_shift;
+            char base_buf[8];
+            if (rn == 31) {
+                snprintf(base_buf, sizeof(base_buf), "sp");
+            } else {
+                snprintf(base_buf, sizeof(base_buf), "x%u", rn);
+            }
+
+            out->name = "MOV #0 + use foldable to ZR";
+            out->start_offset = state->mov_start_offset;
+            out->insn_count = state->mov_insn_count + 1;
+            clear_finding_strings(out);
+
+            char consumer_line[ARMLINT_FINDING_LINE_LEN];
+            if (bytes == 0) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %czr, [%s]", str_mnem, rt_wx, base_buf);
+                snprintf(consumer_line, sizeof(consumer_line),
+                    "%s %c%u, [%s]", str_mnem, rt_wx, rt, base_buf);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %czr, [%s, #0x%x]",
+                    str_mnem, rt_wx, base_buf, bytes);
+                snprintf(consumer_line, sizeof(consumer_line),
+                    "%s %c%u, [%s, #0x%x]",
+                    str_mnem, rt_wx, rt, base_buf, bytes);
+            }
+            mov_zero_finding_render_lines(state, out, consumer_line);
+            return true;
+        }
+    }
+
+    // (b) ADD/SUB shifted-register-LSL0 with mov_rd as Rn or Rm.
+    {
+        unsigned sf, rd, rn, rm;
+        bool is_sub, is_s;
+        if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                        &rd, &rn, &rm)) {
+            if (rn == state->mov_rd || rm == state->mov_rd) {
+                char wx = (sf != 0) ? 'x' : 'w';
+                const char *mnem;
+                if (is_sub) {
+                    mnem = is_s ? "subs" : "sub";
+                } else {
+                    mnem = is_s ? "adds" : "add";
+                }
+                const char *alias = NULL;
+                if (rd == 31 && is_s) {
+                    alias = is_sub ? "cmp" : "cmn";
+                }
+                unsigned new_rn = (rn == state->mov_rd) ? 31u : rn;
+                unsigned new_rm = (rm == state->mov_rd) ? 31u : rm;
+
+                char rd_buf[8], orig_rn_buf[8], orig_rm_buf[8];
+                char new_rn_buf[8], new_rm_buf[8];
+                format_reg(rd_buf, sizeof(rd_buf), wx, rd);
+                format_reg(orig_rn_buf, sizeof(orig_rn_buf), wx, rn);
+                format_reg(orig_rm_buf, sizeof(orig_rm_buf), wx, rm);
+                format_reg(new_rn_buf, sizeof(new_rn_buf), wx, new_rn);
+                format_reg(new_rm_buf, sizeof(new_rm_buf), wx, new_rm);
+
+                out->name = "MOV #0 + use foldable to ZR";
+                out->start_offset = state->mov_start_offset;
+                out->insn_count = state->mov_insn_count + 1;
+                clear_finding_strings(out);
+
+                char consumer_line[ARMLINT_FINDING_LINE_LEN];
+                if (alias != NULL) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %s, %s", alias, new_rn_buf, new_rm_buf);
+                    snprintf(consumer_line, sizeof(consumer_line),
+                        "%s %s, %s", alias, orig_rn_buf, orig_rm_buf);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %s, %s, %s",
+                        mnem, rd_buf, new_rn_buf, new_rm_buf);
+                    snprintf(consumer_line, sizeof(consumer_line),
+                        "%s %s, %s, %s",
+                        mnem, rd_buf, orig_rn_buf, orig_rm_buf);
+                }
+                mov_zero_finding_render_lines(state, out, consumer_line);
+                return true;
+            }
+        }
+    }
+
+    // (c) AND/ORR/EOR/ANDS shifted-register-LSL0 with mov_rd as Rn or Rm.
+    {
+        unsigned sf, opc_l, rd, rn, rm;
+        if (decode_logic_shifted_lsl0(op, &sf, &opc_l, &rd, &rn, &rm)) {
+            if (rn == state->mov_rd || rm == state->mov_rd) {
+                char wx = (sf != 0) ? 'x' : 'w';
+                const char *mnem;
+                switch (opc_l) {
+                    case 0: mnem = "and"; break;
+                    case 1: mnem = "orr"; break;
+                    case 2: mnem = "eor"; break;
+                    case 3: mnem = "ands"; break;
+                    default: return false;
+                }
+                const char *alias = NULL;
+                if (opc_l == 3 && rd == 31) {
+                    alias = "tst";
+                }
+                unsigned new_rn = (rn == state->mov_rd) ? 31u : rn;
+                unsigned new_rm = (rm == state->mov_rd) ? 31u : rm;
+
+                char rd_buf[8], orig_rn_buf[8], orig_rm_buf[8];
+                char new_rn_buf[8], new_rm_buf[8];
+                format_reg(rd_buf, sizeof(rd_buf), wx, rd);
+                format_reg(orig_rn_buf, sizeof(orig_rn_buf), wx, rn);
+                format_reg(orig_rm_buf, sizeof(orig_rm_buf), wx, rm);
+                format_reg(new_rn_buf, sizeof(new_rn_buf), wx, new_rn);
+                format_reg(new_rm_buf, sizeof(new_rm_buf), wx, new_rm);
+
+                out->name = "MOV #0 + use foldable to ZR";
+                out->start_offset = state->mov_start_offset;
+                out->insn_count = state->mov_insn_count + 1;
+                clear_finding_strings(out);
+
+                char consumer_line[ARMLINT_FINDING_LINE_LEN];
+                if (alias != NULL) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %s, %s", alias, new_rn_buf, new_rm_buf);
+                    snprintf(consumer_line, sizeof(consumer_line),
+                        "%s %s, %s", alias, orig_rn_buf, orig_rm_buf);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %s, %s, %s",
+                        mnem, rd_buf, new_rn_buf, new_rm_buf);
+                    snprintf(consumer_line, sizeof(consumer_line),
+                        "%s %s, %s, %s",
+                        mnem, rd_buf, orig_rn_buf, orig_rm_buf);
+                }
+                mov_zero_finding_render_lines(state, out, consumer_line);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 // Decode the unsigned-offset LDR/STR (32-bit or 64-bit, general
 // register, non-atomic, non-SIMD). Encoding mask 0xBF800000, value
 // 0xB9000000 leaves bit 30 (size[0]: 0=W, 1=X) and bit 22 (opc[0]:
@@ -3199,6 +3439,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mneg_strength_reduce,
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
+    check_mov_zero_to_xzr,
     check_movz_movk_bitmask,
     check_lsl_fold,
     check_cmp_zero_branch,

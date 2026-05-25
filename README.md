@@ -370,6 +370,27 @@ code, and documents corners of the A64 instruction set.
     kubectl/docker/dyld/git/python3/openssl. Different distribution
     from the ADD/SUB-imm check because the bitmask-imm encoding
     excludes most arbitrary small constants.
+* MOV #0 + use foldable to ZR
+  - `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Three consumer
+    families:
+    - `STR` (B/H/W/X, unsigned-offset) with `Rt == mov_rd`
+      -> `str <wzr/xzr>, [...]`. Saves the MOV when Rt-only.
+    - `ADD/SUB/ADDS/SUBS` (shifted-register, LSL #0) with Rn or Rm
+      == mov_rd -> the same op with that operand as ZR. `CMP`/`CMN`
+      aliases are rendered when Rd == ZR + S-variant.
+    - `AND/ORR/EOR/ANDS` (shifted-register, LSL #0, N = 0) with Rn
+      or Rm == mov_rd -> the same op with the operand as ZR. `TST`
+      alias when Rd == ZR + ANDS.
+  - The consumer's instruction count does not change, but the MOV
+    becomes dead (assuming no other read of `xd`). Further
+    simplification of forms like `ADD Rd, Rn, XZR -> MOV Rd, Rn` or
+    `SUB Rd, XZR, Rm -> NEG Rd, Rm` is left to the reader.
+  - The Rn (base) slot of STR is intentionally excluded: register 31
+    in addressing means SP, not ZR, so replacing the base would
+    silently change semantics.
+  - Hit density is very high in XUL (4466), modest in dyld (40) and
+    openssl (46); 0 in kubectl/docker/git/python3 -- Go's compiler
+    is good about emitting `STR XZR` directly.
 
 ## Compilation
 

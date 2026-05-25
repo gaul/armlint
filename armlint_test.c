@@ -3261,10 +3261,14 @@ static void test_mov_add_sub_imm_fold(void)
     SUB_X(&code[4], 3, 0, 2);  // SUB X3, X0, X2 -- Rn = X0 (from MOV)
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: C = 0 is the no-op pattern.
+    // C = 0 is intentionally not folded by check_mov_add_sub_imm_fold
+    // (the rewrite "ADD Rd, Rn, #0" is the MOV-or-no-op case). But
+    // check_mov_zero_to_xzr DOES fire on this pattern with a different
+    // rewrite suggestion ("use XZR for the second operand"), so the
+    // overall finding count is 1.
     movz_x(&code[0], 0, 0, 0);
     ADD_X(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
 
     // Negative: width mismatch (MOV W, ADD X).
     movz_w(&code[0], 0, 100);
@@ -3362,10 +3366,12 @@ static void test_mov_logic_imm_fold(void)
     AND_X(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: C = 0 (excluded from bitmask immediates).
+    // C = 0 is not a bitmask immediate so check_mov_logic_imm_fold
+    // skips, but check_mov_zero_to_xzr fires on it (suggesting "use
+    // XZR for the second AND operand"), so the overall count is 1.
     movz_x(&code[0], 0, 0, 0);
     AND_X(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
 
     // Negative: BIC (N = 1 in the encoding) has no immediate form.
     movz_x(&code[0], 0, 0xFF, 0);
@@ -3409,6 +3415,194 @@ static void test_mov_logic_imm_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// Encode STR Xt, [Xn, #imm] (X-form, unsigned offset, imm in 8-byte
+// units). Base 0xF9000000.
+static void str_x_uimm(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm)
+{
+    uint32_t op = 0xF9000000u
+        | ((imm & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode STRB Wt, [Xn, #imm] (byte store). Base 0x39000000.
+static void strb_w_uimm(uint8_t out[4], unsigned rt, unsigned rn,
+                        unsigned imm)
+{
+    uint32_t op = 0x39000000u
+        | ((imm & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode STRH Wt, [Xn, #imm] (halfword store). Base 0x79000000.
+static void strh_w_uimm(uint8_t out[4], unsigned rt, unsigned rn,
+                        unsigned imm)
+{
+    uint32_t op = 0x79000000u
+        | ((imm & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode LDR Xt, [Xn, #imm] (X-form load, unsigned offset). For
+// negative-test: LDR should NOT fire because the consumer family is
+// loads, not stores. Base 0xF9400000.
+static void ldr_x_uimm_for_test(uint8_t out[4], unsigned rt, unsigned rn,
+                                unsigned imm)
+{
+    uint32_t op = 0xF9400000u
+        | ((imm & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void test_mov_zero_to_xzr(void)
+{
+    uint8_t code[16];
+
+    // (a) STR family:
+    // STR X form.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // STR W form.
+    movz_w(&code[0], 0, 0);
+    STR_W(&code[4], 0, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // STRB.
+    movz_w(&code[0], 0, 0);
+    strb_w_uimm(&code[4], 0, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // STRH.
+    movz_w(&code[0], 0, 0);
+    strh_w_uimm(&code[4], 0, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // STR with non-zero offset.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 16);  // offset = 16*8 = 128 bytes
+    assert(run_helper_check(code, 8) == 1);
+
+    // STR with SP as base.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 31, 0);  // [sp]
+    assert(run_helper_check(code, 8) == 1);
+
+    // Width skew: X-form MOV, STR W (low bits of 0 are 0).
+    movz_x(&code[0], 0, 0, 0);
+    STR_W(&code[4], 0, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // (b) ADD/SUB shifted-LSL0:
+    // ADD with Rm = mov_rd -> use XZR.
+    movz_x(&code[0], 0, 0, 0);
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ADD with Rn = mov_rd (commutativity).
+    movz_x(&code[0], 0, 0, 0);
+    ADD_X(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB with Rm = mov_rd (-> MOV Rd, Rn).
+    movz_x(&code[0], 0, 0, 0);
+    SUB_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB with Rn = mov_rd (-> NEG Rd, Rm). The "SUB-from-zero" form.
+    movz_x(&code[0], 0, 0, 0);
+    SUB_X(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMP (SUBS XZR, Rn, Rm) with Rm = mov_rd -> "cmp xn, xzr".
+    movz_x(&code[0], 0, 0, 0);
+    cmp_x_reg_sr(&code[4], 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMN (ADDS XZR, Rn, Rm).
+    movz_x(&code[0], 0, 0, 0);
+    cmn_x_reg_sr(&code[4], 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // (c) AND/ORR/EOR shifted-LSL0:
+    // AND with Rm = mov_rd.
+    movz_x(&code[0], 0, 0, 0);
+    AND_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ORR with Rm = mov_rd -> MOV Rd, Rn (the canonical MOV
+    // register form is ORR Rd, XZR, Rm; this is the mirror).
+    movz_x(&code[0], 0, 0, 0);
+    ORR_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // EOR with Rm = mov_rd -> MOV Rd, Rn (XOR identity).
+    movz_x(&code[0], 0, 0, 0);
+    EOR_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // TST (ANDS XZR, ...).
+    movz_x(&code[0], 0, 0, 0);
+    ANDS_X(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negatives:
+    // Mov value not zero.
+    movz_x(&code[0], 0, 1, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // STR Rt != mov_rd.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 2, 1, 0);  // Rt = X2, not X0
+    assert(run_helper_check(code, 8) == 0);
+
+    // STR base = mov_rd (Rn slot): replacing Rn with ZR would mean SP,
+    // not XZR -- changes semantics. We don't fold this case.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 2, 0, 0);  // STR X2, [X0]; Rt=X2, Rn=X0=mov_rd
+    assert(run_helper_check(code, 8) == 0);
+
+    // LDR (not a store) -> not a STR fold case. The consumer reads
+    // mov_rd via Rn (base), which is SP if 31. Even Rt could match
+    // mov_rd here (loading INTO the MOV destination, overwriting it
+    // -- a different pattern, the "dead MOV" case).
+    movz_x(&code[0], 0, 0, 0);
+    ldr_x_uimm_for_test(&code[4], 2, 1, 0);  // LDR X2, [X1] -- no read of X0
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction closes the chain.
+    movz_x(&code[0], 0, 0, 0);
+    ADD_X(&code[4], 5, 5, 6);
+    str_x_uimm(&code[8], 0, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // ALU op where neither operand is mov_rd.
+    movz_x(&code[0], 0, 0, 0);
+    ADD_X(&code[4], 3, 1, 2);  // ADD X3, X1, X2 -- no X0
+    assert(run_helper_check(code, 8) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -3438,6 +3632,7 @@ int main(void)
     test_mneg_strength_reduce();
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
+    test_mov_zero_to_xzr();
 
     cs_close(&g_handle);
     printf("all tests passed\n");
