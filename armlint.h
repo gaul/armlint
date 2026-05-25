@@ -209,6 +209,26 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
 bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
                                size_t offset, armlint_finding *out);
 
+// Detect MNEG Rd, Rn, Rm (the MSUB Rd, Rn, Rm, ZR alias) where one
+// operand is set by an immediately preceding MOV chain to a constant
+// C. The MNEG is foldable to a single shifted-register instruction
+// for three families of constants:
+//   C = 1                -> NEG Rd, R<other>
+//   C = 2^N (N >= 1)     -> NEG Rd, R<other>, LSL #N
+//   C = 2^N - 1 (N >= 2) -> SUB Rd, R<other>, R<other>, LSL #N
+// The 2^N - 1 family is the elegant complement of MUL's 2^N + 1:
+// SUB Xd, Xn, Xn, LSL #N computes x*(1 - 2^N) = -x*(2^N - 1), exactly
+// what MNEG needs.
+//
+// 2^N + 1 (N >= 1) is NOT folded: the rewrite -((x << N) + x) is two
+// instructions (ADD-shifted then NEG, or SUB+NEG), at parity with
+// MOV+MNEG.
+//
+// Same plumbing as check_mul_strength_reduce -- runs before
+// check_movz_movk_bitmask so the MOV chain state is still active.
+bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

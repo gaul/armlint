@@ -3025,6 +3025,145 @@ static void test_mul_strength_reduce(void)
     assert(run_helper_check(code, 4) == 0);
 }
 
+// MNEG Xd, Xn, Xm encoding (MSUB with Ra=11111). Base 0x9B00FC00.
+static void mneg_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x9B00FC00u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MNEG Wd, Wn, Wm. Base 0x1B00FC00.
+static void mneg_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x1B00FC00u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MSUB Xd, Xn, Xm, Xa with explicit Xa != XZR. Base 0x9B008000.
+static void msub_x(uint8_t out[4], unsigned rd, unsigned rn,
+                   unsigned rm, unsigned ra)
+{
+    uint32_t op = 0x9B008000u
+        | ((rm & 0x1Fu) << 16)
+        | ((ra & 0x1Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void test_mneg_strength_reduce(void)
+{
+    uint8_t code[16];
+
+    // C = 1: movz x0, #1 ; mneg x3, x2, x0  -> neg x3, x2.
+    movz_x(&code[0], 0, 1, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // C = 2^N (power of 2): movz x0, #8 ; mneg x3, x2, x0
+    //                              -> neg x3, x2, lsl #3.
+    movz_x(&code[0], 0, 8, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Commutativity (Rn == mov_rd): movz x0, #2 ; mneg x3, x0, x2
+    //                              -> neg x3, x2, lsl #1.
+    movz_x(&code[0], 0, 2, 0);
+    mneg_x(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W form: movz w0, #4 ; mneg w3, w2, w0  -> neg w3, w2, lsl #2.
+    movz_w(&code[0], 0, 4);
+    mneg_w(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // C = 2^N - 1: movz x0, #3 ; mneg x3, x2, x0
+    //                              -> sub x3, x2, x2, lsl #2.
+    movz_x(&code[0], 0, 3, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // C = 2^N - 1: movz x0, #7 ; mneg x3, x2, x0
+    //                              -> sub x3, x2, x2, lsl #3.
+    movz_x(&code[0], 0, 7, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // C = 2^N - 1: movz x0, #15 ; mneg x3, x2, x0
+    //                              -> sub x3, x2, x2, lsl #4.
+    movz_x(&code[0], 0, 15, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Large power-of-2 via shifted MOVZ: 2^32.
+    movz_x(&code[0], 0, 1, 2);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: 2^N + 1 (5) is intentionally not folded for MNEG.
+    movz_x(&code[0], 0, 5, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: 2^N + 1 (9).
+    movz_x(&code[0], 0, 9, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: arbitrary constant (10).
+    movz_x(&code[0], 0, 10, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: C = 0.
+    movz_x(&code[0], 0, 0, 0);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch.
+    movz_w(&code[0], 0, 8);
+    mneg_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: MNEG does not read the MOV destination.
+    movz_x(&code[0], 0, 8, 0);
+    mneg_x(&code[4], 3, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening unrelated instruction closes the chain.
+    movz_x(&code[0], 0, 8, 0);
+    ADD_X(&code[4], 5, 5, 6);
+    mneg_x(&code[8], 3, 2, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: MSUB with explicit Ra != XZR (not the MNEG alias).
+    movz_x(&code[0], 0, 8, 0);
+    msub_x(&code[4], 3, 2, 0, 4);  // Ra = X4
+    assert(run_helper_check(code, 8) == 0);
+
+    // Sanity: an MUL pattern (bit 15 = 0) does NOT fire as MNEG.
+    // movz x0, #8 ; mul x3, x2, x0 -- should fire as MUL strength
+    // reduction (1 finding), but NOT as MNEG. Total findings == 1.
+    movz_x(&code[0], 0, 8, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -3051,6 +3190,7 @@ int main(void)
     test_bfxil_synth();
     test_ldp_stp_coalesce();
     test_mul_strength_reduce();
+    test_mneg_strength_reduce();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

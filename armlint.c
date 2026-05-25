@@ -2485,6 +2485,157 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// MNEG Rd, Rn, Rm is the alias for MSUB Rd, Rn, Rm, ZR.
+// MSUB encoding: sf | 00 | 11011 | 000 | Rm(5) | 1 | Ra(5) | Rn(5) |
+// Rd(5). Same opcode block as MADD but with bit 15 ("o0") = 1. The
+// MNEG alias requires Ra == 11111 (XZR/WZR).
+static bool decode_mneg(uint32_t op,
+                        unsigned *out_sf, unsigned *out_rd,
+                        unsigned *out_rn, unsigned *out_rm)
+{
+    if ((op & 0x7FE0FC00u) != 0x1B00FC00u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    unsigned sf, rd, rn, rm;
+    if (!decode_mneg(op, &sf, &rd, &rn, &rm)) {
+        return false;
+    }
+
+    bool is_64bit = (sf != 0);
+    if (is_64bit != state->mov_is_64bit) {
+        return false;
+    }
+
+    unsigned other;
+    if (rm == state->mov_rd) {
+        other = rn;
+    } else if (rn == state->mov_rd) {
+        other = rm;
+    } else {
+        return false;
+    }
+
+    if (rd == 31 || other == 31) {
+        return false;
+    }
+
+    uint64_t c = state->mov_value;
+    if (c == 0) {
+        // MNEG by 0 = 0; rewrite is MOV Rd, ZR. Different idiom.
+        return false;
+    }
+
+    unsigned datasize = is_64bit ? 64u : 32u;
+    unsigned n = 0;
+    bool is_one = (c == 1u);
+    bool is_pow2 = false;
+    bool is_n_minus_1 = false;
+
+    if (!is_one) {
+        if ((c & (c - 1u)) == 0) {
+            uint64_t t = c;
+            while ((t & 1u) == 0) {
+                t >>= 1;
+                n++;
+            }
+            if (n >= 1 && n < datasize) {
+                is_pow2 = true;
+            }
+        } else {
+            // C + 1 == 2^N : the 2^N - 1 family. cp1 == 0 only when
+            // c == all-ones (e.g. MOVN producing -1); that wraps to 0
+            // and is correctly rejected below.
+            uint64_t cp1 = c + 1u;
+            if (cp1 != 0 && (cp1 & (cp1 - 1u)) == 0) {
+                uint64_t t = cp1;
+                while ((t & 1u) == 0) {
+                    t >>= 1;
+                    n++;
+                }
+                // N >= 2 because the c == 1 (N == 1) case is handled
+                // above as the simpler NEG-without-shift.
+                if (n >= 2 && n < datasize) {
+                    is_n_minus_1 = true;
+                }
+            }
+        }
+    }
+
+    if (!is_one && !is_pow2 && !is_n_minus_1) {
+        return false;
+    }
+
+    char w_or_x = is_64bit ? 'x' : 'w';
+
+    out->name = "MNEG by constant foldable to neg/sub";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    if (is_one) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> neg %c%u, %c%u",
+            w_or_x, rd, w_or_x, other);
+    } else if (is_pow2) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> neg %c%u, %c%u, lsl #%u",
+            w_or_x, rd, w_or_x, other, n);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> sub %c%u, %c%u, %c%u, lsl #%u",
+            w_or_x, rd, w_or_x, other, w_or_x, other, n);
+    }
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mnem = e->opc == 2 ? "movz"
+                       : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mnem, w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "mneg %c%u, %c%u, %c%u",
+        w_or_x, rd, w_or_x, rn, w_or_x, rm);
+
+    return true;
+}
+
 // Decode the unsigned-offset LDR/STR (32-bit or 64-bit, general
 // register, non-atomic, non-SIMD). Encoding mask 0xBF800000, value
 // 0xB9000000 leaves bit 30 (size[0]: 0=W, 1=X) and bit 22 (opc[0]:
@@ -2722,6 +2873,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending,
     armlint_advance_pending_sv,
     check_mul_strength_reduce,
+    check_mneg_strength_reduce,
     check_movz_movk_bitmask,
     check_lsl_fold,
     check_cmp_zero_branch,

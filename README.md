@@ -316,6 +316,23 @@ code, and documents corners of the A64 instruction set.
     real-binary hit density is low; survey of a dozen system and
     application binaries found 10 hits in Firefox's XUL and 0 in
     `kubectl`, `dyld`, `git`, `python3`, etc.
+* MNEG by constant foldable to NEG/SUB
+  - Direct symmetric counterpart to the MUL strength reduction.
+    `MNEG Rd, Rn, Rm` is the canonical alias for
+    `MSUB Rd, Rn, Rm, ZR`; same MOV-chain plumbing applies.
+  - `mov xc, #1 ; mneg xd, xa, xc` -> `neg xd, xa`
+  - `mov xc, #(1<<N) ; mneg xd, xa, xc` -> `neg xd, xa, lsl #N`
+  - `mov xc, #(2^N - 1) ; mneg xd, xa, xc` -> `sub xd, xa, xa, lsl #N`
+    The elegant case: `SUB Xd, Xn, Xn, LSL #N` computes
+    `x*(1 - 2^N) = -x*(2^N - 1)`, exactly what MNEG needs --
+    swapping the sign that prevented MUL from folding `2^N - 1`
+    in one instruction lets MNEG fold it cleanly.
+  - `2^N + 1` is not folded for MNEG: the rewrite is two
+    instructions (`ADD-shifted` then `NEG`), at parity with
+    `MOV+MNEG`.
+  - Hit density is even lower than MUL: real MNEGs almost always
+    have computed (non-constant) operands. Survey of the same
+    dozen binaries found 0 hits.
 
 ## Compilation
 
