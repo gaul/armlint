@@ -300,6 +300,31 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// Detect MUL Rt, Ra, Rb immediately followed by an ADD/SUB
+// (shifted-register, LSL #0, non-S-variant) that consumes Rt. The
+// pair folds to a single MADD/MSUB:
+//   mul xt, xa, xb ; add xd, xt, xc -> madd xd, xa, xb, xc
+//   mul xt, xa, xb ; add xd, xc, xt -> madd xd, xa, xb, xc  (ADD
+//                                                            commutes)
+//   mul xt, xa, xb ; sub xd, xc, xt -> msub xd, xa, xb, xc
+// The form `sub xd, xt, xc` is NOT foldable: MSUB computes
+// Ra - Rn*Rm, not Rn*Rm - Ra. S-variants (ADDS/SUBS) are skipped
+// because MADD/MSUB have no flag-setting form.
+//
+// Soundness (conservative):
+//   - Rd of the ADD/SUB must equal Rt, so the MUL's destination is
+//     overwritten by the ADD/SUB and its intermediate value is dead.
+//     This is the textbook array-indexing pattern: the MUL result
+//     fed once into the ADD/SUB and not reused.
+//   - The "accumulator" operand (the one that is not Rt) must NOT
+//     equal Rt -- otherwise the ADD/SUB reads the MUL's result
+//     twice while the MADD rewrite reads pre-MUL values, diverging.
+// Widths must match: both W or both X. MUL writing to ZR is excluded
+// (the pending slot is not opened for MUL Xd=XZR since the result
+// is discarded).
+bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

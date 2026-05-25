@@ -3603,6 +3603,101 @@ static void test_mov_zero_to_xzr(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_mul_add_sub_fold(void)
+{
+    uint8_t code[16];
+
+    // mul x3, x1, x2 ; add x3, x3, x4  -> madd x3, x1, x2, x4.
+    mul_x(&code[0], 3, 1, 2);
+    ADD_X(&code[4], 3, 3, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Commutativity: mul x3, x1, x2 ; add x3, x4, x3.
+    mul_x(&code[0], 3, 1, 2);
+    ADD_X(&code[4], 3, 4, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W form.
+    mul_w(&code[0], 3, 1, 2);
+    ADD_W(&code[4], 3, 3, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB with Rm = mul_rd (xd = xc - xt) -> MSUB.
+    mul_x(&code[0], 3, 1, 2);
+    SUB_X(&code[4], 3, 4, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: SUB with Rn = mul_rd (xd = xt - xc) -- NOT foldable
+    // because MSUB computes Ra - Rn*Rm, not Rn*Rm - Ra.
+    mul_x(&code[0], 3, 1, 2);
+    SUB_X(&code[4], 3, 3, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADDS (S-variant) -- no flag-setting MADD.
+    mul_x(&code[0], 3, 1, 2);
+    encode_sr(&code[4], 0xAB000000u, 3, 3, 4);  // ADDS X3, X3, X4
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: SUBS (S-variant).
+    mul_x(&code[0], 3, 1, 2);
+    SUBS_X(&code[4], 3, 4, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: Rd != Rt (the MUL result is alive after the ADD).
+    mul_x(&code[0], 3, 1, 2);
+    ADD_X(&code[4], 5, 3, 4);  // writes X5, not X3
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: accumulator == mul_rd (xc == xt aliasing).
+    // mul x3, x1, x2 ; add x3, x3, x3.
+    mul_x(&code[0], 3, 1, 2);
+    ADD_X(&code[4], 3, 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch (MUL W, ADD X).
+    mul_w(&code[0], 3, 1, 2);
+    ADD_X(&code[4], 3, 3, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD does not consume mul_rd.
+    mul_x(&code[0], 3, 1, 2);
+    ADD_X(&code[4], 6, 4, 5);  // X6 = X4 + X5; no read of X3
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: shifted ADD (imm6 != 0).
+    mul_x(&code[0], 3, 1, 2);
+    uint32_t op_lsl1 = 0x8B000000u | (3u << 16) | (1u << 10) | (3u << 5) | 3u;
+    code[4] = op_lsl1 & 0xff;
+    code[5] = (op_lsl1 >> 8) & 0xff;
+    code[6] = (op_lsl1 >> 16) & 0xff;
+    code[7] = (op_lsl1 >> 24) & 0xff;
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening instruction breaks adjacency.
+    mul_x(&code[0], 3, 1, 2);
+    ADD_X(&code[4], 5, 5, 6);  // unrelated
+    ADD_X(&code[8], 3, 3, 4);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: MUL writing XZR (Rd=31) does not open pending.
+    mul_x(&code[0], 31, 1, 2);
+    ADD_X(&code[4], 31, 31, 4);  // arbitrary ADD
+    assert(run_helper_check(code, 8) == 0);
+
+    // Aliasing of MUL operands with each other: mul x3, x3, x2 (MUL's
+    // Rd == Rn == x3). The MADD rewrite reads x3 (pre-MUL value), so
+    // sound provided Rd == Rt and xc != Rt.
+    mul_x(&code[0], 3, 3, 2);
+    ADD_X(&code[4], 3, 3, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // MUL with Rn = Rm (square): mul x3, x1, x1 ; add x3, x3, x4
+    //                            -> madd x3, x1, x1, x4.
+    mul_x(&code[0], 3, 1, 1);
+    ADD_X(&code[4], 3, 3, 4);
+    assert(run_helper_check(code, 8) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -3633,6 +3728,7 @@ int main(void)
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
+    test_mul_add_sub_fold();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

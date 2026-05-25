@@ -177,6 +177,18 @@ struct armlint_state {
     char bfx_clear_disasm[ARMLINT_FINDING_LINE_LEN];
     char bfx_isolate_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending MUL Rt, Ra, Rb awaiting an adjacent ADD/SUB consumer
+    // whose Rd overwrites Rt and whose accumulator operand is not Rt
+    // -- the pair folds to MADD/MSUB. Strict adjacency: any
+    // non-matching instruction expires the state.
+    bool mul_pending;
+    bool mul_pending_is_64bit;
+    unsigned mul_pending_rd;
+    unsigned mul_pending_rn;
+    unsigned mul_pending_rm;
+    size_t mul_pending_offset;
+    char mul_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
     // partner for LDP/STP/LDPSW coalescing. The next instruction of
     // the same kind (sext or zext) with the same Rn, same direction
@@ -350,6 +362,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->bfx_clear_seen = false;
     state->bfx_isolate_seen = false;
     state->lsp_active = false;
+    state->mul_pending = false;
     return mov_close(state, out);
 }
 
@@ -2959,6 +2972,107 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->mul_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an ADD/SUB consuming the pending MUL?
+    if (state->mul_pending) {
+        unsigned sf, rd, rn, rm;
+        bool is_sub, is_s;
+        if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                        &rd, &rn, &rm)
+                && !is_s
+                && ((sf != 0) == state->mul_pending_is_64bit)) {
+            unsigned t = state->mul_pending_rd;
+            bool valid = false;
+            unsigned xc = 0;
+            if (rd == t) {
+                if (is_sub) {
+                    // Only "sub xd, xc, xt" folds (Rm == t, Rn != t).
+                    if (rm == t && rn != t) {
+                        valid = true;
+                        xc = rn;
+                    }
+                } else {
+                    // ADD is commutative -- Rm == t OR Rn == t (but
+                    // not both, which is the xc == t aliasing case).
+                    if (rm == t && rn != t) {
+                        valid = true;
+                        xc = rn;
+                    } else if (rn == t && rm != t) {
+                        valid = true;
+                        xc = rm;
+                    }
+                }
+            }
+
+            if (valid) {
+                char w_or_x = state->mul_pending_is_64bit ? 'x' : 'w';
+                const char *fold_mnem = is_sub ? "msub" : "madd";
+                const char *cons_mnem = is_sub ? "sub" : "add";
+
+                out->name = "MUL + ADD/SUB foldable to MADD/MSUB";
+                out->start_offset = state->mul_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %c%u, %c%u, %c%u",
+                    fold_mnem,
+                    w_or_x, rd,
+                    w_or_x, state->mul_pending_rn,
+                    w_or_x, state->mul_pending_rm,
+                    w_or_x, xc);
+
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->mul_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, %c%u, %c%u",
+                    cons_mnem,
+                    w_or_x, rd,
+                    w_or_x, rn,
+                    w_or_x, rm);
+
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->mul_pending = false;
+    }
+
+    // (2) Try to open: is this a MUL?
+    unsigned m_sf, m_rd, m_rn, m_rm;
+    if (decode_mul(op, &m_sf, &m_rd, &m_rn, &m_rm)) {
+        if (m_rd != 31) {
+            state->mul_pending = true;
+            state->mul_pending_is_64bit = (m_sf != 0);
+            state->mul_pending_rd = m_rd;
+            state->mul_pending_rn = m_rn;
+            state->mul_pending_rm = m_rm;
+            state->mul_pending_offset = offset;
+            char w_or_x = (m_sf != 0) ? 'x' : 'w';
+            snprintf(state->mul_pending_disasm,
+                sizeof(state->mul_pending_disasm),
+                "mul %c%u, %c%u, %c%u",
+                w_or_x, m_rd, w_or_x, m_rn, w_or_x, m_rm);
+        }
+    }
+
+    return produced;
+}
+
 // Decode unsigned-offset STR (any size: B/H/W/X), integer-register
 // form only. Mask 0x3FC00000 covers bits 29..22 (the LDR/STR opcode
 // block plus V bit and opc bits). Value 0x39000000 fixes V=0,
@@ -3455,6 +3569,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_bfxil_synth,
     check_ldp_stp_coalesce,
     check_redundant_cmp_after_s_variant,
+    check_mul_add_sub_fold,
 };
 
 const size_t armlint_check_registry_count =

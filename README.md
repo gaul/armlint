@@ -391,6 +391,25 @@ code, and documents corners of the A64 instruction set.
   - Hit density is very high in XUL (4466), modest in dyld (40) and
     openssl (46); 0 in kubectl/docker/git/python3 -- Go's compiler
     is good about emitting `STR XZR` directly.
+* MUL + ADD/SUB foldable to MADD/MSUB
+  - `mul xt, xa, xb ; add xd, xt, xc` -> `madd xd, xa, xb, xc`.
+    Standard array-indexing pattern (`base + i*stride`). Same for the
+    commuted ADD (`add xd, xc, xt`) and for SUB with Rm=xt
+    (`sub xd, xc, xt -> msub xd, xa, xb, xc`).
+  - `sub xd, xt, xc` is NOT folded: MSUB computes `Ra - Rn*Rm`, not
+    `Rn*Rm - Ra`. There is no AArch64 instruction matching the
+    latter form in one op.
+  - Conservative soundness: Rd of the ADD/SUB must equal Rt (so the
+    MUL's destination is overwritten and its post-MUL value is
+    dead), and the accumulator operand must not equal Rt (otherwise
+    the ADD reads the MUL's result twice while the MADD rewrite
+    reads pre-MUL values, diverging).
+  - S-variants (ADDS/SUBS) skipped: MADD/MSUB have no flag-setting
+    form. Widths must match (both W or both X).
+  - Real-binary survey hits: XUL 2, libmozinference 7, libmozglue 4,
+    libgkcodecs 1; 0 in kubectl/docker/dyld/git/python3/openssl.
+    Compilers reliably fuse MUL+ADD into MADD; the residual hits
+    are in code paths where the optimizer didn't see the data flow.
 
 ## Compilation
 
