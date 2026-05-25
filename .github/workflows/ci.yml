@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install capstone (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcapstone-dev pkg-config
+
+      - name: Install capstone (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install capstone pkg-config
+
+      - name: Build
+        run: make armlint lib
+
+      - name: Run tests
+        run: make test
