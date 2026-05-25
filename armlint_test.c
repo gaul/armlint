@@ -2807,6 +2807,69 @@ static void test_ldp_stp_coalesce(void)
     LDRSW_X(&code[0], 2, 2, 0);   // first LDRSW clobbers base x2
     LDRSW_X(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Positive: reverse-order LDRs (higher offset first) fold
+    //    into LDP with swapped Rt order. --
+
+    // ldr w1, [x2, #4] ; ldr w0, [x2, #0] -> ldp w0, w1, [x2, #0]
+    LDR_W(&code[0], 1, 2, 1);
+    LDR_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr x1, [x2, #8] ; ldr x0, [x2, #0] -> ldp x0, x1, [x2, #0]
+    LDR_X(&code[0], 1, 2, 1);
+    LDR_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: reverse-order STRs. --
+
+    // str w1, [x2, #4] ; str w0, [x2, #0] -> stp w0, w1, [x2, #0]
+    STR_W(&code[0], 1, 2, 1);
+    STR_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: reverse-order LDRSWs fold into LDPSW. --
+
+    // ldrsw x1, [x2, #4] ; ldrsw x0, [x2, #0] -> ldpsw x0, x1, [x2, #0]
+    LDRSW_X(&code[0], 1, 2, 1);
+    LDRSW_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: reverse-order at boundary (lower imm12 = 63). --
+
+    // ldr w1, [x2, #256] ; ldr w0, [x2, #252] -> ldp at byte 252
+    LDR_W(&code[0], 1, 2, 64);
+    LDR_W(&code[4], 0, 2, 63);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: reverse-order with lower imm12 = 64 (out of imm7
+    //    range). The HIGHER offset would be encodable, but the LDP
+    //    uses the LOWER address as the base + imm7. --
+
+    LDR_W(&code[0], 1, 2, 65);
+    LDR_W(&code[4], 0, 2, 64);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: reverse-order load aliasing -- pending (first in
+    //    source order, at higher offset) Rt == Rn clobbers base
+    //    before second LDR runs. --
+
+    LDR_X(&code[0], 2, 2, 1);   // first LDR clobbers base x2
+    LDR_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: reverse-order with same Rt. --
+
+    LDR_W(&code[0], 0, 2, 1);
+    LDR_W(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Positive: reverse-order store where second STR's Rt == Rn
+    //    is fine (stores don't have the aliasing concern). --
+
+    STR_W(&code[0], 1, 2, 1);
+    STR_W(&code[4], 2, 2, 0);   // second STR uses Rt = x2 (the base)
+    assert(run_helper_check(code, 8) == 1);
 }
 
 int main(void)

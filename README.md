@@ -200,10 +200,18 @@ code, and documents corners of the A64 instruction set.
     (both W or both X); same direction (load/load or store/store);
     consecutive offsets (`imm12_2 = imm12_1 + 1` in scaled units);
     `Rt1 != Rt2` (LDP/STP requires distinct destinations); for
-    loads, `Rt1 != Rn` (else the first load clobbers the base
-    before the second load reads it). The first imm12 must also fit
-    LDP's signed-7-bit imm7 (i.e., be at most 63 for non-negative
-    unsigned-offset sources).
+    loads, the first instruction's `Rt != Rn` (else the first load
+    clobbers the base before the second load reads it). The LOWER
+    of the two imm12s must also fit LDP's signed-7-bit imm7 (i.e.,
+    be at most 63 for non-negative unsigned-offset sources).
+  - Reverse-order pairs (`ldr Rt2, [Rn, #imm+1] ; ldr Rt1, [Rn,
+    #imm]` -- higher offset first) are also coalesced, into a
+    `ldp Rt1, Rt2, [Rn, #imm]` with the Rt operands ordered by
+    ascending address. The load-aliasing concern is about source
+    order, not address order, so the constraint is on the FIRST
+    instruction in source order regardless of which offset it
+    targets. Reverse-order pairs are common in Go-compiled
+    binaries (~24% of total LDP/STP coalesce findings in kubectl).
   - Four consecutive LDR/STRs fold into TWO non-overlapping
     LDP/STPs (after firing, the state resets so the second LDR
     isn't also used as the first of a new pair).

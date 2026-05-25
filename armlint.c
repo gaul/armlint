@@ -2408,26 +2408,37 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
 
     bool produced = false;
 
+    // Adjacent in either direction: forward (pending at lower offset,
+    // current at higher) or reverse (pending at higher offset, current
+    // at lower). In the reverse case the LDP's Rt order is swapped so
+    // the register at the lower address still appears first.
+    bool forward = state->lsp_active
+        && imm12 == state->lsp_imm12 + 1;
+    bool reverse = state->lsp_active
+        && state->lsp_imm12 == imm12 + 1;
+
     // Try to close: does this instruction partner the pending one?
     //   - same kind (sext/zext) -- LDR cannot pair with LDRSW
     //   - same direction (load/load or store/store)
     //   - same size (W/W or X/X)
     //   - same base Rn
-    //   - consecutive in scaled units (imm12 = prev + 1)
+    //   - consecutive in scaled units (forward or reverse)
     //   - distinct destination registers (LDP/STP requires Rt1 != Rt2)
-    //   - first LDR's Rt != Rn (load aliasing -- first load would
-    //     clobber the base before the second's address is computed
-    //     in the original sequence). Doesn't apply to stores.
-    //   - first imm12 fits LDP/STP imm7 (signed 7-bit, scaled),
-    //     i.e., the first imm12 must be <= 63 (unsigned).
-    if (state->lsp_active
+    //   - pending's Rt != Rn for loads (the FIRST load in source order
+    //     would clobber the base before the second's address is
+    //     computed in the original sequence). The aliasing concern is
+    //     about source order, not offset order, so the same constraint
+    //     applies to both forward and reverse. Doesn't apply to stores.
+    //   - the LOWER of the two imm12s fits LDP/STP imm7 (signed 7-bit,
+    //     scaled), i.e., the lower imm12 must be <= 63 (unsigned).
+    unsigned low_imm12 = forward ? state->lsp_imm12 : imm12;
+    if ((forward || reverse)
             && state->lsp_is_sext == is_sext
             && state->lsp_is_load == is_load
             && state->lsp_is_64bit == is_64bit
             && state->lsp_rn == rn
-            && imm12 == state->lsp_imm12 + 1
             && rt != state->lsp_rt
-            && state->lsp_imm12 <= 63u
+            && low_imm12 <= 63u
             && (!is_load || state->lsp_rt != rn)) {
         // LDPSW always loads Xt with 4-byte transfer; otherwise the
         // register width follows is_64bit and transfer size matches.
@@ -2439,13 +2450,22 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         } else {
             pair_mnem = is_load ? "ldp" : "stp";
         }
-        unsigned byte_off = state->lsp_imm12 * xfer;
+        // LDP/STP encodes the register at the lower address first.
+        unsigned first_rt  = forward ? state->lsp_rt : rt;
+        unsigned second_rt = forward ? rt : state->lsp_rt;
+        unsigned byte_off = low_imm12 * xfer;
 
         if (is_sext) {
-            out->name = "adjacent LDRSWs foldable into LDPSW";
+            out->name = reverse
+                ? "adjacent LDRSWs foldable into LDPSW (reverse order)"
+                : "adjacent LDRSWs foldable into LDPSW";
+        } else if (is_load) {
+            out->name = reverse
+                ? "adjacent LDRs foldable into LDP (reverse order)"
+                : "adjacent LDRs foldable into LDP";
         } else {
-            out->name = is_load
-                ? "adjacent LDRs foldable into LDP"
+            out->name = reverse
+                ? "adjacent STRs foldable into STP (reverse order)"
                 : "adjacent STRs foldable into STP";
         }
         out->start_offset = state->lsp_offset;
@@ -2460,7 +2480,7 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         }
         snprintf(out->detail, sizeof(out->detail),
             "-> %s %c%u, %c%u, [%s, #%u]",
-            pair_mnem, w_or_x, state->lsp_rt, w_or_x, rt,
+            pair_mnem, w_or_x, first_rt, w_or_x, second_rt,
             rn_buf, byte_off);
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->lsp_disasm);
