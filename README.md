@@ -333,6 +333,25 @@ code, and documents corners of the A64 instruction set.
   - Hit density is even lower than MUL: real MNEGs almost always
     have computed (non-constant) operands. Survey of the same
     dozen binaries found 0 hits.
+* MOV + ADD/SUB foldable to immediate form
+  - `mov xc, #C ; add xd, xn, xc` instead of `add xd, xn, #C` when
+    `C` fits the ADD/SUB immediate encoding (12-bit unsigned with
+    optional `LSL #12`: `C` in `[1, 0xFFF]` or `C` a multiple of
+    `0x1000` with `C/0x1000` in `[1, 0xFFF]`). Same for `SUB`,
+    `ADDS`, `SUBS`, and the `CMP`/`CMN` aliases (S-variant with
+    `Rd == ZR`).
+  - Reuses the MOVZ/MOVK chain state. ADD is commutative -- either
+    operand may be the MOV destination. SUB is not: only
+    `Rm == mov_rd` folds, since `Rn == mov_rd` would need a
+    reverse-subtract that AArch64 lacks. Width of the MOV chain
+    must match the consumer's.
+  - `C == 0` is excluded (the no-op / MOV-to-Rn case is covered by
+    check_add_sub_zero); `ZR` as the non-MOV operand is excluded
+    (degenerate MOV/NEG).
+  - Hit density is modest -- compilers usually fold these, but
+    Go-compiled binaries (`kubectl`, `docker`) and Firefox's `XUL`
+    leak the pattern often; survey found 230 hits in XUL, 35 each
+    in kubectl/docker, 12 in dyld, with smaller counts elsewhere.
 
 ## Compilation
 

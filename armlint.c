@@ -2636,6 +2636,174 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// ADD/SUB shifted-register (LSL #0, shift_type = LSL): the form that
+// reads its Rm directly. Fixed-bit mask 0x1F200000, value 0x0B000000;
+// shift_type at bits 23..22 must be 00 (LSL) -- LSR/ASR forms don't
+// fold to an immediate; the bit 21 = 0 in the value rejects the
+// extending-register form (which has bit 21 = 1). imm6 at bits
+// 15..10 must be 0 (no LSL shift on Rm); a nonzero imm6 would change
+// the effective constant value, defeating the fold.
+static bool decode_add_sub_shifted_lsl0(uint32_t op,
+                                        unsigned *out_sf,
+                                        bool *out_is_sub,
+                                        bool *out_is_s,
+                                        unsigned *out_rd,
+                                        unsigned *out_rn,
+                                        unsigned *out_rm)
+{
+    if ((op & 0x1F200000u) != 0x0B000000u) {
+        return false;
+    }
+    unsigned shift_type = (op >> 22) & 0x3u;
+    if (shift_type != 0) {
+        return false;
+    }
+    unsigned imm6 = (op >> 10) & 0x3Fu;
+    if (imm6 != 0) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_is_sub = ((op >> 30) & 1u) != 0;
+    *out_is_s = ((op >> 29) & 1u) != 0;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    unsigned sf, rd, rn, rm;
+    bool is_sub, is_s;
+    if (!decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                     &rd, &rn, &rm)) {
+        return false;
+    }
+
+    bool is_64bit = (sf != 0);
+    if (is_64bit != state->mov_is_64bit) {
+        return false;
+    }
+
+    // Non-S-variant writing ZR is dead code -- skip. S-variant with
+    // Rd = ZR is the CMP/CMN alias, allowed.
+    if (rd == 31 && !is_s) {
+        return false;
+    }
+
+    // Identify which operand is from the MOV chain. ADD is commutative
+    // (either Rn or Rm). SUB is not: only Rm == mov_rd folds to
+    // SUB imm; Rn == mov_rd would require a reverse-subtract which
+    // AArch64 does not have.
+    unsigned other;
+    if (is_sub) {
+        if (rm != state->mov_rd) {
+            return false;
+        }
+        other = rn;
+    } else {
+        if (rm == state->mov_rd) {
+            other = rn;
+        } else if (rn == state->mov_rd) {
+            other = rm;
+        } else {
+            return false;
+        }
+    }
+
+    // ZR as the other operand makes the ADD/SUB degenerate (it
+    // reduces to a MOV/NEG of the constant); not the typical fold.
+    if (other == 31) {
+        return false;
+    }
+
+    uint64_t c = state->mov_value;
+    if (c == 0) {
+        // ADD/SUB by 0 is the MOV-or-no-op case; check_add_sub_zero
+        // handles the immediate-form analogue, and the MOV here is
+        // separately suspect. Skip.
+        return false;
+    }
+
+    // ADD/SUB imm form: 12-bit unsigned imm with optional LSL #12.
+    // C fits iff C is in [0, 0xFFF] (sh=0) or C is a multiple of
+    // 0x1000 and (C >> 12) is in [0, 0xFFF] (sh=1).
+    bool fits_no_shift = (c <= 0xFFFu);
+    bool fits_with_shift = (c >= 0x1000u)
+        && ((c & 0xFFFu) == 0)
+        && ((c >> 12) <= 0xFFFu);
+    if (!fits_no_shift && !fits_with_shift) {
+        return false;
+    }
+
+    char w_or_x = is_64bit ? 'x' : 'w';
+    const char *mnem;
+    if (is_sub) {
+        mnem = is_s ? "subs" : "sub";
+    } else {
+        mnem = is_s ? "adds" : "add";
+    }
+    const char *alias = NULL;
+    if (rd == 31 && is_s) {
+        alias = is_sub ? "cmp" : "cmn";
+    }
+
+    out->name = "MOV + ADD/SUB foldable to immediate form";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    if (alias != NULL) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, #0x%" PRIx64,
+            alias, w_or_x, other, c);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, %c%u, #0x%" PRIx64,
+            mnem, w_or_x, rd, w_or_x, other, c);
+    }
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %c%u, %c%u, %c%u",
+        mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+
+    return true;
+}
+
 // Decode the unsigned-offset LDR/STR (32-bit or 64-bit, general
 // register, non-atomic, non-SIMD). Encoding mask 0xBF800000, value
 // 0xB9000000 leaves bit 30 (size[0]: 0=W, 1=X) and bit 22 (opc[0]:
@@ -2874,6 +3042,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_sv,
     check_mul_strength_reduce,
     check_mneg_strength_reduce,
+    check_mov_add_sub_imm_fold,
     check_movz_movk_bitmask,
     check_lsl_fold,
     check_cmp_zero_branch,

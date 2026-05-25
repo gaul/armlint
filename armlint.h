@@ -229,6 +229,32 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
 bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
+// Detect ADD/ADDS/SUB/SUBS (shifted-register, LSL #0) where one
+// operand is set by an immediately preceding MOV chain to a constant
+// C that fits the AArch64 ADD/SUB immediate form (12-bit imm with
+// optional LSL #12: C in [1, 0xFFF] or C a multiple of 0x1000 with
+// C/0x1000 in [1, 0xFFF]). The pair folds to a single immediate-form
+// instruction:
+//   mov xc, #C ; add  xd, xn, xc -> add  xd, xn, #C
+//   mov xc, #C ; adds xd, xn, xc -> adds xd, xn, #C
+//   mov xc, #C ; sub  xd, xn, xc -> sub  xd, xn, #C
+//   mov xc, #C ; subs xd, xn, xc -> subs xd, xn, #C
+// CMP and CMN (S-variant with Rd == ZR) are rendered as the aliases.
+//
+// ADD is commutative so either Rn or Rm may be the MOV destination;
+// SUB requires Rm == mov_rd (Rn == mov_rd would need a reverse-
+// subtract, which AArch64 does not encode in a single instruction).
+// Width of the MOV chain (W vs X) must match the ADD/SUB's. C == 0 is
+// excluded -- that pattern is the MOV-to-Rn or no-op case already
+// handled by check_add_sub_zero. ZR as the non-mov operand is also
+// excluded (it makes the ADD/SUB degenerate).
+//
+// Runs alongside check_mul_strength_reduce / check_mneg_strength_reduce
+// before check_movz_movk_bitmask so the MOV chain state is still
+// active when the consumer is examined.
+bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

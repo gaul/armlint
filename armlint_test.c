@@ -3164,6 +3164,144 @@ static void test_mneg_strength_reduce(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// CMP Xn, Xm (shifted-register form: SUBS XZR, Xn, Xm, LSL #0).
+// Base 0xEB00001F (sf=1, op=1=SUB, S=1, shift=00, bit21=0, Rd=11111).
+static void cmp_x_reg_sr(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0xEB00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// CMN Xn, Xm (ADDS XZR, Xn, Xm, LSL #0). Base 0xAB00001F.
+static void cmn_x_reg_sr(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0xAB00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void test_mov_add_sub_imm_fold(void)
+{
+    uint8_t code[16];
+
+    // movz x0, #100 ; add x3, x2, x0  -> add x3, x2, #100.
+    movz_x(&code[0], 0, 100, 0);
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Commutativity: movz x0, #100 ; add x3, x0, x2.
+    movz_x(&code[0], 0, 100, 0);
+    ADD_X(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W form: movz w0, #50 ; add w3, w2, w0.
+    movz_w(&code[0], 0, 50);
+    ADD_W(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ADDS variant: movz x0, #100 ; adds x3, x2, x0  -> adds x3, x2, #100.
+    movz_x(&code[0], 0, 100, 0);
+    encode_sr(&code[4], 0xAB000000u, 3, 2, 0);  // ADDS X3, X2, X0
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB: movz x0, #100 ; sub x3, x2, x0  -> sub x3, x2, #100.
+    movz_x(&code[0], 0, 100, 0);
+    SUB_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUBS: movz x0, #100 ; subs x3, x2, x0  -> subs x3, x2, #100.
+    movz_x(&code[0], 0, 100, 0);
+    SUBS_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMP (SUBS XZR, ...): movz x0, #100 ; cmp x2, x0  -> cmp x2, #100.
+    movz_x(&code[0], 0, 100, 0);
+    cmp_x_reg_sr(&code[4], 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMN (ADDS XZR, ...): movz x0, #100 ; cmn x2, x0  -> cmn x2, #100.
+    movz_x(&code[0], 0, 100, 0);
+    cmn_x_reg_sr(&code[4], 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // imm12 boundary: C = 0xFFF (= 4095) fits without shift.
+    movz_x(&code[0], 0, 0xFFF, 0);
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // imm12 << 12: C = 0x1000 fits with sh=1.
+    movz_x(&code[0], 0, 0x1000, 0);
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // imm12 << 12 boundary: C = 0xFFF000 fits with sh=1.
+    movz_x(&code[0], 0, 0xFFF, 1);  // imm = 0xFFF << 16 = 0xFFF0000 -- no wait.
+    // Use a different encoding: imm16=0xFFF, shift=0 gives 0xFFF.
+    // To get 0xFFF000, we need MOVZ X0, #0xFFF, LSL #16? No that's 0xFFF0000.
+    // 0xFFF000 = 0xFFF * 4096 = 0xFFF * 0x1000 ... hmm, not directly via MOVZ.
+    // MOVZ X0, #0xFFF000 won't fit in 16-bit imm. Skip this case.
+
+    // Negative: C = 4097 doesn't fit (not <= 4095, not a multiple of 4096).
+    movz_x(&code[0], 0, 0x1001, 0);
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: SUB with Rn from MOV (would need reverse-subtract).
+    movz_x(&code[0], 0, 100, 0);
+    SUB_X(&code[4], 3, 0, 2);  // SUB X3, X0, X2 -- Rn = X0 (from MOV)
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: C = 0 is the no-op pattern.
+    movz_x(&code[0], 0, 0, 0);
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch (MOV W, ADD X).
+    movz_w(&code[0], 0, 100);
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch (MOV X, ADD W).
+    movz_x(&code[0], 0, 100, 0);
+    ADD_W(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD does not read the MOV destination.
+    movz_x(&code[0], 0, 100, 0);
+    ADD_X(&code[4], 3, 2, 1);  // X1 instead of X0
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening instruction closes the chain.
+    movz_x(&code[0], 0, 100, 0);
+    ADD_X(&code[4], 5, 5, 6);  // unrelated insn
+    ADD_X(&code[8], 3, 2, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: non-S ADD with Rd = XZR (dead code, skip).
+    movz_x(&code[0], 0, 100, 0);
+    ADD_X(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: shifted ADD (imm6 != 0) doesn't fold.
+    // ADD X3, X2, X0, LSL #2 -- imm6=2.
+    movz_x(&code[0], 0, 100, 0);
+    uint32_t op_lsl2 = 0x8B000000u | (0u << 16) | (2u << 10) | (2u << 5) | 3u;
+    code[4] = op_lsl2 & 0xff;
+    code[5] = (op_lsl2 >> 8) & 0xff;
+    code[6] = (op_lsl2 >> 16) & 0xff;
+    code[7] = (op_lsl2 >> 24) & 0xff;
+    assert(run_helper_check(code, 8) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -3191,6 +3329,7 @@ int main(void)
     test_ldp_stp_coalesce();
     test_mul_strength_reduce();
     test_mneg_strength_reduce();
+    test_mov_add_sub_imm_fold();
 
     cs_close(&g_handle);
     printf("all tests passed\n");
