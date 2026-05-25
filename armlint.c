@@ -2339,6 +2339,152 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// MUL Rd, Rn, Rm is the canonical alias for MADD Rd, Rn, Rm, ZR.
+// MADD encoding: sf | 00 | 11011 | 000 | Rm(5) | 0 | Ra(5) | Rn(5) |
+// Rd(5). The MUL alias requires Ra == 11111 (XZR/WZR). Bit 15 must be
+// 0 to distinguish MADD from MSUB (the MNEG alias counterpart).
+static bool decode_mul(uint32_t op,
+                       unsigned *out_sf, unsigned *out_rd,
+                       unsigned *out_rn, unsigned *out_rm)
+{
+    if ((op & 0x7FE0FC00u) != 0x1B007C00u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    unsigned sf, rd, rn, rm;
+    if (!decode_mul(op, &sf, &rd, &rn, &rm)) {
+        return false;
+    }
+
+    bool is_64bit = (sf != 0);
+    if (is_64bit != state->mov_is_64bit) {
+        return false;
+    }
+
+    // Identify which of (Rn, Rm) came from the MOV chain. MUL is
+    // commutative.
+    unsigned other;
+    if (rm == state->mov_rd) {
+        other = rn;
+    } else if (rn == state->mov_rd) {
+        other = rm;
+    } else {
+        return false;
+    }
+
+    // ZR as Rd discards the result; ZR as the "other" operand makes
+    // the MUL evaluate to zero (different idiom, not strength
+    // reduction).
+    if (rd == 31 || other == 31) {
+        return false;
+    }
+
+    uint64_t c = state->mov_value;
+    if (c < 2) {
+        // C == 0: MUL is zero (rewrite is MOV Rd, ZR).
+        // C == 1: MUL is identity (rewrite is MOV Rd, R<other>).
+        return false;
+    }
+
+    unsigned datasize = is_64bit ? 64u : 32u;
+    unsigned n = 0;
+    bool is_pow2 = false;
+    bool is_p1 = false;
+
+    if ((c & (c - 1u)) == 0) {
+        uint64_t t = c;
+        while ((t & 1u) == 0) {
+            t >>= 1;
+            n++;
+        }
+        if (n >= 1 && n < datasize) {
+            is_pow2 = true;
+        }
+    } else {
+        uint64_t cm1 = c - 1u;
+        if ((cm1 & (cm1 - 1u)) == 0) {
+            uint64_t t = cm1;
+            while ((t & 1u) == 0) {
+                t >>= 1;
+                n++;
+            }
+            if (n >= 1 && n < datasize) {
+                is_p1 = true;
+            }
+        }
+    }
+
+    if (!is_pow2 && !is_p1) {
+        return false;
+    }
+
+    char w_or_x = is_64bit ? 'x' : 'w';
+
+    out->name = "MUL by constant foldable to shift/add";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    if (is_pow2) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> lsl %c%u, %c%u, #%u",
+            w_or_x, rd, w_or_x, other, n);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> add %c%u, %c%u, %c%u, lsl #%u",
+            w_or_x, rd, w_or_x, other, w_or_x, other, n);
+    }
+
+    // Render MOV chain, leaving one line for the MUL itself.
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mnem = e->opc == 2 ? "movz"
+                       : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mnem, w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "mul %c%u, %c%u, %c%u",
+        w_or_x, rd, w_or_x, rn, w_or_x, rm);
+
+    return true;
+}
+
 // Decode the unsigned-offset LDR/STR (32-bit or 64-bit, general
 // register, non-atomic, non-SIMD). Encoding mask 0xBF800000, value
 // 0xB9000000 leaves bit 30 (size[0]: 0=W, 1=X) and bit 22 (opc[0]:
@@ -2575,6 +2721,7 @@ static void report_finding(const armlint_finding *finding)
 const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending,
     armlint_advance_pending_sv,
+    check_mul_strength_reduce,
     check_movz_movk_bitmask,
     check_lsl_fold,
     check_cmp_zero_branch,

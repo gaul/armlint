@@ -297,6 +297,25 @@ code, and documents corners of the A64 instruction set.
     dropping the `CMP` (and keeping the `B.cond`) or folding the
     `CMP`+`B.cond` pair into a `CBZ`/`CBNZ`. Both rewrites have
     identical downstream behaviour.
+* MUL by constant foldable to shift/add
+  - `mov xc, #(1<<N) ; mul xd, xa, xc` instead of `lsl xd, xa, #N`
+    (power-of-2 multiplier). Same for W-form.
+  - `mov xc, #(2^N + 1) ; mul xd, xa, xc` instead of
+    `add xd, xa, xa, lsl #N`.
+  - Reuses the MOVZ/MOVK chain state, so wide constants assembled
+    via `MOVZ + MOVK` (e.g. `2^16 + 1`) are caught too. The MOV's
+    width must match the MUL's. MUL is the canonical alias for
+    `MADD Rd, Rn, Rm, ZR`; explicit `MADD` with a non-zero
+    accumulator is not flagged.
+  - The `2^N - 1` case is intentionally not folded. AArch64 has no
+    single shifted-register form that computes `x*(2^N - 1)`:
+    `SUB Xd, Xn, Xn, LSL #N` gives `x*(1 - 2^N)`, the negation, so
+    the rewrite would be two instructions (`LSL+SUB` or `SUB+NEG`)
+    at parity with `MOV+MUL` in count.
+  - Compilers strength-reduce constant multiplies aggressively, so
+    real-binary hit density is low; survey of a dozen system and
+    application binaries found 10 hits in Firefox's XUL and 0 in
+    `kubectl`, `dyld`, `git`, `python3`, etc.
 
 ## Compilation
 

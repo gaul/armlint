@@ -188,6 +188,27 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
 bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
                        size_t offset, armlint_finding *out);
 
+// Detect MUL Rd, Rn, Rm (the MADD Rd, Rn, Rm, ZR alias) where one
+// operand is set by an immediately preceding MOV chain (MOVZ/MOVN +
+// optional MOVKs) to a constant C. The MUL is foldable to a single
+// shifted-register instruction when C is a small step from a power
+// of two:
+//   C = 2^N (N >= 1)     -> LSL Rd, R<other>, #N
+//   C = 2^N + 1 (N >= 1) -> ADD Rd, R<other>, R<other>, LSL #N
+// The 2^N - 1 case is intentionally not folded: AArch64 has no single
+// shifted-register form computing x*(2^N - 1) directly --
+// SUB Xn, Xn, Xn, LSL #N gives x*(1 - 2^N), the negation -- so the
+// rewrite needs two instructions (LSL+SUB or SUB+NEG), at parity with
+// MOV+MUL in instruction count. The MOV chain's width (W vs X) must
+// match the MUL's; MUL is commutative, so either Rn or Rm may be the
+// MOV destination. ZR as Rd or as the "other" operand is excluded.
+//
+// Runs before check_movz_movk_bitmask in the registry: that check
+// closes the MOV chain on any non-MOV instruction, so ours must
+// inspect state->mov_active first.
+bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

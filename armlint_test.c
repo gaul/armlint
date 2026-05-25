@@ -2872,6 +2872,159 @@ static void test_ldp_stp_coalesce(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// MUL Wd, Wn, Wm encoding (MADD with Ra=11111). Base 0x1B007C00.
+static void mul_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x1B007C00u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MUL Xd, Xn, Xm encoding. Base 0x9B007C00.
+static void mul_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x9B007C00u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// MADD Xd, Xn, Xm, Xa with explicit Xa != XZR. Base 0x9B000000.
+static void madd_x(uint8_t out[4], unsigned rd, unsigned rn,
+                   unsigned rm, unsigned ra)
+{
+    uint32_t op = 0x9B000000u
+        | ((rm & 0x1Fu) << 16)
+        | ((ra & 0x1Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void test_mul_strength_reduce(void)
+{
+    uint8_t code[16];
+
+    // movz x0, #8 ; mul x3, x2, x0  -> lsl x3, x2, #3  (power of 2).
+    movz_x(&code[0], 0, 8, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // movz x0, #8 ; mul x3, x0, x2  -> lsl x3, x2, #3  (Rn == mov_rd).
+    movz_x(&code[0], 0, 8, 0);
+    mul_x(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W form: movz w0, #4 ; mul w3, w2, w0  -> lsl w3, w2, #2.
+    movz_w(&code[0], 0, 4);
+    mul_w(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 2^N + 1: movz x0, #3 ; mul x3, x2, x0  -> add x3, x2, x2, lsl #1.
+    movz_x(&code[0], 0, 3, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 2^N + 1: movz x0, #5 ; mul x3, x2, x0  -> add x3, x2, x2, lsl #2.
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 2^N + 1: movz x0, #9 ; mul x3, x2, x0  -> add x3, x2, x2, lsl #3.
+    movz_x(&code[0], 0, 9, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Large power-of-2: movz x0, #1, lsl #32 ; mul x3, x2, x0
+    //                              -> lsl x3, x2, #32.
+    movz_x(&code[0], 0, 1, 2);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 2^16 + 1: movz x0, #1, lsl #16 ; movk x0, #1 ; mul x3, x2, x0
+    //                              -> add x3, x2, x2, lsl #16.
+    // 0x10001 is not a bitmask immediate, so check_movz_movk_bitmask
+    // produces no finding; only the MUL strength reduction fires.
+    movz_x(&code[0], 0, 1, 1);
+    movk_x(&code[4], 0, 1, 0);
+    mul_x(&code[8], 3, 2, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Both operands from MOV (Rn == Rm == mov_rd): valid LSL rewrite.
+    // movz x0, #8 ; mul x3, x0, x0  -> lsl x3, x0, #3
+    // (semantically: x3 = 64; rewrite recomputes x0 << 3 = 64).
+    movz_x(&code[0], 0, 8, 0);
+    mul_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: 2^N - 1 case (7) is intentionally not folded.
+    movz_x(&code[0], 0, 7, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: arbitrary non-pow2 / non-(2^N+1) constant.
+    movz_x(&code[0], 0, 10, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: identity (C == 1).
+    movz_x(&code[0], 0, 1, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: zero (C == 0).
+    movz_x(&code[0], 0, 0, 0);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch -- 64-bit MOV, 32-bit MUL.
+    movz_x(&code[0], 0, 8, 0);
+    mul_w(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch -- 32-bit MOV, 64-bit MUL.
+    movz_w(&code[0], 0, 8);
+    mul_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: MUL does not read the MOV destination.
+    movz_x(&code[0], 0, 8, 0);
+    mul_x(&code[4], 3, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: an intervening non-MOV closes the chain.
+    movz_x(&code[0], 0, 8, 0);
+    ADD_X(&code[4], 5, 5, 6);  // arbitrary unrelated insn
+    mul_x(&code[8], 3, 2, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: MUL with Rd = XZR discards the result.
+    movz_x(&code[0], 0, 8, 0);
+    mul_x(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: MADD with explicit Ra != XZR (not the MUL alias).
+    movz_x(&code[0], 0, 8, 0);
+    madd_x(&code[4], 3, 2, 0, 4);  // Ra = X4
+    assert(run_helper_check(code, 8) == 0);
+
+    // Bare MUL with no preceding MOV: no finding.
+    mul_x(&code[0], 3, 2, 0);
+    assert(run_helper_check(code, 4) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -2897,6 +3050,7 @@ int main(void)
     test_csel_self();
     test_bfxil_synth();
     test_ldp_stp_coalesce();
+    test_mul_strength_reduce();
 
     cs_close(&g_handle);
     printf("all tests passed\n");
