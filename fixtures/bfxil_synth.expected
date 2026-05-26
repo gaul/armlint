@@ -1,0 +1,11 @@
+BFXIL synthesis via AND-AND-ORR at offset: 0x0: -> bfxil x3, x5, #0, #8 (3 instructions)
+  and x3, x3, #0xffffffffffffff00
+  and x4, x5, #0xff
+  orr x3, x3, x4
+
+BFXIL synthesis via AND-AND-ORR at offset: 0xc: -> bfxil x8, x7, #0, #16 (3 instructions)
+  and x8, x8, #0xffffffffffff0000
+  and x6, x7, #0xffff
+  orr x8, x8, x6
+
+2 errors

@@ -1,0 +1,17 @@
+LSL+LSR/ASR foldable into bitfield op at offset: 0x0: -> ubfx x0, x1, #4, #56 (2 instructions)
+  lsl x0, x1, #4
+  lsr x0, x0, #8
+
+LSL+LSR/ASR foldable into bitfield op at offset: 0x8: -> sbfx x2, x3, #0, #56 (2 instructions)
+  lsl x2, x3, #8
+  asr x2, x2, #8
+
+LSL+LSR/ASR foldable into bitfield op at offset: 0x10: -> ubfiz x4, x5, #12, #48 (2 instructions)
+  lsl x4, x5, #16
+  lsr x4, x4, #4
+
+LSL+LSR/ASR foldable into bitfield op at offset: 0x18: -> ubfx w6, w7, #8, #16 (2 instructions)
+  lsl w6, w7, #8
+  lsr w6, w6, #16
+
+4 errors

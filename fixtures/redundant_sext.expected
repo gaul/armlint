@@ -1,0 +1,17 @@
+redundant sign-extension after sign-extending op at offset: 0x0: sxtb w0, w0 is a no-op (sign already extended from bit 7) (2 instructions)
+  ldrsb w0, [x1]
+  sxtb w0, w0
+
+redundant sign-extension after sign-extending op at offset: 0x8: sxth w2, w2 is a no-op (sign already extended from bit 15) (2 instructions)
+  ldrsh w2, [x3]
+  sxth w2, w2
+
+redundant sign-extension after sign-extending op at offset: 0x10: sxtw x4, w4 is a no-op (sign already extended from bit 31) (2 instructions)
+  ldrsw x4, [x5]
+  sxtw x4, w4
+
+redundant sign-extension after sign-extending op at offset: 0x18: sxth w6, w6 is a no-op (sign already extended from bit 7) (2 instructions)
+  sxtb w6, w7
+  sxth w6, w6
+
+4 errors

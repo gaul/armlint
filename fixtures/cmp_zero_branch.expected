@@ -1,0 +1,17 @@
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x0: -> cbz x0, 0x30 (2 instructions)
+  cmp x0, #0
+  b.eq 0x30
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x8: -> cbnz x1, 0x30 (2 instructions)
+  cmp x1, xzr
+  b.ne 0x30
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x10: -> cbz x2, 0x30 (2 instructions)
+  tst x2, x2
+  b.eq 0x30
+
+compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0x18: -> tbnz x3, #63, 0x30 (2 instructions)
+  cmp x3, #0
+  b.mi 0x30
+
+4 errors

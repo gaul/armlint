@@ -1,0 +1,11 @@
+suboptimal MOVZ/MOVK sequence at offset: 0x0: w0 = 0x66666666 (2 instructions)
+  movz w0, #0x6666
+  movk w0, #0x6666, lsl #16
+
+suboptimal MOVZ/MOVK sequence at offset: 0x8: x1 = 0xf0f0f0f0f0f0f0f (4 instructions)
+  movz x1, #0xf0f
+  movk x1, #0xf0f, lsl #16
+  movk x1, #0xf0f, lsl #32
+  movk x1, #0xf0f, lsl #48
+
+2 errors

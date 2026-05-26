@@ -1,0 +1,10 @@
+ADD/SUB #0 is redundant at offset: 0x0: add x0, x1, #0 -> mov x0, x1 (1 instructions)
+  add x0, x1, #0
+
+ADD/SUB #0 is redundant at offset: 0x4: add x0, x0, #0 is a no-op (1 instructions)
+  add x0, x0, #0
+
+ADD/SUB #0 is redundant at offset: 0x8: sub w2, w3, #0 -> mov w2, w3 (1 instructions)
+  sub w2, w3, #0
+
+3 errors

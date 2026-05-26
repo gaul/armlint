@@ -1,0 +1,17 @@
+TST+B.EQ/NE foldable into TBZ/TBNZ at offset: 0x0: -> tbz x0, #3, 0x30 (2 instructions)
+  tst x0, #0x8
+  b.eq 0x30
+
+TST+B.EQ/NE foldable into TBZ/TBNZ at offset: 0x8: -> tbnz x1, #4, 0x30 (2 instructions)
+  tst x1, #0x10
+  b.ne 0x30
+
+TST+B.EQ/NE foldable into TBZ/TBNZ at offset: 0x10: -> tbz x2, #63, 0x30 (2 instructions)
+  tst x2, #0x8000000000000000
+  b.eq 0x30
+
+TST+B.EQ/NE foldable into TBZ/TBNZ at offset: 0x18: -> tbnz w3, #31, 0x30 (2 instructions)
+  tst w3, #0x80000000
+  b.ne 0x30
+
+4 errors

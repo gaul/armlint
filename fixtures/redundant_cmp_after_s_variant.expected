@@ -1,0 +1,36 @@
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x4: -> cbz x0, 0x3c (2 instructions)
+  cmp x0, #0
+  b.eq 0x3c
+
+redundant zero-CMP/TST after flag-setting ALU at offset: 0x0: drop cmp x0, #0 -- Z already set by subs x0, x1, x2 (3 instructions)
+  subs x0, x1, x2
+  cmp x0, #0
+  b.eq 0x3c
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x10: -> cbnz x3, 0x3c (2 instructions)
+  cmp x3, xzr
+  b.ne 0x3c
+
+redundant zero-CMP/TST after flag-setting ALU at offset: 0xc: drop cmp x3, xzr -- Z already set by ands x3, x4, x5 (3 instructions)
+  ands x3, x4, x5
+  cmp x3, xzr
+  b.ne 0x3c
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x1c: -> cbz w6, 0x3c (2 instructions)
+  tst w6, w6
+  b.eq 0x3c
+
+redundant zero-CMP/TST after flag-setting ALU at offset: 0x18: drop tst w6, w6 -- Z already set by adds w6, w7, w8 (3 instructions)
+  adds w6, w7, w8
+  tst w6, w6
+  b.eq 0x3c
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x28: -> cbz x12, 0x3c (2 instructions)
+  cmp x12, #0
+  b.eq 0x3c
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x34: -> cbz x13, 0x3c (2 instructions)
+  cmp x13, #0
+  b.eq 0x3c
+
+8 errors

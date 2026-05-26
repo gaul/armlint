@@ -1,0 +1,17 @@
+adjacent LDRs foldable into LDP at offset: 0x0: -> ldp x0, x1, [x10, #0] (2 instructions)
+  ldr x0, [x10]
+  ldr x1, [x10, #8]
+
+adjacent LDRs foldable into LDP (reverse order) at offset: 0x8: -> ldp x2, x3, [x11, #8] (2 instructions)
+  ldr x3, [x11, #0x10]
+  ldr x2, [x11, #8]
+
+adjacent STRs foldable into STP at offset: 0x10: -> stp w4, w5, [x12, #0] (2 instructions)
+  str w4, [x12]
+  str w5, [x12, #4]
+
+adjacent LDRSWs foldable into LDPSW at offset: 0x18: -> ldpsw x6, x7, [x13, #0] (2 instructions)
+  ldrsw x6, [x13]
+  ldrsw x7, [x13, #4]
+
+4 errors

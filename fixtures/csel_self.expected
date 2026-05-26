@@ -1,0 +1,10 @@
+CSEL same-operand identity at offset: 0x0: csel x0, x1, x1, eq -> mov x0, x1 (cond irrelevant: both branches = x1) (1 instructions)
+  csel x0, x1, x1, eq
+
+CSEL same-operand identity at offset: 0x4: csel w2, w3, w3, ne -> mov w2, w3 (cond irrelevant: both branches = w3) (1 instructions)
+  csel w2, w3, w3, ne
+
+CSEL same-operand identity at offset: 0x8: csel x4, x5, x5, lt -> mov x4, x5 (cond irrelevant: both branches = x5) (1 instructions)
+  csel x4, x5, x5, lt
+
+3 errors

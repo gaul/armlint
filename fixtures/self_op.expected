@@ -1,0 +1,25 @@
+self-op identity at offset: 0x0: and x0, x1, x1 -> mov x0, x1 (1 instructions)
+  and x0, x1, x1
+
+self-op identity at offset: 0x4: orr x2, x3, x3 -> mov x2, x3 (1 instructions)
+  orr x2, x3, x3
+
+self-op identity at offset: 0x8: eor x4, x5, x5 -> mov x4, xzr (1 instructions)
+  eor x4, x5, x5
+
+self-op identity at offset: 0xc: sub x6, x7, x7 -> mov x6, xzr (1 instructions)
+  sub x6, x7, x7
+
+self-op identity at offset: 0x10: bic x8, x9, x9 -> mov x8, xzr (1 instructions)
+  bic x8, x9, x9
+
+self-op identity at offset: 0x14: orn x10, x11, x11 -> mov x10, #-1 (movn x10, #0) (1 instructions)
+  orn x10, x11, x11
+
+self-op identity at offset: 0x18: eon x12, x13, x13 -> mov x12, #-1 (movn x12, #0) (1 instructions)
+  eon x12, x13, x13
+
+self-op identity at offset: 0x1c: and w14, w15, w15 -> mov w14, w15 (1 instructions)
+  and w14, w15, w15
+
+8 errors

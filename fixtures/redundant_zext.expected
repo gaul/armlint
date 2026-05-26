@@ -1,0 +1,25 @@
+redundant zero-extension after W-form op at offset: 0x0: ubfx x0, x0, #0, #0x20 is a no-op (bits >= 32 already zero) (2 instructions)
+  add w0, w1, w2
+  ubfx x0, x0, #0, #0x20
+
+redundant zero-extension after W-form op at offset: 0x8: and x3, x3, #0xffffffff is a no-op (bits >= 32 already zero) (2 instructions)
+  add w3, w4, w5
+  and x3, x3, #0xffffffff
+
+redundant zero-extension after W-form op at offset: 0x10: and w6, w6, #0xff is a no-op (bits >= 8 already zero) (2 instructions)
+  ldrb w6, [x7]
+  and w6, w6, #0xff
+
+redundant zero-extension after W-form op at offset: 0x18: and w8, w8, #0xffff is a no-op (bits >= 16 already zero) (2 instructions)
+  ldrh w8, [x9]
+  and w8, w8, #0xffff
+
+redundant zero-extension after W-form op at offset: 0x20: uxtb w10, w10 is a no-op (bits >= 8 already zero) (2 instructions)
+  ldrb w10, [x11]
+  uxtb w10, w10
+
+redundant zero-extension after W-form op at offset: 0x28: mov w12, w12 is a no-op (bits >= 32 already zero) (2 instructions)
+  add w12, w13, w14
+  mov w12, w12
+
+6 errors
