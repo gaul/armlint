@@ -424,6 +424,21 @@ code, and documents corners of the A64 instruction set.
     libgkcodecs 1; 0 in kubectl/docker/dyld/git/python3/openssl.
     Compilers reliably fuse MUL+ADD into MADD; the residual hits
     are in code paths where the optimizer didn't see the data flow.
+* NEG + ADD/SUB foldable to SUB/ADD
+  - `neg xt, xs ; add xd, xc, xt` -> `sub xd, xc, xs`. The ADD is
+    commutative, so `neg xt, xs ; add xd, xt, xc` folds the same
+    way. The SUB consumer mirrors:
+    `neg xt, xs ; sub xd, xc, xt` -> `add xd, xc, xs`.
+  - `sub xd, xt, xc` is NOT foldable: computes `-xs - xc`, which
+    has no single-instruction AArch64 form.
+  - Conservative soundness: Rd of the ADD/SUB must equal Rt (so the
+    NEG's destination is overwritten and `-xs` is dead), and the
+    accumulator operand must not equal Rt -- otherwise both ADD/SUB
+    sources are `-xs`, computing `-2*xs` or `0` instead of the
+    additive identity the fold assumes.
+  - S-variants (ADDS/SUBS, NEGS) are skipped: flag definitions
+    differ between the original and the rewrite. Widths must match
+    (both W or both X). NEG of XZR (computes 0) is excluded.
 * ADD + LDR foldable to register-offset LDR
   - `add xt, xn, xm{, lsl #s} ; ldr xt, [xt]` ->
     `ldr xt, [xn, xm{, lsl #s}]`. Saves the ADD by letting the LDR

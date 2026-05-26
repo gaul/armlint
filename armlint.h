@@ -351,6 +351,30 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// Detect NEG Rt, Rs (the SUB Rt, XZR, Rs alias, no shift, non-S)
+// immediately followed by an ADD/SUB (shifted-register, LSL #0,
+// non-S-variant) that consumes Rt. The pair folds to a single
+// instruction by absorbing the negation into the consumer's sign:
+//   neg xt, xs ; add xd, xt, xc -> sub xd, xc, xs  (ADD commutative)
+//   neg xt, xs ; add xd, xc, xt -> sub xd, xc, xs
+//   neg xt, xs ; sub xd, xc, xt -> add xd, xc, xs
+// The form `sub xd, xt, xc` is NOT foldable: there is no single
+// AArch64 instruction computing `-xs - xc`. S-variants (ADDS/SUBS)
+// are skipped because the fold changes the flag-set definition
+// (V/C in particular). NEGS is similarly excluded as a producer.
+//
+// Soundness (conservative):
+//   - Rd of the ADD/SUB must equal Rt, so the NEG's destination is
+//     overwritten and the intermediate -xs value is dead.
+//   - The "accumulator" operand (the one that is not Rt) must NOT
+//     equal Rt -- otherwise both ADD/SUB sources are -xs, computing
+//     -2*xs or 0 instead of the additive identity the fold assumes.
+// Widths must match: both W or both X. NEG writing to ZR is excluded
+// (the result is discarded), as is NEG of ZR (which computes 0 --
+// a different idiom, not strength reduction).
+bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // Detect an X-form ADD (shifted-register, LSL #s, non-S-variant)
 // immediately followed by an unsigned-offset LDR with imm12 = 0
 // whose base register and destination register both equal Rd of the

@@ -189,6 +189,18 @@ struct armlint_state {
     size_t mul_pending_offset;
     char mul_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending NEG Rt, Rs (the SUB Rt, XZR, Rs alias, no shift, non-S)
+    // awaiting an adjacent ADD/SUB consumer whose Rd overwrites Rt and
+    // whose negated-operand slot is Rt -- the pair folds to a single
+    // SUB (for ADD consumer) or ADD (for SUB consumer). Strict
+    // adjacency: any non-matching instruction expires the state.
+    bool neg_pending;
+    bool neg_pending_is_64bit;
+    unsigned neg_pending_rd;
+    unsigned neg_pending_rs;
+    size_t neg_pending_offset;
+    char neg_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending X-form ADD (shifted-register, LSL #s, non-S-variant)
     // awaiting an adjacent unsigned-offset LDR consumer whose base
     // register and destination register both equal Rd of the ADD. The
@@ -391,6 +403,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->bfx_isolate_seen = false;
     state->lsp_active = false;
     state->mul_pending = false;
+    state->neg_pending = false;
     state->add_pending = false;
     state->addi_pending = false;
     return mov_close(state, out);
@@ -3223,6 +3236,129 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode NEG Rd, Rs (the SUB Rd, XZR, Rs alias) with shift_type = LSL,
+// imm6 = 0, S = 0. NEG (shifted-register, no shift) is the most common
+// form emitted by compilers; the shifted form (NEG Rd, Rs, LSL #n) is
+// not handled. Mask 0x7FE0FFE0 fixes:
+//   bits 30..21 = 1001011000 (SUB, non-S, shifted-register, LSL, bit 21=0)
+//   bits 15..10 = 0          (imm6 == 0)
+//   bits 9..5   = 11111      (Rn = 31 = XZR)
+// sf at bit 31 is left free; Rm (bits 20..16) and Rd (bits 4..0) are
+// the NEG's operands.
+static bool decode_neg(uint32_t op, unsigned *out_sf, unsigned *out_rd,
+                       unsigned *out_rs)
+{
+    if ((op & 0x7FE0FFE0u) != 0x4B0003E0u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rs = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->neg_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an ADD/SUB consuming the pending NEG?
+    if (state->neg_pending) {
+        unsigned sf, rd, rn, rm;
+        bool is_sub, is_s;
+        if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                        &rd, &rn, &rm)
+                && !is_s
+                && ((sf != 0) == state->neg_pending_is_64bit)) {
+            unsigned t = state->neg_pending_rd;
+            bool valid = false;
+            unsigned xc = 0;
+            if (rd == t) {
+                if (is_sub) {
+                    // Only "sub xd, xc, xt" folds (Rm == t, Rn != t):
+                    // xd = xc - (-xs) = xc + xs -> add xd, xc, xs.
+                    if (rm == t && rn != t) {
+                        valid = true;
+                        xc = rn;
+                    }
+                } else {
+                    // ADD is commutative -- nt may sit in Rn or Rm
+                    // (xor): xd = xc + (-xs) = xc - xs -> sub xd, xc, xs.
+                    if (rm == t && rn != t) {
+                        valid = true;
+                        xc = rn;
+                    } else if (rn == t && rm != t) {
+                        valid = true;
+                        xc = rm;
+                    }
+                }
+            }
+
+            if (valid && xc != t) {
+                char w_or_x = state->neg_pending_is_64bit ? 'x' : 'w';
+                const char *fold_mnem = is_sub ? "add" : "sub";
+                const char *cons_mnem = is_sub ? "sub" : "add";
+
+                out->name = "NEG + ADD/SUB foldable to SUB/ADD";
+                out->start_offset = state->neg_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %c%u, %c%u",
+                    fold_mnem,
+                    w_or_x, rd,
+                    w_or_x, xc,
+                    w_or_x, state->neg_pending_rs);
+
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->neg_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, %c%u, %c%u",
+                    cons_mnem,
+                    w_or_x, rd,
+                    w_or_x, rn,
+                    w_or_x, rm);
+
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->neg_pending = false;
+    }
+
+    // (2) Try to open: is this a NEG (SUB Rd, XZR, Rs)?
+    unsigned n_sf, n_rd, n_rs;
+    if (decode_neg(op, &n_sf, &n_rd, &n_rs)) {
+        // Rd = 31 makes the NEG dead (writes to XZR); skip. Rs = 31
+        // (NEG Rd, XZR) computes 0 and is degenerate; skip.
+        if (n_rd != 31 && n_rs != 31) {
+            state->neg_pending = true;
+            state->neg_pending_is_64bit = (n_sf != 0);
+            state->neg_pending_rd = n_rd;
+            state->neg_pending_rs = n_rs;
+            state->neg_pending_offset = offset;
+            char w_or_x = (n_sf != 0) ? 'x' : 'w';
+            snprintf(state->neg_pending_disasm,
+                sizeof(state->neg_pending_disasm),
+                "neg %c%u, %c%u",
+                w_or_x, n_rd, w_or_x, n_rs);
+        }
+    }
+
+    return produced;
+}
+
 // Decode unsigned-offset STR (any size: B/H/W/X), integer-register
 // form only. Mask 0x3FC00000 covers bits 29..22 (the LDR/STR opcode
 // block plus V bit and opc bits). Value 0x39000000 fixes V=0,
@@ -3985,6 +4121,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_ldp_stp_coalesce,
     check_redundant_cmp_after_s_variant,
     check_mul_add_sub_fold,
+    check_neg_add_sub_fold,
     check_add_ldr_register_offset,
     check_add_ldr_imm_offset,
 };

@@ -3872,6 +3872,139 @@ static void test_add_ldr_register_offset(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// Encode NEG Xd, Xm (the SUB Xd, XZR, Xm alias, no shift, non-S).
+// Base 0xCB0003E0: sf=1, op=1 (SUB), S=0, class=01011, shift_type=LSL,
+// bit 21=0, imm6=0, Rn=31 (XZR).
+static void neg_x(uint8_t out[4], unsigned rd, unsigned rs)
+{
+    uint32_t op = 0xCB0003E0u
+        | ((rs & 0x1Fu) << 16)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Encode NEG Wd, Wm. Base 0x4B0003E0 (sf=0 variant).
+static void neg_w(uint8_t out[4], unsigned rd, unsigned rs)
+{
+    uint32_t op = 0x4B0003E0u
+        | ((rs & 0x1Fu) << 16)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Encode NEGS Xd, Xm (the SUBS Xd, XZR, Xm alias). Base 0xEB0003E0
+// adds S=1 to NEG's encoding.
+static void negs_x(uint8_t out[4], unsigned rd, unsigned rs)
+{
+    uint32_t op = 0xEB0003E0u
+        | ((rs & 0x1Fu) << 16)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_neg_add_sub_fold(void)
+{
+    uint8_t code[16];
+
+    // Canonical X-form, nt in Rm slot:
+    //   neg x3, x1 ; add x3, x2, x3 -> sub x3, x2, x1.
+    neg_x(&code[0], 3, 1);
+    ADD_X(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Commuted X-form, nt in Rn slot:
+    //   neg x3, x1 ; add x3, x3, x2 -> sub x3, x2, x1.
+    neg_x(&code[0], 3, 1);
+    ADD_X(&code[4], 3, 3, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form variant.
+    neg_w(&code[0], 3, 1);
+    ADD_W(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB consumer with nt in Rm slot:
+    //   neg x3, x1 ; sub x3, x2, x3 -> add x3, x2, x1.
+    neg_x(&code[0], 3, 1);
+    SUB_X(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: SUB with nt in Rn (xd = -xs - xc) -- no single-insn fold.
+    neg_x(&code[0], 3, 1);
+    SUB_X(&code[4], 3, 3, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADDS (S-variant) -- flag definition differs.
+    neg_x(&code[0], 3, 1);
+    encode_sr(&code[4], 0xAB000000u, 3, 2, 3);  // ADDS X3, X2, X3
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: SUBS (S-variant).
+    neg_x(&code[0], 3, 1);
+    SUBS_X(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD's Rd != Rt (NEG result is alive after the ADD).
+    neg_x(&code[0], 3, 1);
+    ADD_X(&code[4], 5, 2, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: accumulator equals nt (xc == xt aliasing).
+    //   neg x3, x1 ; add x3, x3, x3 (= -2*x1, not foldable as 1 insn).
+    neg_x(&code[0], 3, 1);
+    ADD_X(&code[4], 3, 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch (NEG W, ADD X).
+    neg_w(&code[0], 3, 1);
+    ADD_X(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD does not consume nt at all.
+    neg_x(&code[0], 3, 1);
+    ADD_X(&code[4], 6, 4, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: shifted ADD consumer (imm6 != 0).
+    neg_x(&code[0], 3, 1);
+    {
+        uint32_t op_lsl1 = 0x8B000000u
+            | (3u << 16) | (1u << 10) | (2u << 5) | 3u;  // add x3, x2, x3, lsl #1
+        write_le32(&code[4], op_lsl1);
+    }
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening instruction breaks adjacency.
+    neg_x(&code[0], 3, 1);
+    ADD_X(&code[4], 5, 5, 6);
+    ADD_X(&code[8], 3, 2, 3);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: NEGS (S-variant producer) -- flag-setting NEG, excluded.
+    negs_x(&code[0], 3, 1);
+    ADD_X(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: NEG writes XZR (Rd=31) -- dead-store, no pending.
+    neg_x(&code[0], 31, 1);
+    ADD_X(&code[4], 31, 2, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: NEG of XZR (Rs=31) computes 0 -- degenerate, skipped.
+    neg_x(&code[0], 3, 31);
+    ADD_X(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: bare NEG with no consumer (pending expires at flush).
+    neg_x(&code[0], 3, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // Negative: real SUB (not the NEG alias) -- Rn != XZR.
+    SUB_X(&code[0], 3, 4, 1);  // sub x3, x4, x1 (not neg x3, x1)
+    ADD_X(&code[4], 3, 2, 3);
+    assert(run_helper_check(code, 8) == 0);
+}
+
 // Encode ADD (immediate), X-form, with the sh bit set (imm12 << 12).
 // Base 0x91000000 carries sf=1, op=0, S=0; OR 0x00400000 sets sh=1.
 static void add_x_imm_sh(uint8_t out[4], unsigned rd, unsigned rn,
@@ -4050,6 +4183,7 @@ int main(void)
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
     test_mul_add_sub_fold();
+    test_neg_add_sub_fold();
     test_add_ldr_register_offset();
     test_add_ldr_imm_offset();
 
