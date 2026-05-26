@@ -1113,6 +1113,27 @@ static void test_cmp_zero_branch(void)
     ret_(&code[8]);
     assert(run_helper_check(code, 12) == 1);
 
+    // Exact-boundary negative: imm19 = 8191 -> tbz disp 8192,
+    // one past the top of TBZ's signed 14-bit range.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 8191 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Bottom-of-range positive: imm19 = -8193 -> tbz disp -8192,
+    // exactly at the bottom of TBZ's range.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, -8193 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Exact-boundary negative below the bottom: imm19 = -8194 ->
+    // tbz disp -8193.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, -8194 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
     // -- Negative: downstream reads N/C/V -- both CBZ and sign-bit
     //    folds suppressed by the same liveness scan. --
 
@@ -1189,6 +1210,27 @@ static void test_tst_branch(void)
     b_cond(&code[4], 0, 8190 * 4);
     ret_(&code[8]);
     assert(run_helper_check(code, 12) == 1);
+
+    // Exact-boundary negative: imm19 = 8191 -> tbz disp 8192, one
+    // past the top of TBZ's signed 14-bit range.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8191 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Bottom-of-range positive: imm19 = -8193 -> tbz disp -8192,
+    // exactly at the bottom of TBZ's range.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, -8193 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Exact-boundary negative below the bottom: imm19 = -8194 ->
+    // tbz disp -8193.
+    tst_w_bit(&code[0], 0, 0);
+    b_cond(&code[4], 0, -8194 * 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: flag liveness same as CMP check. --
 
