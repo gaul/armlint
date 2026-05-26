@@ -20,10 +20,32 @@ if [ ! -x "$ROOT/armlint" ]; then
     exit 2
 fi
 
-# Probe whether the host can assemble + link arm64 Mach-O. On macOS
-# clang ships with the arm64 backend; Linux requires a cross-toolchain
-# and produces ELF instead. Skip cleanly so the suite still works for
-# contributors who can't assemble locally.
+# Pick the right clang invocation for the host. We compile (-c) only:
+# the linker step is unnecessary for armlint's analysis (it walks
+# SHT_PROGBITS / __text sections in either an object or a linked
+# binary) and avoids the macOS/Linux _main-vs-main entry-symbol
+# difference.
+#
+# Output format differs: Mach-O .o on macOS, ELF .o on arm64 Linux.
+# armlint accepts both and reports section-relative offsets, so the
+# snapshot output is host-format-agnostic.
+case "$(uname -s)" in
+    Darwin)
+        CC_FLAGS=(-arch arm64)
+        ;;
+    Linux)
+        if [ "$(uname -m)" != "aarch64" ]; then
+            echo "skip: not an arm64 host (use ubuntu-*-arm runner or a cross-toolchain)" >&2
+            exit 0
+        fi
+        CC_FLAGS=()
+        ;;
+    *)
+        echo "skip: unsupported OS $(uname -s)" >&2
+        exit 0
+        ;;
+esac
+
 PROBE=$(mktemp -d)
 trap 'rm -rf "$PROBE"' EXIT
 cat > "$PROBE/probe.s" <<'EOF'
@@ -33,8 +55,9 @@ cat > "$PROBE/probe.s" <<'EOF'
 _main:
     ret
 EOF
-if ! clang -arch arm64 -o "$PROBE/probe" "$PROBE/probe.s" >/dev/null 2>&1; then
-    echo "skip: clang -arch arm64 not available on this host" >&2
+if ! clang "${CC_FLAGS[@]}" -c -o "$PROBE/probe.o" "$PROBE/probe.s" \
+        >/dev/null 2>&1; then
+    echo "skip: clang ${CC_FLAGS[*]} -c failed on this host" >&2
     exit 0
 fi
 
@@ -45,13 +68,13 @@ FAILED_NAMES=()
 for s in "$ROOT"/fixtures/*.s; do
     name="$(basename "$s" .s)"
     expected="$ROOT/fixtures/$name.expected"
-    bin="$PROBE/$name"
+    obj="$PROBE/$name.o"
     actual="$PROBE/$name.actual"
 
-    clang -arch arm64 -o "$bin" "$s" 2>/dev/null
+    clang "${CC_FLAGS[@]}" -c -o "$obj" "$s" 2>/dev/null
     # armlint exits with the finding count, so any positive result
     # would trip `set -e`; we want the output, not the exit code.
-    "$ROOT/armlint" "$bin" > "$actual" || true
+    "$ROOT/armlint" "$obj" > "$actual" || true
 
     if [ "$MODE" = "regen" ]; then
         cp "$actual" "$expected"
