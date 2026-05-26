@@ -189,6 +189,19 @@ struct armlint_state {
     size_t mul_pending_offset;
     char mul_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending X-form ADD (shifted-register, LSL #s, non-S-variant)
+    // awaiting an adjacent unsigned-offset LDR consumer whose base
+    // register and destination register both equal Rd of the ADD. The
+    // pair folds to a single register-offset LDR. Strict adjacency:
+    // any non-matching instruction expires the state.
+    bool add_pending;
+    unsigned add_pending_rd;
+    unsigned add_pending_rn;
+    unsigned add_pending_rm;
+    unsigned add_pending_shift;
+    size_t add_pending_offset;
+    char add_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
     // partner for LDP/STP/LDPSW coalescing. The next instruction of
     // the same kind (sext or zext) with the same Rn, same direction
@@ -363,6 +376,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->bfx_isolate_seen = false;
     state->lsp_active = false;
     state->mul_pending = false;
+    state->add_pending = false;
     return mov_close(state, out);
 }
 
@@ -3482,6 +3496,150 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode X-form ADD (shifted-register, non-S-variant) with any LSL
+// amount in [0, 63]. ADD here means "op = 0, S = 0"; SUB and ADDS/SUBS
+// are rejected. sf must be 1 (X-form): the consumer LDR's base
+// register is always 64-bit. Mask 0xFF200000 fixes sf=1, op=0, S=0,
+// the ADD/SUB opcode bits 28..24, and bit 21 (shifted-register form).
+// Shift type (bits 23..22) is checked separately for LSL only.
+static bool decode_add_x_shifted_lsl(uint32_t op,
+                                     unsigned *out_rd,
+                                     unsigned *out_rn,
+                                     unsigned *out_rm,
+                                     unsigned *out_shift)
+{
+    if ((op & 0xFF200000u) != 0x8B000000u) {
+        return false;
+    }
+    unsigned shift_type = (op >> 22) & 0x3u;
+    if (shift_type != 0) {
+        return false;
+    }
+    *out_shift = (op >> 10) & 0x3Fu;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+// Decode unsigned-offset LDR (any size: B/H/W/X), integer-register
+// form only. Parallel to decode_str_uimm_any_size but for opc=01
+// (LDR) rather than 00 (STR).
+static bool decode_ldr_uimm_any_size(uint32_t op,
+                                     unsigned *out_size,
+                                     unsigned *out_imm12,
+                                     unsigned *out_rn,
+                                     unsigned *out_rt)
+{
+    if ((op & 0x3FC00000u) != 0x39400000u) {
+        return false;
+    }
+    *out_size = (op >> 30) & 0x3u;
+    *out_imm12 = (op >> 10) & 0xFFFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+bool check_add_ldr_register_offset(armlint_state *state,
+                                   const cs_insn *insn,
+                                   size_t offset,
+                                   armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->add_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an LDR uimm consuming the pending ADD?
+    if (state->add_pending) {
+        unsigned size, imm12, ldr_rn, ldr_rt;
+        if (decode_ldr_uimm_any_size(op, &size, &imm12, &ldr_rn, &ldr_rt)
+                && imm12 == 0
+                && ldr_rn == state->add_pending_rd
+                && ldr_rt == state->add_pending_rd) {
+            // The LDR's register-offset form accepts only two shift
+            // amounts: 0 or log2(access_size). size encodes log2
+            // directly: 0=B, 1=H, 2=W, 3=X.
+            unsigned s = state->add_pending_shift;
+            if (s == 0 || s == size) {
+                const char *ldr_mnem;
+                char rt_wx;
+                switch (size) {
+                    case 0: ldr_mnem = "ldrb"; rt_wx = 'w'; break;
+                    case 1: ldr_mnem = "ldrh"; rt_wx = 'w'; break;
+                    case 2: ldr_mnem = "ldr";  rt_wx = 'w'; break;
+                    case 3: ldr_mnem = "ldr";  rt_wx = 'x'; break;
+                    default: ldr_mnem = "ldr"; rt_wx = 'x'; break;
+                }
+
+                out->name = "ADD + LDR foldable to register-offset LDR";
+                out->start_offset = state->add_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                if (s == 0) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, [x%u, x%u]",
+                        ldr_mnem, rt_wx, ldr_rt,
+                        state->add_pending_rn, state->add_pending_rm);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, [x%u, x%u, lsl #%u]",
+                        ldr_mnem, rt_wx, ldr_rt,
+                        state->add_pending_rn, state->add_pending_rm,
+                        s);
+                }
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->add_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, [x%u]",
+                    ldr_mnem, rt_wx, ldr_rt, ldr_rn);
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->add_pending = false;
+    }
+
+    // (2) Try to open: is this an X-form ADD shifted-LSL?
+    unsigned a_rd, a_rn, a_rm, a_shift;
+    if (decode_add_x_shifted_lsl(op, &a_rd, &a_rn, &a_rm, &a_shift)) {
+        // Only open if the shift could match some LDR access scale (0,
+        // 1, 2, or 3). All-ZR operands give a degenerate ADD; the
+        // fold is uninteresting and the Rn=31 case would also change
+        // semantics (Rn=31 in LDR means SP, not XZR). Rd=31 makes the
+        // ADD dead code -- skip.
+        if (a_rd != 31 && a_rn != 31 && a_rm != 31 && a_shift <= 3) {
+            state->add_pending = true;
+            state->add_pending_rd = a_rd;
+            state->add_pending_rn = a_rn;
+            state->add_pending_rm = a_rm;
+            state->add_pending_shift = a_shift;
+            state->add_pending_offset = offset;
+            if (a_shift == 0) {
+                snprintf(state->add_pending_disasm,
+                    sizeof(state->add_pending_disasm),
+                    "add x%u, x%u, x%u", a_rd, a_rn, a_rm);
+            } else {
+                snprintf(state->add_pending_disasm,
+                    sizeof(state->add_pending_disasm),
+                    "add x%u, x%u, x%u, lsl #%u",
+                    a_rd, a_rn, a_rm, a_shift);
+            }
+        }
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -3570,6 +3728,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_ldp_stp_coalesce,
     check_redundant_cmp_after_s_variant,
     check_mul_add_sub_fold,
+    check_add_ldr_register_offset,
 };
 
 const size_t armlint_check_registry_count =

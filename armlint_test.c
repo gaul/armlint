@@ -3698,6 +3698,215 @@ static void test_mul_add_sub_fold(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// Encode X-form ADD (shifted-register, LSL #shift). Base 0x8B000000
+// carries sf=1, op=0 (ADD), S=0, shifted-register opcode and shift
+// type = LSL.
+static void add_x_lsl(uint8_t out[4], unsigned rd, unsigned rn,
+                      unsigned rm, unsigned shift)
+{
+    uint32_t op = 0x8B000000u
+        | ((rm & 0x1Fu) << 16)
+        | ((shift & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode LDR Xt, [Xn] (unsigned-offset, imm12=0). Base 0xF9400000.
+static void ldr_x_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0xF9400000u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode LDR Wt, [Xn] (W-form, unsigned-offset, imm12=0). Base 0xB9400000.
+static void ldr_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0xB9400000u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode LDRB Wt, [Xn] (byte load, unsigned-offset, imm12=0). Base 0x39400000.
+static void ldrb_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0x39400000u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode LDRH Wt, [Xn] (halfword load, unsigned-offset, imm12=0). Base 0x79400000.
+static void ldrh_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0x79400000u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+// Encode LDR Xt, [Xn, #imm] (X-form, unsigned-offset, scaled imm). Base 0xF9400000.
+static void ldr_x_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
+                            unsigned imm12)
+{
+    uint32_t op = 0xF9400000u
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
+static void test_add_ldr_register_offset(void)
+{
+    uint8_t code[16];
+
+    // Canonical X-form: add x3, x1, x2 ; ldr x3, [x3]
+    //                   -> ldr x3, [x1, x2].
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form with LSL #3 (matches X access scale): add x3, x1, x2, lsl #3
+    //                                              ; ldr x3, [x3]
+    //                                              -> ldr x3, [x1, x2, lsl #3].
+    add_x_lsl(&code[0], 3, 1, 2, 3);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form LDR: add x3, x1, x2 ; ldr w3, [x3] -> ldr w3, [x1, x2].
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldr_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form LDR with LSL #2 (matches W access scale):
+    // add x3, x1, x2, lsl #2 ; ldr w3, [x3]
+    //                        -> ldr w3, [x1, x2, lsl #2].
+    add_x_lsl(&code[0], 3, 1, 2, 2);
+    ldr_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDRB: shift=0 OK.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldrb_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDRH with LSL #1 (matches H access scale).
+    add_x_lsl(&code[0], 3, 1, 2, 1);
+    ldrh_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: LSL #2 with X access (scale 3) does NOT match.
+    add_x_lsl(&code[0], 3, 1, 2, 2);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LSL #1 with W access (scale 2) does NOT match.
+    add_x_lsl(&code[0], 3, 1, 2, 1);
+    ldr_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LSL #3 with B access (scale 0, only 0 allowed) -- not match.
+    add_x_lsl(&code[0], 3, 1, 2, 3);
+    ldrb_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LDR base != ADD's Rd.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldr_x_uimm0(&code[4], 3, 5);  // base x5 != x3
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LDR's Rt != ADD's Rd (would leave Xt alive).
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldr_x_uimm0(&code[4], 7, 3);  // load into x7, not x3
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LDR with non-zero immediate offset.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldr_x_uimm_with(&code[4], 3, 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: SUB instead of ADD (semantics differ -- not a fold).
+    SUB_X(&code[0], 3, 1, 2);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADDS (S-variant -- writes flags, not pure ADD).
+    encode_sr(&code[0], 0xAB000000u, 3, 1, 2);  // ADDS X3, X1, X2
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: W-form ADD (sf=0) -- base register must be X.
+    ADD_W(&code[0], 3, 1, 2);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD with Rn = XZR (Rn=31 means XZR in shifted-register
+    // ADD; folding would change to SP semantics in the LDR).
+    add_x_lsl(&code[0], 3, 31, 2, 0);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD with Rm = XZR (degenerate; not folded).
+    add_x_lsl(&code[0], 3, 1, 31, 0);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD writing XZR (Rd=31, dead code).
+    add_x_lsl(&code[0], 31, 1, 2, 0);
+    ldr_x_uimm0(&code[4], 31, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening instruction breaks adjacency.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ADD_X(&code[4], 5, 5, 6);  // unrelated
+    ldr_x_uimm0(&code[8], 3, 3);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: LSL #4 (above max useful scale).
+    add_x_lsl(&code[0], 3, 1, 2, 4);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: trailing ADD with no following LDR (strict adjacency,
+    // not flagged at flush -- the pending state simply expires).
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // Aliasing positive: add x3, x3, x2 ; ldr x3, [x3]
+    //   ADD's Rd == Rn. The fold ldr x3, [x3, x2] reads x3's
+    //   pre-ADD value as base, matching the original semantics
+    //   (the LDR overwrites x3 immediately).
+    add_x_lsl(&code[0], 3, 3, 2, 0);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Aliasing positive: add x3, x1, x3 (Rd == Rm). Same reasoning.
+    add_x_lsl(&code[0], 3, 1, 3, 0);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -3729,6 +3938,7 @@ int main(void)
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
     test_mul_add_sub_fold();
+    test_add_ldr_register_offset();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

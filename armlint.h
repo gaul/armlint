@@ -325,6 +325,36 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// Detect an X-form ADD (shifted-register, LSL #s, non-S-variant)
+// immediately followed by an unsigned-offset LDR with imm12 = 0
+// whose base register and destination register both equal Rd of the
+// ADD. The pair folds to a single register-offset LDR:
+//   add xt, xn, xm           ; ldr xt, [xt]   -> ldr xt, [xn, xm]
+//   add xt, xn, xm, lsl #s   ; ldr xt, [xt]   -> ldr xt, [xn, xm, lsl #s]
+// The LDR's destination width may be W or X (same register number
+// as Xt): writing Wt zeros bits 63..32 of Xt, overwriting the
+// address regardless of size.
+//
+// Shift constraint: LDR (register, unsigned-offset variant) accepts
+// only LSL #0 or LSL #log2(access_size). access_size in bytes:
+// 1 for LDRB, 2 for LDRH, 4 for LDR W, 8 for LDR X.
+//
+// Soundness (conservative): Rd of the ADD must equal Rt of the LDR
+// (the loaded register). The LDR's write to Wt/Xt destroys the
+// pre-LDR address value of Xt, so Xt is dead immediately after the
+// LDR -- the ADD's only consumer was the LDR's base, which is now
+// folded into the LDR's addressing mode. STR is not flagged here
+// because there is no analogous Rd == Rt overwrite to prove Xt dead.
+//
+// The ADD's Rn = 31 case is excluded because Rn = 31 in
+// shifted-register ADD means XZR, but Rn = 31 in the LDR
+// register-offset form means SP -- the semantic mismatch would make
+// the rewrite incorrect. Rm = 31 (XZR) in the ADD makes the ADD a
+// MOV-and-rename, an unusual pattern excluded for cleanliness.
+bool check_add_ldr_register_offset(armlint_state *state,
+                                   const cs_insn *insn,
+                                   size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

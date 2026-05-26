@@ -410,6 +410,28 @@ code, and documents corners of the A64 instruction set.
     libgkcodecs 1; 0 in kubectl/docker/dyld/git/python3/openssl.
     Compilers reliably fuse MUL+ADD into MADD; the residual hits
     are in code paths where the optimizer didn't see the data flow.
+* ADD + LDR foldable to register-offset LDR
+  - `add xt, xn, xm{, lsl #s} ; ldr xt, [xt]` ->
+    `ldr xt, [xn, xm{, lsl #s}]`. Saves the ADD by letting the LDR
+    do the address arithmetic via its register-offset addressing
+    mode.
+  - Shift constraint: AArch64's LDR (register) accepts only LSL #0
+    or LSL #log2(access\_size) -- 0 or 1 for LDRH, 0 or 2 for LDR W,
+    0 or 3 for LDR X. The check filters to those amounts.
+  - Conservative soundness: Rd of the ADD must equal Rt of the LDR
+    (the loaded register). The LDR's write to Wt/Xt destroys the
+    pre-LDR address value of Xt, so Xt's only consumer was the
+    LDR itself.
+  - STR is intentionally not flagged: there is no analogous
+    Rd-overwrite to prove Xt is dead after the store.
+  - Rn = XZR in the ADD is excluded because Rn = 31 in the LDR's
+    register-offset form means SP, a semantic mismatch. Rm = XZR
+    (degenerate ADD) is skipped for cleanliness.
+  - Real-binary survey hits: XUL 155, libgkcodecs 5; 0 in
+    git/python3/openssl/dyld/libmozglue/libmozinference. Compilers
+    fuse most cases via the register-offset addressing mode; the
+    residual hits are in code paths where the address temporary's
+    liveness wasn't fully analyzed.
 
 ## Compilation
 
