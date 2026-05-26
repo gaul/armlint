@@ -399,6 +399,15 @@ static void test_lsl_fold(void)
     ADD_X(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
+    // lsl x0, x1, #1 ; add x0, x2, x0 (minimum shift; flag). The
+    // decoder rejects shift=0 because that's the MOV-alias / UBFX-
+    // all case (imms == imms_max); shift=1 is the smallest valid
+    // X-form LSL. W-form shift=1 is exercised above; this pins the
+    // X-form lower boundary too.
+    lsl_x(&code[0], 0, 1, 1);
+    ADD_X(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
     // adds (flag-setting ADD) consumer; still folds.
     lsl_w(&code[0], 0, 1, 3);
     ADDS_W(&code[4], 0, 2, 0);
