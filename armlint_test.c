@@ -703,6 +703,15 @@ static void and_w_ff(uint8_t out[4], unsigned rd, unsigned rn)
     write_le32(out, op);
 }
 
+// AND Wd, Wn, #0xFFFF -- sf=0, N=0, immr=0, imms=15.
+static void and_w_ffff(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x12003C00u
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
 // CMP Rn, Rm (shifted-register form, shift=LSL, imm6=0).
 //   sf 1 1 01011 00 0 Rm 000000 Rn 11111
 static void cmp_w_reg(uint8_t out[4], unsigned rn, unsigned rm)
@@ -1361,6 +1370,23 @@ static void test_redundant_zext(void)
     LDRB_W(&code[0], 0, 1, 0);
     and_w_ff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w0, [x1] ; and w0, w0, #0xffff -- LDRH (P=16) + AND W #0xFFFF (C=16).
+    LDRH_W(&code[0], 0, 1, 0);
+    and_w_ffff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrb w0, [x1] ; and w0, w0, #0xffff -- LDRB (P=8) + AND W #0xFFFF (C=16);
+    //                                        still redundant (P <= C).
+    LDRB_W(&code[0], 0, 1, 0);
+    and_w_ffff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w0, [x1] ; and w0, w0, #0xff -- LDRH (P=16) > AND W #0xFF (C=8);
+    //                                       NOT redundant (mask narrower).
+    LDRH_W(&code[0], 0, 1, 0);
+    and_w_ff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
 
     // ldrh w0, [x1] ; uxtb w0, w0 -- LDRH (P=16) > UXTB (C=8); NOT redundant.
     LDRH_W(&code[0], 0, 1, 0);
