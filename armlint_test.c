@@ -1433,6 +1433,29 @@ static void test_redundant_zext(void)
     and_w_ffff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
+    // Boundary: decode_and_imm_lowmask accepts imms in [0, datasize-2]
+    // (rejecting imms == datasize-1 because that is the all-ones case,
+    // not a valid bitmask immediate). The largest accepted width is
+    // datasize-1: 31 for W-form, 63 for X-form.
+
+    // ldrb w0, [x1] ; and w0, w0, #0x7FFFFFFF -- W-form AND at max
+    // accepted width (C=31, imms=30). Producer LDRB has P=8 <= 31,
+    // redundant. (and_w_lowmask is defined later in the file; inline
+    // the encoding here.)
+    LDRB_W(&code[0], 0, 1, 0);
+    write_le32(&code[4],
+        0x12000000u | (30u << 10) | (0u << 5) | 0u);
+    assert(run_helper_check(code, 8) == 1);
+
+    // add w0, w1, w2 ; and x0, x0, #0x7FFFFFFFFFFFFFFF -- X-form AND at
+    // max accepted width (C=63, imms=62). Producer W-form ADD zeros
+    // bits 63..32 (P=32 <= 63), so the AND clears only bit 63, which
+    // is already zero. Redundant.
+    ADD_W(&code[0], 0, 1, 2);
+    write_le32(&code[4],
+        0x92400000u | (62u << 10) | (0u << 5) | 0u);
+    assert(run_helper_check(code, 8) == 1);
+
     // ldrh w0, [x1] ; and w0, w0, #0xff -- LDRH (P=16) > AND W #0xFF (C=8);
     //                                       NOT redundant (mask narrower).
     LDRH_W(&code[0], 0, 1, 0);
