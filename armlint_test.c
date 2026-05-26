@@ -3768,6 +3768,39 @@ static void ldr_x_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
     write_le32(out, op);
 }
 
+// LDR Wt, [Xn, #imm] (W-form, unsigned-offset). Base 0xB9400000.
+static void ldr_w_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
+                            unsigned imm12)
+{
+    uint32_t op = 0xB9400000u
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// LDRH Wt, [Xn, #imm] (halfword load, unsigned-offset). Base 0x79400000.
+static void ldrh_w_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
+                             unsigned imm12)
+{
+    uint32_t op = 0x79400000u
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// LDRB Wt, [Xn, #imm] (byte load, unsigned-offset). Base 0x39400000.
+static void ldrb_w_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
+                             unsigned imm12)
+{
+    uint32_t op = 0x39400000u
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 static void test_add_ldr_register_offset(void)
 {
     uint8_t code[16];
@@ -4082,17 +4115,6 @@ static void test_add_ldr_imm_offset(void)
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
-    // Largest X-form offset that fits: 4095*8 = 32760 = 0x7FF8.
-    // 0x7FF8 = 0x7000 + 0xFF8. sh=1, imm12=0x7 gives 0x7000; we want
-    // exactly the boundary, so use sh=1, imm12=8 -> 0x8000 -- too big
-    // (0x8000/8 = 4096). Use sh=0 with imm12=0xFF8 -> 0xFF8 = 4088,
-    // 4088/8 = 511, well within range. Already covered by the
-    // canonical case; explicitly check the upper-bound boundary at
-    // sh=1, imm12=0x07 -> 0x7000 (multiple of 8, 0x7000/8=3584 ok).
-    add_x_imm_sh(&code[0], 3, 1, 0x7);
-    ldr_x_uimm0(&code[4], 3, 3);
-    assert(run_helper_check(code, 8) == 1);
-
     // Negative: misaligned for X access. #4 is not a multiple of 8.
     ADD_X_IMM(&code[0], 3, 1, 4);
     ldr_x_uimm0(&code[4], 3, 3);
@@ -4106,12 +4128,6 @@ static void test_add_ldr_imm_offset(void)
     // Negative: misaligned for H access. #1 is not a multiple of 2.
     ADD_X_IMM(&code[0], 3, 1, 1);
     ldrh_w_uimm0(&code[4], 3, 3);
-    assert(run_helper_check(code, 8) == 0);
-
-    // Negative: too large for X-form encoding. sh=1, imm12=0x8 ->
-    // 0x8000 (32768) bytes; 32768/8 = 4096 > 4095, doesn't fit.
-    add_x_imm_sh(&code[0], 3, 1, 0x8);
-    ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: LDR base != ADD's Rd.
@@ -4182,6 +4198,53 @@ static void test_add_ldr_imm_offset(void)
     ADD_X_IMM(&code[0], 3, 3, 16);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
+
+    // -- Boundary tests, per access size. The fit guard is
+    //    (combined >> size) <= 0xFFF, so the largest valid combined
+    //    byte offset is 4095 * (1 << size) and 4096 * (1 << size)
+    //    is the smallest invalid one. Each pair is constructed so
+    //    the alignment guard passes (the ADD's immediate is a
+    //    multiple of the access size). --
+
+    // X-form (scale 8): at-limit 32760 = 0x7000 + 0x7F8*8 = 0x7FF8.
+    add_x_imm_sh(&code[0], 3, 1, 0x7);          // 0x7000
+    ldr_x_uimm_with(&code[4], 3, 3, 0x1FF);     // 0x1FF * 8 = 0xFF8
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form above limit: 32768 = 0x8000, (combined >> 3) = 0x1000.
+    add_x_imm_sh(&code[0], 3, 1, 0x8);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // W-form (scale 4): at-limit 16380 = 0x3000 + 0x3FF*4 = 0x3FFC.
+    add_x_imm_sh(&code[0], 3, 1, 0x3);          // 0x3000
+    ldr_w_uimm_with(&code[4], 3, 3, 0x3FF);     // 0x3FF * 4 = 0xFFC
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form above limit: 16384 = 0x4000, (combined >> 2) = 0x1000.
+    add_x_imm_sh(&code[0], 3, 1, 0x4);
+    ldr_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // H-form (scale 2): at-limit 8190 = 0x1000 + 0x7FF*2 = 0x1FFE.
+    add_x_imm_sh(&code[0], 3, 1, 0x1);          // 0x1000
+    ldrh_w_uimm_with(&code[4], 3, 3, 0x7FF);    // 0x7FF * 2 = 0xFFE
+    assert(run_helper_check(code, 8) == 1);
+
+    // H-form above limit: 8192 = 0x2000, (combined >> 1) = 0x1000.
+    add_x_imm_sh(&code[0], 3, 1, 0x2);
+    ldrh_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // B-form (scale 1): at-limit 4095 = 0xFFF + 0 (sh=0 ADD).
+    ADD_X_IMM(&code[0], 3, 1, 0xFFF);
+    ldrb_w_uimm_with(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // B-form above limit: 4096 = 0x1000, (combined >> 0) = 0x1000.
+    add_x_imm_sh(&code[0], 3, 1, 0x1);
+    ldrb_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 int main(void)
