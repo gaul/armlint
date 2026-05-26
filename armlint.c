@@ -3955,15 +3955,20 @@ bool check_add_ldr_imm_offset(armlint_state *state,
     if (state->addi_pending) {
         unsigned size, imm12, ldr_rn, ldr_rt;
         if (decode_ldr_uimm_any_size(op, &size, &imm12, &ldr_rn, &ldr_rt)
-                && imm12 == 0
                 && ldr_rn == state->addi_pending_rd
                 && ldr_rt == state->addi_pending_rd) {
-            // The ADD's byte immediate must be a multiple of the LDR's
-            // access size and fit in 12 bits after scaling.
+            // The LDR's own byte offset is imm12 * access_size, already
+            // a multiple of access_size by construction. So the combined
+            // offset's alignment depends only on the ADD's imm, and the
+            // scaled total must fit in 12 bits. ldr_byte_imm + add_imm
+            // cannot overflow uint32_t: add_imm <= 0xFFF000 (24 bits)
+            // and ldr_byte_imm <= 4095 * 8 = 0x7FF8 (15 bits).
             unsigned access_size = 1u << size;
             uint32_t add_imm = state->addi_pending_imm;
+            uint32_t ldr_byte_imm = (uint32_t)imm12 * access_size;
+            uint32_t combined = add_imm + ldr_byte_imm;
             if ((add_imm & (access_size - 1u)) == 0
-                    && (add_imm >> size) <= 0xFFFu) {
+                    && (combined >> size) <= 0xFFFu) {
                 const char *ldr_mnem;
                 char rt_wx;
                 switch (size) {
@@ -3982,18 +3987,24 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 if (state->addi_pending_rn == 31) {
                     snprintf(out->detail, sizeof(out->detail),
                         "-> %s %c%u, [sp, #0x%x]",
-                        ldr_mnem, rt_wx, ldr_rt, add_imm);
+                        ldr_mnem, rt_wx, ldr_rt, combined);
                 } else {
                     snprintf(out->detail, sizeof(out->detail),
                         "-> %s %c%u, [x%u, #0x%x]",
                         ldr_mnem, rt_wx, ldr_rt,
-                        state->addi_pending_rn, add_imm);
+                        state->addi_pending_rn, combined);
                 }
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->addi_pending_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %c%u, [x%u]",
-                    ldr_mnem, rt_wx, ldr_rt, ldr_rn);
+                if (ldr_byte_imm == 0) {
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "%s %c%u, [x%u]",
+                        ldr_mnem, rt_wx, ldr_rt, ldr_rn);
+                } else {
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "%s %c%u, [x%u, #0x%x]",
+                        ldr_mnem, rt_wx, ldr_rt, ldr_rn, ldr_byte_imm);
+                }
                 produced = true;
             }
         }

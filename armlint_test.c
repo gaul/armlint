@@ -4098,10 +4098,17 @@ static void test_add_ldr_imm_offset(void)
     ldr_x_uimm0(&code[4], 7, 3);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: LDR with non-zero imm12 (v1 requires LDR imm = 0;
-    // the combined-offset case is a future extension).
+    // Positive: combined offset. add x3, x1, #16 ; ldr x3, [x3, #8]
+    //   -> ldr x3, [x1, #24]. (16 + 1*8 = 24, multiple of 8, fits.)
     ADD_X_IMM(&code[0], 3, 1, 16);
     ldr_x_uimm_with(&code[4], 3, 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: combined offset out of range. add x3, x1, #0x7FF0
+    //   (sh=1 imm12=7) ; ldr x3, [x3, #0x10] (imm12=2, scaled to 0x10).
+    //   Sum 0x8000 / 8 = 4096 > 4095 -- doesn't fit.
+    add_x_imm_sh(&code[0], 3, 1, 0x7);  // 0x7000
+    ldr_x_uimm_with(&code[4], 3, 3, 0x200);  // 0x200 * 8 = 0x1000; sum 0x8000
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: SUB-imm instead of ADD-imm (would need negative LDR

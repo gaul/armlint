@@ -406,20 +406,21 @@ bool check_add_ldr_register_offset(armlint_state *state,
                                    size_t offset, armlint_finding *out);
 
 // Detect an X-form ADD-immediate (non-S-variant) immediately followed
-// by an unsigned-offset LDR with imm12 = 0 whose base register and
-// destination register both equal Rd of the ADD. The pair folds to a
-// single immediate-offset LDR:
-//   add xt, xn, #imm  ; ldr xt, [xt]  -> ldr xt, [xn, #imm]
-//   add xt, sp, #imm  ; ldr xt, [xt]  -> ldr xt, [sp, #imm]
+// by an unsigned-offset LDR whose base register and destination
+// register both equal Rd of the ADD. The pair folds to a single
+// immediate-offset LDR, summing the two displacements:
+//   add xt, xn, #a  ; ldr xt, [xt]      -> ldr xt, [xn, #a]
+//   add xt, sp, #a  ; ldr xt, [xt]      -> ldr xt, [sp, #a]
+//   add xt, xn, #a  ; ldr xt, [xt, #b]  -> ldr xt, [xn, #(a+b)]
 // The LDR's destination width may be W or X (same register number as
 // Xt): writing Wt zeros bits 63..32 of Xt, overwriting the address
 // regardless of size. LDRB and LDRH consumers fold the same way.
 //
-// Encoding constraint: the ADD's byte immediate must be a multiple of
-// the LDR's access size and the scaled value must fit in 12 bits. The
-// ADD's sh=1 form (imm12 << 12) is supported -- the decoder returns
-// the expanded byte immediate so the check sees the same value
-// whichever way the assembler chose to encode it.
+// Encoding constraint: the combined byte offset must be a multiple of
+// the LDR's access size and its scaled value must fit in 12 bits. The
+// LDR's own imm12 is already a multiple of access_size, so alignment
+// is determined solely by the ADD's byte immediate. The ADD's sh=1
+// form (imm12 << 12) is supported.
 //
 // Soundness (conservative): Rd of the ADD must equal Rt of the LDR
 // (the loaded register), so the LDR's write to Wt/Xt destroys the

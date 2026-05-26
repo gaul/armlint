@@ -26,4 +26,8 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x30: -> ldr x3, [x3, #0x1
   add x3, x3, #0x10
   ldr x3, [x3]
 
-7 errors
+ADD + LDR foldable to immediate-offset LDR at offset: 0x38: -> ldr x3, [x1, #0x18] (2 instructions)
+  add x3, x1, #0x10
+  ldr x3, [x3, #0x8]
+
+8 errors

@@ -33,6 +33,10 @@ _main:
     add     x3, x3, #16
     ldr     x3, [x3]
 
+    // 8) Combined offset: 16 + 8 = 24.
+    add     x3, x1, #16
+    ldr     x3, [x3, #8]
+
     // Negatives:
     // N1) Misaligned for X access (#4 not a multiple of 8).
     add     x3, x1, #4
@@ -54,9 +58,10 @@ _main:
     add     x3, x1, #16
     ldr     x7, [x3]
 
-    // N6) LDR with non-zero imm (combined-offset case is v2).
-    add     x3, x1, #16
-    ldr     x3, [x3, #8]
+    // N6) Combined offset out of X-form range: 0x7000 + 0x1000 = 0x8000,
+    //     0x8000/8 = 4096 > 4095.
+    add     x3, x1, #0x7000
+    ldr     x3, [x3, #0x1000]
 
     // N7) SUB-imm: no negative encoding in LDR-uimm.
     sub     x3, x1, #16

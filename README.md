@@ -462,13 +462,16 @@ code, and documents corners of the A64 instruction set.
     residual hits are in code paths where the address temporary's
     liveness wasn't fully analyzed.
 * ADD + LDR foldable to immediate-offset LDR
-  - `add xt, xn, #imm ; ldr xt, [xt]` -> `ldr xt, [xn, #imm]`. The
-    immediate-form complement of the register-offset fold: same
-    Rd-overwrite soundness argument, but the ADD's constant offset
-    moves into the LDR's unsigned immediate slot.
-  - Encoding constraint: the ADD's byte immediate must be a multiple
-    of the LDR's access size and the scaled value must fit in 12
-    bits. The ADD's `sh=1` form (`imm12 << 12`) is supported.
+  - `add xt, xn, #a ; ldr xt, [xt, #b]` -> `ldr xt, [xn, #(a+b)]`,
+    with `b == 0` the most common case. The immediate-form
+    complement of the register-offset fold: same Rd-overwrite
+    soundness argument, but the ADD's constant offset (plus the
+    LDR's, if any) moves into the LDR's unsigned immediate slot.
+  - Encoding constraint: the combined byte offset must be a multiple
+    of the LDR's access size and its scaled value must fit in 12
+    bits. The LDR's own imm12 is already a multiple of access_size,
+    so alignment is determined solely by the ADD's byte immediate.
+    The ADD's `sh=1` form (`imm12 << 12`) is supported.
   - Rn = SP (Rn = 31 in ADD-imm) is intentionally flagged: ADD-imm
     and LDR-uimm both encode 31 as SP, so the canonical stack-
     relative load pattern (`add xt, sp, #imm ; ldr xt, [xt]`) folds
