@@ -130,6 +130,17 @@ static void test_is_bitmask_immediate_64(void)
     assert(!is_bitmask_immediate(0x1000001000000000ULL, 64));
 }
 
+// Write a 32-bit instruction word as little-endian bytes -- AArch64
+// is always little-endian for code. Every encoder below ends with
+// this 4-byte split.
+static inline void write_le32(uint8_t out[4], uint32_t op)
+{
+    out[0] = op & 0xff;
+    out[1] = (op >> 8) & 0xff;
+    out[2] = (op >> 16) & 0xff;
+    out[3] = (op >> 24) & 0xff;
+}
+
 // MOVZ Wd, #imm16
 // sf=0, opc=10, fixed=100101, hw=00, imm16, Rd
 // Encoding base: 0x52800000
@@ -138,10 +149,7 @@ static void movz_w(uint8_t out[4], unsigned rd, uint16_t imm16)
     uint32_t op = 0x52800000u
         | ((uint32_t)(imm16 & 0xffffu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MOVK Wd, #imm16, LSL #(hw*16)
@@ -152,10 +160,7 @@ static void movk_w(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
         | ((uint32_t)(hw & 0x3u) << 21)
         | ((uint32_t)(imm16 & 0xffffu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MOVZ Xd, #imm16, LSL #(hw*16). Encoding base: 0xd2800000
@@ -165,10 +170,7 @@ static void movz_x(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
         | ((uint32_t)(hw & 0x3u) << 21)
         | ((uint32_t)(imm16 & 0xffffu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MOVK Xd. Encoding base: 0xf2800000
@@ -178,10 +180,7 @@ static void movk_x(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
         | ((uint32_t)(hw & 0x3u) << 21)
         | ((uint32_t)(imm16 & 0xffffu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MOVN Xd. Encoding base: 0x92800000
@@ -191,10 +190,7 @@ static void movn_x(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
         | ((uint32_t)(hw & 0x3u) << 21)
         | ((uint32_t)(imm16 & 0xffffu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static int run_helper_check(uint8_t *bytes, size_t len)
@@ -284,10 +280,7 @@ static void lsl_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
         | (imms << 10)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void lsl_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
@@ -300,10 +293,7 @@ static void lsl_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
         | (imms << 10)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // LSR (immediate) -- UBFM with imms = imms_max, immr = shift. Used to
@@ -315,10 +305,7 @@ static void lsr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
         | (31u << 10)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Shifted-register consumer encoders. Each takes a base value for the
@@ -331,10 +318,7 @@ static void encode_sr(uint8_t out[4], uint32_t base,
         | ((rm & 0x1fu) << 16)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 #define ADD_W(out, rd, rn, rm)  encode_sr(out, 0x0b000000u, rd, rn, rm)
@@ -368,10 +352,7 @@ static void add_w_lsl1(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
         | (1u << 10)        // imm6 = 1
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void test_lsl_fold(void)
@@ -481,10 +462,7 @@ static void cmp_w_imm(uint8_t out[4], unsigned rn, unsigned imm12)
     uint32_t op = 0x7100001fu
         | ((imm12 & 0xfffu) << 10)
         | ((rn & 0x1fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void cmp_x_imm(uint8_t out[4], unsigned rn, unsigned imm12)
@@ -492,10 +470,7 @@ static void cmp_x_imm(uint8_t out[4], unsigned rn, unsigned imm12)
     uint32_t op = 0xf100001fu
         | ((imm12 & 0xfffu) << 10)
         | ((rn & 0x1fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // SUBS Wd, Wn, #0 with a real Rd (Rd != 31) -- not a CMP alias and
@@ -507,10 +482,7 @@ static void subs_w_imm(uint8_t out[4], unsigned rd, unsigned rn,
         | ((imm12 & 0xfffu) << 10)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // ADD/SUB immediate (non-flag-setting, S=0). bases:
@@ -523,10 +495,7 @@ static void encode_addsub_imm(uint8_t out[4], uint32_t base,
         | ((imm12 & 0xFFFu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 #define ADD_W_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x11000000u, rd, rn, imm)
 #define SUB_W_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x51000000u, rd, rn, imm)
@@ -540,10 +509,7 @@ static void adrp_x(uint8_t out[4], unsigned rd, int imm)
         | (((uint32_t)imm & 0x3u) << 29)
         | ((((uint32_t)imm >> 2) & 0x7FFFFu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // B.cond with relative byte offset (signed, multiple of 4).
@@ -553,10 +519,7 @@ static void b_cond(uint8_t out[4], unsigned cond, int32_t byte_offset)
     uint32_t op = 0x54000000u
         | (((uint32_t)imm19 & 0x7ffffu) << 5)
         | (cond & 0xfu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // RET x30 -- the safe-terminator stopper for flag liveness.
@@ -573,10 +536,7 @@ static void bl_(uint8_t out[4], int32_t byte_offset)
 {
     int32_t imm26 = byte_offset / 4;
     uint32_t op = 0x94000000u | ((uint32_t)imm26 & 0x3FFFFFFu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // B (unconditional) -- LIV_TERM_UNSAFE.
@@ -584,10 +544,7 @@ static void b_(uint8_t out[4], int32_t byte_offset)
 {
     int32_t imm26 = byte_offset / 4;
     uint32_t op = 0x14000000u | ((uint32_t)imm26 & 0x3FFFFFFu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // ADCS Wd, Wn, Wm -- reads C; LIV_READ.
@@ -597,10 +554,7 @@ static void adcs_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
         | ((rm & 0x1fu) << 16)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // CSEL Wd, Wn, Wm, cond -- reads NZCV; LIV_READ.
@@ -612,10 +566,7 @@ static void csel_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
         | ((cond & 0xfu) << 12)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void csel_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
@@ -626,10 +577,7 @@ static void csel_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
         | ((cond & 0xfu) << 12)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // CSINC Wd, Wn, Wm, cond -- different from CSEL (op2 = 01 vs 00) and
@@ -642,10 +590,7 @@ static void csinc_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
         | ((cond & 0xfu) << 12)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // TST Wn, #(1<<k) -- ANDS WZR, Wn, #imm with N=0, imms=0, immr =
@@ -656,10 +601,7 @@ static void tst_w_bit(uint8_t out[4], unsigned rn, unsigned k)
     uint32_t op = 0x7200001Fu
         | ((immr & 0x3Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // TST Xn, #(1<<k) -- ANDS XZR, Xn, #imm with N=1, imms=0, immr =
@@ -670,10 +612,7 @@ static void tst_x_bit(uint8_t out[4], unsigned rn, unsigned k)
     uint32_t op = 0xF240001Fu
         | ((immr & 0x3Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // TST Wn, #imm where imm is NOT a single bit (multi-bit mask) -- used
@@ -685,10 +624,7 @@ static void tst_w_run(uint8_t out[4], unsigned rn, unsigned imms)
     uint32_t op = 0x7200001Fu
         | ((imms & 0x3Fu) << 10)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // UXTW Xd, Wn = UBFM Xd, Xn, #0, #31 (sf=1, N=1, immr=0, imms=31).
@@ -697,10 +633,7 @@ static void uxtw(uint8_t out[4], unsigned rd, unsigned rn)
     uint32_t op = 0xD3407C00u
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // AND Xd, Xn, #0xffffffff (sf=1, opc=00, N=1, immr=0, imms=31).
@@ -709,10 +642,7 @@ static void and_x_ff32(uint8_t out[4], unsigned rd, unsigned rn)
     uint32_t op = 0x92407C00u
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // UXTH Xd, Wn = UBFM Xd, Xn, #0, #15 (sf=1, N=1, immr=0, imms=15).
@@ -723,10 +653,7 @@ static void uxth_x(uint8_t out[4], unsigned rd, unsigned rn)
         | (15u << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // UXTH Wd, Wn = UBFM Wd, Wn, #0, #15 (sf=0, N=0, immr=0, imms=15).
@@ -736,10 +663,7 @@ static void uxth_w(uint8_t out[4], unsigned rd, unsigned rn)
         | (15u << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // UXTB Wd, Wn = UBFM Wd, Wn, #0, #7 (sf=0, N=0, immr=0, imms=7).
@@ -749,10 +673,7 @@ static void uxtb_w(uint8_t out[4], unsigned rd, unsigned rn)
         | (7u << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MOV Xd, Xm = ORR Xd, XZR, Xm, LSL #0. Base 0xAA0003E0.
@@ -761,10 +682,7 @@ static void mov_x(uint8_t out[4], unsigned rd, unsigned rm)
     uint32_t op = 0xAA0003E0u
         | ((rm & 0x1Fu) << 16)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MOV Wd, Wm = ORR Wd, WZR, Wm, LSL #0. Base 0x2A0003E0.
@@ -773,10 +691,7 @@ static void mov_w_reg(uint8_t out[4], unsigned rd, unsigned rm)
     uint32_t op = 0x2A0003E0u
         | ((rm & 0x1Fu) << 16)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // AND Wd, Wn, #0xFF -- sf=0, N=0, immr=0, imms=7.
@@ -785,10 +700,7 @@ static void and_w_ff(uint8_t out[4], unsigned rd, unsigned rn)
     uint32_t op = 0x12001C00u
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // CMP Rn, Rm (shifted-register form, shift=LSL, imm6=0).
@@ -798,10 +710,7 @@ static void cmp_w_reg(uint8_t out[4], unsigned rn, unsigned rm)
     uint32_t op = 0x6B00001Fu
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void cmp_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
@@ -809,10 +718,7 @@ static void cmp_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
     uint32_t op = 0xEB00001Fu
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // TST Rn, Rm (logical shifted-register form, shift=LSL, N=0, imm6=0).
@@ -822,10 +728,7 @@ static void tst_w_reg(uint8_t out[4], unsigned rn, unsigned rm)
     uint32_t op = 0x6A00001Fu
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void tst_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
@@ -833,10 +736,7 @@ static void tst_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
     uint32_t op = 0xEA00001Fu
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // LSR (immediate) Wd, Wn, #b -- UBFM Wd, Wn, #b, #31 (already have
@@ -847,10 +747,7 @@ static void lsr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
         | ((shift & 0x3Fu) << 16)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // ASR (immediate) -- SBFM with imms = datasize-1.
@@ -860,10 +757,7 @@ static void asr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
         | ((shift & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
@@ -872,10 +766,7 @@ static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
         | ((shift & 0x3Fu) << 16)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // LDR/LDRH/LDRB Wt with unsigned-immediate offset.
@@ -889,10 +780,7 @@ static void encode_ldr_imm(uint8_t out[4], uint32_t base, unsigned rt,
         | ((imm12 & 0xFFFu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 #define LDR_W(out, rt, rn, imm)  encode_ldr_imm(out, 0xB9400000u, rt, rn, imm)
@@ -928,10 +816,7 @@ static void encode_sbfm_zero_immr(uint8_t out[4], uint32_t base,
     uint32_t op = base
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 #define SXTB_W(out, rd, rn) encode_sbfm_zero_immr(out, 0x13001C00u, rd, rn)
@@ -1526,10 +1411,7 @@ static void and_w_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
         | ((imms & 0x3Fu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // AND Xd, Xn, #imm where imm = (1<<w) - 1. sf=1, N=1, immr=0, imms=w-1.
@@ -1541,10 +1423,7 @@ static void and_x_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
         | ((imms & 0x3Fu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // AND Wd, Wn, #~((1<<w)-1). Encoding: sf=0, N=0, immr=32-w,
@@ -1559,10 +1438,7 @@ static void and_w_highmask(uint8_t out[4], unsigned rd, unsigned rn,
         | ((imms & 0x3Fu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // AND Xd, Xn, #~((1<<w)-1). sf=1, N=1, immr=64-w, imms=63-w.
@@ -1576,10 +1452,7 @@ static void and_x_highmask(uint8_t out[4], unsigned rd, unsigned rn,
         | ((imms & 0x3Fu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // AND Wd, Wn, #0x6 (mask 0b110 -- not contiguous-low). Used to verify
@@ -1594,10 +1467,7 @@ static void and_w_non_contig_lo(uint8_t out[4], unsigned rd, unsigned rn)
         | (1u << 10)    // imms = 1
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void test_lsl_lsr_to_ubfx(void)
@@ -2880,10 +2750,7 @@ static void mul_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MUL Xd, Xn, Xm encoding. Base 0x9B007C00.
@@ -2893,10 +2760,7 @@ static void mul_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MADD Xd, Xn, Xm, Xa with explicit Xa != XZR. Base 0x9B000000.
@@ -2908,10 +2772,7 @@ static void madd_x(uint8_t out[4], unsigned rd, unsigned rn,
         | ((ra & 0x1Fu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void test_mul_strength_reduce(void)
@@ -3033,10 +2894,7 @@ static void mneg_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MNEG Wd, Wn, Wm. Base 0x1B00FC00.
@@ -3046,10 +2904,7 @@ static void mneg_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // MSUB Xd, Xn, Xm, Xa with explicit Xa != XZR. Base 0x9B008000.
@@ -3061,10 +2916,7 @@ static void msub_x(uint8_t out[4], unsigned rd, unsigned rn,
         | ((ra & 0x1Fu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void test_mneg_strength_reduce(void)
@@ -3172,10 +3024,7 @@ static void cmp_x_reg_sr(uint8_t out[4], unsigned rn, unsigned rm)
     uint32_t op = 0xEB00001Fu
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // CMN Xn, Xm (ADDS XZR, Xn, Xm, LSL #0). Base 0xAB00001F.
@@ -3184,10 +3033,7 @@ static void cmn_x_reg_sr(uint8_t out[4], unsigned rn, unsigned rm)
     uint32_t op = 0xAB00001Fu
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void test_mov_add_sub_imm_fold(void)
@@ -3423,10 +3269,7 @@ static void str_x_uimm(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm)
         | ((imm & 0xFFFu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode STRB Wt, [Xn, #imm] (byte store). Base 0x39000000.
@@ -3437,10 +3280,7 @@ static void strb_w_uimm(uint8_t out[4], unsigned rt, unsigned rn,
         | ((imm & 0xFFFu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode STRH Wt, [Xn, #imm] (halfword store). Base 0x79000000.
@@ -3451,10 +3291,7 @@ static void strh_w_uimm(uint8_t out[4], unsigned rt, unsigned rn,
         | ((imm & 0xFFFu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode LDR Xt, [Xn, #imm] (X-form load, unsigned offset). For
@@ -3467,10 +3304,7 @@ static void ldr_x_uimm_for_test(uint8_t out[4], unsigned rt, unsigned rn,
         | ((imm & 0xFFFu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void test_mov_zero_to_xzr(void)
@@ -3709,10 +3543,7 @@ static void add_x_lsl(uint8_t out[4], unsigned rd, unsigned rn,
         | ((shift & 0x3Fu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rd & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode LDR Xt, [Xn] (unsigned-offset, imm12=0). Base 0xF9400000.
@@ -3721,10 +3552,7 @@ static void ldr_x_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
     uint32_t op = 0xF9400000u
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode LDR Wt, [Xn] (W-form, unsigned-offset, imm12=0). Base 0xB9400000.
@@ -3733,10 +3561,7 @@ static void ldr_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
     uint32_t op = 0xB9400000u
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode LDRB Wt, [Xn] (byte load, unsigned-offset, imm12=0). Base 0x39400000.
@@ -3745,10 +3570,7 @@ static void ldrb_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
     uint32_t op = 0x39400000u
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode LDRH Wt, [Xn] (halfword load, unsigned-offset, imm12=0). Base 0x79400000.
@@ -3757,10 +3579,7 @@ static void ldrh_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
     uint32_t op = 0x79400000u
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 // Encode LDR Xt, [Xn, #imm] (X-form, unsigned-offset, scaled imm). Base 0xF9400000.
@@ -3771,10 +3590,7 @@ static void ldr_x_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
         | ((imm12 & 0xFFFu) << 10)
         | ((rn & 0x1Fu) << 5)
         | (rt & 0x1Fu);
-    out[0] = op & 0xff;
-    out[1] = (op >> 8) & 0xff;
-    out[2] = (op >> 16) & 0xff;
-    out[3] = (op >> 24) & 0xff;
+    write_le32(out, op);
 }
 
 static void test_add_ldr_register_offset(void)
