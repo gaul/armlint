@@ -3265,12 +3265,28 @@ static void test_mov_add_sub_imm_fold(void)
     ADD_X(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // imm12 << 12 boundary: C = 0xFFF000 fits with sh=1.
-    movz_x(&code[0], 0, 0xFFF, 1);  // imm = 0xFFF << 16 = 0xFFF0000 -- no wait.
-    // Use a different encoding: imm16=0xFFF, shift=0 gives 0xFFF.
-    // To get 0xFFF000, we need MOVZ X0, #0xFFF, LSL #16? No that's 0xFFF0000.
-    // 0xFFF000 = 0xFFF * 4096 = 0xFFF * 0x1000 ... hmm, not directly via MOVZ.
-    // MOVZ X0, #0xFFF000 won't fit in 16-bit imm. Skip this case.
+    // imm12 << 12 top boundary: C = 0xFFF000 fits with sh=1. A
+    // single MOVZ can't reach 0xFFF000 (12-bit offset within a
+    // 16-bit slot doesn't align to the shift granularity), so the
+    // value is built with a MOVZ + MOVK chain. The chain is itself
+    // a bitmask immediate (a contiguous 12-bit run), so this run
+    // also produces a check_movz_movk_bitmask finding -- the assert
+    // counts both: the MOV+ADD fold plus the bitmask shrink. The
+    // dual finding is deliberate; it documents the cross-check
+    // interaction at this exact boundary.
+    movz_x(&code[0], 0, 0xF000, 0);          // x0 = 0xF000
+    movk_x(&code[4], 0, 0xFF, 1);            // x0 = 0x00FF_F000
+    ADD_X(&code[8], 3, 2, 0);
+    assert(run_helper_check(code, 12) == 2);
+
+    // imm12 << 12 above boundary: C = 0x1000000 doesn't fit
+    // (alignment is fine, but (C >> 12) = 0x1000 > 0xFFF). Use a
+    // single MOVZ #0x100, lsl #16 to avoid triggering the bitmask
+    // check (single MOV does not produce a "suboptimal sequence"
+    // finding because mov_close requires >= 2 chain entries).
+    movz_x(&code[0], 0, 0x100, 1);           // x0 = 0x0100_0000
+    ADD_X(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
 
     // Negative: C = 4097 doesn't fit (not <= 4095, not a multiple of 4096).
     movz_x(&code[0], 0, 0x1001, 0);
