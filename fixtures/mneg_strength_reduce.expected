@@ -1,0 +1,37 @@
+MNEG by constant foldable to neg/sub at offset: 0x0: -> neg x3, x2 (2 instructions)
+  movz x0, #0x1
+  mneg x3, x2, x0
+
+MNEG by constant foldable to neg/sub at offset: 0x8: -> neg x3, x2, lsl #3 (2 instructions)
+  movz x0, #0x8
+  mneg x3, x2, x0
+
+MNEG by constant foldable to neg/sub at offset: 0x10: -> neg x3, x2, lsl #1 (2 instructions)
+  movz x0, #0x2
+  mneg x3, x0, x2
+
+MNEG by constant foldable to neg/sub at offset: 0x18: -> neg w3, w2, lsl #2 (2 instructions)
+  movz w0, #0x4
+  mneg w3, w2, w0
+
+MNEG by constant foldable to neg/sub at offset: 0x20: -> sub x3, x2, x2, lsl #2 (2 instructions)
+  movz x0, #0x3
+  mneg x3, x2, x0
+
+MNEG by constant foldable to neg/sub at offset: 0x28: -> sub x3, x2, x2, lsl #3 (2 instructions)
+  movz x0, #0x7
+  mneg x3, x2, x0
+
+MNEG by constant foldable to neg/sub at offset: 0x30: -> sub x3, x2, x2, lsl #4 (2 instructions)
+  movz x0, #0xf
+  mneg x3, x2, x0
+
+MNEG by constant foldable to neg/sub at offset: 0x38: -> neg x3, x2, lsl #32 (2 instructions)
+  movz x0, #0x1, lsl #32
+  mneg x3, x2, x0
+
+MUL by constant foldable to shift/add at offset: 0x60: -> lsl x3, x2, #3 (2 instructions)
+  movz x0, #0x8
+  mul x3, x2, x0
+
+9 errors

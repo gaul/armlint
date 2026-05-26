@@ -1,0 +1,26 @@
+MUL by constant foldable to shift/add at offset: 0x0: -> lsl x3, x2, #3 (2 instructions)
+  movz x0, #0x8
+  mul x3, x2, x0
+
+MUL by constant foldable to shift/add at offset: 0x8: -> add x3, x2, x2, lsl #1 (2 instructions)
+  movz x0, #0x3
+  mul x3, x2, x0
+
+MUL by constant foldable to shift/add at offset: 0x10: -> lsl w3, w2, #4 (2 instructions)
+  movz w0, #0x10
+  mul w3, w2, w0
+
+MUL by constant foldable to shift/add at offset: 0x18: -> add x3, x2, x2, lsl #2 (2 instructions)
+  movz x0, #0x5
+  mul x3, x0, x2
+
+MUL by constant foldable to shift/add at offset: 0x20: -> lsl x3, x2, #32 (2 instructions)
+  movz x0, #0x1, lsl #32
+  mul x3, x2, x0
+
+MUL by constant foldable to shift/add at offset: 0x28: -> add x3, x2, x2, lsl #16 (3 instructions)
+  movz x0, #0x1, lsl #16
+  movk x0, #0x1
+  mul x3, x2, x0
+
+6 errors

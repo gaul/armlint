@@ -1,0 +1,41 @@
+MOV + ADD/SUB foldable to immediate form at offset: 0x0: -> add x3, x2, #0x64 (2 instructions)
+  movz x0, #0x64
+  add x3, x2, x0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x8: -> add x3, x2, #0x5 (2 instructions)
+  movz x0, #0x5
+  add x3, x0, x2
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x10: -> add w3, w2, #0x32 (2 instructions)
+  movz w0, #0x32
+  add w3, w2, w0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x18: -> adds x3, x2, #0xc8 (2 instructions)
+  movz x0, #0xc8
+  adds x3, x2, x0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x20: -> sub x3, x2, #0x12c (2 instructions)
+  movz x0, #0x12c
+  sub x3, x2, x0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x28: -> subs x3, x2, #0x190 (2 instructions)
+  movz x0, #0x190
+  subs x3, x2, x0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x30: -> cmp x2, #0x1f4 (2 instructions)
+  movz x0, #0x1f4
+  subs x31, x2, x0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x38: -> cmn x2, #0x258 (2 instructions)
+  movz x0, #0x258
+  adds x31, x2, x0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x40: -> add x3, x2, #0xfff (2 instructions)
+  movz x0, #0xfff
+  add x3, x2, x0
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x48: -> add x3, x2, #0x1000 (2 instructions)
+  movz x0, #0x1000
+  add x3, x2, x0
+
+10 errors

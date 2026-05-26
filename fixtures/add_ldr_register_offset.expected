@@ -1,0 +1,29 @@
+ADD + LDR foldable to register-offset LDR at offset: 0x0: -> ldr x3, [x1, x2] (2 instructions)
+  add x3, x1, x2
+  ldr x3, [x3]
+
+ADD + LDR foldable to register-offset LDR at offset: 0x8: -> ldr x3, [x1, x2, lsl #3] (2 instructions)
+  add x3, x1, x2, lsl #3
+  ldr x3, [x3]
+
+ADD + LDR foldable to register-offset LDR at offset: 0x10: -> ldr w3, [x1, x2] (2 instructions)
+  add x3, x1, x2
+  ldr w3, [x3]
+
+ADD + LDR foldable to register-offset LDR at offset: 0x18: -> ldr w3, [x1, x2, lsl #2] (2 instructions)
+  add x3, x1, x2, lsl #2
+  ldr w3, [x3]
+
+ADD + LDR foldable to register-offset LDR at offset: 0x20: -> ldrb w3, [x1, x2] (2 instructions)
+  add x3, x1, x2
+  ldrb w3, [x3]
+
+ADD + LDR foldable to register-offset LDR at offset: 0x28: -> ldrh w3, [x1, x2, lsl #1] (2 instructions)
+  add x3, x1, x2, lsl #1
+  ldrh w3, [x3]
+
+ADD + LDR foldable to register-offset LDR at offset: 0x30: -> ldr x3, [x3, x2] (2 instructions)
+  add x3, x3, x2
+  ldr x3, [x3]
+
+7 errors

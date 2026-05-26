@@ -23,6 +23,18 @@ test: armlint.o armlint_test.o
 	$(CC) $(CFLAGS) armlint.o armlint_test.o $(CAPSTONE_LIBS) -o armlint_test
 	./armlint_test
 
+# Snapshot-based integration suite under fixtures/. Each .s is
+# assembled with clang -arch arm64 and diffed against the matching
+# .expected. Skips cleanly on hosts without an arm64 toolchain.
+integration-test: armlint
+	./scripts/run_fixtures.sh
+
+# Regenerate fixtures/*.expected from current armlint output -- use
+# after an intentional behavior change, then review the diff before
+# committing.
+integration-test-regen: armlint
+	./scripts/run_fixtures.sh regen
+
 all: lib armlint test
 
 clean:
@@ -32,4 +44,4 @@ clean:
 		libarmlint.a \
 		*.o
 
-.PHONY: all clean lib test
+.PHONY: all clean lib test integration-test integration-test-regen

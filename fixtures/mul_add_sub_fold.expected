@@ -1,0 +1,25 @@
+MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x0: -> madd x3, x1, x2, x4 (2 instructions)
+  mul x3, x1, x2
+  add x3, x3, x4
+
+MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x8: -> madd x3, x1, x2, x4 (2 instructions)
+  mul x3, x1, x2
+  add x3, x4, x3
+
+MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x10: -> madd w3, w1, w2, w4 (2 instructions)
+  mul w3, w1, w2
+  add w3, w3, w4
+
+MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x18: -> msub x3, x1, x2, x4 (2 instructions)
+  mul x3, x1, x2
+  sub x3, x4, x3
+
+MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x20: -> madd x3, x3, x2, x4 (2 instructions)
+  mul x3, x3, x2
+  add x3, x3, x4
+
+MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x28: -> madd x3, x1, x1, x4 (2 instructions)
+  mul x3, x1, x1
+  add x3, x3, x4
+
+6 errors
