@@ -2663,6 +2663,126 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// UDIV encoding (Data-processing 2-source):
+// sf | 0 | 0 | 11010110 | Rm(5) | 000010 | Rn(5) | Rd(5). SDIV uses the
+// same opcode block with opcode2 = 000011 at bits 15..10; we
+// deliberately only match UDIV here -- see check_udiv_strength_reduce.
+static bool decode_udiv(uint32_t op,
+                        unsigned *out_sf, unsigned *out_rd,
+                        unsigned *out_rn, unsigned *out_rm)
+{
+    if ((op & 0x7FE0FC00u) != 0x1AC00800u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    unsigned sf, rd, rn, rm;
+    if (!decode_udiv(op, &sf, &rd, &rn, &rm)) {
+        return false;
+    }
+
+    bool is_64bit = (sf != 0);
+    if (is_64bit != state->mov_is_64bit) {
+        return false;
+    }
+
+    // UDIV is NOT commutative: only the divisor (Rm) coming from the
+    // MOV chain enables the LSR fold. Rn from MOV would be a
+    // reciprocal-multiply problem, not a shift.
+    if (rm != state->mov_rd) {
+        return false;
+    }
+
+    // ZR as Rd discards the result; ZR as Rn (dividend) makes the
+    // result always 0 -- a different idiom, not strength reduction.
+    if (rd == 31 || rn == 31) {
+        return false;
+    }
+
+    uint64_t c = state->mov_value;
+    if (c < 2) {
+        // C == 0: UDIV by zero produces 0 on AArch64 (no trap), but
+        // this is a degenerate idiom, not strength reduction.
+        // C == 1: UDIV is identity (rewrite is MOV Rd, Rn).
+        return false;
+    }
+
+    // Only powers of two map cleanly to LSR. Non-pow2 divisors have
+    // no single-instruction shift rewrite.
+    if ((c & (c - 1u)) != 0) {
+        return false;
+    }
+
+    unsigned datasize = is_64bit ? 64u : 32u;
+    unsigned n = 0;
+    uint64_t t = c;
+    while ((t & 1u) == 0) {
+        t >>= 1;
+        n++;
+    }
+    if (n < 1 || n >= datasize) {
+        return false;
+    }
+
+    char w_or_x = is_64bit ? 'x' : 'w';
+
+    out->name = "UDIV by constant foldable to shift";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "-> lsr %c%u, %c%u, #%u",
+        w_or_x, rd, w_or_x, rn, n);
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mnem = e->opc == 2 ? "movz"
+                       : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mnem, w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "udiv %c%u, %c%u, %c%u",
+        w_or_x, rd, w_or_x, rn, w_or_x, rm);
+
+    return true;
+}
+
 // ADD/SUB shifted-register (LSL #0, shift_type = LSL): the form that
 // reads its Rm directly. Fixed-bit mask 0x1F200000, value 0x0B000000;
 // shift_type at bits 23..22 must be 00 (LSL) -- LSR/ASR forms don't
@@ -3709,6 +3829,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_sv,
     check_mul_strength_reduce,
     check_mneg_strength_reduce,
+    check_udiv_strength_reduce,
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
     check_mov_zero_to_xzr,

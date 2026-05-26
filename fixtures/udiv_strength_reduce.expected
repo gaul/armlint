@@ -1,0 +1,21 @@
+UDIV by constant foldable to shift at offset: 0x0: -> lsr x3, x2, #3 (2 instructions)
+  movz x0, #0x8
+  udiv x3, x2, x0
+
+UDIV by constant foldable to shift at offset: 0x8: -> lsr w3, w2, #4 (2 instructions)
+  movz w0, #0x10
+  udiv w3, w2, w0
+
+UDIV by constant foldable to shift at offset: 0x10: -> lsr x3, x2, #10 (2 instructions)
+  movz x0, #0x400
+  udiv x3, x2, x0
+
+UDIV by constant foldable to shift at offset: 0x18: -> lsr x3, x2, #32 (2 instructions)
+  movz x0, #0x1, lsl #32
+  udiv x3, x2, x0
+
+UDIV by constant foldable to shift at offset: 0x20: -> lsr x3, x2, #16 (2 instructions)
+  movz x0, #0x1, lsl #16
+  udiv x3, x2, x0
+
+5 errors

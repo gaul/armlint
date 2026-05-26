@@ -333,6 +333,20 @@ code, and documents corners of the A64 instruction set.
   - Hit density is even lower than MUL: real MNEGs almost always
     have computed (non-constant) operands. Survey of the same
     dozen binaries found 0 hits.
+* UDIV by constant foldable to shift
+  - `mov xc, #(1<<N) ; udiv xd, xn, xc` -> `lsr xd, xn, #N`. Same
+    MOV-chain plumbing as the MUL/MNEG checks.
+  - UDIV is not commutative, so only the divisor (Rm) coming from
+    the MOV chain enables the fold; an Rn-from-MOV match would be a
+    reciprocal-multiply problem, not a shift. Non-pow2 divisors have
+    no single-instruction shift rewrite and are excluded.
+  - SDIV is intentionally not folded: SDIV by `2^N` is *not*
+    equivalent to `ASR by N` on negative dividends (SDIV rounds
+    toward zero; ASR rounds toward -inf), so the rewrite would be
+    incorrect.
+  - `C == 0` and `C == 1` are excluded as degenerate/identity. Rd ==
+    ZR (result discarded) and Rn == ZR (dividend always zero) are
+    excluded as different idioms.
 * MOV + ADD/SUB foldable to immediate form
   - `mov xc, #C ; add xd, xn, xc` instead of `add xd, xn, #C` when
     `C` fits the ADD/SUB immediate encoding (12-bit unsigned with

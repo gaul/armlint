@@ -3017,6 +3017,155 @@ static void test_mneg_strength_reduce(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// UDIV Xd, Xn, Xm encoding. Base 0x9AC00800.
+static void udiv_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x9AC00800u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// UDIV Wd, Wn, Wm encoding. Base 0x1AC00800.
+static void udiv_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x1AC00800u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// SDIV Xd, Xn, Xm encoding. Base 0x9AC00C00 (opcode2 = 000011).
+// Used only to verify SDIV does NOT match check_udiv_strength_reduce.
+static void sdiv_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x9AC00C00u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_udiv_strength_reduce(void)
+{
+    uint8_t code[16];
+
+    // movz x0, #8 ; udiv x3, x2, x0  -> lsr x3, x2, #3.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W form: movz w0, #4 ; udiv w3, w2, w0  -> lsr w3, w2, #2.
+    movz_w(&code[0], 0, 4);
+    udiv_w(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Larger power-of-2: movz x0, #1024 ; udiv x3, x2, x0
+    //                              -> lsr x3, x2, #10.
+    movz_x(&code[0], 0, 1024, 0);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Large power-of-2 via shifted MOVZ: movz x0, #1, lsl #32 ; ...
+    movz_x(&code[0], 0, 1, 2);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 0x10000 (pow2 in upper half) via a single shifted MOVZ.
+    // movz x0, #1, lsl #16 ; udiv x3, x2, x0  -> lsr x3, x2, #16.
+    movz_x(&code[0], 0, 1, 1);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Rd == mov_rd is fine: rewrite clobbers x0 with a value still
+    // derived from x0 the divisor.
+    // movz x0, #8 ; udiv x0, x2, x0  -> lsr x0, x2, #3.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Rn == mov_rd is also fine (dividend reuses the constant register).
+    // movz x0, #8 ; udiv x3, x0, x0  -> lsr x3, x0, #3.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: non-power-of-2 (C = 3).
+    movz_x(&code[0], 0, 3, 0);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: non-power-of-2 (C = 10).
+    movz_x(&code[0], 0, 10, 0);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: 2^N - 1 (C = 7).
+    movz_x(&code[0], 0, 7, 0);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: identity (C = 1).
+    movz_x(&code[0], 0, 1, 0);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: zero divisor (C = 0).
+    movz_x(&code[0], 0, 0, 0);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: UDIV is not commutative. mov_rd == Rn (dividend) is
+    // NOT a foldable pattern -- the constant would need a reciprocal.
+    // movz x0, #8 ; udiv x3, x0, x2 -- x2 unrelated.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: UDIV does not read the MOV destination at all.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 3, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch -- 64-bit MOV, 32-bit UDIV.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_w(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: width mismatch -- 32-bit MOV, 64-bit UDIV.
+    movz_w(&code[0], 0, 8);
+    udiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: an intervening non-MOV closes the chain.
+    movz_x(&code[0], 0, 8, 0);
+    ADD_X(&code[4], 5, 5, 6);
+    udiv_x(&code[8], 3, 2, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: Rd = XZR discards the result.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: Rn = XZR makes the dividend always zero.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 3, 31, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: SDIV by 2^N is NOT equivalent to ASR (wrong rounding
+    // on negative dividends). Same encoding block, opcode2 = 000011.
+    movz_x(&code[0], 0, 8, 0);
+    sdiv_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Bare UDIV with no preceding MOV: no finding.
+    udiv_x(&code[0], 3, 2, 0);
+    assert(run_helper_check(code, 4) == 0);
+}
+
 // CMP Xn, Xm (shifted-register form: SUBS XZR, Xn, Xm, LSL #0).
 // Base 0xEB00001F (sf=1, op=1=SUB, S=1, shift=00, bit21=0, Rd=11111).
 static void cmp_x_reg_sr(uint8_t out[4], unsigned rn, unsigned rm)
@@ -3750,6 +3899,7 @@ int main(void)
     test_ldp_stp_coalesce();
     test_mul_strength_reduce();
     test_mneg_strength_reduce();
+    test_udiv_strength_reduce();
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();

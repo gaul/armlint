@@ -229,6 +229,32 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
 bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
+// Detect UDIV Rd, Rn, Rm where Rm is set by an immediately preceding
+// MOV chain to a constant C that is a power of two (C = 2^N, N >= 1).
+// The pair folds to a single shift:
+//   mov xc, #2^N ; udiv xd, xn, xc  ->  lsr xd, xn, #N
+// Width (W vs X) of the MOV chain must match the UDIV.
+//
+// UDIV is NOT commutative, so unlike the MUL strength reduction only
+// the divisor (Rm) can come from the MOV; an Rn-from-MOV match would
+// be a reciprocal-multiply problem, not a shift. Non-pow2 divisors
+// have no single-instruction shift rewrite and are excluded.
+//
+// SDIV is intentionally NOT included: SDIV by 2^N is not equivalent
+// to ASR by N on negative dividends (SDIV rounds toward zero; ASR
+// rounds toward -inf), so the fold would be incorrect.
+//
+// C == 0 is degenerate (UDIV by zero produces 0 on AArch64, no trap)
+// and C == 1 is the identity case; both are excluded. Rd == ZR
+// discards the result and Rn == ZR makes the dividend always zero --
+// different idioms, not strength reduction.
+//
+// Runs alongside check_mul_strength_reduce / check_mneg_strength_reduce
+// before check_movz_movk_bitmask so the MOV chain state is still
+// active.
+bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
 // Detect ADD/ADDS/SUB/SUBS (shifted-register, LSL #0) where one
 // operand is set by an immediately preceding MOV chain to a constant
 // C that fits the AArch64 ADD/SUB immediate form (12-bit imm with
