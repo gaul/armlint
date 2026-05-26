@@ -456,6 +456,17 @@ cd armlint
 make all
 ```
 
+Two test suites are available. `make test` runs the unit tests against
+fabricated byte sequences, exercising the check registry directly.
+`make integration-test` runs the snapshot suite under `fixtures/`:
+each `.s` is assembled with `clang -arch arm64` and `armlint`'s
+output is diffed against a checked-in `.expected` file. The
+integration suite covers the Mach-O parser and the report formatting,
+which the unit tests bypass; it skips cleanly on hosts without an
+arm64 toolchain. After an intentional output change, regenerate the
+snapshots with `make integration-test-regen` and review the diff
+before committing.
+
 ## Usage
 
 armlint is intended to be part of compiler test suites which should

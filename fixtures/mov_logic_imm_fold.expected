@@ -1,0 +1,37 @@
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x0: -> and x3, x2, #0xff (2 instructions)
+  movz x0, #0xff
+  and x3, x2, x0
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x8: -> and x3, x2, #0xff (2 instructions)
+  movz x0, #0xff
+  and x3, x0, x2
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x10: -> and w3, w2, #0xff (2 instructions)
+  movz w0, #0xff
+  and w3, w2, w0
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x18: -> orr x3, x2, #0xff (2 instructions)
+  movz x0, #0xff
+  orr x3, x2, x0
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x20: -> eor x3, x2, #0xff (2 instructions)
+  movz x0, #0xff
+  eor x3, x2, x0
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x28: -> ands x3, x2, #0xff (2 instructions)
+  movz x0, #0xff
+  ands x3, x2, x0
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x30: -> tst x2, #0xff (2 instructions)
+  movz x0, #0xff
+  ands x31, x2, x0
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x38: -> and x3, x2, #0xffff (2 instructions)
+  movz x0, #0xffff
+  and x3, x2, x0
+
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x40: -> and x3, x2, #0xffff0000 (2 instructions)
+  movz x0, #0xffff, lsl #16
+  and x3, x2, x0
+
+9 errors
