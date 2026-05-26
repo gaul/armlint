@@ -3872,6 +3872,152 @@ static void test_add_ldr_register_offset(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// Encode ADD (immediate), X-form, with the sh bit set (imm12 << 12).
+// Base 0x91000000 carries sf=1, op=0, S=0; OR 0x00400000 sets sh=1.
+static void add_x_imm_sh(uint8_t out[4], unsigned rd, unsigned rn,
+                         unsigned imm12)
+{
+    uint32_t op = 0x91400000u
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_add_ldr_imm_offset(void)
+{
+    uint8_t code[16];
+
+    // Canonical: add x3, x1, #16 ; ldr x3, [x3] -> ldr x3, [x1, #16].
+    // (16 is a multiple of 8 and 16/8=2 fits in imm12.)
+    ADD_X_IMM(&code[0], 3, 1, 16);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form LDR: add x3, x1, #16 ; ldr w3, [x3] -> ldr w3, [x1, #16].
+    // (16 is a multiple of 4 and 16/4=4 fits in imm12.)
+    ADD_X_IMM(&code[0], 3, 1, 16);
+    ldr_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDRB: any byte offset works (access size 1). #5 OK.
+    ADD_X_IMM(&code[0], 3, 1, 5);
+    ldrb_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDRH: half-word load; #6 is a multiple of 2 and 6/2=3 fits.
+    ADD_X_IMM(&code[0], 3, 1, 6);
+    ldrh_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SP base: add x3, sp, #32 ; ldr x3, [x3] -> ldr x3, [sp, #32].
+    // ADD-imm with Rn=31 is SP, matching LDR-uimm with Rn=31.
+    ADD_X_IMM(&code[0], 3, 31, 32);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sh=1 form: add x3, x1, #0x1000 ; ldr x3, [x3]
+    //                                -> ldr x3, [x1, #0x1000].
+    // (0x1000 = 4096, multiple of 8, 4096/8 = 512 <= 4095.)
+    add_x_imm_sh(&code[0], 3, 1, 1);  // imm12=1, sh=1 -> byte 0x1000
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Largest X-form offset that fits: 4095*8 = 32760 = 0x7FF8.
+    // 0x7FF8 = 0x7000 + 0xFF8. sh=1, imm12=0x7 gives 0x7000; we want
+    // exactly the boundary, so use sh=1, imm12=8 -> 0x8000 -- too big
+    // (0x8000/8 = 4096). Use sh=0 with imm12=0xFF8 -> 0xFF8 = 4088,
+    // 4088/8 = 511, well within range. Already covered by the
+    // canonical case; explicitly check the upper-bound boundary at
+    // sh=1, imm12=0x07 -> 0x7000 (multiple of 8, 0x7000/8=3584 ok).
+    add_x_imm_sh(&code[0], 3, 1, 0x7);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: misaligned for X access. #4 is not a multiple of 8.
+    ADD_X_IMM(&code[0], 3, 1, 4);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: misaligned for W access. #2 is not a multiple of 4.
+    ADD_X_IMM(&code[0], 3, 1, 2);
+    ldr_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: misaligned for H access. #1 is not a multiple of 2.
+    ADD_X_IMM(&code[0], 3, 1, 1);
+    ldrh_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: too large for X-form encoding. sh=1, imm12=0x8 ->
+    // 0x8000 (32768) bytes; 32768/8 = 4096 > 4095, doesn't fit.
+    add_x_imm_sh(&code[0], 3, 1, 0x8);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LDR base != ADD's Rd.
+    ADD_X_IMM(&code[0], 3, 1, 16);
+    ldr_x_uimm0(&code[4], 3, 5);  // base x5 != x3
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LDR's Rt != ADD's Rd (would leave x3 alive).
+    ADD_X_IMM(&code[0], 3, 1, 16);
+    ldr_x_uimm0(&code[4], 7, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LDR with non-zero imm12 (v1 requires LDR imm = 0;
+    // the combined-offset case is a future extension).
+    ADD_X_IMM(&code[0], 3, 1, 16);
+    ldr_x_uimm_with(&code[4], 3, 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: SUB-imm instead of ADD-imm (would need negative LDR
+    // offset, which the unsigned-offset form cannot encode).
+    SUB_X_IMM(&code[0], 3, 1, 16);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADDS-imm (S-variant; writes flags, not non-flag ADD).
+    {
+        uint32_t op = 0xB1000000u  // ADDS X-form imm
+            | ((16u & 0xFFFu) << 10)
+            | ((1u & 0x1Fu) << 5)
+            | (3u & 0x1Fu);
+        write_le32(&code[0], op);
+    }
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: W-form ADD-imm (sf=0). LDR base must be 64-bit.
+    ADD_W_IMM(&code[0], 3, 1, 16);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: ADD writes SP (Rd=31). Excluded: SP update is
+    // observable, fold would discard it.
+    ADD_X_IMM(&code[0], 31, 1, 16);
+    ldr_x_uimm0(&code[4], 31, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening instruction breaks adjacency.
+    ADD_X_IMM(&code[0], 3, 1, 16);
+    ADD_X(&code[4], 5, 5, 6);
+    ldr_x_uimm0(&code[8], 3, 3);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Negative: trailing ADD with no following LDR. Pending state
+    // expires at flush; no finding emitted.
+    ADD_X_IMM(&code[0], 3, 1, 16);
+    assert(run_helper_check(code, 4) == 0);
+
+    // Aliasing positive: add x3, x3, #16 ; ldr x3, [x3]. ADD's
+    // Rd == Rn. The fold ldr x3, [x3, #16] reads x3's pre-ADD value
+    // as base, matching the original semantics (LDR overwrites x3).
+    ADD_X_IMM(&code[0], 3, 3, 16);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -3905,6 +4051,7 @@ int main(void)
     test_mov_zero_to_xzr();
     test_mul_add_sub_fold();
     test_add_ldr_register_offset();
+    test_add_ldr_imm_offset();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

@@ -202,6 +202,21 @@ struct armlint_state {
     size_t add_pending_offset;
     char add_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending X-form ADD-immediate (non-S-variant) awaiting an adjacent
+    // unsigned-offset LDR consumer with imm12 == 0 whose base register
+    // and destination register both equal Rd of the ADD. The pair folds
+    // to a single immediate-offset LDR, provided the ADD's byte
+    // immediate is a multiple of the LDR's access size and the scaled
+    // value fits in 12 bits. addi_pending_imm is the actual byte
+    // immediate (sh=1 already expanded to imm12 << 12). Strict
+    // adjacency: any non-matching instruction expires the state.
+    bool addi_pending;
+    unsigned addi_pending_rd;
+    unsigned addi_pending_rn;
+    uint32_t addi_pending_imm;
+    size_t addi_pending_offset;
+    char addi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
     // partner for LDP/STP/LDPSW coalescing. The next instruction of
     // the same kind (sext or zext) with the same Rn, same direction
@@ -377,6 +392,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lsp_active = false;
     state->mul_pending = false;
     state->add_pending = false;
+    state->addi_pending = false;
     return mov_close(state, out);
 }
 
@@ -3661,6 +3677,28 @@ static bool decode_ldr_uimm_any_size(uint32_t op,
     return true;
 }
 
+// Decode X-form ADD (immediate), non-S-variant. ADD-imm uses
+// sf 0 0 100010 sh imm12 Rn Rd; sf=1, op=0, S=0 -> base 0x91000000,
+// mask 0xFF800000 (bits 31..23). sh (bit 22) is a free field: when
+// 1, the imm12 is logically left-shifted by 12. The decoder returns
+// the *byte* immediate (sh-expanded), so callers compare directly
+// against an LDR's byte offset.
+static bool decode_add_imm_x(uint32_t op,
+                             unsigned *out_rd,
+                             unsigned *out_rn,
+                             uint32_t *out_imm)
+{
+    if ((op & 0xFF800000u) != 0x91000000u) {
+        return false;
+    }
+    unsigned sh = (op >> 22) & 1u;
+    unsigned imm12 = (op >> 10) & 0xFFFu;
+    *out_imm = sh ? ((uint32_t)imm12 << 12) : (uint32_t)imm12;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
 bool check_add_ldr_register_offset(armlint_state *state,
                                    const cs_insn *insn,
                                    size_t offset,
@@ -3760,6 +3798,104 @@ bool check_add_ldr_register_offset(armlint_state *state,
     return produced;
 }
 
+bool check_add_ldr_imm_offset(armlint_state *state,
+                              const cs_insn *insn,
+                              size_t offset,
+                              armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->addi_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an LDR uimm consuming the pending ADD?
+    if (state->addi_pending) {
+        unsigned size, imm12, ldr_rn, ldr_rt;
+        if (decode_ldr_uimm_any_size(op, &size, &imm12, &ldr_rn, &ldr_rt)
+                && imm12 == 0
+                && ldr_rn == state->addi_pending_rd
+                && ldr_rt == state->addi_pending_rd) {
+            // The ADD's byte immediate must be a multiple of the LDR's
+            // access size and fit in 12 bits after scaling.
+            unsigned access_size = 1u << size;
+            uint32_t add_imm = state->addi_pending_imm;
+            if ((add_imm & (access_size - 1u)) == 0
+                    && (add_imm >> size) <= 0xFFFu) {
+                const char *ldr_mnem;
+                char rt_wx;
+                switch (size) {
+                    case 0: ldr_mnem = "ldrb"; rt_wx = 'w'; break;
+                    case 1: ldr_mnem = "ldrh"; rt_wx = 'w'; break;
+                    case 2: ldr_mnem = "ldr";  rt_wx = 'w'; break;
+                    case 3: ldr_mnem = "ldr";  rt_wx = 'x'; break;
+                    default: ldr_mnem = "ldr"; rt_wx = 'x'; break;
+                }
+
+                out->name = "ADD + LDR foldable to immediate-offset LDR";
+                out->start_offset = state->addi_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                if (state->addi_pending_rn == 31) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, [sp, #0x%x]",
+                        ldr_mnem, rt_wx, ldr_rt, add_imm);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, [x%u, #0x%x]",
+                        ldr_mnem, rt_wx, ldr_rt,
+                        state->addi_pending_rn, add_imm);
+                }
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->addi_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, [x%u]",
+                    ldr_mnem, rt_wx, ldr_rt, ldr_rn);
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->addi_pending = false;
+    }
+
+    // (2) Try to open: is this an X-form ADD-immediate?
+    unsigned a_rd, a_rn;
+    uint32_t a_imm;
+    if (decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)) {
+        // Rd=31 in ADD-imm means SP, not XZR; folding would write a
+        // discarded LDR to XZR while the SP modification is observable
+        // -- exclude. imm == 0 is handled by check_add_sub_zero; not
+        // a strength reduction case. Rn=31 (SP) IS allowed: ADD-imm
+        // and LDR-uimm both encode 31 as SP, so the fold preserves
+        // semantics for the common stack-relative load pattern.
+        if (a_rd != 31 && a_imm != 0) {
+            state->addi_pending = true;
+            state->addi_pending_rd = a_rd;
+            state->addi_pending_rn = a_rn;
+            state->addi_pending_imm = a_imm;
+            state->addi_pending_offset = offset;
+            if (a_rn == 31) {
+                snprintf(state->addi_pending_disasm,
+                    sizeof(state->addi_pending_disasm),
+                    "add x%u, sp, #0x%x", a_rd, a_imm);
+            } else {
+                snprintf(state->addi_pending_disasm,
+                    sizeof(state->addi_pending_disasm),
+                    "add x%u, x%u, #0x%x", a_rd, a_rn, a_imm);
+            }
+        }
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -3850,6 +3986,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_redundant_cmp_after_s_variant,
     check_mul_add_sub_fold,
     check_add_ldr_register_offset,
+    check_add_ldr_imm_offset,
 };
 
 const size_t armlint_check_registry_count =

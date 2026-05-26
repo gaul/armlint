@@ -381,6 +381,39 @@ bool check_add_ldr_register_offset(armlint_state *state,
                                    const cs_insn *insn,
                                    size_t offset, armlint_finding *out);
 
+// Detect an X-form ADD-immediate (non-S-variant) immediately followed
+// by an unsigned-offset LDR with imm12 = 0 whose base register and
+// destination register both equal Rd of the ADD. The pair folds to a
+// single immediate-offset LDR:
+//   add xt, xn, #imm  ; ldr xt, [xt]  -> ldr xt, [xn, #imm]
+//   add xt, sp, #imm  ; ldr xt, [xt]  -> ldr xt, [sp, #imm]
+// The LDR's destination width may be W or X (same register number as
+// Xt): writing Wt zeros bits 63..32 of Xt, overwriting the address
+// regardless of size. LDRB and LDRH consumers fold the same way.
+//
+// Encoding constraint: the ADD's byte immediate must be a multiple of
+// the LDR's access size and the scaled value must fit in 12 bits. The
+// ADD's sh=1 form (imm12 << 12) is supported -- the decoder returns
+// the expanded byte immediate so the check sees the same value
+// whichever way the assembler chose to encode it.
+//
+// Soundness (conservative): Rd of the ADD must equal Rt of the LDR
+// (the loaded register), so the LDR's write to Wt/Xt destroys the
+// pre-LDR address value of Xt and the ADD's only consumer was the
+// LDR's base. STR is not flagged here because there is no analogous
+// Rd == Rt overwrite to prove Xt dead.
+//
+// Rn = 31 in the ADD-immediate form means SP (not XZR), and Rn = 31
+// in the LDR unsigned-offset form also means SP -- so this is the
+// canonical stack-relative load pattern (`add xt, sp, #imm; ldr xt,
+// [xt]`) and is intentionally flagged. Rd = 31 in ADD-immediate also
+// means SP; folding would write a discarded LDR (Rt=XZR), losing the
+// SP update, so Rd = 31 is excluded. imm = 0 is the MOV-or-no-op
+// case handled by check_add_sub_zero and is also excluded here.
+bool check_add_ldr_imm_offset(armlint_state *state,
+                              const cs_insn *insn,
+                              size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs
