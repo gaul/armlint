@@ -321,27 +321,27 @@ static void encode_sr(uint8_t out[4], uint32_t base,
     write_le32(out, op);
 }
 
-#define ADD_W(out, rd, rn, rm)  encode_sr(out, 0x0b000000u, rd, rn, rm)
-#define ADDS_W(out, rd, rn, rm) encode_sr(out, 0x2b000000u, rd, rn, rm)
-#define SUB_W(out, rd, rn, rm)  encode_sr(out, 0x4b000000u, rd, rn, rm)
-#define SUBS_W(out, rd, rn, rm) encode_sr(out, 0x6b000000u, rd, rn, rm)
-#define ADD_X(out, rd, rn, rm)  encode_sr(out, 0x8b000000u, rd, rn, rm)
-#define SUB_X(out, rd, rn, rm)  encode_sr(out, 0xcb000000u, rd, rn, rm)
-#define SUBS_X(out, rd, rn, rm) encode_sr(out, 0xeb000000u, rd, rn, rm)
-#define AND_W(out, rd, rn, rm)  encode_sr(out, 0x0a000000u, rd, rn, rm)
-#define AND_X(out, rd, rn, rm)  encode_sr(out, 0x8a000000u, rd, rn, rm)
-#define ANDS_W(out, rd, rn, rm) encode_sr(out, 0x6a000000u, rd, rn, rm)
-#define ANDS_X(out, rd, rn, rm) encode_sr(out, 0xea000000u, rd, rn, rm)
-#define BIC_W(out, rd, rn, rm)  encode_sr(out, 0x0a200000u, rd, rn, rm)
-#define BICS_W(out, rd, rn, rm) encode_sr(out, 0x6a200000u, rd, rn, rm)
-#define ORN_W(out, rd, rn, rm)  encode_sr(out, 0x2a200000u, rd, rn, rm)
-#define EON_W(out, rd, rn, rm)  encode_sr(out, 0x4a200000u, rd, rn, rm)
-#define BIC_X(out, rd, rn, rm)  encode_sr(out, 0x8a200000u, rd, rn, rm)
-#define ORN_X(out, rd, rn, rm)  encode_sr(out, 0xaa200000u, rd, rn, rm)
-#define ORR_W(out, rd, rn, rm)  encode_sr(out, 0x2a000000u, rd, rn, rm)
-#define ORR_X(out, rd, rn, rm)  encode_sr(out, 0xaa000000u, rd, rn, rm)
-#define EOR_W(out, rd, rn, rm)  encode_sr(out, 0x4a000000u, rd, rn, rm)
-#define EOR_X(out, rd, rn, rm)  encode_sr(out, 0xca000000u, rd, rn, rm)
+static inline void add_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x0b000000u, rd, rn, rm); }
+static inline void adds_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0x2b000000u, rd, rn, rm); }
+static inline void sub_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x4b000000u, rd, rn, rm); }
+static inline void subs_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0x6b000000u, rd, rn, rm); }
+static inline void add_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x8b000000u, rd, rn, rm); }
+static inline void sub_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xcb000000u, rd, rn, rm); }
+static inline void subs_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0xeb000000u, rd, rn, rm); }
+static inline void and_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x0a000000u, rd, rn, rm); }
+static inline void and_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x8a000000u, rd, rn, rm); }
+static inline void ands_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0x6a000000u, rd, rn, rm); }
+static inline void ands_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0xea000000u, rd, rn, rm); }
+static inline void bic_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x0a200000u, rd, rn, rm); }
+static inline void bics_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0x6a200000u, rd, rn, rm); }
+static inline void orn_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x2a200000u, rd, rn, rm); }
+static inline void eon_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x4a200000u, rd, rn, rm); }
+static inline void bic_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x8a200000u, rd, rn, rm); }
+static inline void orn_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xaa200000u, rd, rn, rm); }
+static inline void orr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x2a000000u, rd, rn, rm); }
+static inline void orr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xaa000000u, rd, rn, rm); }
+static inline void eor_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x4a000000u, rd, rn, rm); }
+static inline void eor_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xca000000u, rd, rn, rm); }
 
 // Arithmetic shifted-register with imm6 = 1 (existing shift). Used to
 // verify we do NOT fold into a consumer that already has a shift.
@@ -361,42 +361,42 @@ static void test_lsl_fold(void)
 
     // lsl w0, w1, #3 ; add w0, w2, w0 -> add w0, w2, w1, lsl #3 (flag).
     lsl_w(&code[0], 0, 1, 3);
-    ADD_W(&code[4], 0, 2, 0);
+    add_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl x0, x1, #5 ; add x0, x2, x0 (X-register; flag).
     lsl_x(&code[0], 0, 1, 5);
-    ADD_X(&code[4], 0, 2, 0);
+    add_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl w0, w1, #2 ; sub w0, w2, w0 -> sub w0, w2, w1, lsl #2 (flag).
     lsl_w(&code[0], 0, 1, 2);
-    SUB_W(&code[4], 0, 2, 0);
+    sub_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl w0, w1, #4 ; and w0, w2, w0 (logical; flag).
     lsl_w(&code[0], 0, 1, 4);
-    AND_W(&code[4], 0, 2, 0);
+    and_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl w0, w1, #1 ; orr w0, w2, w0 (logical; flag).
     lsl_w(&code[0], 0, 1, 1);
-    ORR_W(&code[4], 0, 2, 0);
+    orr_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl w0, w1, #5 ; eor w0, w2, w0 (logical; flag).
     lsl_w(&code[0], 0, 1, 5);
-    EOR_W(&code[4], 0, 2, 0);
+    eor_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl x0, x1, #32 ; add x0, x2, x0 (maximum-width-half shift; flag).
     lsl_x(&code[0], 0, 1, 32);
-    ADD_X(&code[4], 0, 2, 0);
+    add_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl x0, x1, #63 ; add x0, x2, x0 (maximum shift; flag).
     lsl_x(&code[0], 0, 1, 63);
-    ADD_X(&code[4], 0, 2, 0);
+    add_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // lsl x0, x1, #1 ; add x0, x2, x0 (minimum shift; flag). The
@@ -405,12 +405,12 @@ static void test_lsl_fold(void)
     // X-form LSL. W-form shift=1 is exercised above; this pins the
     // X-form lower boundary too.
     lsl_x(&code[0], 0, 1, 1);
-    ADD_X(&code[4], 0, 2, 0);
+    add_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // adds (flag-setting ADD) consumer; still folds.
     lsl_w(&code[0], 0, 1, 3);
-    ADDS_W(&code[4], 0, 2, 0);
+    adds_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negative cases --
@@ -418,24 +418,24 @@ static void test_lsl_fold(void)
     // Consumer overwrites a different register: v1 safety condition
     // (Rd_consumer == Rd_lsl) does not hold. Don't flag.
     lsl_w(&code[0], 0, 1, 3);
-    ADD_W(&code[4], 5, 2, 0);
+    add_w(&code[4], 5, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // LSL Rd is at Rn position of the consumer, not Rm. v1 only folds
     // when the LSL result is at Rm. Don't flag.
     lsl_w(&code[0], 0, 1, 3);
-    ADD_W(&code[4], 0, 0, 2);
+    add_w(&code[4], 0, 0, 2);
     assert(run_helper_check(code, 8) == 0);
 
     // Width mismatch (W LSL followed by X consumer).
     lsl_w(&code[0], 0, 1, 3);
-    ADD_X(&code[4], 0, 2, 0);
+    add_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Intervening instruction (movz to an unrelated reg) expires LSL.
     lsl_w(&code[0], 0, 1, 3);
     movz_w(&code[4], 5, 0x1234);
-    ADD_W(&code[8], 0, 2, 0);
+    add_w(&code[8], 0, 2, 0);
     assert(run_helper_check(code, 12) == 0);
 
     // Consumer already has a non-zero shift; we don't try to merge.
@@ -449,7 +449,7 @@ static void test_lsl_fold(void)
 
     // LSR -- different alias of UBFM; must not be misread as LSL.
     lsr_w(&code[0], 0, 1, 3);
-    ADD_W(&code[4], 0, 2, 0);
+    add_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Back-to-back LSLs: the first has no consumer, the second is alone.
@@ -459,9 +459,9 @@ static void test_lsl_fold(void)
 
     // Two independent fold patterns back to back. Both flag.
     lsl_w(&code[0], 0, 1, 3);
-    ADD_W(&code[4], 0, 2, 0);
+    add_w(&code[4], 0, 2, 0);
     lsl_w(&code[8], 3, 4, 2);
-    SUB_W(&code[12], 3, 5, 3);
+    sub_w(&code[12], 3, 5, 3);
     assert(run_helper_check(code, 16) == 2);
 }
 
@@ -506,10 +506,10 @@ static void encode_addsub_imm(uint8_t out[4], uint32_t base,
         | (rd & 0x1Fu);
     write_le32(out, op);
 }
-#define ADD_W_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x11000000u, rd, rn, imm)
-#define SUB_W_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x51000000u, rd, rn, imm)
-#define ADD_X_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0x91000000u, rd, rn, imm)
-#define SUB_X_IMM(out, rd, rn, imm) encode_addsub_imm(out, 0xD1000000u, rd, rn, imm)
+static inline void add_w_imm(uint8_t out[4], unsigned rd, unsigned rn, unsigned imm) { encode_addsub_imm(out, 0x11000000u, rd, rn, imm); }
+static inline void sub_w_imm(uint8_t out[4], unsigned rd, unsigned rn, unsigned imm) { encode_addsub_imm(out, 0x51000000u, rd, rn, imm); }
+static inline void add_x_imm(uint8_t out[4], unsigned rd, unsigned rn, unsigned imm) { encode_addsub_imm(out, 0x91000000u, rd, rn, imm); }
+static inline void sub_x_imm(uint8_t out[4], unsigned rd, unsigned rn, unsigned imm) { encode_addsub_imm(out, 0xD1000000u, rd, rn, imm); }
 
 // ADRP Xd, page_count. immlo in bits 30..29, immhi in bits 23..5.
 static void adrp_x(uint8_t out[4], unsigned rd, int imm)
@@ -801,12 +801,12 @@ static void encode_ldr_imm(uint8_t out[4], uint32_t base, unsigned rt,
     write_le32(out, op);
 }
 
-#define LDR_W(out, rt, rn, imm)  encode_ldr_imm(out, 0xB9400000u, rt, rn, imm)
-#define LDR_X(out, rt, rn, imm)  encode_ldr_imm(out, 0xF9400000u, rt, rn, imm)
-#define LDRH_W(out, rt, rn, imm) encode_ldr_imm(out, 0x79400000u, rt, rn, imm)
-#define LDRB_W(out, rt, rn, imm) encode_ldr_imm(out, 0x39400000u, rt, rn, imm)
-#define STR_W(out, rt, rn, imm)  encode_ldr_imm(out, 0xB9000000u, rt, rn, imm)
-#define STR_X(out, rt, rn, imm)  encode_ldr_imm(out, 0xF9000000u, rt, rn, imm)
+static inline void ldr_w(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm)  { encode_ldr_imm(out, 0xB9400000u, rt, rn, imm); }
+static inline void ldr_x(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm)  { encode_ldr_imm(out, 0xF9400000u, rt, rn, imm); }
+static inline void ldrh_w(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x79400000u, rt, rn, imm); }
+static inline void ldrb_w(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x39400000u, rt, rn, imm); }
+static inline void str_w(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm)  { encode_ldr_imm(out, 0xB9000000u, rt, rn, imm); }
+static inline void str_x(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm)  { encode_ldr_imm(out, 0xF9000000u, rt, rn, imm); }
 
 // Sign-extending integer loads, unsigned-immediate-offset form. The
 // addressing-mode bit (24) is set; mask in armlint.c leaves it free so
@@ -816,11 +816,11 @@ static void encode_ldr_imm(uint8_t out[4], uint32_t base, unsigned rt,
 //   LDRSH Xt: size=01, opc=10 -> base 0x79800000
 //   LDRSH Wt: size=01, opc=11 -> base 0x79C00000
 //   LDRSW Xt: size=10, opc=10 -> base 0xB9800000
-#define LDRSB_X(out, rt, rn, imm) encode_ldr_imm(out, 0x39800000u, rt, rn, imm)
-#define LDRSB_W(out, rt, rn, imm) encode_ldr_imm(out, 0x39C00000u, rt, rn, imm)
-#define LDRSH_X(out, rt, rn, imm) encode_ldr_imm(out, 0x79800000u, rt, rn, imm)
-#define LDRSH_W(out, rt, rn, imm) encode_ldr_imm(out, 0x79C00000u, rt, rn, imm)
-#define LDRSW_X(out, rt, rn, imm) encode_ldr_imm(out, 0xB9800000u, rt, rn, imm)
+static inline void ldrsb_x(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x39800000u, rt, rn, imm); }
+static inline void ldrsb_w(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x39C00000u, rt, rn, imm); }
+static inline void ldrsh_x(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x79800000u, rt, rn, imm); }
+static inline void ldrsh_w(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x79C00000u, rt, rn, imm); }
+static inline void ldrsw_x(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0xB9800000u, rt, rn, imm); }
 
 // SBFM SXT* aliases. SXTB/SXTH (W- and X-form) and SXTW (X-form only).
 //   SXTB Wd, Wn: SBFM Wd, Wn, #0, #7  -> sf=0, N=0, imms=7  -> 0x13001C00
@@ -837,11 +837,11 @@ static void encode_sbfm_zero_immr(uint8_t out[4], uint32_t base,
     write_le32(out, op);
 }
 
-#define SXTB_W(out, rd, rn) encode_sbfm_zero_immr(out, 0x13001C00u, rd, rn)
-#define SXTH_W(out, rd, rn) encode_sbfm_zero_immr(out, 0x13003C00u, rd, rn)
-#define SXTB_X(out, rd, rn) encode_sbfm_zero_immr(out, 0x93401C00u, rd, rn)
-#define SXTH_X(out, rd, rn) encode_sbfm_zero_immr(out, 0x93403C00u, rd, rn)
-#define SXTW_X(out, rd, rn) encode_sbfm_zero_immr(out, 0x93407C00u, rd, rn)
+static inline void sxtb_w(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbfm_zero_immr(out, 0x13001C00u, rd, rn); }
+static inline void sxth_w(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbfm_zero_immr(out, 0x13003C00u, rd, rn); }
+static inline void sxtb_x(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbfm_zero_immr(out, 0x93401C00u, rd, rn); }
+static inline void sxth_x(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbfm_zero_immr(out, 0x93403C00u, rd, rn); }
+static inline void sxtw_x(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbfm_zero_immr(out, 0x93407C00u, rd, rn); }
 
 static void test_cmp_zero_branch(void)
 {
@@ -1305,12 +1305,12 @@ static void test_redundant_zext(void)
     // -- Positive: W-form producer immediately followed by UXTW/AND. --
 
     // add w0, w1, w2 ; uxtw x0, w0 -- shifted-register ADD W.
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // add w0, w1, w2 ; and x0, x0, #0xffffffff.
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     and_x_ff32(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
@@ -1336,25 +1336,25 @@ static void test_redundant_zext(void)
 
     // -- Negative: producer is X-form -- bits 63..32 not pre-zeroed.
 
-    ADD_X(&code[0], 0, 1, 2);
+    add_x(&code[0], 0, 1, 2);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: consumer's Rn doesn't match producer's Rd. --
 
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     uxtw(&code[4], 0, 5);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: consumer's Rd doesn't match producer's Rd. --
 
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     uxtw(&code[4], 5, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: intervening instruction expires wzx state. --
 
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     movz_w(&code[4], 5, 1);
     uxtw(&code[8], 0, 0);
     assert(run_helper_check(code, 12) == 0);
@@ -1366,14 +1366,14 @@ static void test_redundant_zext(void)
 
     // -- Negative: UXTH (different alias of UBFM, not zero-extend-32). --
 
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     uxth_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: producer with Rd=31 (WZR -- result is discarded). --
 
     // adds wzr, w1, w2 (flag-only); should not open wzx.
-    ADDS_W(&code[0], 31, 1, 2);
+    adds_w(&code[0], 31, 1, 2);
     uxtw(&code[4], 31, 31);
     assert(run_helper_check(code, 8) == 0);
 
@@ -1381,55 +1381,55 @@ static void test_redundant_zext(void)
 
     // lsl w0, w1, #3 ; add w0, w2, w0 ; uxtw x0, w0.
     lsl_w(&code[0], 0, 1, 3);
-    ADD_W(&code[4], 0, 2, 0);
+    add_w(&code[4], 0, 2, 0);
     uxtw(&code[8], 0, 0);
     assert(run_helper_check(code, 12) == 2);
 
     // -- Load producers: P depends on access width. --
 
     // ldr w0, [x1] ; uxtw x0, w0 -- LDR W (P=32) + UXTW (C=32).
-    LDR_W(&code[0], 0, 1, 0);
+    ldr_w(&code[0], 0, 1, 0);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrh w0, [x1] ; uxth w0, w0 -- LDRH (P=16) + UXTH W (C=16).
-    LDRH_W(&code[0], 0, 1, 0);
+    ldrh_w(&code[0], 0, 1, 0);
     uxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrh w0, [x1] ; uxtw x0, w0 -- LDRH (P=16) + UXTW (C=32), still redundant.
-    LDRH_W(&code[0], 0, 1, 0);
+    ldrh_w(&code[0], 0, 1, 0);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrh w0, [x1] ; uxth x0, w0 -- LDRH + UXTH X form (C=16).
-    LDRH_W(&code[0], 0, 1, 0);
+    ldrh_w(&code[0], 0, 1, 0);
     uxth_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrb w0, [x1] ; uxtb w0, w0 -- LDRB (P=8) + UXTB (C=8).
-    LDRB_W(&code[0], 0, 1, 0);
+    ldrb_w(&code[0], 0, 1, 0);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrb w0, [x1] ; uxth w0, w0 -- LDRB (P=8) + UXTH (C=16), still redundant.
-    LDRB_W(&code[0], 0, 1, 0);
+    ldrb_w(&code[0], 0, 1, 0);
     uxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrb w0, [x1] ; and w0, w0, #0xff -- LDRB (P=8) + AND W #0xFF (C=8).
-    LDRB_W(&code[0], 0, 1, 0);
+    ldrb_w(&code[0], 0, 1, 0);
     and_w_ff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrh w0, [x1] ; and w0, w0, #0xffff -- LDRH (P=16) + AND W #0xFFFF (C=16).
-    LDRH_W(&code[0], 0, 1, 0);
+    ldrh_w(&code[0], 0, 1, 0);
     and_w_ffff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrb w0, [x1] ; and w0, w0, #0xffff -- LDRB (P=8) + AND W #0xFFFF (C=16);
     //                                        still redundant (P <= C).
-    LDRB_W(&code[0], 0, 1, 0);
+    ldrb_w(&code[0], 0, 1, 0);
     and_w_ffff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
@@ -1442,7 +1442,7 @@ static void test_redundant_zext(void)
     // accepted width (C=31, imms=30). Producer LDRB has P=8 <= 31,
     // redundant. (and_w_lowmask is defined later in the file; inline
     // the encoding here.)
-    LDRB_W(&code[0], 0, 1, 0);
+    ldrb_w(&code[0], 0, 1, 0);
     write_le32(&code[4],
         0x12000000u | (30u << 10) | (0u << 5) | 0u);
     assert(run_helper_check(code, 8) == 1);
@@ -1451,53 +1451,53 @@ static void test_redundant_zext(void)
     // max accepted width (C=63, imms=62). Producer W-form ADD zeros
     // bits 63..32 (P=32 <= 63), so the AND clears only bit 63, which
     // is already zero. Redundant.
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     write_le32(&code[4],
         0x92400000u | (62u << 10) | (0u << 5) | 0u);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrh w0, [x1] ; and w0, w0, #0xff -- LDRH (P=16) > AND W #0xFF (C=8);
     //                                       NOT redundant (mask narrower).
-    LDRH_W(&code[0], 0, 1, 0);
+    ldrh_w(&code[0], 0, 1, 0);
     and_w_ff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // ldrh w0, [x1] ; uxtb w0, w0 -- LDRH (P=16) > UXTB (C=8); NOT redundant.
-    LDRH_W(&code[0], 0, 1, 0);
+    ldrh_w(&code[0], 0, 1, 0);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // ldr w0, [x1] ; uxth w0, w0 -- LDR W (P=32) > UXTH (C=16); NOT redundant.
-    LDR_W(&code[0], 0, 1, 0);
+    ldr_w(&code[0], 0, 1, 0);
     uxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // add w0, w1, w2 ; uxth w0, w0 -- ADD (P=32) > UXTH (C=16); NOT redundant.
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     uxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- W-form MOV-to-self as the consumer. --
 
     // add w0, w1, w2 ; mov w0, w0 -- W-form ALU (P=32) + ORR Wd,WZR,Wd (C=32).
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     mov_w_reg(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrh w0, [x1] ; mov w0, w0 -- LDRH (P=16) + MOV self (C=32).
-    LDRH_W(&code[0], 0, 1, 0);
+    ldrh_w(&code[0], 0, 1, 0);
     mov_w_reg(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrb w0, [x1] ; mov w0, w0 -- LDRB (P=8) + MOV self (C=32).
-    LDRB_W(&code[0], 0, 1, 0);
+    ldrb_w(&code[0], 0, 1, 0);
     mov_w_reg(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negative: MOV w0, w5 -- different source register, not self-MOV.
     //    Producer's wzx state should not match.
 
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     mov_w_reg(&code[4], 0, 5);
     assert(run_helper_check(code, 8) == 0);
 }
@@ -1805,132 +1805,132 @@ static void test_redundant_sext(void)
     // -- Positive: sign-extending load + matching SXT* (same S, same W). --
 
     // ldrsb w0, [x1] ; sxtb w0, w0 -- S=8, W=32 on both sides.
-    LDRSB_W(&code[0], 0, 1, 0);
-    SXTB_W(&code[4], 0, 0);
+    ldrsb_w(&code[0], 0, 1, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsh w0, [x1] ; sxth w0, w0 -- S=16, W=32.
-    LDRSH_W(&code[0], 0, 1, 0);
-    SXTH_W(&code[4], 0, 0);
+    ldrsh_w(&code[0], 0, 1, 0);
+    sxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsb x0, [x1] ; sxtb x0, w0 -- S=8, W=64.
-    LDRSB_X(&code[0], 0, 1, 0);
-    SXTB_X(&code[4], 0, 0);
+    ldrsb_x(&code[0], 0, 1, 0);
+    sxtb_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsh x0, [x1] ; sxth x0, w0 -- S=16, W=64.
-    LDRSH_X(&code[0], 0, 1, 0);
-    SXTH_X(&code[4], 0, 0);
+    ldrsh_x(&code[0], 0, 1, 0);
+    sxth_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsw x0, [x1] ; sxtw x0, w0 -- S=32, W=64.
-    LDRSW_X(&code[0], 0, 1, 0);
-    SXTW_X(&code[4], 0, 0);
+    ldrsw_x(&code[0], 0, 1, 0);
+    sxtw_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: S_p < S_c, same W. The producer's stricter
     //    sign-extension subsumes the consumer's wider one. --
 
     // ldrsb w0, [x1] ; sxth w0, w0 -- S_p=8 < S_c=16, W=32.
-    LDRSB_W(&code[0], 0, 1, 0);
-    SXTH_W(&code[4], 0, 0);
+    ldrsb_w(&code[0], 0, 1, 0);
+    sxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsb x0, [x1] ; sxth x0, w0 -- S_p=8 < S_c=16, W=64.
-    LDRSB_X(&code[0], 0, 1, 0);
-    SXTH_X(&code[4], 0, 0);
+    ldrsb_x(&code[0], 0, 1, 0);
+    sxth_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsh x0, [x1] ; sxtw x0, w0 -- S_p=16 < S_c=32, W=64.
-    LDRSH_X(&code[0], 0, 1, 0);
-    SXTW_X(&code[4], 0, 0);
+    ldrsh_x(&code[0], 0, 1, 0);
+    sxtw_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: SXT* producer paired with SXT* consumer. --
 
     // sxtb w0, w1 ; sxtb w0, w0 (same S, same W).
-    SXTB_W(&code[0], 0, 1);
-    SXTB_W(&code[4], 0, 0);
+    sxtb_w(&code[0], 0, 1);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxtb x0, w1 ; sxtb x0, w0 -- X-form chain.
-    SXTB_X(&code[0], 0, 1);
-    SXTB_X(&code[4], 0, 0);
+    sxtb_x(&code[0], 0, 1);
+    sxtb_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Three adjacent SXT*: each consumer fires against the previous. --
 
-    SXTB_W(&code[0], 0, 1);
-    SXTB_W(&code[4], 0, 0);
-    SXTB_W(&code[8], 0, 0);
+    sxtb_w(&code[0], 0, 1);
+    sxtb_w(&code[4], 0, 0);
+    sxtb_w(&code[8], 0, 0);
     assert(run_helper_check(code, 12) == 2);
 
     // -- Negative: width mismatch. --
 
     // ldrsb w0, [x1] ; sxtb x0, w0 -- W=32 vs W=64.
-    LDRSB_W(&code[0], 0, 1, 0);
-    SXTB_X(&code[4], 0, 0);
+    ldrsb_w(&code[0], 0, 1, 0);
+    sxtb_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // ldrsb x0, [x1] ; sxtb w0, w0 -- W=64 vs W=32.
-    LDRSB_X(&code[0], 0, 1, 0);
-    SXTB_W(&code[4], 0, 0);
+    ldrsb_x(&code[0], 0, 1, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: S_p > S_c (producer wider, consumer narrower). --
 
     // ldrsh w0, [x1] ; sxtb w0, w0 -- S_p=16 > S_c=8.
-    LDRSH_W(&code[0], 0, 1, 0);
-    SXTB_W(&code[4], 0, 0);
+    ldrsh_w(&code[0], 0, 1, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // ldrsw x0, [x1] ; sxth x0, w0 -- S_p=32 > S_c=16.
-    LDRSW_X(&code[0], 0, 1, 0);
-    SXTH_X(&code[4], 0, 0);
+    ldrsw_x(&code[0], 0, 1, 0);
+    sxth_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: zero-extending load is not a sign-ext producer. --
 
     // ldr w0, [x1] ; sxtb w0, w0 -- LDR W zero-extends, not sign-extends.
-    LDR_W(&code[0], 0, 1, 0);
-    SXTB_W(&code[4], 0, 0);
+    ldr_w(&code[0], 0, 1, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: Rd mismatch on consumer. --
 
-    LDRSB_W(&code[0], 0, 1, 0);
-    SXTB_W(&code[4], 5, 0);     // consumer Rd != sxt_rd
+    ldrsb_w(&code[0], 0, 1, 0);
+    sxtb_w(&code[4], 5, 0);     // consumer Rd != sxt_rd
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: Rn mismatch on consumer (reads a different reg). --
 
-    LDRSB_W(&code[0], 0, 1, 0);
-    SXTB_W(&code[4], 0, 5);     // consumer Rn != sxt_rd
+    ldrsb_w(&code[0], 0, 1, 0);
+    sxtb_w(&code[4], 0, 5);     // consumer Rn != sxt_rd
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: intervening instruction expires sxt state. --
 
-    LDRSB_W(&code[0], 0, 1, 0);
+    ldrsb_w(&code[0], 0, 1, 0);
     movz_w(&code[4], 5, 1);
-    SXTB_W(&code[8], 0, 0);
+    sxtb_w(&code[8], 0, 0);
     assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: lone SXTB with no preceding sign-ext producer. --
 
-    SXTB_W(&code[0], 0, 0);
+    sxtb_w(&code[0], 0, 0);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: producer with Rt=31 (LDRSB Wzr). --
 
-    LDRSB_W(&code[0], 31, 1, 0);
-    SXTB_W(&code[4], 31, 31);
+    ldrsb_w(&code[0], 31, 1, 0);
+    sxtb_w(&code[4], 31, 31);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: SXTB Wzr, Wn (Rd=31 producer skipped). --
 
-    SXTB_W(&code[0], 31, 1);
-    SXTB_W(&code[4], 31, 31);
+    sxtb_w(&code[0], 31, 1);
+    sxtb_w(&code[4], 31, 31);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Interaction: SXT producer also opens zext state, but a UBFM
@@ -1938,22 +1938,22 @@ static void test_redundant_sext(void)
 
     // ldrsb w0, [x1] ; uxtw x0, w0 -- zext (P=32, C=32) fires; sxt
     // does not (UXTW is UBFM, not SBFM).
-    LDRSB_W(&code[0], 0, 1, 0);
+    ldrsb_w(&code[0], 0, 1, 0);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsb x0, [x1] ; sxtb x0, w0 -- sxt fires; zext does not
     // (LDRSB X is not a W-form producer, so wzx not opened).
-    LDRSB_X(&code[0], 0, 1, 0);
-    SXTB_X(&code[4], 0, 0);
+    ldrsb_x(&code[0], 0, 1, 0);
+    sxtb_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Two adjacent independent patterns: both flag. --
 
-    LDRSB_W(&code[0], 0, 1, 0);
-    SXTB_W(&code[4], 0, 0);
-    LDRSH_W(&code[8], 2, 1, 0);
-    SXTH_W(&code[12], 2, 2);
+    ldrsb_w(&code[0], 0, 1, 0);
+    sxtb_w(&code[4], 0, 0);
+    ldrsh_w(&code[8], 2, 1, 0);
+    sxth_w(&code[12], 2, 2);
     assert(run_helper_check(code, 16) == 2);
 
     // -- ASR as a sign-extension producer. ASR Rd, Rn, #k yields
@@ -1961,63 +1961,63 @@ static void test_redundant_sext(void)
 
     // asr w0, w1, #24 ; sxtb w0, w0 -- S=8, W=32 on both sides.
     asr_w(&code[0], 0, 1, 24);
-    SXTB_W(&code[4], 0, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // asr w0, w1, #16 ; sxth w0, w0 -- S=16, W=32.
     asr_w(&code[0], 0, 1, 16);
-    SXTH_W(&code[4], 0, 0);
+    sxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // asr x0, x1, #56 ; sxtb x0, w0 -- S=8, W=64.
     asr_x(&code[0], 0, 1, 56);
-    SXTB_X(&code[4], 0, 0);
+    sxtb_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // asr x0, x1, #48 ; sxth x0, w0 -- S=16, W=64.
     asr_x(&code[0], 0, 1, 48);
-    SXTH_X(&code[4], 0, 0);
+    sxth_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // asr x0, x1, #32 ; sxtw x0, w0 -- S=32, W=64.
     asr_x(&code[0], 0, 1, 32);
-    SXTW_X(&code[4], 0, 0);
+    sxtw_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: ASR S_p < S_c. asr w0, w1, #25 ; sxtb w0, w0 --
     //    S_p=7 < S_c=8, redundant. --
 
     asr_w(&code[0], 0, 1, 25);
-    SXTB_W(&code[4], 0, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // asr w0, w1, #24 ; sxth w0, w0 -- S_p=8 < S_c=16, redundant.
     asr_w(&code[0], 0, 1, 24);
-    SXTH_W(&code[4], 0, 0);
+    sxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negative: ASR shift too small to cover the SXT width. --
 
     // asr w0, w1, #8 ; sxtb w0, w0 -- S_p=24 > S_c=8, not redundant.
     asr_w(&code[0], 0, 1, 8);
-    SXTB_W(&code[4], 0, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // asr w0, w1, #16 ; sxtb w0, w0 -- S_p=16 > S_c=8, not redundant.
     asr_w(&code[0], 0, 1, 16);
-    SXTB_W(&code[4], 0, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: width mismatch with ASR producer. --
 
     // asr w0, w1, #24 ; sxtb x0, w0 -- W_p=32 vs W_c=64.
     asr_w(&code[0], 0, 1, 24);
-    SXTB_X(&code[4], 0, 0);
+    sxtb_x(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // asr x0, x1, #56 ; sxtb w0, w0 -- W_p=64 vs W_c=32.
     asr_x(&code[0], 0, 1, 56);
-    SXTB_W(&code[4], 0, 0);
+    sxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Positive: sign-extension dead because a following zero-ext
@@ -2026,50 +2026,50 @@ static void test_redundant_sext(void)
     //    region). --
 
     // sxtb w0, w1 ; uxtb w0, w0 -- S=8, C=8: dead.
-    SXTB_W(&code[0], 0, 1);
+    sxtb_w(&code[0], 0, 1);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxth w0, w1 ; uxtb w0, w0 -- S=16, C=8: dead.
-    SXTH_W(&code[0], 0, 1);
+    sxth_w(&code[0], 0, 1);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxth w0, w1 ; uxth w0, w0 -- S=16, C=16: dead.
-    SXTH_W(&code[0], 0, 1);
+    sxth_w(&code[0], 0, 1);
     uxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxtw x0, w1 ; uxtw x0, w0 -- S=32, C=32: dead (X-form pair).
-    SXTW_X(&code[0], 0, 1);
+    sxtw_x(&code[0], 0, 1);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxtb x0, w1 ; uxtb w0, w0 -- X-form producer (S=8, W=64) +
     // W-form consumer (C=8, W=32). W-form auto-zero of X[63:32] clears
     // the high half of the sign-ext; UXTB clears bits 31..8. Dead.
-    SXTB_X(&code[0], 0, 1);
+    sxtb_x(&code[0], 0, 1);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsb w0, [x1] ; uxtb w0, w0 -- dead (could be ldrb w0, [x1]).
-    LDRSB_W(&code[0], 0, 1, 0);
+    ldrsb_w(&code[0], 0, 1, 0);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldrsw x0, [x1] ; uxtw x0, w0 -- dead (could be ldr w0, [x1]).
-    LDRSW_X(&code[0], 0, 1, 0);
+    ldrsw_x(&code[0], 0, 1, 0);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxtb w0, w1 ; and w0, w0, #0xff -- dead (AND mask C=8 <= S=8).
-    SXTB_W(&code[0], 0, 1);
+    sxtb_w(&code[0], 0, 1);
     and_w_ff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxtw x0, w1 ; mov w0, w0 -- dead (MOV W self C=32 == S=32,
     // and the W-form write clears X[63:32] including sign-ext bits).
-    SXTW_X(&code[0], 0, 1);
+    sxtw_x(&code[0], 0, 1);
     mov_w_reg(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
@@ -2084,29 +2084,29 @@ static void test_redundant_sext(void)
     // bits 31..16 = sign(bit 15). Sign-ext NOT dead (it actually
     // shows up in the result). But the existing zext check fires
     // (P=32 <= C=32, redundant UXTW). One finding from zext side.
-    SXTH_W(&code[0], 0, 1);
+    sxth_w(&code[0], 0, 1);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // sxth w0, w1 ; mov w0, w0 -- S=16, MOV W self C=32 > 16.
     // The existing zext check fires (P=32 <= C=32), not my new check.
-    SXTH_W(&code[0], 0, 1);
+    sxth_w(&code[0], 0, 1);
     mov_w_reg(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negative: Rd mismatch / Rn mismatch on consumer. --
 
-    SXTB_W(&code[0], 0, 1);
+    sxtb_w(&code[0], 0, 1);
     uxtb_w(&code[4], 5, 0);   // consumer Rd != sxt_rd
     assert(run_helper_check(code, 8) == 0);
 
-    SXTB_W(&code[0], 0, 1);
+    sxtb_w(&code[0], 0, 1);
     uxtb_w(&code[4], 0, 5);   // consumer Rn != sxt_rd
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: intervening instruction expires sxt state. --
 
-    SXTB_W(&code[0], 0, 1);
+    sxtb_w(&code[0], 0, 1);
     movz_w(&code[4], 5, 1);
     uxtb_w(&code[8], 0, 0);
     assert(run_helper_check(code, 12) == 0);
@@ -2120,49 +2120,49 @@ static void test_redundant_cmp_after_s_variant(void)
     //    AND the existing CMP+B.cond -> CBZ finding, so expect 2. --
 
     // adds w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);
 
     // subs w0, w1, w2 ; cmp w0, #0 ; b.ne +8 ; ret.
-    SUBS_W(&code[0], 0, 1, 2);
+    subs_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 1, 8);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);
 
     // ands w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
-    ANDS_W(&code[0], 0, 1, 2);
+    ands_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);
 
     // bics w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
-    BICS_W(&code[0], 0, 1, 2);
+    bics_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);
 
     // X-form: subs x5, x1, x2 ; cmp x5, #0 ; b.eq +8 ; ret.
-    SUBS_X(&code[0], 5, 1, 2);
+    subs_x(&code[0], 5, 1, 2);
     cmp_x_imm(&code[4], 5, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);
 
     // TST form: adds w0, w1, w2 ; tst w0, w0 ; b.eq +8 ; ret.
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     tst_w_reg(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);
 
     // CMP-with-XZR form: adds w0, w1, w2 ; cmp w0, wzr ; b.eq +8 ; ret.
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     cmp_w_reg(&code[4], 0, 31);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
@@ -2171,7 +2171,7 @@ static void test_redundant_cmp_after_s_variant(void)
     // -- Negative: non-S-variant ADD; only existing check fires. --
 
     // add w0, w1, w2 (no flag set) ; cmp w0, #0 ; b.eq ; ret.
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
@@ -2181,7 +2181,7 @@ static void test_redundant_cmp_after_s_variant(void)
 
     // adds w0, w1, w2 ; cmp w5, #0 ; b.eq ; ret -- existing fires for
     // CMP w5 + B.EQ; mine doesn't (Rn != sv_rd).
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 5, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
@@ -2192,7 +2192,7 @@ static void test_redundant_cmp_after_s_variant(void)
     // adds w0, w1, w2 ; movz w5, #1 ; cmp w0, #0 ; b.eq ; ret -- the
     // intervening MOV breaks the sv chain. Existing CMP+B.EQ still
     // fires (1 finding).
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     movz_w(&code[4], 5, 1);
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
@@ -2205,7 +2205,7 @@ static void test_redundant_cmp_after_s_variant(void)
     //    legitimately clears V so B.LT tests sign, not signed-overflow).
     //    The CMP-zero+B.LT -> TBNZ-on-sign-bit check DOES fire (the
     //    rewrite is sound: ADDS already set bit 31 = sign of result). --
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 11 /* LT */, 8);
     ret_(&code[12]);
@@ -2215,7 +2215,7 @@ static void test_redundant_cmp_after_s_variant(void)
     //    pendings suppressed by liveness scan. --
 
     // adds w0, w1, w2 ; cmp w0, #0 ; b.eq ; adcs w5, w6, w7.
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     adcs_w(&code[12], 5, 6, 7);
@@ -2227,7 +2227,7 @@ static void test_redundant_cmp_after_s_variant(void)
 
     // adds wzr, w1, w2 ; cmp w0, #0 ; b.eq ; ret -- the first instr
     // is really CMN-like (Rd=31); existing CMP+B.EQ still fires.
-    ADDS_W(&code[0], 31, 1, 2);
+    adds_w(&code[0], 31, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
@@ -2238,7 +2238,7 @@ static void test_redundant_cmp_after_s_variant(void)
     // adds w0, w1, w2 ; cmp x0, #0 ; b.eq -- mine doesn't fire because
     // CMP's sf differs from ADDS's sf. Existing CMP+B.EQ on X still
     // fires.
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
@@ -2247,13 +2247,13 @@ static void test_redundant_cmp_after_s_variant(void)
     // -- Negative: lone S-variant; CMP without B.cond; etc. --
 
     // adds w0, w1, w2 ; ret -- nothing follows. No finding from either.
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     ret_(&code[4]);
     assert(run_helper_check(code, 8) == 0);
 
     // adds w0, w1, w2 ; cmp w0, #0 ; ret -- CMP not followed by
     // B.EQ/B.NE; sv_cmp_active expires; neither check fires.
-    ADDS_W(&code[0], 0, 1, 2);
+    adds_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     ret_(&code[8]);
     assert(run_helper_check(code, 12) == 0);
@@ -2266,47 +2266,47 @@ static void test_add_sub_zero(void)
     // -- Positive: Rd != Rn, equivalent to MOV. --
 
     // add w0, w1, #0
-    ADD_W_IMM(&code[0], 0, 1, 0);
+    add_w_imm(&code[0], 0, 1, 0);
     assert(run_helper_check(code, 4) == 1);
 
     // sub w0, w1, #0
-    SUB_W_IMM(&code[0], 0, 1, 0);
+    sub_w_imm(&code[0], 0, 1, 0);
     assert(run_helper_check(code, 4) == 1);
 
     // add x5, x6, #0 -- X-form.
-    ADD_X_IMM(&code[0], 5, 6, 0);
+    add_x_imm(&code[0], 5, 6, 0);
     assert(run_helper_check(code, 4) == 1);
 
     // sub x5, x6, #0
-    SUB_X_IMM(&code[0], 5, 6, 0);
+    sub_x_imm(&code[0], 5, 6, 0);
     assert(run_helper_check(code, 4) == 1);
 
     // -- Positive: Rd == Rn, completely no-op. --
 
     // add w0, w0, #0
-    ADD_W_IMM(&code[0], 0, 0, 0);
+    add_w_imm(&code[0], 0, 0, 0);
     assert(run_helper_check(code, 4) == 1);
 
     // sub x3, x3, #0
-    SUB_X_IMM(&code[0], 3, 3, 0);
+    sub_x_imm(&code[0], 3, 3, 0);
     assert(run_helper_check(code, 4) == 1);
 
     // -- Negative: imm != 0. --
 
     // add w0, w1, #1
-    ADD_W_IMM(&code[0], 0, 1, 1);
+    add_w_imm(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: Rd = 31 (SP encoding -- MOV-to-SP alias). --
 
     // add sp, x1, #0
-    ADD_X_IMM(&code[0], 31, 1, 0);
+    add_x_imm(&code[0], 31, 1, 0);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: Rn = 31 (SP encoding -- MOV-from-SP alias). --
 
     // add x0, sp, #0
-    ADD_X_IMM(&code[0], 0, 31, 0);
+    add_x_imm(&code[0], 0, 31, 0);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: ADDS (S=1, flag-setting) -- intentional zero-test
@@ -2321,13 +2321,13 @@ static void test_add_sub_zero(void)
     // -- Negative: shifted-register ADD (not the immediate form). --
 
     // add w0, w1, w2 -- not flagged by this check.
-    ADD_W(&code[0], 0, 1, 2);
+    add_w(&code[0], 0, 1, 2);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Two adjacent: each fires independently. --
 
-    ADD_W_IMM(&code[0], 0, 1, 0);
-    SUB_W_IMM(&code[4], 2, 3, 0);
+    add_w_imm(&code[0], 0, 1, 0);
+    sub_w_imm(&code[4], 2, 3, 0);
     assert(run_helper_check(code, 8) == 2);
 
     // -- Negative: ADRP+ADD #0 page-relative addressing pair (linker
@@ -2335,7 +2335,7 @@ static void test_add_sub_zero(void)
 
     // adrp x8, 1 ; add x8, x8, #0
     adrp_x(&code[0], 8, 1);
-    ADD_X_IMM(&code[4], 8, 8, 0);
+    add_x_imm(&code[4], 8, 8, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Positive: ADRP+ADD #0 with Rd != Rn -- not the canonical
@@ -2343,7 +2343,7 @@ static void test_add_sub_zero(void)
 
     // adrp x8, 1 ; add x9, x8, #0
     adrp_x(&code[0], 8, 1);
-    ADD_X_IMM(&code[4], 9, 8, 0);
+    add_x_imm(&code[4], 9, 8, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: ADRP+(intervening MOV)+ADD #0 -- strict adjacency
@@ -2351,7 +2351,7 @@ static void test_add_sub_zero(void)
 
     adrp_x(&code[0], 8, 1);
     movz_x(&code[4], 5, 1, 0);   // intervening
-    ADD_X_IMM(&code[8], 8, 8, 0);
+    add_x_imm(&code[8], 8, 8, 0);
     assert(run_helper_check(code, 12) == 1);
 }
 
@@ -2362,49 +2362,49 @@ static void test_self_op(void)
     // -- Positive: identity AND/ORR (Rd != Rn). --
 
     // and w0, w1, w1 -> mov w0, w1
-    AND_W(&code[0], 0, 1, 1);
+    and_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 1);
 
     // orr w0, w1, w1 -> mov w0, w1
-    ORR_W(&code[0], 0, 1, 1);
+    orr_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 1);
 
     // and x5, x6, x6 -> mov x5, x6 (X-form)
-    AND_X(&code[0], 5, 6, 6);
+    and_x(&code[0], 5, 6, 6);
     assert(run_helper_check(code, 4) == 1);
 
     // orr x5, x6, x6
-    ORR_X(&code[0], 5, 6, 6);
+    orr_x(&code[0], 5, 6, 6);
     assert(run_helper_check(code, 4) == 1);
 
     // -- Positive: zero result EOR/SUB. --
 
     // eor w0, w1, w1 -> mov w0, wzr
-    EOR_W(&code[0], 0, 1, 1);
+    eor_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 1);
 
     // sub w0, w1, w1 -> mov w0, wzr
-    SUB_W(&code[0], 0, 1, 1);
+    sub_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 1);
 
     // eor x5, x6, x6
-    EOR_X(&code[0], 5, 6, 6);
+    eor_x(&code[0], 5, 6, 6);
     assert(run_helper_check(code, 4) == 1);
 
     // sub x5, x6, x6
-    SUB_X(&code[0], 5, 6, 6);
+    sub_x(&code[0], 5, 6, 6);
     assert(run_helper_check(code, 4) == 1);
 
     // -- Positive: Rd == Rn case still fires. --
 
     // and w0, w0, w0 (X-form would be a true no-op; W-form also zeros
     // X[63:32] but the canonical idiom is MOV W0, W0).
-    AND_W(&code[0], 0, 0, 0);
+    and_w(&code[0], 0, 0, 0);
     assert(run_helper_check(code, 4) == 1);
 
     // -- Negative: ANDS (flag-setting, intentional). --
 
-    ANDS_W(&code[0], 0, 1, 1);
+    ands_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: SUBS (flag-setting). --
@@ -2416,56 +2416,56 @@ static void test_self_op(void)
 
     // -- Negative: Rn != Rm (not a self-op). --
 
-    AND_W(&code[0], 0, 1, 2);
+    and_w(&code[0], 0, 1, 2);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Positive: N=1 logical self-ops. --
 
     // bic w0, w1, w1 -> mov w0, wzr (Rs AND NOT Rs = 0)
-    BIC_W(&code[0], 0, 1, 1);
+    bic_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 1);
 
     // orn w0, w1, w1 -> mov w0, #-1 (Rs OR NOT Rs = all-ones)
-    ORN_W(&code[0], 0, 1, 1);
+    orn_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 1);
 
     // eon w0, w1, w1 -> mov w0, #-1 (Rs XOR NOT Rs = all-ones)
-    EON_W(&code[0], 0, 1, 1);
+    eon_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 1);
 
     // bic x5, x6, x6 (X-form zero)
-    BIC_X(&code[0], 5, 6, 6);
+    bic_x(&code[0], 5, 6, 6);
     assert(run_helper_check(code, 4) == 1);
 
     // orn x5, x6, x6 (X-form -1)
-    ORN_X(&code[0], 5, 6, 6);
+    orn_x(&code[0], 5, 6, 6);
     assert(run_helper_check(code, 4) == 1);
 
     // -- Negative: BICS (N=1, S=1, flag-set is intentional). --
 
-    BICS_W(&code[0], 0, 1, 1);
+    bics_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: Rd = 31 (result discarded). --
 
-    AND_W(&code[0], 31, 1, 1);
+    and_w(&code[0], 31, 1, 1);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: Rn = 31 (ZR operand, not a real self-op). --
 
-    AND_W(&code[0], 0, 31, 31);
+    and_w(&code[0], 0, 31, 31);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Negative: ADD Rd, Rs, Rs -- not a self-op identity
     //    (doubles Rs). --
 
-    ADD_W(&code[0], 0, 1, 1);
+    add_w(&code[0], 0, 1, 1);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Two adjacent: each fires independently. --
 
-    AND_W(&code[0], 0, 1, 1);
-    EOR_W(&code[4], 2, 3, 3);
+    and_w(&code[0], 0, 1, 1);
+    eor_w(&code[4], 2, 3, 3);
     assert(run_helper_check(code, 8) == 2);
 }
 
@@ -2528,7 +2528,7 @@ static void test_bfxil_synth(void)
     // -> bfxil w0, w1, #0, #8
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 1, 8);
-    ORR_W(&code[8], 0, 0, 5);
+    orr_w(&code[8], 0, 0, 5);
     assert(run_helper_check(code, 12) == 1);
 
     // -- Positive: reverse order (isolate first). --
@@ -2536,35 +2536,35 @@ static void test_bfxil_synth(void)
     // and w5, w1, #0xff ; and w0, w0, #~0xff ; orr w0, w0, w5
     and_w_lowmask(&code[0], 5, 1, 8);
     and_w_highmask(&code[4], 0, 0, 8);
-    ORR_W(&code[8], 0, 0, 5);
+    orr_w(&code[8], 0, 0, 5);
     assert(run_helper_check(code, 12) == 1);
 
     // -- Positive: ORR with commuted operands (Rd, Rt, Rd). --
 
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 1, 8);
-    ORR_W(&code[8], 0, 5, 0);   // commuted
+    orr_w(&code[8], 0, 5, 0);   // commuted
     assert(run_helper_check(code, 12) == 1);
 
     // -- Positive: X-form. --
 
     and_x_highmask(&code[0], 0, 0, 16);
     and_x_lowmask(&code[4], 5, 1, 16);
-    ORR_X(&code[8], 0, 0, 5);
+    orr_x(&code[8], 0, 0, 5);
     assert(run_helper_check(code, 12) == 1);
 
     // -- Negative: width mismatch. --
 
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 1, 16);   // different width
-    ORR_W(&code[8], 0, 0, 5);
+    orr_w(&code[8], 0, 0, 5);
     assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: ORR Rd doesn't match clear's Rd. --
 
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 1, 8);
-    ORR_W(&code[8], 7, 0, 5);   // Rd=7 doesn't match clear's Rd=0
+    orr_w(&code[8], 7, 0, 5);   // Rd=7 doesn't match clear's Rd=0
     assert(run_helper_check(code, 12) == 0);
 
     // -- Negative for BFXIL: aliasing -- Rt == clear.Rd. The ORR
@@ -2575,21 +2575,21 @@ static void test_bfxil_synth(void)
     //    so the only finding is the self-op one. --
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 0, 1, 8);   // Rt == clear.Rd
-    ORR_W(&code[8], 0, 0, 0);
+    orr_w(&code[8], 0, 0, 0);
     assert(run_helper_check(code, 12) == 1);
 
     // -- Negative: aliasing -- Rt == Rs (isolate modifies source). --
 
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 1, 1, 8);   // Rt == Rs == w1
-    ORR_W(&code[8], 0, 0, 1);
+    orr_w(&code[8], 0, 0, 1);
     assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: aliasing -- Rs == clear.Rd (degenerate). --
 
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 0, 8);   // Rs == clear.Rd
-    ORR_W(&code[8], 0, 0, 5);
+    orr_w(&code[8], 0, 0, 5);
     assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: clear is not in-place (Rd != Rn). --
@@ -2608,7 +2608,7 @@ static void test_bfxil_synth(void)
     }
     memcpy(&code[0], clear_not_inplace, 4);
     and_w_lowmask(&code[4], 5, 1, 8);
-    ORR_W(&code[8], 7, 7, 5);
+    orr_w(&code[8], 7, 7, 5);
     assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: intervening instruction (strict adjacency). --
@@ -2616,12 +2616,12 @@ static void test_bfxil_synth(void)
     and_w_highmask(&code[0], 0, 0, 8);
     movz_w(&code[4], 6, 0x42);
     and_w_lowmask(&code[8], 5, 1, 8);
-    ORR_W(&code[12], 0, 0, 5);
+    orr_w(&code[12], 0, 0, 5);
     assert(run_helper_check(code, 16) == 0);
 
     // -- Negative: ORR alone (no preceding ANDs). --
 
-    ORR_W(&code[0], 0, 0, 5);
+    orr_w(&code[0], 0, 0, 5);
     assert(run_helper_check(code, 4) == 0);
 }
 
@@ -2632,214 +2632,214 @@ static void test_ldp_stp_coalesce(void)
     // -- Positive: adjacent loads (W-form). --
 
     // ldr w0, [x2, #0] ; ldr w1, [x2, #4] -> ldp w0, w1, [x2, #0]
-    LDR_W(&code[0], 0, 2, 0);
-    LDR_W(&code[4], 1, 2, 1);
+    ldr_w(&code[0], 0, 2, 0);
+    ldr_w(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // ldr w0, [x2, #4] ; ldr w1, [x2, #8] -> ldp at byte 4.
-    LDR_W(&code[0], 0, 2, 1);
-    LDR_W(&code[4], 1, 2, 2);
+    ldr_w(&code[0], 0, 2, 1);
+    ldr_w(&code[4], 1, 2, 2);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: adjacent loads (X-form). --
 
     // ldr x0, [x2, #0] ; ldr x1, [x2, #8] -> ldp x0, x1, [x2, #0]
-    LDR_X(&code[0], 0, 2, 0);
-    LDR_X(&code[4], 1, 2, 1);
+    ldr_x(&code[0], 0, 2, 0);
+    ldr_x(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: adjacent stores. --
 
     // str w0, [x2, #0] ; str w1, [x2, #4] -> stp w0, w1, [x2, #0]
-    STR_W(&code[0], 0, 2, 0);
-    STR_W(&code[4], 1, 2, 1);
+    str_w(&code[0], 0, 2, 0);
+    str_w(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // str x0, [x2, #16] ; str x1, [x2, #24] -> stp x0, x1, [x2, #16]
-    STR_X(&code[0], 0, 2, 2);
-    STR_X(&code[4], 1, 2, 3);
+    str_x(&code[0], 0, 2, 2);
+    str_x(&code[4], 1, 2, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: store with first Rt == Rn is OK (no aliasing
     //    concern for stores). --
 
-    STR_W(&code[0], 2, 2, 0);   // STR W2, [X2, #0]
-    STR_W(&code[4], 1, 2, 1);
+    str_w(&code[0], 2, 2, 0);   // STR W2, [X2, #0]
+    str_w(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: 4 consecutive LDRs become 2 LDPs (non-overlapping). --
 
-    LDR_W(&code[0], 0, 2, 0);
-    LDR_W(&code[4], 1, 2, 1);
-    LDR_W(&code[8], 3, 2, 2);
-    LDR_W(&code[12], 4, 2, 3);
+    ldr_w(&code[0], 0, 2, 0);
+    ldr_w(&code[4], 1, 2, 1);
+    ldr_w(&code[8], 3, 2, 2);
+    ldr_w(&code[12], 4, 2, 3);
     assert(run_helper_check(code, 16) == 2);
 
     // -- Positive: LDR at the highest in-range offset (imm12 = 63
     //    for W-form -> byte 252). --
 
-    LDR_W(&code[0], 0, 2, 63);
-    LDR_W(&code[4], 1, 2, 64);
+    ldr_w(&code[0], 0, 2, 63);
+    ldr_w(&code[4], 1, 2, 64);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negative: first imm12 > 63 (out of LDP imm7 range). --
 
-    LDR_W(&code[0], 0, 2, 64);
-    LDR_W(&code[4], 1, 2, 65);
+    ldr_w(&code[0], 0, 2, 64);
+    ldr_w(&code[4], 1, 2, 65);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: different base register. --
 
-    LDR_W(&code[0], 0, 2, 0);
-    LDR_W(&code[4], 1, 3, 1);   // Rn = x3, not x2
+    ldr_w(&code[0], 0, 2, 0);
+    ldr_w(&code[4], 1, 3, 1);   // Rn = x3, not x2
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: non-adjacent offsets. --
 
-    LDR_W(&code[0], 0, 2, 0);
-    LDR_W(&code[4], 1, 2, 2);   // skips imm12=1
+    ldr_w(&code[0], 0, 2, 0);
+    ldr_w(&code[4], 1, 2, 2);   // skips imm12=1
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: mixed W and X (size mismatch). --
 
-    LDR_W(&code[0], 0, 2, 0);
-    LDR_X(&code[4], 1, 2, 1);
+    ldr_w(&code[0], 0, 2, 0);
+    ldr_x(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: load + store (direction mismatch). --
 
-    LDR_W(&code[0], 0, 2, 0);
-    STR_W(&code[4], 1, 2, 1);
+    ldr_w(&code[0], 0, 2, 0);
+    str_w(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: same Rt for both LDRs (LDP Rt1 != Rt2 required). --
 
-    LDR_W(&code[0], 0, 2, 0);
-    LDR_W(&code[4], 0, 2, 1);   // Rt2 == Rt1 == w0
+    ldr_w(&code[0], 0, 2, 0);
+    ldr_w(&code[4], 0, 2, 1);   // Rt2 == Rt1 == w0
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: load with first Rt == Rn (aliasing). --
 
-    LDR_X(&code[0], 2, 2, 0);   // first LDR clobbers base x2
-    LDR_X(&code[4], 1, 2, 1);
+    ldr_x(&code[0], 2, 2, 0);   // first LDR clobbers base x2
+    ldr_x(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: intervening instruction (strict adjacency). --
 
-    LDR_W(&code[0], 0, 2, 0);
+    ldr_w(&code[0], 0, 2, 0);
     movz_w(&code[4], 5, 1);
-    LDR_W(&code[8], 1, 2, 1);
+    ldr_w(&code[8], 1, 2, 1);
     assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: lone LDR. --
 
-    LDR_W(&code[0], 0, 2, 0);
+    ldr_w(&code[0], 0, 2, 0);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Positive: adjacent LDRSWs become LDPSW. --
 
     // ldrsw x0, [x2, #0] ; ldrsw x1, [x2, #4] -> ldpsw x0, x1, [x2, #0]
-    LDRSW_X(&code[0], 0, 2, 0);
-    LDRSW_X(&code[4], 1, 2, 1);
+    ldrsw_x(&code[0], 0, 2, 0);
+    ldrsw_x(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: LDPSW at the highest in-range offset (imm12 = 63
     //    for word transfer -> byte 252). --
 
-    LDRSW_X(&code[0], 0, 2, 63);
-    LDRSW_X(&code[4], 1, 2, 64);
+    ldrsw_x(&code[0], 0, 2, 63);
+    ldrsw_x(&code[4], 1, 2, 64);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negative: first LDRSW imm12 > 63. --
 
-    LDRSW_X(&code[0], 0, 2, 64);
-    LDRSW_X(&code[4], 1, 2, 65);
+    ldrsw_x(&code[0], 0, 2, 64);
+    ldrsw_x(&code[4], 1, 2, 65);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: kind mismatch -- LDR (zext) does not pair with
     //    LDRSW (sext). --
 
-    LDR_W(&code[0], 0, 2, 0);
-    LDRSW_X(&code[4], 1, 2, 1);
+    ldr_w(&code[0], 0, 2, 0);
+    ldrsw_x(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
-    LDRSW_X(&code[0], 0, 2, 0);
-    LDR_W(&code[4], 1, 2, 1);
+    ldrsw_x(&code[0], 0, 2, 0);
+    ldr_w(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: same Rt for both LDRSWs. --
 
-    LDRSW_X(&code[0], 0, 2, 0);
-    LDRSW_X(&code[4], 0, 2, 1);
+    ldrsw_x(&code[0], 0, 2, 0);
+    ldrsw_x(&code[4], 0, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: LDRSW load aliasing (first Rt == Rn). --
 
-    LDRSW_X(&code[0], 2, 2, 0);   // first LDRSW clobbers base x2
-    LDRSW_X(&code[4], 1, 2, 1);
+    ldrsw_x(&code[0], 2, 2, 0);   // first LDRSW clobbers base x2
+    ldrsw_x(&code[4], 1, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Positive: reverse-order LDRs (higher offset first) fold
     //    into LDP with swapped Rt order. --
 
     // ldr w1, [x2, #4] ; ldr w0, [x2, #0] -> ldp w0, w1, [x2, #0]
-    LDR_W(&code[0], 1, 2, 1);
-    LDR_W(&code[4], 0, 2, 0);
+    ldr_w(&code[0], 1, 2, 1);
+    ldr_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ldr x1, [x2, #8] ; ldr x0, [x2, #0] -> ldp x0, x1, [x2, #0]
-    LDR_X(&code[0], 1, 2, 1);
-    LDR_X(&code[4], 0, 2, 0);
+    ldr_x(&code[0], 1, 2, 1);
+    ldr_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: reverse-order STRs. --
 
     // str w1, [x2, #4] ; str w0, [x2, #0] -> stp w0, w1, [x2, #0]
-    STR_W(&code[0], 1, 2, 1);
-    STR_W(&code[4], 0, 2, 0);
+    str_w(&code[0], 1, 2, 1);
+    str_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: reverse-order LDRSWs fold into LDPSW. --
 
     // ldrsw x1, [x2, #4] ; ldrsw x0, [x2, #0] -> ldpsw x0, x1, [x2, #0]
-    LDRSW_X(&code[0], 1, 2, 1);
-    LDRSW_X(&code[4], 0, 2, 0);
+    ldrsw_x(&code[0], 1, 2, 1);
+    ldrsw_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: reverse-order at boundary (lower imm12 = 63). --
 
     // ldr w1, [x2, #256] ; ldr w0, [x2, #252] -> ldp at byte 252
-    LDR_W(&code[0], 1, 2, 64);
-    LDR_W(&code[4], 0, 2, 63);
+    ldr_w(&code[0], 1, 2, 64);
+    ldr_w(&code[4], 0, 2, 63);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negative: reverse-order with lower imm12 = 64 (out of imm7
     //    range). The HIGHER offset would be encodable, but the LDP
     //    uses the LOWER address as the base + imm7. --
 
-    LDR_W(&code[0], 1, 2, 65);
-    LDR_W(&code[4], 0, 2, 64);
+    ldr_w(&code[0], 1, 2, 65);
+    ldr_w(&code[4], 0, 2, 64);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: reverse-order load aliasing -- pending (first in
     //    source order, at higher offset) Rt == Rn clobbers base
     //    before second LDR runs. --
 
-    LDR_X(&code[0], 2, 2, 1);   // first LDR clobbers base x2
-    LDR_X(&code[4], 0, 2, 0);
+    ldr_x(&code[0], 2, 2, 1);   // first LDR clobbers base x2
+    ldr_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: reverse-order with same Rt. --
 
-    LDR_W(&code[0], 0, 2, 1);
-    LDR_W(&code[4], 0, 2, 0);
+    ldr_w(&code[0], 0, 2, 1);
+    ldr_w(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // -- Positive: reverse-order store where second STR's Rt == Rn
     //    is fine (stores don't have the aliasing concern). --
 
-    STR_W(&code[0], 1, 2, 1);
-    STR_W(&code[4], 2, 2, 0);   // second STR uses Rt = x2 (the base)
+    str_w(&code[0], 1, 2, 1);
+    str_w(&code[4], 2, 2, 0);   // second STR uses Rt = x2 (the base)
     assert(run_helper_check(code, 8) == 1);
 }
 
@@ -2968,7 +2968,7 @@ static void test_mul_strength_reduce(void)
 
     // Negative: an intervening non-MOV closes the chain.
     movz_x(&code[0], 0, 8, 0);
-    ADD_X(&code[4], 5, 5, 6);  // arbitrary unrelated insn
+    add_x(&code[4], 5, 5, 6);  // arbitrary unrelated insn
     mul_x(&code[8], 3, 2, 0);
     assert(run_helper_check(code, 12) == 0);
 
@@ -3100,7 +3100,7 @@ static void test_mneg_strength_reduce(void)
 
     // Negative: intervening unrelated instruction closes the chain.
     movz_x(&code[0], 0, 8, 0);
-    ADD_X(&code[4], 5, 5, 6);
+    add_x(&code[4], 5, 5, 6);
     mneg_x(&code[8], 3, 2, 0);
     assert(run_helper_check(code, 12) == 0);
 
@@ -3241,7 +3241,7 @@ static void test_udiv_strength_reduce(void)
 
     // Negative: an intervening non-MOV closes the chain.
     movz_x(&code[0], 0, 8, 0);
-    ADD_X(&code[4], 5, 5, 6);
+    add_x(&code[4], 5, 5, 6);
     udiv_x(&code[8], 3, 2, 0);
     assert(run_helper_check(code, 12) == 0);
 
@@ -3291,17 +3291,17 @@ static void test_mov_add_sub_imm_fold(void)
 
     // movz x0, #100 ; add x3, x2, x0  -> add x3, x2, #100.
     movz_x(&code[0], 0, 100, 0);
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // Commutativity: movz x0, #100 ; add x3, x0, x2.
     movz_x(&code[0], 0, 100, 0);
-    ADD_X(&code[4], 3, 0, 2);
+    add_x(&code[4], 3, 0, 2);
     assert(run_helper_check(code, 8) == 1);
 
     // W form: movz w0, #50 ; add w3, w2, w0.
     movz_w(&code[0], 0, 50);
-    ADD_W(&code[4], 3, 2, 0);
+    add_w(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ADDS variant: movz x0, #100 ; adds x3, x2, x0  -> adds x3, x2, #100.
@@ -3311,12 +3311,12 @@ static void test_mov_add_sub_imm_fold(void)
 
     // SUB: movz x0, #100 ; sub x3, x2, x0  -> sub x3, x2, #100.
     movz_x(&code[0], 0, 100, 0);
-    SUB_X(&code[4], 3, 2, 0);
+    sub_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // SUBS: movz x0, #100 ; subs x3, x2, x0  -> subs x3, x2, #100.
     movz_x(&code[0], 0, 100, 0);
-    SUBS_X(&code[4], 3, 2, 0);
+    subs_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // CMP (SUBS XZR, ...): movz x0, #100 ; cmp x2, x0  -> cmp x2, #100.
@@ -3331,12 +3331,12 @@ static void test_mov_add_sub_imm_fold(void)
 
     // imm12 boundary: C = 0xFFF (= 4095) fits without shift.
     movz_x(&code[0], 0, 0xFFF, 0);
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // imm12 << 12: C = 0x1000 fits with sh=1.
     movz_x(&code[0], 0, 0x1000, 0);
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // imm12 << 12 top boundary: C = 0xFFF000 fits with sh=1. A
@@ -3350,7 +3350,7 @@ static void test_mov_add_sub_imm_fold(void)
     // interaction at this exact boundary.
     movz_x(&code[0], 0, 0xF000, 0);          // x0 = 0xF000
     movk_x(&code[4], 0, 0xFF, 1);            // x0 = 0x00FF_F000
-    ADD_X(&code[8], 3, 2, 0);
+    add_x(&code[8], 3, 2, 0);
     assert(run_helper_check(code, 12) == 2);
 
     // imm12 << 12 above boundary: C = 0x1000000 doesn't fit
@@ -3359,17 +3359,17 @@ static void test_mov_add_sub_imm_fold(void)
     // check (single MOV does not produce a "suboptimal sequence"
     // finding because mov_close requires >= 2 chain entries).
     movz_x(&code[0], 0, 0x100, 1);           // x0 = 0x0100_0000
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: C = 4097 doesn't fit (not <= 4095, not a multiple of 4096).
     movz_x(&code[0], 0, 0x1001, 0);
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: SUB with Rn from MOV (would need reverse-subtract).
     movz_x(&code[0], 0, 100, 0);
-    SUB_X(&code[4], 3, 0, 2);  // SUB X3, X0, X2 -- Rn = X0 (from MOV)
+    sub_x(&code[4], 3, 0, 2);  // SUB X3, X0, X2 -- Rn = X0 (from MOV)
     assert(run_helper_check(code, 8) == 0);
 
     // C = 0 is intentionally not folded by check_mov_add_sub_imm_fold
@@ -3378,33 +3378,33 @@ static void test_mov_add_sub_imm_fold(void)
     // rewrite suggestion ("use XZR for the second operand"), so the
     // overall finding count is 1.
     movz_x(&code[0], 0, 0, 0);
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // Negative: width mismatch (MOV W, ADD X).
     movz_w(&code[0], 0, 100);
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: width mismatch (MOV X, ADD W).
     movz_x(&code[0], 0, 100, 0);
-    ADD_W(&code[4], 3, 2, 0);
+    add_w(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ADD does not read the MOV destination.
     movz_x(&code[0], 0, 100, 0);
-    ADD_X(&code[4], 3, 2, 1);  // X1 instead of X0
+    add_x(&code[4], 3, 2, 1);  // X1 instead of X0
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: intervening instruction closes the chain.
     movz_x(&code[0], 0, 100, 0);
-    ADD_X(&code[4], 5, 5, 6);  // unrelated insn
-    ADD_X(&code[8], 3, 2, 0);
+    add_x(&code[4], 5, 5, 6);  // unrelated insn
+    add_x(&code[8], 3, 2, 0);
     assert(run_helper_check(code, 12) == 0);
 
     // Negative: non-S ADD with Rd = XZR (dead code, skip).
     movz_x(&code[0], 0, 100, 0);
-    ADD_X(&code[4], 31, 2, 0);
+    add_x(&code[4], 31, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: shifted ADD (imm6 != 0) doesn't fold.
@@ -3424,49 +3424,49 @@ static void test_mov_logic_imm_fold(void)
 
     // AND: movz x0, #0xff ; and x3, x2, x0  -> and x3, x2, #0xff.
     movz_x(&code[0], 0, 0xFF, 0);
-    AND_X(&code[4], 3, 2, 0);
+    and_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // Commutativity (Rn from MOV).
     movz_x(&code[0], 0, 0xFF, 0);
-    AND_X(&code[4], 3, 0, 2);
+    and_x(&code[4], 3, 0, 2);
     assert(run_helper_check(code, 8) == 1);
 
     // W form.
     movz_w(&code[0], 0, 0xFF);
-    AND_W(&code[4], 3, 2, 0);
+    and_w(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ORR.
     movz_x(&code[0], 0, 0xFF, 0);
-    ORR_X(&code[4], 3, 2, 0);
+    orr_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // EOR.
     movz_x(&code[0], 0, 0xFF, 0);
-    EOR_X(&code[4], 3, 2, 0);
+    eor_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ANDS.
     movz_x(&code[0], 0, 0xFF, 0);
-    ANDS_X(&code[4], 3, 2, 0);
+    ands_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // TST alias (ANDS with Rd = XZR).
     movz_x(&code[0], 0, 0xFF, 0);
-    ANDS_X(&code[4], 31, 2, 0);
+    ands_x(&code[4], 31, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // 16-bit bitmask: movz x0, #0xffff ; and x3, x2, x0.
     movz_x(&code[0], 0, 0xFFFF, 0);
-    AND_X(&code[4], 3, 2, 0);
+    and_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // Two-MOV chain producing 0xffff0000ffff0000 (esize=32 bitmask).
     // 0xFFFF0000 in 64-bit also has a bitmask encoding (rotated run).
     // First check via a single MOVZ at shift 16 giving 0xFFFF0000.
     movz_x(&code[0], 0, 0xFFFF, 1);
-    AND_X(&code[4], 3, 2, 0);
+    and_x(&code[4], 3, 2, 0);
     // This is a single MOVZ + AND -- 1 finding from our check;
     // check_movz_movk_bitmask requires chain >= 2 so it doesn't fire.
     assert(run_helper_check(code, 8) == 1);
@@ -3474,45 +3474,45 @@ static void test_mov_logic_imm_fold(void)
     // Negative: C = 5 (binary 101) is not a bitmask immediate
     // (non-contiguous bits, no replicated-run encoding).
     movz_x(&code[0], 0, 5, 0);
-    AND_X(&code[4], 3, 2, 0);
+    and_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // C = 0 is not a bitmask immediate so check_mov_logic_imm_fold
     // skips, but check_mov_zero_to_xzr fires on it (suggesting "use
     // XZR for the second AND operand"), so the overall count is 1.
     movz_x(&code[0], 0, 0, 0);
-    AND_X(&code[4], 3, 2, 0);
+    and_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // Negative: BIC (N = 1 in the encoding) has no immediate form.
     movz_x(&code[0], 0, 0xFF, 0);
-    BIC_X(&code[4], 3, 2, 0);
+    bic_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ORN (N = 1).
     movz_x(&code[0], 0, 0xFF, 0);
-    ORN_X(&code[4], 3, 2, 0);
+    orn_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: width mismatch.
     movz_w(&code[0], 0, 0xFF);
-    AND_X(&code[4], 3, 2, 0);
+    and_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: MOV does not feed the AND.
     movz_x(&code[0], 0, 0xFF, 0);
-    AND_X(&code[4], 3, 2, 1);
+    and_x(&code[4], 3, 2, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: intervening instruction closes the chain.
     movz_x(&code[0], 0, 0xFF, 0);
-    ADD_X(&code[4], 5, 5, 6);
-    AND_X(&code[8], 3, 2, 0);
+    add_x(&code[4], 5, 5, 6);
+    and_x(&code[8], 3, 2, 0);
     assert(run_helper_check(code, 12) == 0);
 
     // Negative: non-ANDS write to ZR (dead code).
     movz_x(&code[0], 0, 0xFF, 0);
-    AND_X(&code[4], 31, 2, 0);
+    and_x(&code[4], 31, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: shifted AND (imm6 != 0).
@@ -3584,7 +3584,7 @@ static void test_mov_zero_to_xzr(void)
 
     // STR W form.
     movz_w(&code[0], 0, 0);
-    STR_W(&code[4], 0, 1, 0);
+    str_w(&code[4], 0, 1, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // STRB.
@@ -3609,28 +3609,28 @@ static void test_mov_zero_to_xzr(void)
 
     // Width skew: X-form MOV, STR W (low bits of 0 are 0).
     movz_x(&code[0], 0, 0, 0);
-    STR_W(&code[4], 0, 1, 0);
+    str_w(&code[4], 0, 1, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // (b) ADD/SUB shifted-LSL0:
     // ADD with Rm = mov_rd -> use XZR.
     movz_x(&code[0], 0, 0, 0);
-    ADD_X(&code[4], 3, 2, 0);
+    add_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ADD with Rn = mov_rd (commutativity).
     movz_x(&code[0], 0, 0, 0);
-    ADD_X(&code[4], 3, 0, 2);
+    add_x(&code[4], 3, 0, 2);
     assert(run_helper_check(code, 8) == 1);
 
     // SUB with Rm = mov_rd (-> MOV Rd, Rn).
     movz_x(&code[0], 0, 0, 0);
-    SUB_X(&code[4], 3, 2, 0);
+    sub_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // SUB with Rn = mov_rd (-> NEG Rd, Rm). The "SUB-from-zero" form.
     movz_x(&code[0], 0, 0, 0);
-    SUB_X(&code[4], 3, 0, 2);
+    sub_x(&code[4], 3, 0, 2);
     assert(run_helper_check(code, 8) == 1);
 
     // CMP (SUBS XZR, Rn, Rm) with Rm = mov_rd -> "cmp xn, xzr".
@@ -3646,23 +3646,23 @@ static void test_mov_zero_to_xzr(void)
     // (c) AND/ORR/EOR shifted-LSL0:
     // AND with Rm = mov_rd.
     movz_x(&code[0], 0, 0, 0);
-    AND_X(&code[4], 3, 2, 0);
+    and_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // ORR with Rm = mov_rd -> MOV Rd, Rn (the canonical MOV
     // register form is ORR Rd, XZR, Rm; this is the mirror).
     movz_x(&code[0], 0, 0, 0);
-    ORR_X(&code[4], 3, 2, 0);
+    orr_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // EOR with Rm = mov_rd -> MOV Rd, Rn (XOR identity).
     movz_x(&code[0], 0, 0, 0);
-    EOR_X(&code[4], 3, 2, 0);
+    eor_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // TST (ANDS XZR, ...).
     movz_x(&code[0], 0, 0, 0);
-    ANDS_X(&code[4], 31, 2, 0);
+    ands_x(&code[4], 31, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // Negatives:
@@ -3692,13 +3692,13 @@ static void test_mov_zero_to_xzr(void)
 
     // Intervening instruction closes the chain.
     movz_x(&code[0], 0, 0, 0);
-    ADD_X(&code[4], 5, 5, 6);
+    add_x(&code[4], 5, 5, 6);
     str_x_uimm(&code[8], 0, 1, 0);
     assert(run_helper_check(code, 12) == 0);
 
     // ALU op where neither operand is mov_rd.
     movz_x(&code[0], 0, 0, 0);
-    ADD_X(&code[4], 3, 1, 2);  // ADD X3, X1, X2 -- no X0
+    add_x(&code[4], 3, 1, 2);  // ADD X3, X1, X2 -- no X0
     assert(run_helper_check(code, 8) == 0);
 }
 
@@ -3708,28 +3708,28 @@ static void test_mul_add_sub_fold(void)
 
     // mul x3, x1, x2 ; add x3, x3, x4  -> madd x3, x1, x2, x4.
     mul_x(&code[0], 3, 1, 2);
-    ADD_X(&code[4], 3, 3, 4);
+    add_x(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 1);
 
     // Commutativity: mul x3, x1, x2 ; add x3, x4, x3.
     mul_x(&code[0], 3, 1, 2);
-    ADD_X(&code[4], 3, 4, 3);
+    add_x(&code[4], 3, 4, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // W form.
     mul_w(&code[0], 3, 1, 2);
-    ADD_W(&code[4], 3, 3, 4);
+    add_w(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 1);
 
     // SUB with Rm = mul_rd (xd = xc - xt) -> MSUB.
     mul_x(&code[0], 3, 1, 2);
-    SUB_X(&code[4], 3, 4, 3);
+    sub_x(&code[4], 3, 4, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // Negative: SUB with Rn = mul_rd (xd = xt - xc) -- NOT foldable
     // because MSUB computes Ra - Rn*Rm, not Rn*Rm - Ra.
     mul_x(&code[0], 3, 1, 2);
-    SUB_X(&code[4], 3, 3, 4);
+    sub_x(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ADDS (S-variant) -- no flag-setting MADD.
@@ -3739,28 +3739,28 @@ static void test_mul_add_sub_fold(void)
 
     // Negative: SUBS (S-variant).
     mul_x(&code[0], 3, 1, 2);
-    SUBS_X(&code[4], 3, 4, 3);
+    subs_x(&code[4], 3, 4, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: Rd != Rt (the MUL result is alive after the ADD).
     mul_x(&code[0], 3, 1, 2);
-    ADD_X(&code[4], 5, 3, 4);  // writes X5, not X3
+    add_x(&code[4], 5, 3, 4);  // writes X5, not X3
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: accumulator == mul_rd (xc == xt aliasing).
     // mul x3, x1, x2 ; add x3, x3, x3.
     mul_x(&code[0], 3, 1, 2);
-    ADD_X(&code[4], 3, 3, 3);
+    add_x(&code[4], 3, 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: width mismatch (MUL W, ADD X).
     mul_w(&code[0], 3, 1, 2);
-    ADD_X(&code[4], 3, 3, 4);
+    add_x(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ADD does not consume mul_rd.
     mul_x(&code[0], 3, 1, 2);
-    ADD_X(&code[4], 6, 4, 5);  // X6 = X4 + X5; no read of X3
+    add_x(&code[4], 6, 4, 5);  // X6 = X4 + X5; no read of X3
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: shifted ADD (imm6 != 0).
@@ -3774,26 +3774,26 @@ static void test_mul_add_sub_fold(void)
 
     // Negative: intervening instruction breaks adjacency.
     mul_x(&code[0], 3, 1, 2);
-    ADD_X(&code[4], 5, 5, 6);  // unrelated
-    ADD_X(&code[8], 3, 3, 4);
+    add_x(&code[4], 5, 5, 6);  // unrelated
+    add_x(&code[8], 3, 3, 4);
     assert(run_helper_check(code, 12) == 0);
 
     // Negative: MUL writing XZR (Rd=31) does not open pending.
     mul_x(&code[0], 31, 1, 2);
-    ADD_X(&code[4], 31, 31, 4);  // arbitrary ADD
+    add_x(&code[4], 31, 31, 4);  // arbitrary ADD
     assert(run_helper_check(code, 8) == 0);
 
     // Aliasing of MUL operands with each other: mul x3, x3, x2 (MUL's
     // Rd == Rn == x3). The MADD rewrite reads x3 (pre-MUL value), so
     // sound provided Rd == Rt and xc != Rt.
     mul_x(&code[0], 3, 3, 2);
-    ADD_X(&code[4], 3, 3, 4);
+    add_x(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 1);
 
     // MUL with Rn = Rm (square): mul x3, x1, x1 ; add x3, x3, x4
     //                            -> madd x3, x1, x1, x4.
     mul_x(&code[0], 3, 1, 1);
-    ADD_X(&code[4], 3, 3, 4);
+    add_x(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 1);
 }
 
@@ -3961,7 +3961,7 @@ static void test_add_ldr_register_offset(void)
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: SUB instead of ADD (semantics differ -- not a fold).
-    SUB_X(&code[0], 3, 1, 2);
+    sub_x(&code[0], 3, 1, 2);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
@@ -3971,7 +3971,7 @@ static void test_add_ldr_register_offset(void)
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: W-form ADD (sf=0) -- base register must be X.
-    ADD_W(&code[0], 3, 1, 2);
+    add_w(&code[0], 3, 1, 2);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
@@ -3993,7 +3993,7 @@ static void test_add_ldr_register_offset(void)
 
     // Negative: intervening instruction breaks adjacency.
     add_x_lsl(&code[0], 3, 1, 2, 0);
-    ADD_X(&code[4], 5, 5, 6);  // unrelated
+    add_x(&code[4], 5, 5, 6);  // unrelated
     ldr_x_uimm0(&code[8], 3, 3);
     assert(run_helper_check(code, 12) == 0);
 
@@ -4058,29 +4058,29 @@ static void test_neg_add_sub_fold(void)
     // Canonical X-form, nt in Rm slot:
     //   neg x3, x1 ; add x3, x2, x3 -> sub x3, x2, x1.
     neg_x(&code[0], 3, 1);
-    ADD_X(&code[4], 3, 2, 3);
+    add_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // Commuted X-form, nt in Rn slot:
     //   neg x3, x1 ; add x3, x3, x2 -> sub x3, x2, x1.
     neg_x(&code[0], 3, 1);
-    ADD_X(&code[4], 3, 3, 2);
+    add_x(&code[4], 3, 3, 2);
     assert(run_helper_check(code, 8) == 1);
 
     // W-form variant.
     neg_w(&code[0], 3, 1);
-    ADD_W(&code[4], 3, 2, 3);
+    add_w(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // SUB consumer with nt in Rm slot:
     //   neg x3, x1 ; sub x3, x2, x3 -> add x3, x2, x1.
     neg_x(&code[0], 3, 1);
-    SUB_X(&code[4], 3, 2, 3);
+    sub_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // Negative: SUB with nt in Rn (xd = -xs - xc) -- no single-insn fold.
     neg_x(&code[0], 3, 1);
-    SUB_X(&code[4], 3, 3, 4);
+    sub_x(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ADDS (S-variant) -- flag definition differs.
@@ -4090,28 +4090,28 @@ static void test_neg_add_sub_fold(void)
 
     // Negative: SUBS (S-variant).
     neg_x(&code[0], 3, 1);
-    SUBS_X(&code[4], 3, 2, 3);
+    subs_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ADD's Rd != Rt (NEG result is alive after the ADD).
     neg_x(&code[0], 3, 1);
-    ADD_X(&code[4], 5, 2, 3);
+    add_x(&code[4], 5, 2, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: accumulator equals nt (xc == xt aliasing).
     //   neg x3, x1 ; add x3, x3, x3 (= -2*x1, not foldable as 1 insn).
     neg_x(&code[0], 3, 1);
-    ADD_X(&code[4], 3, 3, 3);
+    add_x(&code[4], 3, 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: width mismatch (NEG W, ADD X).
     neg_w(&code[0], 3, 1);
-    ADD_X(&code[4], 3, 2, 3);
+    add_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ADD does not consume nt at all.
     neg_x(&code[0], 3, 1);
-    ADD_X(&code[4], 6, 4, 5);
+    add_x(&code[4], 6, 4, 5);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: shifted ADD consumer (imm6 != 0).
@@ -4125,23 +4125,23 @@ static void test_neg_add_sub_fold(void)
 
     // Negative: intervening instruction breaks adjacency.
     neg_x(&code[0], 3, 1);
-    ADD_X(&code[4], 5, 5, 6);
-    ADD_X(&code[8], 3, 2, 3);
+    add_x(&code[4], 5, 5, 6);
+    add_x(&code[8], 3, 2, 3);
     assert(run_helper_check(code, 12) == 0);
 
     // Negative: NEGS (S-variant producer) -- flag-setting NEG, excluded.
     negs_x(&code[0], 3, 1);
-    ADD_X(&code[4], 3, 2, 3);
+    add_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: NEG writes XZR (Rd=31) -- dead-store, no pending.
     neg_x(&code[0], 31, 1);
-    ADD_X(&code[4], 31, 2, 31);
+    add_x(&code[4], 31, 2, 31);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: NEG of XZR (Rs=31) computes 0 -- degenerate, skipped.
     neg_x(&code[0], 3, 31);
-    ADD_X(&code[4], 3, 2, 3);
+    add_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: bare NEG with no consumer (pending expires at flush).
@@ -4149,8 +4149,8 @@ static void test_neg_add_sub_fold(void)
     assert(run_helper_check(code, 4) == 0);
 
     // Negative: real SUB (not the NEG alias) -- Rn != XZR.
-    SUB_X(&code[0], 3, 4, 1);  // sub x3, x4, x1 (not neg x3, x1)
-    ADD_X(&code[4], 3, 2, 3);
+    sub_x(&code[0], 3, 4, 1);  // sub x3, x4, x1 (not neg x3, x1)
+    add_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 0);
 }
 
@@ -4183,29 +4183,29 @@ static void test_add_ldr_imm_offset(void)
 
     // Canonical: add x3, x1, #16 ; ldr x3, [x3] -> ldr x3, [x1, #16].
     // (16 is a multiple of 8 and 16/8=2 fits in imm12.)
-    ADD_X_IMM(&code[0], 3, 1, 16);
+    add_x_imm(&code[0], 3, 1, 16);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // W-form LDR: add x3, x1, #16 ; ldr w3, [x3] -> ldr w3, [x1, #16].
     // (16 is a multiple of 4 and 16/4=4 fits in imm12.)
-    ADD_X_IMM(&code[0], 3, 1, 16);
+    add_x_imm(&code[0], 3, 1, 16);
     ldr_w_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // LDRB: any byte offset works (access size 1). #5 OK.
-    ADD_X_IMM(&code[0], 3, 1, 5);
+    add_x_imm(&code[0], 3, 1, 5);
     ldrb_w_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // LDRH: half-word load; #6 is a multiple of 2 and 6/2=3 fits.
-    ADD_X_IMM(&code[0], 3, 1, 6);
+    add_x_imm(&code[0], 3, 1, 6);
     ldrh_w_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
     // SP base: add x3, sp, #32 ; ldr x3, [x3] -> ldr x3, [sp, #32].
     // ADD-imm with Rn=31 is SP, matching LDR-uimm with Rn=31.
-    ADD_X_IMM(&code[0], 3, 31, 32);
+    add_x_imm(&code[0], 3, 31, 32);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
@@ -4217,33 +4217,33 @@ static void test_add_ldr_imm_offset(void)
     assert(run_helper_check(code, 8) == 1);
 
     // Negative: misaligned for X access. #4 is not a multiple of 8.
-    ADD_X_IMM(&code[0], 3, 1, 4);
+    add_x_imm(&code[0], 3, 1, 4);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: misaligned for W access. #2 is not a multiple of 4.
-    ADD_X_IMM(&code[0], 3, 1, 2);
+    add_x_imm(&code[0], 3, 1, 2);
     ldr_w_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: misaligned for H access. #1 is not a multiple of 2.
-    ADD_X_IMM(&code[0], 3, 1, 1);
+    add_x_imm(&code[0], 3, 1, 1);
     ldrh_w_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: LDR base != ADD's Rd.
-    ADD_X_IMM(&code[0], 3, 1, 16);
+    add_x_imm(&code[0], 3, 1, 16);
     ldr_x_uimm0(&code[4], 3, 5);  // base x5 != x3
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: LDR's Rt != ADD's Rd (would leave x3 alive).
-    ADD_X_IMM(&code[0], 3, 1, 16);
+    add_x_imm(&code[0], 3, 1, 16);
     ldr_x_uimm0(&code[4], 7, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Positive: combined offset. add x3, x1, #16 ; ldr x3, [x3, #8]
     //   -> ldr x3, [x1, #24]. (16 + 1*8 = 24, multiple of 8, fits.)
-    ADD_X_IMM(&code[0], 3, 1, 16);
+    add_x_imm(&code[0], 3, 1, 16);
     ldr_x_uimm_with(&code[4], 3, 3, 1);
     assert(run_helper_check(code, 8) == 1);
 
@@ -4256,7 +4256,7 @@ static void test_add_ldr_imm_offset(void)
 
     // Negative: SUB-imm instead of ADD-imm (would need negative LDR
     // offset, which the unsigned-offset form cannot encode).
-    SUB_X_IMM(&code[0], 3, 1, 16);
+    sub_x_imm(&code[0], 3, 1, 16);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
@@ -4272,31 +4272,31 @@ static void test_add_ldr_imm_offset(void)
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: W-form ADD-imm (sf=0). LDR base must be 64-bit.
-    ADD_W_IMM(&code[0], 3, 1, 16);
+    add_w_imm(&code[0], 3, 1, 16);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: ADD writes SP (Rd=31). Excluded: SP update is
     // observable, fold would discard it.
-    ADD_X_IMM(&code[0], 31, 1, 16);
+    add_x_imm(&code[0], 31, 1, 16);
     ldr_x_uimm0(&code[4], 31, 31);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: intervening instruction breaks adjacency.
-    ADD_X_IMM(&code[0], 3, 1, 16);
-    ADD_X(&code[4], 5, 5, 6);
+    add_x_imm(&code[0], 3, 1, 16);
+    add_x(&code[4], 5, 5, 6);
     ldr_x_uimm0(&code[8], 3, 3);
     assert(run_helper_check(code, 12) == 0);
 
     // Negative: trailing ADD with no following LDR. Pending state
     // expires at flush; no finding emitted.
-    ADD_X_IMM(&code[0], 3, 1, 16);
+    add_x_imm(&code[0], 3, 1, 16);
     assert(run_helper_check(code, 4) == 0);
 
     // Aliasing positive: add x3, x3, #16 ; ldr x3, [x3]. ADD's
     // Rd == Rn. The fold ldr x3, [x3, #16] reads x3's pre-ADD value
     // as base, matching the original semantics (LDR overwrites x3).
-    ADD_X_IMM(&code[0], 3, 3, 16);
+    add_x_imm(&code[0], 3, 3, 16);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
@@ -4338,7 +4338,7 @@ static void test_add_ldr_imm_offset(void)
     assert(run_helper_check(code, 8) == 0);
 
     // B-form (scale 1): at-limit 4095 = 0xFFF + 0 (sh=0 ADD).
-    ADD_X_IMM(&code[0], 3, 1, 0xFFF);
+    add_x_imm(&code[0], 3, 1, 0xFFF);
     ldrb_w_uimm_with(&code[4], 3, 3, 0);
     assert(run_helper_check(code, 8) == 1);
 
@@ -4357,68 +4357,68 @@ static void test_ldr_str_add_post_indexed(void)
     // Canonical X-form load: ldr x3, [x1] ; add x1, x1, #16
     //   -> ldr x3, [x1], #16.
     ldr_x_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 1, 16);
+    add_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 1);
 
     // W-form load.
     ldr_w_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 1, 16);
+    add_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 1);
 
     // Byte and halfword loads: post-index allows any byte offset.
     ldrb_w_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 1, 5);
+    add_x_imm(&code[4], 1, 1, 5);
     assert(run_helper_check(code, 8) == 1);
     ldrh_w_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 1, 6);
+    add_x_imm(&code[4], 1, 1, 6);
     assert(run_helper_check(code, 8) == 1);
 
     // X-form store: str x3, [x1] ; add x1, x1, #16
     //   -> str x3, [x1], #16.
     str_x_uimm(&code[0], 3, 1, 0);
-    ADD_X_IMM(&code[4], 1, 1, 16);
+    add_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 1);
 
     // W-form store, plus byte / halfword stores.
     str_w_uimm(&code[0], 3, 1, 0);
-    ADD_X_IMM(&code[4], 1, 1, 16);
+    add_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 1);
     strb_w_uimm(&code[0], 3, 1, 0);
-    ADD_X_IMM(&code[4], 1, 1, 5);
+    add_x_imm(&code[4], 1, 1, 5);
     assert(run_helper_check(code, 8) == 1);
     strh_w_uimm(&code[0], 3, 1, 0);
-    ADD_X_IMM(&code[4], 1, 1, 6);
+    add_x_imm(&code[4], 1, 1, 6);
     assert(run_helper_check(code, 8) == 1);
 
     // SP base on load: ldr x3, [sp] ; add sp, sp, #16
     //   -> ldr x3, [sp], #16. Canonical stack-pop pattern.
     ldr_x_uimm0(&code[0], 3, 31);
-    ADD_X_IMM(&code[4], 31, 31, 16);
+    add_x_imm(&code[4], 31, 31, 16);
     assert(run_helper_check(code, 8) == 1);
 
     // SP base on store, Rt == 31 (XZR): str xzr, [sp] ; add sp, sp, #8
     //   -> str xzr, [sp], #8. Rt and Rn both encode 31 but mean
     //   different registers (XZR vs SP), so the writeback is fine.
     str_x_uimm(&code[0], 31, 31, 0);
-    ADD_X_IMM(&code[4], 31, 31, 8);
+    add_x_imm(&code[4], 31, 31, 8);
     assert(run_helper_check(code, 8) == 1);
 
     // Boundary: imm = 1 (minimum accepted, since imm = 0 is the
     // redundant-ADD case handled elsewhere).
     ldr_x_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 1, 1);
+    add_x_imm(&code[4], 1, 1, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // Boundary: imm = 255 (top of accepted positive 9-bit range).
     ldr_x_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 1, 255);
+    add_x_imm(&code[4], 1, 1, 255);
     assert(run_helper_check(code, 8) == 1);
 
     // -- Negatives. --
 
     // Boundary: imm = 256 (just over the 9-bit signed positive range).
     ldr_x_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 1, 256);
+    add_x_imm(&code[4], 1, 1, 256);
     assert(run_helper_check(code, 8) == 0);
 
     // sh=1 ADD: imm = 4096 -- well outside the 9-bit range.
@@ -4428,25 +4428,25 @@ static void test_ldr_str_add_post_indexed(void)
 
     // Rt == Rn writeback (UNPREDICTABLE), Rn != 31.
     ldr_x_uimm0(&code[0], 1, 1);    // ldr x1, [x1]
-    ADD_X_IMM(&code[4], 1, 1, 16);
+    add_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 0);
 
     // ADD not a self-update (Rd != Rn): the post-index encoding
     // can only update its own base register, so this can't fold.
     ldr_x_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 1, 2, 16);   // add x1, x2, #16
+    add_x_imm(&code[4], 1, 2, 16);   // add x1, x2, #16
     assert(run_helper_check(code, 8) == 0);
 
     // ADD updates an unrelated register: post-index would update
     // x1, not x5. No fold.
     ldr_x_uimm0(&code[0], 3, 1);
-    ADD_X_IMM(&code[4], 5, 5, 16);
+    add_x_imm(&code[4], 5, 5, 16);
     assert(run_helper_check(code, 8) == 0);
 
     // SUB-imm (negative direction): valid in post-index encoding
     // but v1 only handles ADD-imm.
     ldr_x_uimm0(&code[0], 3, 1);
-    SUB_X_IMM(&code[4], 1, 1, 16);
+    sub_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 0);
 
     // ADDS (flag-setting; post-index has no flag-setting form).
@@ -4463,13 +4463,13 @@ static void test_ldr_str_add_post_indexed(void)
     // Folding to post-index would change the load address (would load
     // from x1 instead of x1+8).
     ldr_x_uimm_with(&code[0], 3, 1, 1);
-    ADD_X_IMM(&code[4], 1, 1, 16);
+    add_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 0);
 
     // Intervening instruction expires the pending state.
     ldr_x_uimm0(&code[0], 3, 1);
     movz_x(&code[4], 9, 5, 0);
-    ADD_X_IMM(&code[8], 1, 1, 16);
+    add_x_imm(&code[8], 1, 1, 16);
     assert(run_helper_check(code, 12) == 0);
 }
 
@@ -4483,59 +4483,59 @@ static void test_add_ldr_str_pre_indexed(void)
     //   -> ldr x3, [x1, #16]!. Rt != Rn here so the related
     //   check_add_ldr_imm_offset (immediate-offset, no writeback)
     //   does NOT also fire.
-    ADD_X_IMM(&code[0], 1, 1, 16);
+    add_x_imm(&code[0], 1, 1, 16);
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // W-form load.
-    ADD_X_IMM(&code[0], 1, 1, 16);
+    add_x_imm(&code[0], 1, 1, 16);
     ldr_w_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // Byte and halfword loads.
-    ADD_X_IMM(&code[0], 1, 1, 5);
+    add_x_imm(&code[0], 1, 1, 5);
     ldrb_w_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 1);
-    ADD_X_IMM(&code[0], 1, 1, 6);
+    add_x_imm(&code[0], 1, 1, 6);
     ldrh_w_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // X-form store.
-    ADD_X_IMM(&code[0], 1, 1, 16);
+    add_x_imm(&code[0], 1, 1, 16);
     str_x_uimm(&code[4], 3, 1, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // W/B/H stores.
-    ADD_X_IMM(&code[0], 1, 1, 16);
+    add_x_imm(&code[0], 1, 1, 16);
     str_w_uimm(&code[4], 3, 1, 0);
     assert(run_helper_check(code, 8) == 1);
-    ADD_X_IMM(&code[0], 1, 1, 5);
+    add_x_imm(&code[0], 1, 1, 5);
     strb_w_uimm(&code[4], 3, 1, 0);
     assert(run_helper_check(code, 8) == 1);
-    ADD_X_IMM(&code[0], 1, 1, 6);
+    add_x_imm(&code[0], 1, 1, 6);
     strh_w_uimm(&code[4], 3, 1, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // SP base load: add sp, sp, #16 ; ldr x3, [sp]
     //   -> ldr x3, [sp, #16]!.
-    ADD_X_IMM(&code[0], 31, 31, 16);
+    add_x_imm(&code[0], 31, 31, 16);
     ldr_x_uimm0(&code[4], 3, 31);
     assert(run_helper_check(code, 8) == 1);
 
     // SP base + Rt == 31 (XZR): add sp, sp, #8 ; str xzr, [sp]
     //   -> str xzr, [sp, #8]!. Rn means SP, Rt means XZR; distinct
     //   registers, so the writeback is well-defined.
-    ADD_X_IMM(&code[0], 31, 31, 8);
+    add_x_imm(&code[0], 31, 31, 8);
     str_x_uimm(&code[4], 31, 31, 0);
     assert(run_helper_check(code, 8) == 1);
 
     // Boundary: imm = 1.
-    ADD_X_IMM(&code[0], 1, 1, 1);
+    add_x_imm(&code[0], 1, 1, 1);
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // Boundary: imm = 255.
-    ADD_X_IMM(&code[0], 1, 1, 255);
+    add_x_imm(&code[0], 1, 1, 255);
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 1);
 
@@ -4543,7 +4543,7 @@ static void test_add_ldr_str_pre_indexed(void)
 
     // Boundary: imm = 256 (just over the 9-bit signed positive
     // range).
-    ADD_X_IMM(&code[0], 1, 1, 256);
+    add_x_imm(&code[0], 1, 1, 256);
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 0);
 
@@ -4556,22 +4556,22 @@ static void test_add_ldr_str_pre_indexed(void)
     // is exactly check_add_ldr_imm_offset's target, so it folds to
     // `ldr x1, [x1, #16]` (immediate-offset, no writeback) and the
     // expected total is 1 finding (from that check), not 0.
-    ADD_X_IMM(&code[0], 1, 1, 16);
+    add_x_imm(&code[0], 1, 1, 16);
     ldr_x_uimm0(&code[4], 1, 1);
     assert(run_helper_check(code, 8) == 1);
 
     // ADD not a self-update.
-    ADD_X_IMM(&code[0], 1, 2, 16);
+    add_x_imm(&code[0], 1, 2, 16);
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // ADD updates a different register than the LDR base.
-    ADD_X_IMM(&code[0], 5, 5, 16);
+    add_x_imm(&code[0], 5, 5, 16);
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // SUB-imm (v1 doesn't handle negative direction).
-    SUB_X_IMM(&code[0], 1, 1, 16);
+    sub_x_imm(&code[0], 1, 1, 16);
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 0);
 
@@ -4584,12 +4584,12 @@ static void test_add_ldr_str_pre_indexed(void)
     assert(run_helper_check(code, 8) == 0);
 
     // LDR has non-zero offset.
-    ADD_X_IMM(&code[0], 1, 1, 16);
+    add_x_imm(&code[0], 1, 1, 16);
     ldr_x_uimm_with(&code[4], 3, 1, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // Intervening instruction expires the pending state.
-    ADD_X_IMM(&code[0], 1, 1, 16);
+    add_x_imm(&code[0], 1, 1, 16);
     movz_x(&code[4], 9, 5, 0);
     ldr_x_uimm0(&code[8], 3, 1);
     assert(run_helper_check(code, 12) == 0);
