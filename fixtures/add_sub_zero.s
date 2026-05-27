@@ -23,7 +23,9 @@ _main:
 
     // N3) Linker-resolved ADRP+ADD where the page offset is 0:
     //     removing the ADD requires re-linking, so it is not flagged.
-    adrp    x0, _main@PAGE
+    //     Emit ADRP via .long to avoid Mach-O/ELF relocation-syntax
+    //     differences (`@PAGE` is Mach-O-only).
+    .long   0x90000000              // adrp x0, page0
     add     x0, x0, #0
 
     ret
