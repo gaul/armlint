@@ -439,6 +439,34 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// Detect an unsigned-offset LDR or STR with imm12 == 0 immediately
+// followed by an X-form ADD-immediate that self-updates the base
+// register. The pair folds into a single post-indexed LDR/STR with
+// the ADD's byte immediate moved into the post-index slot:
+//   ldr xt, [xn]    ; add xn, xn, #imm  -> ldr xt, [xn], #imm
+//   str xt, [xn]    ; add xn, xn, #imm  -> str xt, [xn], #imm
+//   ldr xt, [sp]    ; add sp, sp, #imm  -> ldr xt, [sp], #imm
+// All four access sizes (B/H/W/X) are supported.
+//
+// Encoding constraint: post-index uses a 9-bit signed immediate
+// (-256..255). v1 accepts only positive immediates (1..255) sourced
+// from ADD-imm; SUB-imm and pre-index folds are deferred.
+//
+// Soundness: ADD's Rd and Rn must both equal the LDR/STR's Rn so
+// that the base receives a self-update (the only form expressible as
+// post-index). Rt == Rn writeback is UNPREDICTABLE for loads and
+// CONSTRAINED UNPREDICTABLE for stores, so that pair is rejected --
+// except when Rn == 31, where 31 means SP for the base and XZR for
+// Rt, so the two encode distinct registers and no conflict arises.
+// LDR with Rt = 31 (load to XZR) is allowed for symmetry with STR
+// of XZR. The unsigned-offset LDR/STR must have imm12 == 0; a
+// non-zero LDR offset combined with a post-index update has no
+// single-instruction rewrite (that pattern matches pre-index, not
+// post-index).
+bool check_ldr_str_add_post_indexed(armlint_state *state,
+                                    const cs_insn *insn,
+                                    size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs

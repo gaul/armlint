@@ -4166,6 +4166,17 @@ static void add_x_imm_sh(uint8_t out[4], unsigned rd, unsigned rn,
     write_le32(out, op);
 }
 
+// Encode STR Wt, [Xn, #imm] (W-form, unsigned-offset). Base 0xB9000000.
+static void str_w_uimm(uint8_t out[4], unsigned rt, unsigned rn,
+                       unsigned imm)
+{
+    uint32_t op = 0xB9000000u
+        | ((imm & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 static void test_add_ldr_imm_offset(void)
 {
     uint8_t code[16];
@@ -4337,6 +4348,131 @@ static void test_add_ldr_imm_offset(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_ldr_str_add_post_indexed(void)
+{
+    uint8_t code[12];
+
+    // -- Positives: LDR/STR + ADD self-update -> post-indexed. --
+
+    // Canonical X-form load: ldr x3, [x1] ; add x1, x1, #16
+    //   -> ldr x3, [x1], #16.
+    ldr_x_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form load.
+    ldr_w_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Byte and halfword loads: post-index allows any byte offset.
+    ldrb_w_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 1, 5);
+    assert(run_helper_check(code, 8) == 1);
+    ldrh_w_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 1, 6);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form store: str x3, [x1] ; add x1, x1, #16
+    //   -> str x3, [x1], #16.
+    str_x_uimm(&code[0], 3, 1, 0);
+    ADD_X_IMM(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form store, plus byte / halfword stores.
+    str_w_uimm(&code[0], 3, 1, 0);
+    ADD_X_IMM(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 1);
+    strb_w_uimm(&code[0], 3, 1, 0);
+    ADD_X_IMM(&code[4], 1, 1, 5);
+    assert(run_helper_check(code, 8) == 1);
+    strh_w_uimm(&code[0], 3, 1, 0);
+    ADD_X_IMM(&code[4], 1, 1, 6);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SP base on load: ldr x3, [sp] ; add sp, sp, #16
+    //   -> ldr x3, [sp], #16. Canonical stack-pop pattern.
+    ldr_x_uimm0(&code[0], 3, 31);
+    ADD_X_IMM(&code[4], 31, 31, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SP base on store, Rt == 31 (XZR): str xzr, [sp] ; add sp, sp, #8
+    //   -> str xzr, [sp], #8. Rt and Rn both encode 31 but mean
+    //   different registers (XZR vs SP), so the writeback is fine.
+    str_x_uimm(&code[0], 31, 31, 0);
+    ADD_X_IMM(&code[4], 31, 31, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Boundary: imm = 1 (minimum accepted, since imm = 0 is the
+    // redundant-ADD case handled elsewhere).
+    ldr_x_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Boundary: imm = 255 (top of accepted positive 9-bit range).
+    ldr_x_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 1, 255);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // Boundary: imm = 256 (just over the 9-bit signed positive range).
+    ldr_x_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 1, 256);
+    assert(run_helper_check(code, 8) == 0);
+
+    // sh=1 ADD: imm = 4096 -- well outside the 9-bit range.
+    ldr_x_uimm0(&code[0], 3, 1);
+    add_x_imm_sh(&code[4], 1, 1, 1);  // 1 << 12 = 4096
+    assert(run_helper_check(code, 8) == 0);
+
+    // Rt == Rn writeback (UNPREDICTABLE), Rn != 31.
+    ldr_x_uimm0(&code[0], 1, 1);    // ldr x1, [x1]
+    ADD_X_IMM(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADD not a self-update (Rd != Rn): the post-index encoding
+    // can only update its own base register, so this can't fold.
+    ldr_x_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 1, 2, 16);   // add x1, x2, #16
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADD updates an unrelated register: post-index would update
+    // x1, not x5. No fold.
+    ldr_x_uimm0(&code[0], 3, 1);
+    ADD_X_IMM(&code[4], 5, 5, 16);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB-imm (negative direction): valid in post-index encoding
+    // but v1 only handles ADD-imm.
+    ldr_x_uimm0(&code[0], 3, 1);
+    SUB_X_IMM(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADDS (flag-setting; post-index has no flag-setting form).
+    // ADDS X-form base is ADD-imm base (0x91000000) | S-bit (0x20000000)
+    // = 0xB1000000.
+    ldr_x_uimm0(&code[0], 3, 1);
+    {
+        uint32_t adds = 0xB1000000u | (16u << 10) | (1u << 5) | 1u;
+        write_le32(&code[4], adds);
+    }
+    assert(run_helper_check(code, 8) == 0);
+
+    // LDR has a non-zero offset: ldr x3, [x1, #8] ; add x1, x1, #16.
+    // Folding to post-index would change the load address (would load
+    // from x1 instead of x1+8).
+    ldr_x_uimm_with(&code[0], 3, 1, 1);
+    ADD_X_IMM(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending state.
+    ldr_x_uimm0(&code[0], 3, 1);
+    movz_x(&code[4], 9, 5, 0);
+    ADD_X_IMM(&code[8], 1, 1, 16);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -4372,6 +4508,7 @@ int main(void)
     test_neg_add_sub_fold();
     test_add_ldr_register_offset();
     test_add_ldr_imm_offset();
+    test_ldr_str_add_post_indexed();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

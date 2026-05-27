@@ -229,6 +229,22 @@ struct armlint_state {
     size_t addi_pending_offset;
     char addi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending unsigned-offset LDR/STR with imm12 == 0 awaiting an
+    // adjacent X-form ADD-immediate that self-updates the base
+    // register (Rd == Rn == LDR/STR's Rn). The pair folds into a
+    // single post-indexed LDR/STR with the ADD's byte immediate in
+    // the post-index slot. Post-index uses a 9-bit signed immediate,
+    // so v1 accepts ADD imm in 1..255 (SUB and negative immediates
+    // are deferred). Strict adjacency: any non-matching instruction
+    // expires the state.
+    bool lspi_pending;
+    bool lspi_pending_is_load;
+    unsigned lspi_pending_size;
+    unsigned lspi_pending_rn;
+    unsigned lspi_pending_rt;
+    size_t lspi_pending_offset;
+    char lspi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
     // partner for LDP/STP/LDPSW coalescing. The next instruction of
     // the same kind (sext or zext) with the same Rn, same direction
@@ -406,6 +422,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->neg_pending = false;
     state->add_pending = false;
     state->addi_pending = false;
+    state->lspi_pending = false;
     return mov_close(state, out);
 }
 
@@ -4043,6 +4060,141 @@ bool check_add_ldr_imm_offset(armlint_state *state,
     return produced;
 }
 
+bool check_ldr_str_add_post_indexed(armlint_state *state,
+                                    const cs_insn *insn,
+                                    size_t offset,
+                                    armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->lspi_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an X-form ADD-immediate that
+    // self-updates the pending LDR/STR's base?
+    if (state->lspi_pending) {
+        unsigned a_rd, a_rn;
+        uint32_t a_imm;
+        // Rt == Rn writeback is UNPREDICTABLE (CONSTRAINED for stores)
+        // unless Rn == 31, where 31 means SP for Rn but XZR for Rt --
+        // distinct registers, so no conflict.
+        bool rt_aliases_rn =
+            state->lspi_pending_rt == state->lspi_pending_rn
+            && state->lspi_pending_rn != 31;
+        if (!rt_aliases_rn
+                && decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)
+                && a_rd == state->lspi_pending_rn
+                && a_rn == state->lspi_pending_rn
+                && a_imm >= 1
+                && a_imm <= 255) {
+            unsigned size = state->lspi_pending_size;
+            bool is_load = state->lspi_pending_is_load;
+            const char *mnem;
+            char rt_wx;
+            switch (size) {
+                case 0: mnem = is_load ? "ldrb" : "strb"; rt_wx = 'w'; break;
+                case 1: mnem = is_load ? "ldrh" : "strh"; rt_wx = 'w'; break;
+                case 2: mnem = is_load ? "ldr"  : "str";  rt_wx = 'w'; break;
+                case 3: mnem = is_load ? "ldr"  : "str";  rt_wx = 'x'; break;
+                default: mnem = "ldr"; rt_wx = 'x'; break;
+            }
+
+            out->name = is_load
+                ? "LDR + ADD foldable to post-indexed LDR"
+                : "STR + ADD foldable to post-indexed STR";
+            out->start_offset = state->lspi_pending_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            char rt_buf[8];
+            if (state->lspi_pending_rt == 31) {
+                snprintf(rt_buf, sizeof(rt_buf), "%czr", rt_wx);
+            } else {
+                snprintf(rt_buf, sizeof(rt_buf), "%c%u",
+                    rt_wx, state->lspi_pending_rt);
+            }
+            if (state->lspi_pending_rn == 31) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, [sp], #0x%x", mnem, rt_buf, a_imm);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, [x%u], #0x%x",
+                    mnem, rt_buf, state->lspi_pending_rn, a_imm);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->lspi_pending_disasm);
+            if (a_rn == 31) {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "add sp, sp, #0x%x", a_imm);
+            } else {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "add x%u, x%u, #0x%x", a_rd, a_rn, a_imm);
+            }
+            produced = true;
+        }
+        // Strict adjacency: clear regardless of match.
+        state->lspi_pending = false;
+    }
+
+    // (2) Try to open: is this an unsigned-offset LDR or STR with
+    // imm12 == 0? Only the zero-offset case folds cleanly: a non-zero
+    // imm12 plus a post-index update has no single-instruction
+    // rewrite (pre-indexed handles a different pattern).
+    unsigned size, imm12, rn, rt;
+    bool opened = false;
+    bool is_load = false;
+    if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
+            && imm12 == 0) {
+        opened = true;
+        is_load = true;
+    } else if (decode_str_uimm_any_size(op, &size, &imm12, &rn, &rt)
+            && imm12 == 0) {
+        opened = true;
+        is_load = false;
+    }
+    if (opened) {
+        state->lspi_pending = true;
+        state->lspi_pending_is_load = is_load;
+        state->lspi_pending_size = size;
+        state->lspi_pending_rn = rn;
+        state->lspi_pending_rt = rt;
+        state->lspi_pending_offset = offset;
+        const char *mnem;
+        char rt_wx;
+        switch (size) {
+            case 0: mnem = is_load ? "ldrb" : "strb"; rt_wx = 'w'; break;
+            case 1: mnem = is_load ? "ldrh" : "strh"; rt_wx = 'w'; break;
+            case 2: mnem = is_load ? "ldr"  : "str";  rt_wx = 'w'; break;
+            case 3: mnem = is_load ? "ldr"  : "str";  rt_wx = 'x'; break;
+            default: mnem = "ldr"; rt_wx = 'x'; break;
+        }
+        char rt_buf[8];
+        if (rt == 31) {
+            snprintf(rt_buf, sizeof(rt_buf), "%czr", rt_wx);
+        } else {
+            snprintf(rt_buf, sizeof(rt_buf), "%c%u", rt_wx, rt);
+        }
+        if (rn == 31) {
+            snprintf(state->lspi_pending_disasm,
+                sizeof(state->lspi_pending_disasm),
+                "%s %s, [sp]", mnem, rt_buf);
+        } else {
+            snprintf(state->lspi_pending_disasm,
+                sizeof(state->lspi_pending_disasm),
+                "%s %s, [x%u]", mnem, rt_buf, rn);
+        }
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -4135,6 +4287,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_neg_add_sub_fold,
     check_add_ldr_register_offset,
     check_add_ldr_imm_offset,
+    check_ldr_str_add_post_indexed,
 };
 
 const size_t armlint_check_registry_count =

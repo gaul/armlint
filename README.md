@@ -505,6 +505,44 @@ code, and documents corners of the A64 instruction set.
 * SUB-immediate is not folded: the LDR unsigned-offset form has
   no negative-immediate encoding.
 
+### LDR/STR + ADD foldable to post-indexed LDR/STR
+* `ldr xt, [xn] ; add xn, xn, #imm` -> `ldr xt, [xn], #imm`. Same
+  for STR and all four access sizes (B/H/W/X). The post-indexed
+  encoding already expresses "load/store from `[xn]` and then bump
+  `xn` by imm", so the rewrite is a literal source-to-encoding
+  fold with no semantic change.
+* What you actually save: 4 bytes per fold and one fetch/decode
+  slot. The backend cost is typically unchanged -- most modern OoO
+  cores (Apple M-series, Cortex-A76+, Neoverse N1+) crack the
+  post-indexed load into two micro-ops (load and base-register
+  writeback), the same backend work as the original two
+  instructions. Critical-path latency is unchanged. The wins are in
+  code size, I-cache footprint, and front-end bandwidth (helpful
+  on decode-bound inner loops); don't expect a measurable cycle
+  drop on backend-bound code. Caveat: an analogous LDP/STP +
+  writeback fold (not implemented here) can be slower on Apple
+  cores because LDP-with-writeback decodes into more micro-ops
+  than the separate-ADD variant -- single-register LDR/STR does
+  not have this issue.
+* Encoding constraint: post-index uses a 9-bit signed immediate
+  (-256..255). v1 only handles ADD-imm with imm in 1..255; SUB-imm
+  (negative direction) and the `sh=1` form (imm >= 4096) are
+  rejected. The LDR/STR must have imm12 == 0 -- a non-zero offset
+  combined with a base bump matches the pre-indexed pattern, not
+  post-index.
+* Soundness: the ADD must be a self-update (`Rd == Rn ==` LDR/STR's
+  `Rn`), since post-index can only update its own base register.
+  Rt == Rn writeback is UNPREDICTABLE for loads and CONSTRAINED
+  UNPREDICTABLE for stores, so that case is rejected -- except
+  when Rn == 31, where Rn means SP and Rt means XZR (distinct
+  registers, no conflict). `str xzr, [sp] ; add sp, sp, #imm` and
+  `ldr xt, [sp] ; add sp, sp, #imm` are both flagged as the
+  canonical stack-frame teardown patterns.
+* `ADDS` (flag-setting) is excluded because post-index has no
+  flag-setting form. Distinct from `check_add_ldr_imm_offset`,
+  which catches the reversed sequence (ADD then LDR) and folds
+  into the unsigned-offset form rather than post-index.
+
 ## Compilation
 
 armlint depends on [Capstone](https://www.capstone-engine.org/) and uses
