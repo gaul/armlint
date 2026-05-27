@@ -4473,6 +4473,128 @@ static void test_ldr_str_add_post_indexed(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+static void test_add_ldr_str_pre_indexed(void)
+{
+    uint8_t code[12];
+
+    // -- Positives: ADD self-update + LDR/STR -> pre-indexed. --
+
+    // Canonical X-form load: add x1, x1, #16 ; ldr x3, [x1]
+    //   -> ldr x3, [x1, #16]!. Rt != Rn here so the related
+    //   check_add_ldr_imm_offset (immediate-offset, no writeback)
+    //   does NOT also fire.
+    ADD_X_IMM(&code[0], 1, 1, 16);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form load.
+    ADD_X_IMM(&code[0], 1, 1, 16);
+    ldr_w_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Byte and halfword loads.
+    ADD_X_IMM(&code[0], 1, 1, 5);
+    ldrb_w_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+    ADD_X_IMM(&code[0], 1, 1, 6);
+    ldrh_w_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form store.
+    ADD_X_IMM(&code[0], 1, 1, 16);
+    str_x_uimm(&code[4], 3, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W/B/H stores.
+    ADD_X_IMM(&code[0], 1, 1, 16);
+    str_w_uimm(&code[4], 3, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+    ADD_X_IMM(&code[0], 1, 1, 5);
+    strb_w_uimm(&code[4], 3, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+    ADD_X_IMM(&code[0], 1, 1, 6);
+    strh_w_uimm(&code[4], 3, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SP base load: add sp, sp, #16 ; ldr x3, [sp]
+    //   -> ldr x3, [sp, #16]!.
+    ADD_X_IMM(&code[0], 31, 31, 16);
+    ldr_x_uimm0(&code[4], 3, 31);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SP base + Rt == 31 (XZR): add sp, sp, #8 ; str xzr, [sp]
+    //   -> str xzr, [sp, #8]!. Rn means SP, Rt means XZR; distinct
+    //   registers, so the writeback is well-defined.
+    ADD_X_IMM(&code[0], 31, 31, 8);
+    str_x_uimm(&code[4], 31, 31, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Boundary: imm = 1.
+    ADD_X_IMM(&code[0], 1, 1, 1);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Boundary: imm = 255.
+    ADD_X_IMM(&code[0], 1, 1, 255);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // Boundary: imm = 256 (just over the 9-bit signed positive
+    // range).
+    ADD_X_IMM(&code[0], 1, 1, 256);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // sh=1 ADD (imm >= 4096).
+    add_x_imm_sh(&code[0], 1, 1, 1);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Rt == Rn writeback UNPREDICTABLE (Rn != 31). NOTE: this pair
+    // is exactly check_add_ldr_imm_offset's target, so it folds to
+    // `ldr x1, [x1, #16]` (immediate-offset, no writeback) and the
+    // expected total is 1 finding (from that check), not 0.
+    ADD_X_IMM(&code[0], 1, 1, 16);
+    ldr_x_uimm0(&code[4], 1, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ADD not a self-update.
+    ADD_X_IMM(&code[0], 1, 2, 16);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADD updates a different register than the LDR base.
+    ADD_X_IMM(&code[0], 5, 5, 16);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB-imm (v1 doesn't handle negative direction).
+    SUB_X_IMM(&code[0], 1, 1, 16);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADDS (flag-setting; pre-index has no flag-setting form).
+    {
+        uint32_t adds = 0xB1000000u | (16u << 10) | (1u << 5) | 1u;
+        write_le32(&code[0], adds);
+        ldr_x_uimm0(&code[4], 3, 1);
+    }
+    assert(run_helper_check(code, 8) == 0);
+
+    // LDR has non-zero offset.
+    ADD_X_IMM(&code[0], 1, 1, 16);
+    ldr_x_uimm_with(&code[4], 3, 1, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending state.
+    ADD_X_IMM(&code[0], 1, 1, 16);
+    movz_x(&code[4], 9, 5, 0);
+    ldr_x_uimm0(&code[8], 3, 1);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -4509,6 +4631,7 @@ int main(void)
     test_add_ldr_register_offset();
     test_add_ldr_imm_offset();
     test_ldr_str_add_post_indexed();
+    test_add_ldr_str_pre_indexed();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

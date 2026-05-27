@@ -543,6 +543,32 @@ code, and documents corners of the A64 instruction set.
   which catches the reversed sequence (ADD then LDR) and folds
   into the unsigned-offset form rather than post-index.
 
+### ADD + LDR/STR foldable to pre-indexed LDR/STR
+* `add xn, xn, #imm ; ldr xt, [xn]` -> `ldr xt, [xn, #imm]!`. Same
+  for STR and all four access sizes (B/H/W/X). The pre-indexed
+  encoding already expresses "bump `xn` by imm and then load/store
+  from the new `xn`", which is exactly what the source sequence
+  does.
+* Same code-size and decode-slot win as the post-index check. The
+  backend cost is also unchanged: most modern OoO cores crack
+  pre-indexed loads into two micro-ops (address update and load),
+  the same dependency chain as ADD followed by LDR.
+* Encoding constraint: same 9-bit signed range as post-index; v1
+  accepts ADD imm in 1..255. The LDR/STR must have imm12 == 0 --
+  a non-zero offset combined with a base bump has no single
+  pre-index expression that preserves both the load address and
+  the final base register value.
+* Soundness: the ADD must be a self-update (`Rd == Rn ==` LDR/STR's
+  `Rn`). Rt == Rn writeback is rejected (UNPREDICTABLE / CONSTRAINED
+  UNPREDICTABLE), except when Rn == 31 (Rn means SP, Rt means XZR;
+  distinct registers).
+* Cross-check interaction with [check_add_ldr_imm_offset]: when
+  Rt == Rn == ADD's Rd, that earlier check fires instead and folds
+  to the unsigned-offset form (no writeback). When Rt != Rn but
+  rn == ADD's Rd, only this check fires. So the two checks together
+  cover the full ADD + LDR/STR space without double-firing on the
+  same pair.
+
 ## Compilation
 
 armlint depends on [Capstone](https://www.capstone-engine.org/) and uses

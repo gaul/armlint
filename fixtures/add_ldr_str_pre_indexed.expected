@@ -1,0 +1,93 @@
+ADD + LDR foldable to pre-indexed LDR at offset: 0x0: -> ldr x3, [x1, #0x10]! (2 instructions)
+  add x1, x1, #0x10
+  ldr x3, [x1]
+
+LDR + ADD foldable to post-indexed LDR at offset: 0x4: -> ldr x3, [x1], #0x10 (2 instructions)
+  ldr x3, [x1]
+  add x1, x1, #0x10
+
+ADD + LDR foldable to pre-indexed LDR at offset: 0x8: -> ldr w3, [x1, #0x10]! (2 instructions)
+  add x1, x1, #0x10
+  ldr w3, [x1]
+
+LDR + ADD foldable to post-indexed LDR at offset: 0xc: -> ldr w3, [x1], #0x5 (2 instructions)
+  ldr w3, [x1]
+  add x1, x1, #0x5
+
+ADD + LDR foldable to pre-indexed LDR at offset: 0x10: -> ldrb w3, [x1, #0x5]! (2 instructions)
+  add x1, x1, #0x5
+  ldrb w3, [x1]
+
+LDR + ADD foldable to post-indexed LDR at offset: 0x14: -> ldrb w3, [x1], #0x6 (2 instructions)
+  ldrb w3, [x1]
+  add x1, x1, #0x6
+
+ADD + LDR foldable to pre-indexed LDR at offset: 0x18: -> ldrh w3, [x1, #0x6]! (2 instructions)
+  add x1, x1, #0x6
+  ldrh w3, [x1]
+
+LDR + ADD foldable to post-indexed LDR at offset: 0x1c: -> ldrh w3, [x1], #0x10 (2 instructions)
+  ldrh w3, [x1]
+  add x1, x1, #0x10
+
+ADD + STR foldable to pre-indexed STR at offset: 0x20: -> str x3, [x1, #0x10]! (2 instructions)
+  add x1, x1, #0x10
+  str x3, [x1]
+
+STR + ADD foldable to post-indexed STR at offset: 0x24: -> str x3, [x1], #0x10 (2 instructions)
+  str x3, [x1]
+  add x1, x1, #0x10
+
+ADD + STR foldable to pre-indexed STR at offset: 0x28: -> str w3, [x1, #0x10]! (2 instructions)
+  add x1, x1, #0x10
+  str w3, [x1]
+
+STR + ADD foldable to post-indexed STR at offset: 0x2c: -> str w3, [x1], #0x5 (2 instructions)
+  str w3, [x1]
+  add x1, x1, #0x5
+
+ADD + STR foldable to pre-indexed STR at offset: 0x30: -> strb w3, [x1, #0x5]! (2 instructions)
+  add x1, x1, #0x5
+  strb w3, [x1]
+
+STR + ADD foldable to post-indexed STR at offset: 0x34: -> strb w3, [x1], #0x6 (2 instructions)
+  strb w3, [x1]
+  add x1, x1, #0x6
+
+ADD + STR foldable to pre-indexed STR at offset: 0x38: -> strh w3, [x1, #0x6]! (2 instructions)
+  add x1, x1, #0x6
+  strh w3, [x1]
+
+ADD + LDR foldable to pre-indexed LDR at offset: 0x40: -> ldr x3, [sp, #0x10]! (2 instructions)
+  add sp, sp, #0x10
+  ldr x3, [sp]
+
+LDR + ADD foldable to post-indexed LDR at offset: 0x44: -> ldr x3, [sp], #0x8 (2 instructions)
+  ldr x3, [sp]
+  add sp, sp, #0x8
+
+ADD + STR foldable to pre-indexed STR at offset: 0x48: -> str xzr, [sp, #0x8]! (2 instructions)
+  add sp, sp, #0x8
+  str xzr, [sp]
+
+ADD + LDR foldable to pre-indexed LDR at offset: 0x50: -> ldr x3, [x1, #0xff]! (2 instructions)
+  add x1, x1, #0xff
+  ldr x3, [x1]
+
+LDR + ADD foldable to post-indexed LDR at offset: 0x54: -> ldr x3, [x1], #0x1 (2 instructions)
+  ldr x3, [x1]
+  add x1, x1, #0x1
+
+ADD + LDR foldable to pre-indexed LDR at offset: 0x58: -> ldr x3, [x1, #0x1]! (2 instructions)
+  add x1, x1, #0x1
+  ldr x3, [x1]
+
+ADD + LDR foldable to immediate-offset LDR at offset: 0x70: -> ldr x4, [x4, #0x10] (2 instructions)
+  add x4, x4, #0x10
+  ldr x4, [x4]
+
+LDR + ADD foldable to post-indexed LDR at offset: 0x94: -> ldr x3, [x1], #0x10 (2 instructions)
+  ldr x3, [x1]
+  add x1, x1, #0x10
+
+23 errors

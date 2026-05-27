@@ -245,6 +245,20 @@ struct armlint_state {
     size_t lspi_pending_offset;
     char lspi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending X-form ADD-immediate self-update (Rd == Rn) awaiting an
+    // adjacent unsigned-offset LDR/STR with imm12 == 0 whose base
+    // register equals the ADD's Rd. The pair folds into a single
+    // pre-indexed LDR/STR. Same 9-bit signed range as post-index, so
+    // v1 accepts ADD imm in 1..255. Distinct from
+    // check_add_ldr_imm_offset, which catches the related pattern
+    // where the LDR's Rt also equals the ADD's Rd (folding to the
+    // unsigned-offset form with no writeback).
+    bool lspr_pending;
+    unsigned lspr_pending_rd;
+    uint32_t lspr_pending_imm;
+    size_t lspr_pending_offset;
+    char lspr_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
     // partner for LDP/STP/LDPSW coalescing. The next instruction of
     // the same kind (sext or zext) with the same Rn, same direction
@@ -423,6 +437,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->add_pending = false;
     state->addi_pending = false;
     state->lspi_pending = false;
+    state->lspr_pending = false;
     return mov_close(state, out);
 }
 
@@ -4195,6 +4210,119 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
     return produced;
 }
 
+bool check_add_ldr_str_pre_indexed(armlint_state *state,
+                                   const cs_insn *insn,
+                                   size_t offset,
+                                   armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->lspr_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an unsigned-offset LDR or STR with
+    // imm12 == 0 whose base matches the pending ADD self-update?
+    if (state->lspr_pending) {
+        unsigned size, imm12, rn, rt;
+        bool matched = false;
+        bool is_load = false;
+        if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
+                && imm12 == 0
+                && rn == state->lspr_pending_rd) {
+            matched = true;
+            is_load = true;
+        } else if (decode_str_uimm_any_size(op, &size, &imm12, &rn, &rt)
+                && imm12 == 0
+                && rn == state->lspr_pending_rd) {
+            matched = true;
+            is_load = false;
+        }
+        // Rt == Rn writeback is UNPREDICTABLE for loads and
+        // CONSTRAINED UNPREDICTABLE for stores (same rule as
+        // post-index). Rn == 31 is the exception: Rn means SP and Rt
+        // means XZR, so the two encode distinct registers.
+        bool rt_aliases_rn = matched && rt == rn && rn != 31;
+        if (matched && !rt_aliases_rn) {
+            const char *mnem;
+            char rt_wx;
+            switch (size) {
+                case 0: mnem = is_load ? "ldrb" : "strb"; rt_wx = 'w'; break;
+                case 1: mnem = is_load ? "ldrh" : "strh"; rt_wx = 'w'; break;
+                case 2: mnem = is_load ? "ldr"  : "str";  rt_wx = 'w'; break;
+                case 3: mnem = is_load ? "ldr"  : "str";  rt_wx = 'x'; break;
+                default: mnem = "ldr"; rt_wx = 'x'; break;
+            }
+
+            char rt_buf[8];
+            if (rt == 31) {
+                snprintf(rt_buf, sizeof(rt_buf), "%czr", rt_wx);
+            } else {
+                snprintf(rt_buf, sizeof(rt_buf), "%c%u", rt_wx, rt);
+            }
+
+            uint32_t imm = state->lspr_pending_imm;
+            out->name = is_load
+                ? "ADD + LDR foldable to pre-indexed LDR"
+                : "ADD + STR foldable to pre-indexed STR";
+            out->start_offset = state->lspr_pending_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            if (rn == 31) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, [sp, #0x%x]!", mnem, rt_buf, imm);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, [x%u, #0x%x]!", mnem, rt_buf, rn, imm);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->lspr_pending_disasm);
+            if (rn == 31) {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s, [sp]", mnem, rt_buf);
+            } else {
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s, [x%u]", mnem, rt_buf, rn);
+            }
+            produced = true;
+        }
+        // Strict adjacency: clear regardless of match.
+        state->lspr_pending = false;
+    }
+
+    // (2) Try to open: is this an X-form ADD-immediate self-update
+    // (Rd == Rn) with imm in the 9-bit signed positive range?
+    unsigned a_rd, a_rn;
+    uint32_t a_imm;
+    if (decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)
+            && a_rd == a_rn
+            && a_imm >= 1
+            && a_imm <= 255) {
+        state->lspr_pending = true;
+        state->lspr_pending_rd = a_rd;
+        state->lspr_pending_imm = a_imm;
+        state->lspr_pending_offset = offset;
+        if (a_rn == 31) {
+            snprintf(state->lspr_pending_disasm,
+                sizeof(state->lspr_pending_disasm),
+                "add sp, sp, #0x%x", a_imm);
+        } else {
+            snprintf(state->lspr_pending_disasm,
+                sizeof(state->lspr_pending_disasm),
+                "add x%u, x%u, #0x%x", a_rd, a_rn, a_imm);
+        }
+    }
+
+    return produced;
+}
+
 bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -4288,6 +4416,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_add_ldr_register_offset,
     check_add_ldr_imm_offset,
     check_ldr_str_add_post_indexed,
+    check_add_ldr_str_pre_indexed,
 };
 
 const size_t armlint_check_registry_count =

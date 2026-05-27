@@ -467,6 +467,34 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
                                     const cs_insn *insn,
                                     size_t offset, armlint_finding *out);
 
+// Detect an X-form ADD-immediate self-update (Rd == Rn) immediately
+// followed by an unsigned-offset LDR/STR with imm12 == 0 whose base
+// register equals the ADD's Rd. The pair folds into a single
+// pre-indexed LDR/STR with the ADD's byte immediate moved into the
+// pre-index slot:
+//   add xn, xn, #imm  ; ldr xt, [xn]  -> ldr xt, [xn, #imm]!
+//   add xn, xn, #imm  ; str xt, [xn]  -> str xt, [xn, #imm]!
+//   add sp, sp, #imm  ; ldr xt, [sp]  -> ldr xt, [sp, #imm]!
+// All four access sizes (B/H/W/X) are supported.
+//
+// Encoding constraint: same 9-bit signed range as post-index. v1
+// accepts ADD imm in 1..255; SUB-imm is deferred.
+//
+// Soundness: distinct from check_add_ldr_imm_offset, which catches
+// the related pattern where the LDR's Rt also equals the ADD's Rd
+// (folding to the unsigned-offset form with no writeback). When
+// Rt == Rd, that earlier check fires and pre-index is rejected here
+// because Rt == Rn writeback is UNPREDICTABLE (CONSTRAINED for
+// stores). The Rn == 31 case is allowed: Rn means SP and Rt means
+// XZR, so the two encode distinct registers. The LDR/STR's imm12
+// must be 0; a non-zero offset combined with a base bump has no
+// pre-index expression that preserves both the load address and
+// the final base value. Same code-size/decode-slot win as
+// post-index; no backend throughput change on most OoO cores.
+bool check_add_ldr_str_pre_indexed(armlint_state *state,
+                                   const cs_insn *insn,
+                                   size_t offset, armlint_finding *out);
+
 // Detect two adjacent unsigned-offset LDR/STR (both W or both X,
 // same direction, same base, consecutive offsets) foldable into a
 // single LDP/STP; also two adjacent unsigned-offset LDRSW pairs
