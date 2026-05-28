@@ -2073,10 +2073,38 @@ static void test_redundant_sext(void)
     mov_w_reg(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // asr w0, w1, #24 ; uxtb w0, w0 -- ASR S=8, UXTB C=8: dead.
+    // -- Negative: ASR producer must NOT be reported "dead" by the
+    //    zero-extension path. ASR Rd, Rn, #k relocates the data bits
+    //    (Rn[datasize-1 : k] move down into the low bits); it is not a
+    //    pure in-place sign-extension, so masking off the sign region
+    //    does not make the ASR removable. The redundant-SXT path above
+    //    is still sound for ASR (a following SXT re-extends the same
+    //    field in place), but the dead path is not. --
+
+    // asr w0, w1, #24 ; uxtb w0, w0 -- ASR S=8, UXTB C=8. NOT dead:
+    // asr+uxtb yields w1[31:24]; dropping the asr (uxtb w0,w1) would
+    // yield w1[7:0] -- a different value.
     asr_w(&code[0], 0, 1, 24);
     uxtb_w(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // asr w0, w1, #4 ; uxtb w0, w0 -- ASR S=28, UXTB C=8 <= 28. NOT
+    // dead (asr+uxtb yields w1[11:4], not w1[7:0]).
+    asr_w(&code[0], 0, 1, 4);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // asr w0, w1, #4 ; and w0, w0, #0xff -- AND low-mask C=8. NOT dead.
+    asr_w(&code[0], 0, 1, 4);
+    and_w_ff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // asr x0, x1, #8 ; uxtw x0, w0 -- X-form ASR S=56, UXTW C=32 <= 56.
+    // NOT dead. (The W-form zext check also does not fire: an X-form
+    // ASR is not a W-form zero-extending producer.)
+    asr_x(&code[0], 0, 1, 8);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: C_c > S_p (sign-extension partially survives). --
 

@@ -118,6 +118,14 @@ struct armlint_state {
     unsigned sxt_upper;
     size_t sxt_offset;
     char sxt_producer_disasm[ARMLINT_FINDING_LINE_LEN];
+    // True when the producer is a data-relocating shift (ASR) rather
+    // than a pure in-place sign-extension (SXTB/SXTH/SXTW, LDRS*). The
+    // redundant-SXT path is sound for both (a following SXT re-extends
+    // the same field in place), but the dead-sign-extension path treats
+    // the producer as removable, which is only valid when the producer
+    // leaves the meaningful data in its original low bits. ASR shifts
+    // those bits, so it must be excluded from the dead path.
+    bool sxt_is_shift;
 
     // Deferred CMP/TST + B.EQ/NE finding awaiting forward NZCV-liveness
     // verification. Only one of CMP or TST can be pending at a time
@@ -1833,7 +1841,8 @@ static bool decode_sbfm_sext(uint32_t op, unsigned *out_s, unsigned *out_w,
 // unscaled, pre-/post-/register-offset forms all match). Producers
 // with Rd=31 are skipped (write goes to ZR).
 static bool decode_sext_producer(uint32_t op, unsigned *out_s,
-                                 unsigned *out_w, unsigned *out_rd)
+                                 unsigned *out_w, unsigned *out_rd,
+                                 bool *out_is_shift)
 {
     unsigned rd_field = op & 0x1Fu;
     if (rd_field == 31) {
@@ -1845,6 +1854,7 @@ static bool decode_sext_producer(uint32_t op, unsigned *out_s,
         *out_s = s;
         *out_w = w;
         *out_rd = rd;
+        *out_is_shift = false;
         return true;
     }
 
@@ -1859,6 +1869,7 @@ static bool decode_sext_producer(uint32_t op, unsigned *out_s,
         *out_s = datasize - asr_shift;
         *out_w = datasize;
         *out_rd = asr_rd;
+        *out_is_shift = true;
         return true;
     }
 
@@ -1868,11 +1879,11 @@ static bool decode_sext_producer(uint32_t op, unsigned *out_s,
     //   LDRSH Xt: (01, 10) -> (16, 64)
     //   LDRSH Wt: (01, 11) -> (16, 32)
     //   LDRSW Xt: (10, 10) -> (32, 64)
-    if ((op & 0xFEC00000u) == 0x38800000u) { *out_s = 8;  *out_w = 64; *out_rd = rd_field; return true; }
-    if ((op & 0xFEC00000u) == 0x38C00000u) { *out_s = 8;  *out_w = 32; *out_rd = rd_field; return true; }
-    if ((op & 0xFEC00000u) == 0x78800000u) { *out_s = 16; *out_w = 64; *out_rd = rd_field; return true; }
-    if ((op & 0xFEC00000u) == 0x78C00000u) { *out_s = 16; *out_w = 32; *out_rd = rd_field; return true; }
-    if ((op & 0xFEC00000u) == 0xB8800000u) { *out_s = 32; *out_w = 64; *out_rd = rd_field; return true; }
+    if ((op & 0xFEC00000u) == 0x38800000u) { *out_s = 8;  *out_w = 64; *out_rd = rd_field; *out_is_shift = false; return true; }
+    if ((op & 0xFEC00000u) == 0x38C00000u) { *out_s = 8;  *out_w = 32; *out_rd = rd_field; *out_is_shift = false; return true; }
+    if ((op & 0xFEC00000u) == 0x78800000u) { *out_s = 16; *out_w = 64; *out_rd = rd_field; *out_is_shift = false; return true; }
+    if ((op & 0xFEC00000u) == 0x78C00000u) { *out_s = 16; *out_w = 32; *out_rd = rd_field; *out_is_shift = false; return true; }
+    if ((op & 0xFEC00000u) == 0xB8800000u) { *out_s = 32; *out_w = 64; *out_rd = rd_field; *out_is_shift = false; return true; }
 
     return false;
 }
@@ -1939,7 +1950,8 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
             if ((is_uxtm || is_andm || is_movs)
                     && z_rd == state->sxt_rd
                     && z_rn == state->sxt_rd
-                    && z_c <= state->sxt_signed_from) {
+                    && z_c <= state->sxt_signed_from
+                    && !state->sxt_is_shift) {
                 out->name = "dead sign-extension masked by zero-extension";
                 out->start_offset = state->sxt_offset;
                 out->insn_count = 2;
@@ -1963,11 +1975,13 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
 
     // (2) Open: is this a sign-extending producer?
     unsigned p_s, p_w, p_rd;
-    if (decode_sext_producer(op, &p_s, &p_w, &p_rd)) {
+    bool p_is_shift;
+    if (decode_sext_producer(op, &p_s, &p_w, &p_rd, &p_is_shift)) {
         state->sxt_active = true;
         state->sxt_rd = p_rd;
         state->sxt_signed_from = p_s;
         state->sxt_upper = p_w;
+        state->sxt_is_shift = p_is_shift;
         state->sxt_offset = offset;
         snprintf(state->sxt_producer_disasm,
             sizeof(state->sxt_producer_disasm),

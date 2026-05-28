@@ -173,6 +173,16 @@ code, and documents corners of the A64 instruction set.
   uxtb w0, w0` (replace with `uxtb w0, w1`); `ldrsb w0, [x1] ;
   uxtb w0, w0` (replace with `ldrb w0, [x1]`); `ldrsw x0, [x1] ;
   uxtw x0, w0` (replace with `ldr w0, [x1]`).
+* The `ASR` producer is deliberately excluded from this dead path
+  (though it remains valid for the redundant-`SXT*` path above).
+  `ASR Rd, Rn, #k` is not a pure in-place sign-extension: it also
+  shifts the meaningful data down into `Rd[datasize-k-1 .. 0]`.
+  Masking off the replicated sign with a following zero-extension
+  does not make the `ASR` removable -- e.g. `asr w0, w1, #24 ;
+  uxtb w0, w0` keeps `w1[31:24]`, whereas dropping the `ASR` would
+  keep `w1[7:0]`. Only the in-place sign-extenders (`SXTB`/`SXTH`/
+  `SXTW`, `LDRSB`/`LDRSH`/`LDRSW`), whose data already occupies the
+  low bits, qualify as dead when masked.
 
 ### self-op identities (`AND/ORR/EOR/SUB/BIC/ORN/EON Rd, Rs, Rs`)
 * `AND Rd, Rs, Rs` and `ORR Rd, Rs, Rs` collapse to `MOV Rd, Rs`
