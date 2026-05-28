@@ -342,11 +342,25 @@ code, and documents corners of the A64 instruction set.
   real-binary hit density is low; survey of a dozen system and
   application binaries found 10 hits in Firefox's XUL and 0 in
   `kubectl`, `dyld`, `git`, `python3`, etc.
+* Dead-constant caveat (shared by every MOV-chain fold below --
+  `MNEG`, `UDIV`, `MOV + ADD/SUB`, `MOV + AND/ORR/EOR`, and
+  `MOV #0 + use`): the reported saving assumes the constant register
+  is dead after the consumer, i.e. it was materialised solely to feed
+  this one instruction. armlint does not verify that -- it has no
+  forward liveness scan for general-purpose registers. If the constant
+  register is read again before being overwritten, the MOV must stay
+  and the instruction-count saving does not materialise (the consumer
+  rewrite itself -- the `lsl`/`add #imm`/etc. -- remains valid either
+  way). This mirrors the `MOVZ/MOVK -> bitmask` check, which likewise
+  treats the chain as a unit whose only output is the final constant.
+  The case is rare in compiler output (a scratch constant feeding one
+  use is seldom reused) but can occur in hand-written assembly.
 
 ### MNEG by constant foldable to NEG/SUB
 * Direct symmetric counterpart to the MUL strength reduction.
   `MNEG Rd, Rn, Rm` is the canonical alias for
-  `MSUB Rd, Rn, Rm, ZR`; same MOV-chain plumbing applies.
+  `MSUB Rd, Rn, Rm, ZR`; same MOV-chain plumbing applies, including
+  the dead-constant caveat noted under the MUL check.
 * `mov xc, #1 ; mneg xd, xa, xc` -> `neg xd, xa`
 * `mov xc, #(1<<N) ; mneg xd, xa, xc` -> `neg xd, xa, lsl #N`
 * `mov xc, #(2^N - 1) ; mneg xd, xa, xc` -> `sub xd, xa, xa, lsl #N`
@@ -363,7 +377,8 @@ code, and documents corners of the A64 instruction set.
 
 ### UDIV by constant foldable to shift
 * `mov xc, #(1<<N) ; udiv xd, xn, xc` -> `lsr xd, xn, #N`. Same
-  MOV-chain plumbing as the MUL/MNEG checks.
+  MOV-chain plumbing as the MUL/MNEG checks, including the
+  dead-constant caveat.
 * UDIV is not commutative, so only the divisor (Rm) coming from
   the MOV chain enables the fold; an Rn-from-MOV match would be a
   reciprocal-multiply problem, not a shift. Non-pow2 divisors have
@@ -383,11 +398,11 @@ code, and documents corners of the A64 instruction set.
   `0x1000` with `C/0x1000` in `[1, 0xFFF]`). Same for `SUB`,
   `ADDS`, `SUBS`, and the `CMP`/`CMN` aliases (S-variant with
   `Rd == ZR`).
-* Reuses the MOVZ/MOVK chain state. ADD is commutative -- either
-  operand may be the MOV destination. SUB is not: only
-  `Rm == mov_rd` folds, since `Rn == mov_rd` would need a
-  reverse-subtract that AArch64 lacks. Width of the MOV chain
-  must match the consumer's.
+* Reuses the MOVZ/MOVK chain state (and shares the MUL check's
+  dead-constant caveat). ADD is commutative -- either operand may be
+  the MOV destination. SUB is not: only `Rm == mov_rd` folds, since
+  `Rn == mov_rd` would need a reverse-subtract that AArch64 lacks.
+  Width of the MOV chain must match the consumer's.
 * `C == 0` is excluded (the no-op / MOV-to-Rn case is covered by
   check_add_sub_zero); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
@@ -408,7 +423,7 @@ code, and documents corners of the A64 instruction set.
 * The N = 1 family (`BIC`, `ORN`, `EON`, `BICS`) has no
   immediate form in AArch64 and is excluded by the decoder.
 * All four are commutative; either Rn or Rm may be the MOV
-  destination.
+  destination. Shares the MUL check's dead-constant caveat.
 * Real-binary survey: 187 hits in Firefox's XUL (mostly single-bit
   or shifted-bit OR patterns like `orr xd, xn, #(1<<40)`), 0 in
   kubectl/docker/dyld/git/python3/openssl. Different distribution
