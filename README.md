@@ -515,12 +515,13 @@ code, and documents corners of the A64 instruction set.
 * SUB-immediate is not folded: the LDR unsigned-offset form has
   no negative-immediate encoding.
 
-### LDR/STR + ADD foldable to post-indexed LDR/STR
-* `ldr xt, [xn] ; add xn, xn, #imm` -> `ldr xt, [xn], #imm`. Same
-  for STR and all four access sizes (B/H/W/X). The post-indexed
-  encoding already expresses "load/store from `[xn]` and then bump
-  `xn` by imm", so the rewrite is a literal source-to-encoding
-  fold with no semantic change.
+### LDR/STR + ADD/SUB foldable to post-indexed LDR/STR
+* `ldr xt, [xn] ; add xn, xn, #imm` -> `ldr xt, [xn], #imm`, and the
+  negative-direction `ldr xt, [xn] ; sub xn, xn, #imm` ->
+  `ldr xt, [xn], #-imm`. Same for STR and all four access sizes
+  (B/H/W/X). The post-indexed encoding already expresses "load/store
+  from `[xn]` and then bump `xn` by ±imm", so the rewrite is a literal
+  source-to-encoding fold with no semantic change.
 * What you actually save: 4 bytes per fold and one fetch/decode
   slot. The backend cost is typically unchanged -- most modern OoO
   cores (Apple M-series, Cortex-A76+, Neoverse N1+) crack the
@@ -535,12 +536,14 @@ code, and documents corners of the A64 instruction set.
   than the separate-ADD variant -- single-register LDR/STR does
   not have this issue.
 * Encoding constraint: post-index uses a 9-bit signed immediate
-  (-256..255). v1 only handles ADD-imm with imm in 1..255; SUB-imm
-  (negative direction) and the `sh=1` form (imm >= 4096) are
-  rejected. The LDR/STR must have imm12 == 0 -- a non-zero offset
-  combined with a base bump matches the pre-indexed pattern, not
-  post-index.
-* Soundness: the ADD must be a self-update (`Rd == Rn ==` LDR/STR's
+  (-256..255). An `ADD`-imm self-update with imm in 1..255 folds to a
+  positive writeback; a `SUB`-imm self-update with imm in 1..256 folds
+  to a negative one (-256 is the signed-9-bit minimum, so the negative
+  side reaches one further than the positive). The `sh=1` form
+  (imm >= 4096) is out of range. The LDR/STR must have imm12 == 0 --
+  a non-zero offset combined with a base bump matches the pre-indexed
+  pattern, not post-index.
+* Soundness: the ADD/SUB must be a self-update (`Rd == Rn ==` LDR/STR's
   `Rn`), since post-index can only update its own base register.
   Rt == Rn writeback is UNPREDICTABLE for loads and CONSTRAINED
   UNPREDICTABLE for stores, so that case is rejected -- except
@@ -548,35 +551,39 @@ code, and documents corners of the A64 instruction set.
   registers, no conflict). `str xzr, [sp] ; add sp, sp, #imm` and
   `ldr xt, [sp] ; add sp, sp, #imm` are both flagged as the
   canonical stack-frame teardown patterns.
-* `ADDS` (flag-setting) is excluded because post-index has no
+* `ADDS`/`SUBS` (flag-setting) are excluded because post-index has no
   flag-setting form. Distinct from `check_add_ldr_imm_offset`,
   which catches the reversed sequence (ADD then LDR) and folds
   into the unsigned-offset form rather than post-index.
 
-### ADD + LDR/STR foldable to pre-indexed LDR/STR
-* `add xn, xn, #imm ; ldr xt, [xn]` -> `ldr xt, [xn, #imm]!`. Same
-  for STR and all four access sizes (B/H/W/X). The pre-indexed
-  encoding already expresses "bump `xn` by imm and then load/store
-  from the new `xn`", which is exactly what the source sequence
-  does.
+### ADD/SUB + LDR/STR foldable to pre-indexed LDR/STR
+* `add xn, xn, #imm ; ldr xt, [xn]` -> `ldr xt, [xn, #imm]!`, and the
+  negative-direction `sub xn, xn, #imm ; ldr xt, [xn]` ->
+  `ldr xt, [xn, #-imm]!`. Same for STR and all four access sizes
+  (B/H/W/X). The pre-indexed encoding already expresses "bump `xn` by
+  ±imm and then load/store from the new `xn`", which is exactly what
+  the source sequence does.
 * Same code-size and decode-slot win as the post-index check. The
   backend cost is also unchanged: most modern OoO cores crack
   pre-indexed loads into two micro-ops (address update and load),
   the same dependency chain as ADD followed by LDR.
-* Encoding constraint: same 9-bit signed range as post-index; v1
-  accepts ADD imm in 1..255. The LDR/STR must have imm12 == 0 --
-  a non-zero offset combined with a base bump has no single
-  pre-index expression that preserves both the load address and
-  the final base register value.
-* Soundness: the ADD must be a self-update (`Rd == Rn ==` LDR/STR's
+* Encoding constraint: same 9-bit signed range as post-index. An
+  `ADD` self-update with imm in 1..255 folds to a positive writeback;
+  a `SUB` self-update with imm in 1..256 to a negative one. The LDR/STR
+  must have imm12 == 0 -- a non-zero offset combined with a base bump
+  has no single pre-index expression that preserves both the load
+  address and the final base register value.
+* Soundness: the ADD/SUB must be a self-update (`Rd == Rn ==` LDR/STR's
   `Rn`). Rt == Rn writeback is rejected (UNPREDICTABLE / CONSTRAINED
   UNPREDICTABLE), except when Rn == 31 (Rn means SP, Rt means XZR;
   distinct registers).
 * Cross-check interaction with [check_add_ldr_imm_offset]: when
   Rt == Rn == ADD's Rd, that earlier check fires instead and folds
-  to the unsigned-offset form (no writeback). When Rt != Rn but
-  rn == ADD's Rd, only this check fires. So the two checks together
-  cover the full ADD + LDR/STR space without double-firing on the
+  to the unsigned-offset form (no writeback) -- but only for `ADD`,
+  since the unsigned-offset form has no negative immediate, so a
+  `SUB` with Rt == Rn yields no finding at all. When Rt != Rn but
+  rn == ADD's/SUB's Rd, only this check fires. So the checks together
+  cover the full ADD/SUB + LDR/STR space without double-firing on the
   same pair.
 
 ## Compilation

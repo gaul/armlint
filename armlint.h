@@ -446,11 +446,14 @@ bool check_add_ldr_imm_offset(armlint_state *state,
 //   ldr xt, [xn]    ; add xn, xn, #imm  -> ldr xt, [xn], #imm
 //   str xt, [xn]    ; add xn, xn, #imm  -> str xt, [xn], #imm
 //   ldr xt, [sp]    ; add sp, sp, #imm  -> ldr xt, [sp], #imm
+//   ldr xt, [xn]    ; sub xn, xn, #imm  -> ldr xt, [xn], #-imm
 // All four access sizes (B/H/W/X) are supported.
 //
 // Encoding constraint: post-index uses a 9-bit signed immediate
-// (-256..255). v1 accepts only positive immediates (1..255) sourced
-// from ADD-imm; SUB-imm and pre-index folds are deferred.
+// (-256..255). An ADD-imm self-update with imm in 1..255 folds to a
+// positive writeback; a SUB-imm self-update with imm in 1..256 folds
+// to a negative one (-256 is the signed-9-bit minimum). The sh=1 form
+// (imm >= 4096) is out of range and rejected.
 //
 // Soundness: ADD's Rd and Rn must both equal the LDR/STR's Rn so
 // that the base receives a self-update (the only form expressible as
@@ -475,10 +478,12 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
 //   add xn, xn, #imm  ; ldr xt, [xn]  -> ldr xt, [xn, #imm]!
 //   add xn, xn, #imm  ; str xt, [xn]  -> str xt, [xn, #imm]!
 //   add sp, sp, #imm  ; ldr xt, [sp]  -> ldr xt, [sp, #imm]!
+//   sub xn, xn, #imm  ; ldr xt, [xn]  -> ldr xt, [xn, #-imm]!
 // All four access sizes (B/H/W/X) are supported.
 //
-// Encoding constraint: same 9-bit signed range as post-index. v1
-// accepts ADD imm in 1..255; SUB-imm is deferred.
+// Encoding constraint: same 9-bit signed range as post-index. An ADD
+// self-update with imm in 1..255 folds to a positive writeback; a SUB
+// self-update with imm in 1..256 to a negative one.
 //
 // Soundness: distinct from check_add_ldr_imm_offset, which catches
 // the related pattern where the LDR's Rt also equals the ADD's Rd

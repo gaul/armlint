@@ -75,9 +75,12 @@ _main:
     add     x5, x5, #16
     ldr     x3, [x1]
 
-    // N6) SUB-imm (v1 doesn't handle negative direction).
+    // Positive: SUB-imm self-update -> negative pre-index writeback.
+    // (The preceding ldr also pairs with this sub as a post-index fold,
+    // so this block yields both a post- and a pre-index finding -- the
+    // same overlap the ADD positives above exhibit.)
     sub     x1, x1, #16
-    ldr     x3, [x1]
+    ldr     x3, [x1]                // -> ldr x3, [x1, #-16]!
 
     // N7) ADDS (flag-setting; pre-index has no flag form).
     adds    x1, x1, #16

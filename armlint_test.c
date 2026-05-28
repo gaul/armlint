@@ -4471,10 +4471,33 @@ static void test_ldr_str_add_post_indexed(void)
     add_x_imm(&code[4], 5, 5, 16);
     assert(run_helper_check(code, 8) == 0);
 
-    // SUB-imm (negative direction): valid in post-index encoding
-    // but v1 only handles ADD-imm.
+    // SUB-imm self-update (negative direction): folds to a negative
+    // post-index writeback. ldr x3, [x1] ; sub x1, x1, #16
+    //   -> ldr x3, [x1], #-16.
     ldr_x_uimm0(&code[0], 3, 1);
     sub_x_imm(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB boundary: imm = 256 maps to writeback -256 (the signed-9-bit
+    // minimum), so it is accepted (the positive side stops at 255).
+    ldr_x_uimm0(&code[0], 3, 1);
+    sub_x_imm(&code[4], 1, 1, 256);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB store + SP base: str xzr, [sp] ; sub sp, sp, #8
+    //   -> str xzr, [sp], #-8.
+    str_x_uimm(&code[0], 31, 31, 0);
+    sub_x_imm(&code[4], 31, 31, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB boundary: imm = 257 is below the signed-9-bit minimum (-256).
+    ldr_x_uimm0(&code[0], 3, 1);
+    sub_x_imm(&code[4], 1, 1, 257);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB but not a self-update (Rd != Rn): cannot fold.
+    ldr_x_uimm0(&code[0], 3, 1);
+    sub_x_imm(&code[4], 1, 2, 16);
     assert(run_helper_check(code, 8) == 0);
 
     // ADDS (flag-setting; post-index has no flag-setting form).
@@ -4598,9 +4621,30 @@ static void test_add_ldr_str_pre_indexed(void)
     ldr_x_uimm0(&code[4], 3, 1);
     assert(run_helper_check(code, 8) == 0);
 
-    // SUB-imm (v1 doesn't handle negative direction).
+    // SUB-imm self-update (negative direction): folds to a negative
+    // pre-index writeback. sub x1, x1, #16 ; ldr x3, [x1]
+    //   -> ldr x3, [x1, #-16]!.
     sub_x_imm(&code[0], 1, 1, 16);
     ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB boundary: imm = 256 -> writeback -256 (accepted).
+    sub_x_imm(&code[0], 1, 1, 256);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB boundary: imm = 257 is below the signed-9-bit minimum.
+    sub_x_imm(&code[0], 1, 1, 257);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB self-update + Rt == Rn (Rn != 31): writeback is
+    // UNPREDICTABLE, so no pre-index fold. Unlike the ADD case above,
+    // there is NO immediate-offset fallback -- check_add_ldr_imm_offset
+    // is ADD-only and a SUB cannot fold to an unsigned offset -- so the
+    // expected total is 0, not 1.
+    sub_x_imm(&code[0], 1, 1, 16);
+    ldr_x_uimm0(&code[4], 1, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // ADDS (flag-setting; pre-index has no flag-setting form).

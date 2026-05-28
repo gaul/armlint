@@ -240,11 +240,11 @@ struct armlint_state {
     // Pending unsigned-offset LDR/STR with imm12 == 0 awaiting an
     // adjacent X-form ADD-immediate that self-updates the base
     // register (Rd == Rn == LDR/STR's Rn). The pair folds into a
-    // single post-indexed LDR/STR with the ADD's byte immediate in
-    // the post-index slot. Post-index uses a 9-bit signed immediate,
-    // so v1 accepts ADD imm in 1..255 (SUB and negative immediates
-    // are deferred). Strict adjacency: any non-matching instruction
-    // expires the state.
+    // single post-indexed LDR/STR with the ADD/SUB's byte immediate in
+    // the post-index slot. Post-index uses a 9-bit signed immediate
+    // (-256..255): ADD imm in 1..255 folds to a positive writeback,
+    // SUB imm in 1..256 to a negative one. Strict adjacency: any
+    // non-matching instruction expires the state.
     bool lspi_pending;
     bool lspi_pending_is_load;
     unsigned lspi_pending_size;
@@ -256,14 +256,16 @@ struct armlint_state {
     // Pending X-form ADD-immediate self-update (Rd == Rn) awaiting an
     // adjacent unsigned-offset LDR/STR with imm12 == 0 whose base
     // register equals the ADD's Rd. The pair folds into a single
-    // pre-indexed LDR/STR. Same 9-bit signed range as post-index, so
-    // v1 accepts ADD imm in 1..255. Distinct from
+    // pre-indexed LDR/STR. Same 9-bit signed range as post-index: ADD
+    // imm in 1..255 (positive writeback) or SUB imm in 1..256 (negative
+    // writeback), the sign recorded in lspr_pending_is_sub. Distinct from
     // check_add_ldr_imm_offset, which catches the related pattern
     // where the LDR's Rt also equals the ADD's Rd (folding to the
     // unsigned-offset form with no writeback).
     bool lspr_pending;
+    bool lspr_pending_is_sub;     // SUB self-update -> negative writeback
     unsigned lspr_pending_rd;
-    uint32_t lspr_pending_imm;
+    uint32_t lspr_pending_imm;    // magnitude; sign carried by is_sub
     size_t lspr_pending_offset;
     char lspr_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
@@ -3881,6 +3883,30 @@ static bool decode_add_imm_x(uint32_t op,
     return true;
 }
 
+// Decode X-form SUB (immediate), non-S-variant. Identical field layout
+// to decode_add_imm_x but with op (bit 30) = 1: base 0xD1000000, mask
+// 0xFF800000 (sf=1, op=1, S=0, 100010). Returns the sh-expanded byte
+// immediate. Used only by the pre-/post-index folds, where a SUB
+// self-update maps to a *negative* writeback immediate -- the index
+// slot is a signed 9-bit field (-256..255), so a SUB by k folds to a
+// writeback of -k. (The unsigned-offset fold in check_add_ldr_imm_offset
+// must NOT use this: that addressing form has no negative encoding.)
+static bool decode_sub_imm_x(uint32_t op,
+                             unsigned *out_rd,
+                             unsigned *out_rn,
+                             uint32_t *out_imm)
+{
+    if ((op & 0xFF800000u) != 0xD1000000u) {
+        return false;
+    }
+    unsigned sh = (op >> 22) & 1u;
+    unsigned imm12 = (op >> 10) & 0xFFFu;
+    *out_imm = sh ? ((uint32_t)imm12 << 12) : (uint32_t)imm12;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
 bool check_add_ldr_register_offset(armlint_state *state,
                                    const cs_insn *insn,
                                    size_t offset,
@@ -4117,12 +4143,19 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
         bool rt_aliases_rn =
             state->lspi_pending_rt == state->lspi_pending_rn
             && state->lspi_pending_rn != 31;
+        bool is_add = decode_add_imm_x(op, &a_rd, &a_rn, &a_imm);
+        bool is_sub = !is_add && decode_sub_imm_x(op, &a_rd, &a_rn, &a_imm);
+        // ADD self-update folds to a positive writeback (imm 1..255);
+        // SUB to a negative one (imm 1..256, the signed-9-bit slot
+        // reaching -256). The imm range test sits after the
+        // (is_add || is_sub) guard so a_imm is only read once a decoder
+        // has filled it.
         if (!rt_aliases_rn
-                && decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)
+                && (is_add || is_sub)
                 && a_rd == state->lspi_pending_rn
                 && a_rn == state->lspi_pending_rn
                 && a_imm >= 1
-                && a_imm <= 255) {
+                && a_imm <= (is_sub ? 256u : 255u)) {
             unsigned size = state->lspi_pending_size;
             bool is_load = state->lspi_pending_is_load;
             const char *mnem;
@@ -4134,10 +4167,18 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
                 case 3: mnem = is_load ? "ldr"  : "str";  rt_wx = 'x'; break;
                 default: mnem = "ldr"; rt_wx = 'x'; break;
             }
+            const char *idx_sign = is_sub ? "-" : "";
+            const char *upd_mnem = is_sub ? "sub" : "add";
 
-            out->name = is_load
-                ? "LDR + ADD foldable to post-indexed LDR"
-                : "STR + ADD foldable to post-indexed STR";
+            if (is_load) {
+                out->name = is_sub
+                    ? "LDR + SUB foldable to post-indexed LDR"
+                    : "LDR + ADD foldable to post-indexed LDR";
+            } else {
+                out->name = is_sub
+                    ? "STR + SUB foldable to post-indexed STR"
+                    : "STR + ADD foldable to post-indexed STR";
+            }
             out->start_offset = state->lspi_pending_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
@@ -4151,20 +4192,20 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
             }
             if (state->lspi_pending_rn == 31) {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %s, [sp], #0x%x", mnem, rt_buf, a_imm);
+                    "-> %s %s, [sp], #%s0x%x", mnem, rt_buf, idx_sign, a_imm);
             } else {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %s, [x%u], #0x%x",
-                    mnem, rt_buf, state->lspi_pending_rn, a_imm);
+                    "-> %s %s, [x%u], #%s0x%x",
+                    mnem, rt_buf, state->lspi_pending_rn, idx_sign, a_imm);
             }
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lspi_pending_disasm);
             if (a_rn == 31) {
                 snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "add sp, sp, #0x%x", a_imm);
+                    "%s sp, sp, #0x%x", upd_mnem, a_imm);
             } else {
                 snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "add x%u, x%u, #0x%x", a_rd, a_rn, a_imm);
+                    "%s x%u, x%u, #0x%x", upd_mnem, a_rd, a_rn, a_imm);
             }
             produced = true;
         }
@@ -4282,19 +4323,26 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
             }
 
             uint32_t imm = state->lspr_pending_imm;
-            out->name = is_load
-                ? "ADD + LDR foldable to pre-indexed LDR"
-                : "ADD + STR foldable to pre-indexed STR";
+            const char *idx_sign = state->lspr_pending_is_sub ? "-" : "";
+            if (is_load) {
+                out->name = state->lspr_pending_is_sub
+                    ? "SUB + LDR foldable to pre-indexed LDR"
+                    : "ADD + LDR foldable to pre-indexed LDR";
+            } else {
+                out->name = state->lspr_pending_is_sub
+                    ? "SUB + STR foldable to pre-indexed STR"
+                    : "ADD + STR foldable to pre-indexed STR";
+            }
             out->start_offset = state->lspr_pending_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
 
             if (rn == 31) {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %s, [sp, #0x%x]!", mnem, rt_buf, imm);
+                    "-> %s %s, [sp, #%s0x%x]!", mnem, rt_buf, idx_sign, imm);
             } else {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %s, [x%u, #0x%x]!", mnem, rt_buf, rn, imm);
+                    "-> %s %s, [x%u, #%s0x%x]!", mnem, rt_buf, rn, idx_sign, imm);
             }
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lspr_pending_disasm);
@@ -4311,26 +4359,32 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
         state->lspr_pending = false;
     }
 
-    // (2) Try to open: is this an X-form ADD-immediate self-update
-    // (Rd == Rn) with imm in the 9-bit signed positive range?
+    // (2) Try to open: is this an X-form ADD/SUB-immediate self-update
+    // (Rd == Rn) with imm in the 9-bit signed range? ADD imm 1..255 is
+    // a positive writeback; SUB imm 1..256 is a negative one (-256
+    // being the signed-9-bit minimum).
     unsigned a_rd, a_rn;
     uint32_t a_imm;
-    if (decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)
+    bool is_add = decode_add_imm_x(op, &a_rd, &a_rn, &a_imm);
+    bool is_sub = !is_add && decode_sub_imm_x(op, &a_rd, &a_rn, &a_imm);
+    if ((is_add || is_sub)
             && a_rd == a_rn
             && a_imm >= 1
-            && a_imm <= 255) {
+            && a_imm <= (is_sub ? 256u : 255u)) {
+        const char *upd_mnem = is_sub ? "sub" : "add";
         state->lspr_pending = true;
+        state->lspr_pending_is_sub = is_sub;
         state->lspr_pending_rd = a_rd;
         state->lspr_pending_imm = a_imm;
         state->lspr_pending_offset = offset;
         if (a_rn == 31) {
             snprintf(state->lspr_pending_disasm,
                 sizeof(state->lspr_pending_disasm),
-                "add sp, sp, #0x%x", a_imm);
+                "%s sp, sp, #0x%x", upd_mnem, a_imm);
         } else {
             snprintf(state->lspr_pending_disasm,
                 sizeof(state->lspr_pending_disasm),
-                "add x%u, x%u, #0x%x", a_rd, a_rn, a_imm);
+                "%s x%u, x%u, #0x%x", upd_mnem, a_rd, a_rn, a_imm);
         }
     }
 

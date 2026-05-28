@@ -77,9 +77,14 @@ _main:
     ldr     x3, [x1]
     add     x5, x5, #16
 
-    // N6) SUB-imm: v1 doesn't handle the negative direction.
+    // Positive: SUB-imm self-update -> negative post-index writeback.
     ldr     x3, [x1]
-    sub     x1, x1, #16
+    sub     x1, x1, #16             // -> ldr x3, [x1], #-16
+
+    // Positive (boundary): SUB imm = 256 -> writeback -256 (signed-9-bit
+    // minimum). imm = 257 would be out of range (covered in unit tests).
+    ldr     x3, [x1]
+    sub     x1, x1, #256            // -> ldr x3, [x1], #-256
 
     // N7) ADDS (flag-setting; post-index has no flag form).
     ldr     x3, [x1]

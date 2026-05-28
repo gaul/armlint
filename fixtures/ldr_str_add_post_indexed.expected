@@ -86,8 +86,24 @@ ADD + LDR foldable to pre-indexed LDR at offset: 0x5c: -> ldr x3, [x1, #0x1]! (2
   add x1, x1, #0x1
   ldr x3, [x1]
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0x9c: -> ldr x3, [x1, #0x10]! (2 instructions)
+LDR + SUB foldable to post-indexed LDR at offset: 0x88: -> ldr x3, [x1], #-0x10 (2 instructions)
+  ldr x3, [x1]
+  sub x1, x1, #0x10
+
+SUB + LDR foldable to pre-indexed LDR at offset: 0x8c: -> ldr x3, [x1, #-0x10]! (2 instructions)
+  sub x1, x1, #0x10
+  ldr x3, [x1]
+
+LDR + SUB foldable to post-indexed LDR at offset: 0x90: -> ldr x3, [x1], #-0x100 (2 instructions)
+  ldr x3, [x1]
+  sub x1, x1, #0x100
+
+SUB + LDR foldable to pre-indexed LDR at offset: 0x94: -> ldr x3, [x1, #-0x100]! (2 instructions)
+  sub x1, x1, #0x100
+  ldr x3, [x1]
+
+ADD + LDR foldable to pre-indexed LDR at offset: 0xa4: -> ldr x3, [x1, #0x10]! (2 instructions)
   add x1, x1, #0x10
   ldr x3, [x1]
 
-23 errors
+27 errors
