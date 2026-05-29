@@ -102,6 +102,29 @@ code, and documents corners of the A64 instruction set.
   appropriate element size); rotated/non-contiguous masks like
   `#0x6` are correctly skipped.
 
+### mask-and-shift bitfield extraction foldable into UBFX
+* The opposite ("mask then shift-right") order from the check above.
+  `and wd, ws, #mask ; lsr wd, wd, #n` where `mask` is a single
+  contiguous run of 1s `[lo, hi]`; the LSR reads and writes the AND's
+  destination. The surviving bits are `ws[hi .. n]`, so the pair is
+  equivalent to a single `ubfx wd, ws, #n, #(hi+1-n)`. Same for
+  X-form. Examples: `and w0, w1, #0xff0 ; lsr w0, w0, #4`
+  -> `ubfx w0, w1, #4, #8`; `and x0, x1, #0xffff00 ; lsr x0, x0, #8`
+  -> `ubfx x0, x1, #8, #16`.
+* Foldable only when `lo <= n <= hi`. `lo > n` would leave the field
+  above bit 0 (e.g. `and w0,w1,#0xff00 ; lsr w0,w0,#4` keeps
+  `w1[15:8]` at bits `[11:4]`, which has no single-UBFX form), and
+  `n > hi` shifts the whole run out (a degenerate zero result). When
+  `lo < n` the mask's low bits below the shift are simply dropped by
+  the LSR, and the fold still holds (the extracted field is
+  `ws[hi .. n]`).
+* The mask is decoded to its concrete value (the AArch64
+  `DecodeBitMasks` reconstruction) and accepted only as a single
+  contiguous, non-wrapping run: replicated patterns (`esize < datasize`,
+  e.g. `0x0f0f0f0f`) and rotated masks that wrap the top of the
+  register leave a gap and are skipped. `ANDS` (flag-setting) is
+  excluded -- dropping it would lose the NZCV write.
+
 ### redundant zero-extension after a producer that already zeroed those bits
 * Generalises the previous "redundant UXTW after W-form ALU" rule
   to size-aware producer/consumer pairs. The check tracks the

@@ -140,6 +140,20 @@ bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
 bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// Mirror of check_lsr_and_to_ubfx for the opposite ("mask then
+// shift-right") order. Detect AND Rd, Rs, #mask -- where mask is a
+// single contiguous run of 1s [lo, hi] -- immediately followed by
+// LSR Rd, Rd, #n (the LSR reads and writes the AND's destination). The
+// pair extracts Rs[hi .. n] (the run bits at or above the shift) into
+// the low bits; equivalent to a single UBFX Rd, Rs, #n, #(hi+1-n).
+//
+// Foldable only when lo <= n <= hi: lo > n would leave the field above
+// bit 0 (no single-UBFX form), and n > hi shifts the whole run out
+// (a degenerate zero result). Replicated/rotated-wrapping masks are
+// not single runs and are skipped. ANDS (flag-setting) is excluded.
+bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
+
 // Detect MOV Xd, Xd encoded as ORR Xd, XZR, Xd, LSL #0 -- a literal
 // no-op that reads and writes the same 64 bits. The W-form MOV Wd, Wd
 // is NOT flagged here: it zero-extends X[63:32] and is handled as a

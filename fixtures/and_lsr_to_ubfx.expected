@@ -1,0 +1,21 @@
+AND+LSR foldable into UBFX at offset: 0x0: -> ubfx w0, w1, #4, #8 (2 instructions)
+  and w0, w1, #0xff0
+  lsr w0, w0, #4
+
+AND+LSR foldable into UBFX at offset: 0x8: -> ubfx w0, w1, #4, #4 (2 instructions)
+  and w0, w1, #0xff
+  lsr w0, w0, #4
+
+AND+LSR foldable into UBFX at offset: 0x10: -> ubfx w0, w1, #6, #6 (2 instructions)
+  and w0, w1, #0xff0
+  lsr w0, w0, #6
+
+AND+LSR foldable into UBFX at offset: 0x18: -> ubfx x0, x1, #8, #16 (2 instructions)
+  and x0, x1, #0xffff00
+  lsr x0, x0, #8
+
+AND+LSR foldable into UBFX at offset: 0x20: -> ubfx w0, w1, #11, #1 (2 instructions)
+  and w0, w1, #0xff0
+  lsr w0, w0, #11
+
+5 errors

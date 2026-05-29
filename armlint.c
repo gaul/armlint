@@ -68,6 +68,21 @@ struct armlint_state {
     unsigned lra_shift;
     size_t lra_offset;
 
+    // AND-immediate (with a single contiguous run of 1s) pending an LSR
+    // consumer for the "mask then shift-right" UBFX idiom -- the mirror
+    // of lra_* (which is keyed on an LSR producer). alr_lo/alr_hi bound
+    // the mask's run of ones [lo, hi]; alr_rn is the AND's source (the
+    // UBFX source) and alr_rd is the AND's destination, which the LSR
+    // must read and write.
+    bool alr_active;
+    bool alr_is_64bit;
+    unsigned alr_rd;
+    unsigned alr_rn;
+    unsigned alr_lo;
+    unsigned alr_hi;
+    size_t alr_offset;
+    char alr_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / TST Rn,Rn) pending a
     // B.EQ/B.NE consumer.
     bool cmp_active;
@@ -446,6 +461,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lsl_active = false;
     state->bsx_active = false;
     state->lra_active = false;
+    state->alr_active = false;
     state->cmp_active = false;
     state->tst_active = false;
     state->wzx_active = false;
@@ -967,6 +983,177 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
         state->lra_rn = rn;
         state->lra_shift = shift;
         state->lra_offset = offset;
+    }
+
+    return produced;
+}
+
+// Reconstruct the concrete value of a logical (bitmask) immediate from
+// its (N, immr, imms) fields at the given datasize (32 or 64). This is
+// the AArch64 DecodeBitMasks "wmask". Returns false for encodings that
+// are not valid bitmask immediates (len < 1, or S == esize-1, the
+// all-ones-within-element case). On success *out_value holds the value
+// masked to datasize bits.
+static bool decode_bitmask_imm_value(unsigned N, unsigned immr,
+                                     unsigned imms, unsigned datasize,
+                                     uint64_t *out_value)
+{
+    unsigned bits7 = (N << 6) | ((~imms) & 0x3Fu);   // N : NOT(imms)
+    if (bits7 == 0) {
+        return false;
+    }
+    int len = 6;
+    while (len >= 0 && ((bits7 >> len) & 1u) == 0) {
+        len--;
+    }
+    if (len < 1) {
+        return false;
+    }
+    unsigned esize = 1u << len;
+    unsigned S = imms & (esize - 1u);
+    unsigned R = immr & (esize - 1u);
+    if (S == esize - 1u) {
+        return false;   // all-ones within the element -- not encodable
+    }
+    uint64_t welem = ((uint64_t)1 << (S + 1u)) - 1u;   // S+1 low ones
+    uint64_t elem_mask = (esize == 64u) ? ~(uint64_t)0
+                                        : (((uint64_t)1 << esize) - 1u);
+    uint64_t rotated = (R == 0)
+        ? welem
+        : (((welem >> R) | (welem << (esize - R))) & elem_mask);
+    uint64_t value = 0;
+    for (unsigned pos = 0; pos < datasize; pos += esize) {
+        value |= rotated << pos;
+    }
+    if (datasize == 32u) {
+        value &= 0xFFFFFFFFu;
+    }
+    *out_value = value;
+    return true;
+}
+
+// Decode an AND (immediate), W- or X-form, returning the concrete mask
+// value and registers. Base 0x12000000 (W, N=0) / 0x92400000 (X, N=1),
+// mask 0xFFC00000 -- the same family the existing low-/high-mask
+// decoders match, but here the full value is reconstructed so the
+// caller can inspect arbitrary run shapes. ANDS (flag-setting) has
+// different opc bits and is not matched.
+static bool decode_and_imm(uint32_t op, unsigned *out_sf, uint64_t *out_mask,
+                           unsigned *out_rd, unsigned *out_rn)
+{
+    unsigned sf = (op >> 31) & 1u;
+    uint32_t base = sf ? 0x92400000u : 0x12000000u;
+    if ((op & 0xFFC00000u) != base) {
+        return false;
+    }
+    unsigned N = (op >> 22) & 1u;
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    uint64_t value;
+    if (!decode_bitmask_imm_value(N, immr, imms, sf ? 64u : 32u, &value)) {
+        return false;
+    }
+    *out_sf = sf;
+    *out_mask = value;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->alr_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: LSR Rd, Rd, #n consuming the pending AND? The LSR must
+    //     read and write the AND's destination (Rd == Rn == alr_rd).
+    if (state->alr_active) {
+        unsigned c_sf, c_rd, c_rn, n;
+        if (decode_lsr_imm(op, &c_sf, &c_rd, &c_rn, &n)
+                && c_sf == (state->alr_is_64bit ? 1u : 0u)
+                && c_rd == state->alr_rd
+                && c_rn == state->alr_rd) {
+            unsigned lo = state->alr_lo;
+            unsigned hi = state->alr_hi;
+            // (mask & ws) >> n is a bottom-aligned field -- a single
+            // UBFX -- iff the run is not shifted past bit 0 (lo <= n,
+            // so any mask bits below n are simply dropped) and not
+            // shifted out entirely (n <= hi). The surviving bits are
+            // ws[hi : n], so width = hi + 1 - n at lsb = n. lo > n would
+            // leave the field above bit 0 (no single UBFX); n > hi makes
+            // the result 0 (a different, degenerate rewrite).
+            if (lo <= n && n <= hi) {
+                unsigned width = hi + 1u - n;
+                char w_or_x = state->alr_is_64bit ? 'x' : 'w';
+
+                out->name = "AND+LSR foldable into UBFX";
+                out->start_offset = state->alr_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> ubfx %c%u, %c%u, #%u, #%u",
+                    w_or_x, c_rd, w_or_x, state->alr_rn, n, width);
+
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->alr_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "lsr %c%u, %c%u, #%u",
+                    w_or_x, c_rd, w_or_x, c_rn, n);
+                produced = true;
+            }
+        }
+        // Strict adjacency: any non-matching instruction expires.
+        state->alr_active = false;
+    }
+
+    // (2) Open: is this AND Rd, Rs, #<single contiguous run> (Rd != XZR)?
+    unsigned a_sf, a_rd, a_rn;
+    uint64_t mask;
+    if (decode_and_imm(op, &a_sf, &mask, &a_rd, &a_rn) && a_rd != 31) {
+        unsigned datasize = a_sf ? 64u : 32u;
+        unsigned lo = 0;
+        while (lo < datasize && ((mask >> lo) & 1u) == 0) {
+            lo++;
+        }
+        if (lo < datasize) {
+            unsigned hi = datasize - 1u;
+            while (hi > lo && ((mask >> hi) & 1u) == 0) {
+                hi--;
+            }
+            unsigned runlen = hi - lo + 1u;
+            uint64_t runmask = (runlen >= 64u)
+                ? ~(uint64_t)0
+                : (((uint64_t)1 << runlen) - 1u) << lo;
+            if (datasize == 32u) {
+                runmask &= 0xFFFFFFFFu;
+            }
+            // Single contiguous, non-wrapping run only. Replicated
+            // patterns (esize < datasize, e.g. 0x0f0f0f0f) and rotated
+            // wrapping runs leave a gap, so mask != runmask and are
+            // skipped -- they have no single-UBFX equivalent.
+            if (mask == runmask) {
+                state->alr_active = true;
+                state->alr_is_64bit = (a_sf != 0);
+                state->alr_rd = a_rd;
+                state->alr_rn = a_rn;
+                state->alr_lo = lo;
+                state->alr_hi = hi;
+                state->alr_offset = offset;
+                snprintf(state->alr_disasm, sizeof(state->alr_disasm),
+                    "%s %s", insn->mnemonic, insn->op_str);
+            }
+        }
     }
 
     return produced;
@@ -4618,6 +4805,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,
     check_lsr_and_to_ubfx,
+    check_and_lsr_to_ubfx,
     check_mov_reg_self,
     check_add_sub_zero,
     check_self_op,

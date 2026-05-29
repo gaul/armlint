@@ -721,6 +721,31 @@ static void and_w_ffff(uint8_t out[4], unsigned rd, unsigned rn)
     write_le32(out, op);
 }
 
+// AND (immediate) from raw (N, immr, imms) fields. is64 selects the
+// W-form (0x12000000) or X-form (0x92000000) base.
+static void and_imm_raw(uint8_t out[4], int is64, unsigned rd, unsigned rn,
+                        unsigned N, unsigned immr, unsigned imms)
+{
+    uint32_t op = (is64 ? 0x92000000u : 0x12000000u)
+        | ((N & 1u) << 22)
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// AND (immediate) with a single contiguous run of `m` ones starting at
+// bit `lo` (mask = ((1<<m)-1) << lo). The bitmask immediate encodes a
+// run as ROR(low-m-run, R) at element size = datasize, so S = m-1,
+// R = (datasize - lo) mod datasize, N = (datasize == 64).
+static void and_run(uint8_t out[4], int is64, unsigned rd, unsigned rn,
+                    unsigned lo, unsigned m)
+{
+    unsigned ds = is64 ? 64u : 32u;
+    and_imm_raw(out, is64, rd, rn, is64 ? 1u : 0u, (ds - lo) % ds, m - 1u);
+}
+
 // CMP Rn, Rm (shifted-register form, shift=LSL, imm6=0).
 //   sf 1 1 01011 00 0 Rm 000000 Rn 11111
 static void cmp_w_reg(uint8_t out[4], unsigned rn, unsigned rm)
@@ -1750,6 +1775,104 @@ static void test_lsr_and_to_ubfx(void)
 
     lsr_w(&code[0], 0, 1, 4);
     assert(run_helper_check(code, 4) == 0);
+}
+
+static void test_and_lsr_to_ubfx(void)
+{
+    uint8_t code[16];
+
+    // -- Positives. --
+
+    // Canonical (run base == shift): and w0, w1, #0xff0 (bits [4,11]) ;
+    // lsr w0, w0, #4 -> ubfx w0, w1, #4, #8.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    lsr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Low mask, shift inside the run: and w0, w1, #0xff (bits [0,7]) ;
+    // lsr w0, w0, #4 -> ubfx w0, w1, #4, #4.
+    and_run(&code[0], 0, 0, 1, 0, 8);
+    lsr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Run starts below the shift (low mask bits dropped): and w0, w1,
+    // #0xff0 (bits [4,11]) ; lsr w0, w0, #6 -> ubfx w0, w1, #6, #6.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    lsr_w(&code[4], 0, 0, 6);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form: and x0, x1, #0xffff00 (bits [8,23]) ; lsr x0, x0, #8
+    //   -> ubfx x0, x1, #8, #16.
+    and_run(&code[0], 1, 0, 1, 8, 16);
+    lsr_x(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Shift at the top of the run (width 1): and w0, w1, #0xff0 ;
+    // lsr w0, w0, #11 -> ubfx w0, w1, #11, #1.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    lsr_w(&code[4], 0, 0, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Aliasing (AND source == destination): and w0, w0, #0xff0 ;
+    // lsr w0, w0, #4 -> ubfx w0, w0, #4, #8.
+    and_run(&code[0], 0, 0, 0, 4, 8);
+    lsr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // Run starts above the shift (lo > n): the field would land above
+    // bit 0, so no single UBFX. and w0, w1, #0xff00 (bits [8,15]) ;
+    // lsr w0, w0, #4.
+    and_run(&code[0], 0, 0, 1, 8, 8);
+    lsr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Run entirely shifted out (n > hi): result is always 0. and w0,
+    // w1, #0xff0 (bits [4,11]) ; lsr w0, w0, #12.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    lsr_w(&code[4], 0, 0, 12);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Non-contiguous (replicated) mask 0x0f0f0f0f (esize=8): no single
+    // run, so no UBFX. N=0, immr=0, imms=0b110011.
+    and_imm_raw(&code[0], 0, 0, 1, 0, 0, 0x33);
+    lsr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ANDS (flag-setting) must not open the fold: ands w0, w1, #0xff0.
+    {
+        uint32_t ands = 0x72000000u | (28u << 16) | (7u << 10) | (1u << 5);
+        write_le32(&code[0], ands);
+    }
+    lsr_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch: W-form AND then X-form LSR.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    lsr_x(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LSR Rd != AND Rd (the LSR doesn't write the AND's destination).
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    lsr_w(&code[4], 5, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LSR Rn != AND Rd (the LSR reads a different source).
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    lsr_w(&code[4], 0, 5, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending AND.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    movz_w(&code[4], 5, 1);
+    lsr_w(&code[8], 0, 0, 4);
+    assert(run_helper_check(code, 12) == 0);
+
+    // AND writing XZR (Rd=31) does not open the fold.
+    and_run(&code[0], 0, 31, 1, 4, 8);
+    lsr_w(&code[4], 31, 31, 4);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 static void test_mov_reg_self(void)
@@ -4815,6 +4938,7 @@ int main(void)
     test_redundant_zext();
     test_lsl_lsr_to_ubfx();
     test_lsr_and_to_ubfx();
+    test_and_lsr_to_ubfx();
     test_mov_reg_self();
     test_redundant_sext();
     test_redundant_cmp_after_s_variant();
