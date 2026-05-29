@@ -552,6 +552,30 @@ code, and documents corners of the A64 instruction set.
   differ between the original and the rewrite. Widths must match
   (both W or both X). NEG of XZR (computes 0) is excluded.
 
+### MVN + AND/ORR/EOR foldable to BIC/ORN/EON
+* The logical-op counterpart of the NEG fold. `mvn wt, ws` (bitwise
+  NOT) feeding a logical op collapses into that op's built-in
+  negated-operand form:
+  * `mvn wt, ws ; and  wd, wn, wt` -> `bic  wd, wn, ws`
+  * `mvn wt, ws ; orr  wd, wn, wt` -> `orn  wd, wn, ws`
+  * `mvn wt, ws ; eor  wd, wn, wt` -> `eon  wd, wn, ws`
+  * `mvn wt, ws ; ands wd, wn, wt` -> `bics wd, wn, ws`
+* All four consumers are commutative, so the `mvn` result may sit in
+  the consumer's Rn or Rm slot; the fold puts the other operand in Rn
+  and `ws` in the negated Rm slot. (`ANDS` -> `BICS` is sound because
+  both set N/Z from the same result with C = V = 0.)
+* Conservative soundness (mirrors the NEG fold): Rd of the consumer
+  must equal `wt` (so the `mvn` destination is overwritten and `~ws`
+  is dead), and the independent operand must not also be `wt` -- the
+  `mvn wt, ws ; and wt, wt, wt` degenerate is a self-op, reported by
+  the self-op check instead. The shifted `MVN` form is not handled
+  (the consumer would shift the complemented value, not `ws`). `MVN`
+  to ZR, and `MVN` of ZR (the all-ones `mov wd, #-1` idiom), are
+  excluded.
+* Modern compilers usually emit `BIC`/`ORN`/`EON` directly, so
+  expect low hit density -- residuals appear where the optimizer
+  materialized the complement into a temporary first.
+
 ### ADD + LDR foldable to register-offset LDR
 * `add xt, xn, xm{, lsl #s} ; ldr xt, [xt]` ->
   `ldr xt, [xn, xm{, lsl #s}]`. Saves the ADD by letting the LDR

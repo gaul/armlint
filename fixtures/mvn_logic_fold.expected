@@ -1,0 +1,25 @@
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x0: -> bic w0, w3, w1 (2 instructions)
+  mvn w0, w1
+  and w0, w3, w0
+
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x8: -> bic w0, w3, w1 (2 instructions)
+  mvn w0, w1
+  and w0, w0, w3
+
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x10: -> orn w0, w3, w1 (2 instructions)
+  mvn w0, w1
+  orr w0, w3, w0
+
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x18: -> eon w0, w3, w1 (2 instructions)
+  mvn w0, w1
+  eor w0, w3, w0
+
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x20: -> bics w0, w3, w1 (2 instructions)
+  mvn w0, w1
+  ands w0, w3, w0
+
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x28: -> bic x0, x3, x1 (2 instructions)
+  mvn x0, x1
+  and x0, x3, x0
+
+6 errors

@@ -424,6 +424,29 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
 bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// Logical-op analogue of check_neg_add_sub_fold. Detect MVN Rt, Rs (the
+// ORN Rt, XZR, Rs alias, no shift) immediately followed by an
+// AND/ORR/EOR/ANDS (shifted-register, LSL #0, N=0) that consumes Rt.
+// The pair folds the bitwise-NOT into the consumer's built-in
+// negated-operand form:
+//   mvn wt, ws ; and  wd, wn, wt -> bic  wd, wn, ws
+//   mvn wt, ws ; orr  wd, wn, wt -> orn  wd, wn, ws
+//   mvn wt, ws ; eor  wd, wn, wt -> eon  wd, wn, ws
+//   mvn wt, ws ; ands wd, wn, wt -> bics wd, wn, ws
+// All four consumers commute, so Rt may sit in either source slot; the
+// fold puts the other ("independent") operand in Rn and Rs in the
+// negated Rm slot.
+//
+// Soundness (conservative, mirrors check_neg_add_sub_fold): Rd of the
+// consumer must equal Rt (so the MVN's destination is overwritten and
+// the ~Rs value is dead), and the independent operand must not also be
+// Rt (the both-equal case is a self-op, handled by check_self_op). The
+// shifted MVN form is not handled -- the consumer would shift the
+// complemented value, not Rs. MVN writing ZR, and MVN of ZR (the
+// all-ones constant), are excluded.
+bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect an X-form ADD (shifted-register, LSL #s, non-S-variant)
 // immediately followed by an unsigned-offset LDR with imm12 = 0
 // whose base register and destination register both equal Rd of the

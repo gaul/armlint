@@ -342,6 +342,9 @@ static inline void orr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) 
 static inline void orr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xaa000000u, rd, rn, rm); }
 static inline void eor_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x4a000000u, rd, rn, rm); }
 static inline void eor_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xca000000u, rd, rn, rm); }
+// MVN Rd, Rm = ORN Rd, ZR, Rm (no shift): the ORN base with Rn = 31.
+static inline void mvn_w(uint8_t out[4], unsigned rd, unsigned rm) { encode_sr(out, 0x2a200000u, rd, 31, rm); }
+static inline void mvn_x(uint8_t out[4], unsigned rd, unsigned rm) { encode_sr(out, 0xaa200000u, rd, 31, rm); }
 
 // Arithmetic shifted-register with imm6 = 1 (existing shift). Used to
 // verify we do NOT fold into a consumer that already has a shift.
@@ -4488,6 +4491,95 @@ static void test_neg_add_sub_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_mvn_logic_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positives. --
+
+    // mvn w0, w1 ; and w0, w3, w0  -> bic w0, w3, w1 (Rm slot).
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // mvn w0, w1 ; and w0, w0, w3  -> bic w0, w3, w1 (Rn slot, AND
+    // commutes so the result is swapped into Rm).
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 0, 0, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ORR -> ORN, EOR -> EON, ANDS -> BICS.
+    mvn_w(&code[0], 0, 1);
+    orr_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+    mvn_w(&code[0], 0, 1);
+    eor_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+    mvn_w(&code[0], 0, 1);
+    ands_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form: mvn x0, x1 ; and x0, x3, x0 -> bic x0, x3, x1.
+    mvn_x(&code[0], 0, 1);
+    and_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // Rd != MVN dest (the ~Rs value would still be live).
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 5, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Consumer does not read the MVN dest.
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 2, 3, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Both consumer sources are the MVN dest (and w0,w0,w0). This check
+    // must not fire (the independent operand would be the MVN dest);
+    // check_self_op handles `and Rd,Rs,Rs` instead, so total == 1.
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 0, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Consumer is already a negated form (BIC, N=1): this check only
+    // matches AND/ORR/EOR/ANDS (N=0), so no fold here.
+    mvn_w(&code[0], 0, 1);
+    bic_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch (W MVN, X consumer).
+    mvn_w(&code[0], 0, 1);
+    and_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Shifted MVN (mvn w0, w1, lsl #2) is not matched (imm6 != 0).
+    {
+        uint32_t op = 0x2A2003E0u | (2u << 10) | (1u << 16);  // lsl #2, Rm=1
+        write_le32(&code[0], op);
+    }
+    and_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // MVN dest = ZR (Rd=31) does not open: mvn wzr, w1 ; and wzr, w3, wzr.
+    // Without the guard this would wrongly fold to `bic wzr, w3, w1`.
+    mvn_w(&code[0], 31, 1);
+    and_w(&code[4], 31, 3, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // MVN of ZR (Rs=31, = mov Rd,#-1) is a constant idiom, not opened.
+    mvn_w(&code[0], 0, 31);
+    and_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending MVN.
+    mvn_w(&code[0], 0, 1);
+    movz_w(&code[4], 5, 1);
+    and_w(&code[8], 0, 3, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // Encode ADD (immediate), X-form, with the sh bit set (imm12 << 12).
 // Base 0x91000000 carries sf=1, op=0, S=0; OR 0x00400000 sets sh=1.
 static void add_x_imm_sh(uint8_t out[4], unsigned rd, unsigned rn,
@@ -5008,6 +5100,7 @@ int main(void)
     test_mul_add_sub_fold();
     test_widening_mul_add_sub_fold();
     test_neg_add_sub_fold();
+    test_mvn_logic_fold();
     test_add_ldr_register_offset();
     test_add_ldr_imm_offset();
     test_ldr_str_add_post_indexed();

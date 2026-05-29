@@ -240,6 +240,19 @@ struct armlint_state {
     size_t neg_pending_offset;
     char neg_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending MVN Rt, Rs (the ORN Rt, XZR, Rs alias, no shift) awaiting
+    // an adjacent AND/ORR/EOR/ANDS (shifted-register, LSL #0, N=0)
+    // consumer whose Rd overwrites Rt and one of whose sources is Rt --
+    // the pair folds the bitwise-NOT into the consumer's negated-operand
+    // form: AND->BIC, ORR->ORN, EOR->EON, ANDS->BICS. The logical ops
+    // commute, so Rt may sit in either source slot. Strict adjacency.
+    bool mvn_pending;
+    bool mvn_pending_is_64bit;
+    unsigned mvn_pending_rd;
+    unsigned mvn_pending_rs;
+    size_t mvn_pending_offset;
+    char mvn_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending X-form ADD (shifted-register, LSL #s, non-S-variant)
     // awaiting an adjacent unsigned-offset LDR consumer whose base
     // register and destination register both equal Rd of the ADD. The
@@ -477,6 +490,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->mul_pending = false;
     state->wmul_pending = false;
     state->neg_pending = false;
+    state->mvn_pending = false;
     state->add_pending = false;
     state->addi_pending = false;
     state->lspi_pending = false;
@@ -3767,6 +3781,124 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode MVN Rd, Rm (the ORN Rd, XZR, Rm alias) with shift_type = LSL,
+// imm6 = 0. MVN (no shift) is the common compiler form; the shifted
+// form (MVN Rd, Rm, LSL #n) is not handled because the consumer's
+// negated-operand form would shift the *complemented* value, not the
+// original. Mask 0x7FE0FFE0 fixes bits 30..21 (opc=01 ORR-family,
+// logical shifted-register class, LSL, N=1), bits 15..10 (imm6=0) and
+// bits 9..5 (Rn=11111=XZR); sf is free, Rm and Rd are the operands.
+static bool decode_mvn(uint32_t op, unsigned *out_sf, unsigned *out_rd,
+                       unsigned *out_rm)
+{
+    if ((op & 0x7FE0FFE0u) != 0x2A2003E0u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->mvn_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an AND/ORR/EOR/ANDS consuming the MVN?
+    if (state->mvn_pending) {
+        unsigned sf, opc, rd, rn, rm;
+        if (decode_logic_shifted_lsl0(op, &sf, &opc, &rd, &rn, &rm)
+                && ((sf != 0) == state->mvn_pending_is_64bit)) {
+            unsigned t = state->mvn_pending_rd;
+            bool valid = false;
+            unsigned indep = 0;
+            // AND/ORR/EOR/ANDS all commute, so the MVN result may sit in
+            // Rn or Rm (but not both -- that is a self-op, handled by
+            // check_self_op). The other source becomes the new Rn and
+            // must not also be the MVN destination.
+            if (rd == t) {
+                if (rm == t && rn != t) {
+                    valid = true;
+                    indep = rn;
+                } else if (rn == t && rm != t) {
+                    valid = true;
+                    indep = rm;
+                }
+            }
+
+            if (valid) {
+                char w_or_x = state->mvn_pending_is_64bit ? 'x' : 'w';
+                // opc: 0=AND, 1=ORR, 2=EOR, 3=ANDS -> the negated forms.
+                static const char *cons_names[4] = {
+                    "and", "orr", "eor", "ands"
+                };
+                static const char *fold_names[4] = {
+                    "bic", "orn", "eon", "bics"
+                };
+                const char *cons_mnem = cons_names[opc];
+                const char *fold_mnem = fold_names[opc];
+
+                out->name = "MVN + AND/ORR/EOR foldable to BIC/ORN/EON";
+                out->start_offset = state->mvn_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %c%u, %c%u",
+                    fold_mnem,
+                    w_or_x, rd,
+                    w_or_x, indep,
+                    w_or_x, state->mvn_pending_rs);
+
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->mvn_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, %c%u, %c%u",
+                    cons_mnem,
+                    w_or_x, rd,
+                    w_or_x, rn,
+                    w_or_x, rm);
+
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->mvn_pending = false;
+    }
+
+    // (2) Try to open: is this an MVN (no shift)?
+    unsigned m_sf, m_rd, m_rs;
+    if (decode_mvn(op, &m_sf, &m_rd, &m_rs)) {
+        // Rd = 31 writes ZR (dead). Rs = 31 is MVN of XZR = all-ones,
+        // a constant materialisation (mov Rd, #-1) -- a different idiom.
+        if (m_rd != 31 && m_rs != 31) {
+            state->mvn_pending = true;
+            state->mvn_pending_is_64bit = (m_sf != 0);
+            state->mvn_pending_rd = m_rd;
+            state->mvn_pending_rs = m_rs;
+            state->mvn_pending_offset = offset;
+            char w_or_x = (m_sf != 0) ? 'x' : 'w';
+            snprintf(state->mvn_pending_disasm,
+                sizeof(state->mvn_pending_disasm),
+                "mvn %c%u, %c%u",
+                w_or_x, m_rd, w_or_x, m_rs);
+        }
+    }
+
+    return produced;
+}
+
 // Decode unsigned-offset STR (any size: B/H/W/X), integer-register
 // form only. Mask 0x3FC00000 covers bits 29..22 (the LDR/STR opcode
 // block plus V bit and opc bits). Value 0x39000000 fixes V=0,
@@ -4843,6 +4975,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mul_add_sub_fold,
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,
+    check_mvn_logic_fold,
     check_add_ldr_register_offset,
     check_add_ldr_imm_offset,
     check_ldr_str_add_post_indexed,
