@@ -1,0 +1,25 @@
+AND+LSL foldable into UBFIZ at offset: 0x0: -> ubfiz w0, w1, #4, #8 (2 instructions)
+  and w0, w1, #0xff
+  lsl w0, w0, #4
+
+AND+LSL foldable into UBFIZ at offset: 0x8: -> ubfiz w0, w1, #20, #12 (2 instructions)
+  and w0, w1, #0xffff
+  lsl w0, w0, #0x14
+
+AND+LSL foldable into UBFIZ at offset: 0x10: -> ubfiz x0, x1, #8, #8 (2 instructions)
+  and x0, x1, #0xff
+  lsl x0, x0, #8
+
+LSR+LSL foldable into bit-clearing AND at offset: 0x18: -> and w0, w1, #0xfffffff0 (2 instructions)
+  lsr w0, w1, #4
+  lsl w0, w0, #4
+
+LSR+LSL foldable into bit-clearing AND at offset: 0x20: -> and x0, x1, #0xfffffffffffff000 (2 instructions)
+  lsr x0, x1, #0xc
+  lsl x0, x0, #0xc
+
+Optimization opportunities by type:
+       3  AND+LSL foldable into UBFIZ
+       2  LSR+LSL foldable into bit-clearing AND
+
+5 optimization opportunities in 15 instructions

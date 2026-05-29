@@ -83,6 +83,22 @@ struct armlint_state {
     size_t alr_offset;
     char alr_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // AND-low-mask or LSR pending an LSL consumer (the "shift a field up"
+    // idiom). An AND of the low w bits then LSL #n folds to UBFIZ Rd, Rs,
+    // #n, #w; an LSR #a then LSL #a (equal shifts) clears the low a bits,
+    // i.e. AND Rd, Rs, #~(2^a-1). aul_is_lsr selects which producer;
+    // aul_param holds the mask width w (AND) or the shift a (LSR). aul_rd
+    // is the producer's destination (the LSL reads and writes it), aul_rn
+    // its source (the fold's source).
+    bool aul_active;
+    bool aul_is_64bit;
+    bool aul_is_lsr;
+    unsigned aul_rd;
+    unsigned aul_rn;
+    unsigned aul_param;
+    size_t aul_offset;
+    char aul_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / TST Rn,Rn) pending a
     // B.EQ/B.NE consumer.
     bool cmp_active;
@@ -502,6 +518,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->bsx_active = false;
     state->lra_active = false;
     state->alr_active = false;
+    state->aul_active = false;
     state->cmp_active = false;
     state->tst_active = false;
     state->wzx_active = false;
@@ -1223,6 +1240,112 @@ bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                 snprintf(state->alr_disasm, sizeof(state->alr_disasm),
                     "%s %s", insn->mnemonic, insn->op_str);
             }
+        }
+    }
+
+    return produced;
+}
+
+bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->aul_active = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    // (1) Close: LSL Rd, Rd, #n consuming the pending AND-low-mask / LSR?
+    if (state->aul_active) {
+        unsigned c_sf, c_rd, c_rn, n;
+        if (decode_lsl_imm(op, &c_sf, &c_rd, &c_rn, &n)
+                && c_sf == (state->aul_is_64bit ? 1u : 0u)
+                && c_rd == state->aul_rd
+                && c_rn == state->aul_rd) {
+            unsigned datasize = state->aul_is_64bit ? 64u : 32u;
+            char w_or_x = state->aul_is_64bit ? 'x' : 'w';
+
+            if (!state->aul_is_lsr) {
+                // AND low w bits, then LSL #n:
+                //   (ws & ((1<<w)-1)) << n  ==  ubfiz Rd, Rs, #n, #w.
+                // Cap the width at the bits that survive the shift, since
+                // n + w may exceed datasize.
+                unsigned width = state->aul_param;
+                if (n + width > datasize) {
+                    width = datasize - n;
+                }
+                out->name = "AND+LSL foldable into UBFIZ";
+                out->start_offset = state->aul_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> ubfiz %c%u, %c%u, #%u, #%u",
+                    w_or_x, c_rd, w_or_x, state->aul_rn, n, width);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->aul_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            } else if (n == state->aul_param) {
+                // LSR #a then LSL #a clears the low a bits:
+                //   (ws >> a) << a  ==  ws & ~((1<<a)-1).
+                // Unequal shifts have no single-instruction form (the
+                // surviving field is neither low- nor zero-aligned), so
+                // they are left un-flagged.
+                unsigned a = state->aul_param;
+                uint64_t mask = ~(((uint64_t)1 << a) - 1u);
+                if (datasize == 32u) {
+                    mask &= 0xFFFFFFFFu;
+                }
+                out->name = "LSR+LSL foldable into bit-clearing AND";
+                out->start_offset = state->aul_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> and %c%u, %c%u, #0x%" PRIx64,
+                    w_or_x, c_rd, w_or_x, state->aul_rn, mask);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->aul_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
+        }
+        // Strict adjacency: any non-matching instruction expires.
+        state->aul_active = false;
+    }
+
+    // (2) Open: an AND with a low mask, or an LSR (Rd != XZR)?
+    unsigned w_width, a_rd, a_rn;
+    if (decode_and_imm_lowmask(op, &w_width, &a_rd, &a_rn) && a_rd != 31) {
+        state->aul_active = true;
+        state->aul_is_64bit = (((op >> 31) & 1u) != 0u);
+        state->aul_is_lsr = false;
+        state->aul_rd = a_rd;
+        state->aul_rn = a_rn;
+        state->aul_param = w_width;
+        state->aul_offset = offset;
+        snprintf(state->aul_disasm, sizeof(state->aul_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    } else {
+        unsigned l_sf, l_rd, l_rn, l_shift;
+        if (decode_lsr_imm(op, &l_sf, &l_rd, &l_rn, &l_shift)
+                && l_rd != 31) {
+            state->aul_active = true;
+            state->aul_is_64bit = (l_sf != 0);
+            state->aul_is_lsr = true;
+            state->aul_rd = l_rd;
+            state->aul_rn = l_rn;
+            state->aul_param = l_shift;
+            state->aul_offset = offset;
+            snprintf(state->aul_disasm, sizeof(state->aul_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
         }
     }
 
@@ -5337,6 +5460,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_lsl_lsr_to_ubfx,
     check_lsr_and_to_ubfx,
     check_and_lsr_to_ubfx,
+    check_and_lsr_lsl_fold,
     check_mov_reg_self,
     check_add_sub_zero,
     check_self_op,

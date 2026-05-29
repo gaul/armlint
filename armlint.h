@@ -162,6 +162,20 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
 bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// The left-shift mirror of the two checks above: an AND-low-mask or LSR
+// immediately followed by LSL Rd, Rd, #n (the LSL reads and writes the
+// producer's destination).
+//   and wd, ws, #((1<<w)-1) ; lsl wd, wd, #n -> ubfiz wd, ws, #n, #w
+//     ((ws & low-w-bits) << n; width capped at datasize-n when it would
+//      overflow), and
+//   lsr wd, ws, #a ; lsl wd, wd, #a -> and wd, ws, #~((1<<a)-1)
+//     (equal shifts clear the low a bits).
+// LSR + LSL with unequal shifts has no single-instruction form -- the
+// surviving field is neither low- nor zero-aligned -- and is not
+// flagged. ANDS (flag-setting) is excluded by the low-mask decoder.
+bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // Detect MOV Xd, Xd encoded as ORR Xd, XZR, Xd, LSL #0 -- a literal
 // no-op that reads and writes the same 64 bits. The W-form MOV Wd, Wd
 // is NOT flagged here: it zero-extends X[63:32] and is handled as a

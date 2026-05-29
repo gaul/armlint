@@ -1930,6 +1930,99 @@ static void test_and_lsr_to_ubfx(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_and_lsr_lsl_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positives: AND low-mask + LSL -> UBFIZ. --
+
+    // and w0, w1, #0xff ; lsl w0, w0, #4 -> ubfiz w0, w1, #4, #8.
+    and_w_lowmask(&code[0], 0, 1, 8);
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Width capped: and w0, w1, #0xffff ; lsl w0, w0, #20
+    //   -> ubfiz w0, w1, #20, #12 (n + w = 36 > 32).
+    and_w_lowmask(&code[0], 0, 1, 16);
+    lsl_w(&code[4], 0, 0, 20);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Single-bit mask: and w0, w1, #1 ; lsl w0, w0, #4 -> ubfiz #4,#1.
+    and_w_lowmask(&code[0], 0, 1, 1);
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form: and x0, x1, #0xff ; lsl x0, x0, #8 -> ubfiz x0, x1, #8, #8.
+    and_x_lowmask(&code[0], 0, 1, 8);
+    lsl_x(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Aliasing (AND source == destination).
+    and_w_lowmask(&code[0], 0, 0, 8);
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positives: LSR + LSL (equal) -> clear low bits via AND. --
+
+    // lsr w0, w1, #4 ; lsl w0, w0, #4 -> and w0, w1, #~0xf.
+    lsr_w(&code[0], 0, 1, 4);
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form: lsr x0, x1, #12 ; lsl x0, x0, #12.
+    lsr_x(&code[0], 0, 1, 12);
+    lsl_x(&code[4], 0, 0, 12);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // LSR + LSL with unequal shifts has no single-instruction form.
+    lsr_w(&code[0], 0, 1, 4);
+    lsl_w(&code[4], 0, 0, 6);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LSL Rd != producer dest.
+    and_w_lowmask(&code[0], 0, 1, 8);
+    lsl_w(&code[4], 5, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LSL Rn != producer dest (reads a different source).
+    and_w_lowmask(&code[0], 0, 1, 8);
+    lsl_w(&code[4], 0, 5, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch: W-form AND, X-form LSL.
+    and_w_lowmask(&code[0], 0, 1, 8);
+    lsl_x(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Non-low mask (run not based at bit 0): and w0, w1, #0xff0 is a
+    // contiguous run [4,11], not a low mask, so the LSL would shift a
+    // mid-field -- no UBFIZ. (and w0,w1,#0xff0 ; lsl w0,w0,#4)
+    and_run(&code[0], 0, 0, 1, 4, 8);   // mask 0xff0
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ANDS (flag-setting) is not a plain AND-imm and must not open.
+    {
+        uint32_t ands = 0x72000000u | (7u << 10) | (1u << 5);  // ands w0,w1,#0xff
+        write_le32(&code[0], ands);
+    }
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // AND writing XZR (Rd=31) does not open.
+    and_w_lowmask(&code[0], 31, 1, 8);
+    lsl_w(&code[4], 31, 31, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending producer.
+    and_w_lowmask(&code[0], 0, 1, 8);
+    movz_w(&code[4], 5, 1);
+    lsl_w(&code[8], 0, 0, 4);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 static void test_mov_reg_self(void)
 {
     uint8_t code[8];
@@ -5286,6 +5379,7 @@ int main(void)
     test_lsl_lsr_to_ubfx();
     test_lsr_and_to_ubfx();
     test_and_lsr_to_ubfx();
+    test_and_lsr_lsl_fold();
     test_mov_reg_self();
     test_redundant_sext();
     test_redundant_cmp_after_s_variant();

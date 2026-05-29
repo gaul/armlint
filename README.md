@@ -197,6 +197,27 @@ code, and documents corners of the A64 instruction set.
 * Fuse win (see the LSL fold): mask + shift become one `UBFX` --
   one fewer instruction, the shift off the critical path.
 
+### mask-and-shift-left foldable into UBFIZ, or shift round-trip into a clearing AND
+* The left-shift mirror of the two checks above (an `LSL`, rather than
+  an `LSR`/`AND`, is the consumer):
+  * `and wd, ws, #((1<<w)-1) ; lsl wd, wd, #n` keeps the low `w` bits
+    and shifts them up by `n`; equivalent to `ubfiz wd, ws, #n, #w`
+    (capping the width at `datasize-n` when `n+w` would overflow, since
+    the high bits shift out). Example: `and w0, w1, #0xff ;
+    lsl w0, w0, #4` -> `ubfiz w0, w1, #4, #8`.
+  * `lsr wd, ws, #a ; lsl wd, wd, #a` (equal shifts) is a round-trip
+    that clears the low `a` bits; equivalent to `and wd, ws, #~((1<<a)-1)`
+    (the high mask is always a valid bitmask immediate). Example:
+    `lsr w0, w1, #4 ; lsl w0, w0, #4` -> `and w0, w1, #0xfffffff0`.
+* `LSR` + `LSL` with *unequal* shifts is not folded: the surviving
+  field is neither low-aligned nor zero-aligned, so it has no single
+  `UBFM`/`AND` form (the `LSL` + `LSR` order, by contrast, always folds
+  -- see the two-shift check above). The `LSL` must read and write the
+  producer's destination, and `ANDS` (flag-setting) is excluded by the
+  low-mask decoder.
+* Fuse win (see the LSL fold): two instructions become one, with the
+  shift/mask off the critical path.
+
 ### redundant zero-extension after a producer that already zeroed those bits
 * Generalises the previous "redundant UXTW after W-form ALU" rule
   to size-aware producer/consumer pairs. The check tracks the
