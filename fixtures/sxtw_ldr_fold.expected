@@ -1,0 +1,21 @@
+SXTW + register-offset LDR foldable into the load at offset: 0x0: -> ldr x0, [x3, w1, sxtw] (2 instructions)
+  sxtw x0, w1
+  ldr x0, [x3, x0]
+
+SXTW + register-offset LDR foldable into the load at offset: 0x8: -> ldr x0, [x3, w1, sxtw #3] (2 instructions)
+  sxtw x0, w1
+  ldr x0, [x3, x0, lsl #3]
+
+SXTW + register-offset LDR foldable into the load at offset: 0x10: -> ldr w0, [x3, w1, sxtw #2] (2 instructions)
+  sxtw x0, w1
+  ldr w0, [x3, x0, lsl #2]
+
+SXTW + register-offset LDR foldable into the load at offset: 0x18: -> ldrb w0, [x3, w1, sxtw] (2 instructions)
+  sxtw x0, w1
+  ldrb w0, [x3, x0]
+
+SXTW + register-offset LDR foldable into the load at offset: 0x20: -> ldr x0, [sp, w1, sxtw] (2 instructions)
+  sxtw x0, w1
+  ldr x0, [sp, x0]
+
+5 errors

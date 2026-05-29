@@ -498,6 +498,27 @@ bool check_add_ldr_register_offset(armlint_state *state,
                                    const cs_insn *insn,
                                    size_t offset, armlint_finding *out);
 
+// Detect SXTW Xt, Ws immediately followed by a register-offset LDR
+// whose index register and destination both equal Xt. The pair folds
+// the sign-extension into the load's addressing mode:
+//   sxtw xt, ws ; ldr xt, [xn, xt]          -> ldr xt, [xn, ws, sxtw]
+//   sxtw xt, ws ; ldr xt, [xn, xt, lsl #s]  -> ldr xt, [xn, ws, sxtw #s]
+// This is the array-indexing idiom (a 32-bit signed index into a 64-bit
+// base). All four load sizes (LDRB/LDRH/LDR W/LDR X) are handled; the
+// scale bit carries over unchanged.
+//
+// Soundness (conservative, mirrors check_add_ldr_register_offset): the
+// consumer must be a plain LDR (not STR -- no Rt overwrite -- nor a
+// sign-extending load) using the LSL/UXTX index option (a full 64-bit
+// register offset, equivalent to the SXTW's result), with Rt == Rm == Xt
+// so the load overwrites the index and the extended value is dead. The
+// base Rn must NOT be Xt: with the SXTW folded away the base would read
+// its pre-SXTW value, changing the address. SXTW into ZR is excluded.
+// Only SXTW is matched (the load index extend is word-width; a standalone
+// 32->64 zero-extend is normally a W-register MOV, not a literal UXTW).
+bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect an X-form ADD-immediate (non-S-variant) immediately followed
 // by an unsigned-offset LDR whose base register and destination
 // register both equal Rd of the ADD. The pair folds to a single

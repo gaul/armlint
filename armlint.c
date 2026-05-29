@@ -269,6 +269,17 @@ struct armlint_state {
     size_t ext_pending_offset;
     char ext_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending SXTW Xt, Ws awaiting an adjacent register-offset LDR whose
+    // index register and destination both equal Xt -- the pair folds the
+    // sign-extend into the load's addressing mode (option SXTW). The LDR
+    // overwrites Xt, so the extended index is dead. sxl_rd is the SXTW's
+    // destination (the load's index/Rt), sxl_rs its W source.
+    bool sxl_pending;
+    unsigned sxl_rd;
+    unsigned sxl_rs;
+    size_t sxl_offset;
+    char sxl_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending X-form ADD (shifted-register, LSL #s, non-S-variant)
     // awaiting an adjacent unsigned-offset LDR consumer whose base
     // register and destination register both equal Rd of the ADD. The
@@ -508,6 +519,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->neg_pending = false;
     state->mvn_pending = false;
     state->ext_pending = false;
+    state->sxl_pending = false;
     state->add_pending = false;
     state->addi_pending = false;
     state->lspi_pending = false;
@@ -4651,6 +4663,120 @@ bool check_add_ldr_register_offset(armlint_state *state,
     return produced;
 }
 
+// Decode an integer register-offset LDR (the "[Rn, Rm{, ext #s}]" form):
+//   size 111 0 00 opc 1 Rm option S 10 Rn Rt
+// Mask 0x3F200C00 fixes bits 29..24 = 111000, bit 21 = 1, bits 11..10 =
+// 10; value 0x38200800. The caller filters to a plain load (opc = 01)
+// with the LSL/UXTX index option (011, a full 64-bit register offset).
+// option = bits 15..13, S = bit 12 (scale by log2(size) when set).
+static bool decode_ldr_reg_offset(uint32_t op, unsigned *out_size,
+                                  unsigned *out_opc, unsigned *out_rm,
+                                  unsigned *out_option, unsigned *out_s,
+                                  unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0x3F200C00u) != 0x38200800u) {
+        return false;
+    }
+    *out_size = (op >> 30) & 0x3u;
+    *out_opc = (op >> 22) & 0x3u;
+    *out_rm = (op >> 16) & 0x1Fu;
+    *out_option = (op >> 13) & 0x7u;
+    *out_s = (op >> 12) & 0x1u;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->sxl_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: a register-offset LDR that uses the SXTW result
+    //     as a plain X-register index and loads back into it?
+    if (state->sxl_pending) {
+        unsigned size, opc, rm, option, s, rn, rt;
+        if (decode_ldr_reg_offset(op, &size, &opc, &rm, &option, &s,
+                                  &rn, &rt)
+                && opc == 1u            // plain LDR (B/H/W/X), not STR/LDRS
+                && option == 3u         // LSL/UXTX: a full 64-bit offset
+                && rm == state->sxl_rd  // index is the SXTW result
+                && rt == state->sxl_rd  // the load overwrites it (dead)
+                && rn != state->sxl_rd) {
+            // Rn == index would make the fold read the base's pre-SXTW
+            // value (the SXTW is removed), changing the address; excluded
+            // above. The scale bit S carries over unchanged: it scales
+            // the sign-extended index either way.
+            const char *ldr_mnem;
+            char rt_wx;
+            switch (size) {
+                case 0: ldr_mnem = "ldrb"; rt_wx = 'w'; break;
+                case 1: ldr_mnem = "ldrh"; rt_wx = 'w'; break;
+                case 2: ldr_mnem = "ldr";  rt_wx = 'w'; break;
+                case 3: ldr_mnem = "ldr";  rt_wx = 'x'; break;
+                default: ldr_mnem = "ldr"; rt_wx = 'x'; break;
+            }
+            char base_buf[8];
+            if (rn == 31) {
+                snprintf(base_buf, sizeof(base_buf), "sp");
+            } else {
+                snprintf(base_buf, sizeof(base_buf), "x%u", rn);
+            }
+
+            out->name = "SXTW + register-offset LDR foldable into the load";
+            out->start_offset = state->sxl_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            if (s == 0) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, [%s, w%u, sxtw]",
+                    ldr_mnem, rt_wx, rt, base_buf, state->sxl_rs);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, [%s, x%u]",
+                    ldr_mnem, rt_wx, rt, base_buf, rm);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, [%s, w%u, sxtw #%u]",
+                    ldr_mnem, rt_wx, rt, base_buf, state->sxl_rs, size);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, [%s, x%u, lsl #%u]",
+                    ldr_mnem, rt_wx, rt, base_buf, rm, size);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->sxl_disasm);
+            produced = true;
+        }
+        // Strict adjacency: clear regardless of match.
+        state->sxl_pending = false;
+    }
+
+    // (2) Try to open: is this an SXTW Xd, Wn (SBFM with imms=31)?
+    unsigned s_s, s_w, s_rd, s_rn;
+    if (decode_sbfm_sext(op, &s_s, &s_w, &s_rd, &s_rn)
+            && s_s == 32u            // SXTW (sign-extend word -> dword)
+            && s_rd != 31 && s_rn != 31) {
+        state->sxl_pending = true;
+        state->sxl_rd = s_rd;
+        state->sxl_rs = s_rn;
+        state->sxl_offset = offset;
+        snprintf(state->sxl_disasm, sizeof(state->sxl_disasm),
+            "sxtw x%u, w%u", s_rd, s_rn);
+    }
+
+    return produced;
+}
+
 bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset,
@@ -5131,6 +5257,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mvn_logic_fold,
     check_extend_add_sub_fold,
     check_add_ldr_register_offset,
+    check_sxtw_ldr_fold,
     check_add_ldr_imm_offset,
     check_ldr_str_add_post_indexed,
     check_add_ldr_str_pre_indexed,

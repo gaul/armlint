@@ -4358,6 +4358,103 @@ static void test_add_ldr_register_offset(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// Register-offset LDR/STR: size 111 0 00 opc 1 Rm option S 10 Rn Rt.
+// Base 0x38200800; opc selects load(01)/store(00), option the index
+// extend (3 = LSL/UXTX, 6 = SXTW), S the scale bit.
+static void ldr_ro(uint8_t out[4], unsigned size, unsigned opc,
+                   unsigned rm, unsigned option, unsigned s,
+                   unsigned rn, unsigned rt)
+{
+    uint32_t op = 0x38200800u
+        | ((size & 0x3u) << 30)
+        | ((opc & 0x3u) << 22)
+        | ((rm & 0x1Fu) << 16)
+        | ((option & 0x7u) << 13)
+        | ((s & 0x1u) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_sxtw_ldr_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positives. --
+
+    // sxtw x0, w1 ; ldr x0, [x3, x0] -> ldr x0, [x3, w1, sxtw].
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Scaled: sxtw x0, w1 ; ldr x0, [x3, x0, lsl #3].
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 1, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W load, scaled: sxtw x0, w1 ; ldr w0, [x3, x0, lsl #2].
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 2, 1, 0, 3, 1, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDRB / LDRH.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 0, 1, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 1, 1, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SP base: sxtw x0, w1 ; ldr x0, [sp, x0].
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 0, 31, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // Rt != index (the SXTW result would still be live).
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 0, 3, 2);   // ldr x2, [x3, x0]
+    assert(run_helper_check(code, 8) == 0);
+
+    // Base == index (ldr x0, [x0, x0]): folding would read the base's
+    // pre-SXTW value.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 0, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Index already uses the SXTW option (6), not LSL: nothing to fold.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 6, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Store (opc=0): no Rt overwrite to prove the index dead.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 0, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SXTB producer is not a 32->64 index extend.
+    sxtb_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SXTW into ZR (Rd=31) does not open.
+    sxtw_x(&code[0], 31, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Unsigned-offset LDR (not the register-offset form) does not match.
+    sxtw_x(&code[0], 0, 1);
+    ldr_x_uimm0(&code[4], 0, 3);   // ldr x0, [x3]
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending SXTW.
+    sxtw_x(&code[0], 0, 1);
+    movz_x(&code[4], 5, 1, 0);
+    ldr_ro(&code[8], 3, 1, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // Encode NEG Xd, Xm (the SUB Xd, XZR, Xm alias, no shift, non-S).
 // Base 0xCB0003E0: sf=1, op=1 (SUB), S=0, class=01011, shift_type=LSL,
 // bit 21=0, imm6=0, Rn=31 (XZR).
@@ -5209,6 +5306,7 @@ int main(void)
     test_mvn_logic_fold();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
+    test_sxtw_ldr_fold();
     test_add_ldr_imm_offset();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();

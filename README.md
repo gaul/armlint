@@ -684,6 +684,31 @@ code, and documents corners of the A64 instruction set.
   residual hits are in code paths where the address temporary's
   liveness wasn't fully analyzed.
 
+### SXTW + register-offset LDR foldable into the load
+* The extend analogue of the check above: where that absorbs an `ADD`
+  into the load's register offset, this absorbs a sign-extend into the
+  offset's *extend* modifier. The canonical 32-bit-signed-index idiom:
+  * `sxtw x0, w1 ; ldr x0, [x3, x0]` -> `ldr x0, [x3, w1, sxtw]`
+  * `sxtw x0, w1 ; ldr x0, [x3, x0, lsl #3]`
+    -> `ldr x0, [x3, w1, sxtw #3]`
+  All four load sizes (LDRB/LDRH/LDR W/LDR X) are handled, and the
+  scale bit carries over.
+* Why it helps: one fewer instruction, and the sign-extend leaves the
+  critical path -- the load's address-generation unit does it for free
+  rather than a separate dependent op feeding the load. (Same profile
+  as the LSL/extend folds; this is the load-addressing form of it.)
+* Soundness (conservative, mirrors the `ADD + LDR` register-offset
+  check): the consumer must be a plain `LDR` (not `STR` -- no `Rt`
+  overwrite to prove the index dead -- nor a sign-extending load) using
+  the LSL/UXTX index option (a full 64-bit register offset, identical
+  to the `SXTW` result), with `Rt == Rm == Xt` so the load overwrites
+  the index. The base `Rn` must NOT be `Xt`: with the `SXTW` folded
+  away the base would read its pre-`SXTW` value, changing the address.
+  `SXTW` into ZR is excluded.
+* Only `SXTW` is matched: the load-index extend is word-width, and a
+  standalone 32->64 zero-extend is normally a `W`-register `MOV`, not a
+  literal `UXTW` instruction.
+
 ### ADD + LDR foldable to immediate-offset LDR
 * `add xt, xn, #a ; ldr xt, [xt, #b]` -> `ldr xt, [xn, #(a+b)]`,
   with `b == 0` the most common case. The immediate-form
