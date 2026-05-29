@@ -18,6 +18,46 @@ mov w0, #0x66666666     ; orr w0, wzr, #0x66666666
 armlint helps compiler writers and assembly authors generate tighter
 code, and documents corners of the A64 instruction set.
 
+## Design and limitations
+
+armlint is a peephole analyzer. It decodes each 32-bit A64 instruction
+directly from the binary and matches it by mask and value, resolving
+aliases (for example `MUL` is `MADD` with a zero accumulator) so that
+both spellings of a pattern are caught. It then looks for a short window
+of adjacent instructions that a shorter or cheaper encoding can replace.
+
+The overriding rule is soundness: armlint emits a finding only when the
+rewrite provably preserves the architectural result. For a tool that
+suggests code changes, a false positive is the worst failure, so it errs
+toward false negatives -- a missed opportunity is cheaper than a wrong
+one. Each check documents the exact conditions under which its rewrite is
+equivalent; the constraints below are the ones they share.
+
+* **Strict adjacency.** A producer and its consumer must be consecutive;
+  an unrelated instruction between them suppresses the finding. armlint
+  does not reorder code or look through intervening instructions.
+* **Liveness is proved structurally, not analyzed.** A
+  producer-into-consumer fold fires only when the consumer overwrites the
+  producer's destination register, proving the intermediate value is
+  dead. There is no general-purpose register liveness pass.
+* **MOV-chain folds assume the constant is dead.** Folds that absorb a
+  materialized constant -- `MUL`/`MNEG`/`UDIV` by a constant, `MOV` +
+  `ADD`/`AND`/`ORR`/`EOR`, `MOV #0` -- report a saving only if the
+  constant register feeds nothing else, which armlint cannot confirm
+  without a liveness pass. The consumer rewrite itself stays valid
+  regardless.
+* **Flag liveness uses a bounded forward scan.** The branch- and
+  flag-folding checks drop a `CMP`/`TST` only after confirming that no
+  later instruction reads N/C/V before they are overwritten, scanning the
+  fall-through path for a limited window. The branch-target path is never
+  followed, so a finding near a taken edge is suppressed rather than
+  risked.
+
+Findings are *opportunities*, not guaranteed speedups: some -- the pre-
+and post-indexed addressing folds -- are code-size and front-end wins
+that are backend-neutral. Each check's notes say what its rewrite
+actually saves.
+
 ## Implemented analyses
 
 ### suboptimal MOVZ/MOVK sequence
