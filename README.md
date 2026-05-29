@@ -3,7 +3,7 @@
 armlint examines AArch64 machine code to find suboptimal instruction
 sequences. For example, building the constant `0x66666666` as
 
-```
+```asm
 movz w0, #0x6666
 movk w0, #0x6666, lsl #16
 ```
@@ -11,7 +11,7 @@ movk w0, #0x6666, lsl #16
 is two instructions where one would do, because `0x66666666` is encodable
 as an AArch64 logical (bitmask) immediate:
 
-```
+```asm
 mov w0, #0x66666666     ; orr w0, wzr, #0x66666666
 ```
 
@@ -21,10 +21,12 @@ code, and documents corners of the A64 instruction set.
 ## Implemented analyses
 
 ### suboptimal MOVZ/MOVK sequence
+
 * `movz w0, #0x6666 ; movk w0, #0x6666, lsl #16` instead of
   `mov w0, #0x66666666` (single bitmask-immediate ORR)
 
 ### LSL foldable into shifted-register form
+
 * `lsl w0, w1, #3 ; add w0, w2, w0` instead of
   `add w0, w2, w1, lsl #3`. Same for SUB, AND, ORR, EOR (and
   flag-setting variants). Conservative: only flags when the
@@ -55,6 +57,7 @@ code, and documents corners of the A64 instruction set.
   value for the second operand.
 
 ### extend foldable into shifted/extended-register form
+
 * The extend counterpart of the LSL fold: where that absorbs a shift,
   this absorbs an extension. A standalone `UXTB`/`UXTH` (W-form),
   `SXTB`/`SXTH` (W or X), or `SXTW` (X) feeding an `ADD`/`SUB` folds
@@ -86,6 +89,7 @@ code, and documents corners of the A64 instruction set.
   write already zeros the upper half), not a literal instruction.
 
 ### compare-zero branch foldable into CBZ/CBNZ
+
 * `cmp w0, #0 ; b.eq target` instead of `cbz w0, target`. Same for
   `b.ne` -> `cbnz`. Also matches the equivalent zero-test idioms
   `cmp Rn, xzr` (SUBS XZR, Rn, XZR) and `tst Rn, Rn`
@@ -108,6 +112,7 @@ code, and documents corners of the A64 instruction set.
   full soundness would require basic-block analysis.
 
 ### compare-zero signed-branch foldable into TBZ/TBNZ
+
 * `cmp wn, #0 ; b.lt target` (or `b.ge`/`b.mi`/`b.pl`) folds to
   `tbnz wn, #(datasize-1), target` (or `tbz`). After `CMP Rn, #0` /
   `CMP Rn, ZR` / `TST Rn, Rn`, `V == 0`, so `B.LT` (N != V) reduces
@@ -127,6 +132,7 @@ code, and documents corners of the A64 instruction set.
   branch no longer carries an NZCV dependency.
 
 ### TST single-bit + B.EQ/NE foldable into TBZ/TBNZ
+
 * `tst w0, #(1<<5) ; b.eq target` instead of `tbz w0, #5, target`.
   Same for `b.ne` -> `tbnz`. Only the immediate-form `TST` is
   matched (`ANDS XZR, Rn, #imm`) and only when the immediate is a
@@ -139,6 +145,7 @@ code, and documents corners of the A64 instruction set.
   branch no longer carries an NZCV dependency.
 
 ### bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
+
 * `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the
   relationship between `a` and `b`:
   * `b >= a`: extraction. `ubfx wd, ws, #(b-a), #(datasize-b)`.
@@ -154,6 +161,7 @@ code, and documents corners of the A64 instruction set.
   one fewer instruction, second shift off the critical path.
 
 ### shift-and-mask bitfield extraction foldable into UBFX
+
 * `lsr wd, ws, #n ; and wd, wd, #((1<<w)-1)` extracts bits
   `ws[n+w-1 .. n]`; equivalent to `ubfx wd, ws, #n, #w` (capping
   `w` at `datasize-n` when the mask is wider than the LSR-fillable
@@ -166,6 +174,7 @@ code, and documents corners of the A64 instruction set.
   one fewer instruction, the mask off the critical path.
 
 ### mask-and-shift bitfield extraction foldable into UBFX
+
 * The opposite ("mask then shift-right") order from the check above.
   `and wd, ws, #mask ; lsr wd, wd, #n` where `mask` is a single
   contiguous run of 1s `[lo, hi]`; the LSR reads and writes the AND's
@@ -191,6 +200,7 @@ code, and documents corners of the A64 instruction set.
   one fewer instruction, the shift off the critical path.
 
 ### mask-and-shift-left foldable into UBFIZ, or shift round-trip into a clearing AND
+
 * The left-shift mirror of the two checks above (an `LSL`, rather than
   an `LSR`/`AND`, is the consumer):
   * `and wd, ws, #((1<<w)-1) ; lsl wd, wd, #n` keeps the low `w` bits
@@ -212,6 +222,7 @@ code, and documents corners of the A64 instruction set.
   shift/mask off the critical path.
 
 ### redundant zero-extension after a producer that already zeroed those bits
+
 * Generalises the previous "redundant UXTW after W-form ALU" rule
   to size-aware producer/consumer pairs. The check tracks the
   threshold `P` at which the producer guarantees `Rt[63:P] == 0`:
@@ -236,6 +247,7 @@ code, and documents corners of the A64 instruction set.
   loads with `Wt` destination in any addressing mode.
 
 ### `MOV Xd, Xd` is a literal no-op
+
 * The X-form register MOV alias (`ORR Xd, XZR, Xm, LSL #0`) with
   `Rm = Rd` reads `Xd` and writes the same 64 bits back; the
   instruction has no architectural effect and can be removed. It shows
@@ -246,6 +258,7 @@ code, and documents corners of the A64 instruction set.
   preceding producer already zeroed those bits.
 
 ### redundant sign-extension after a producer that already replicated the sign
+
 * Mirror of the zero-extension framework above. The check tracks two
   thresholds `(S, W)`: the producer guarantees `Rd[W-1:S] =
   sign(Rd[S-1])`. A consumer `SXTB / SXTH / SXTW` with thresholds
@@ -293,6 +306,7 @@ code, and documents corners of the A64 instruction set.
   low bits, qualify as dead when masked.
 
 ### self-op identities (`AND/ORR/EOR/SUB/BIC/ORN/EON Rd, Rs, Rs`)
+
 * `AND Rd, Rs, Rs` and `ORR Rd, Rs, Rs` collapse to `MOV Rd, Rs`
   (identity). `EOR Rd, Rs, Rs`, `SUB Rd, Rs, Rs`, and `BIC Rd, Rs,
   Rs` (= `Rs AND NOT Rs`) collapse to `MOV Rd, XZR` (zero). `ORN
@@ -311,6 +325,7 @@ code, and documents corners of the A64 instruction set.
   `MOV Rd, XZR`.
 
 ### adjacent LDR/STR foldable into LDP/STP
+
 * Two unsigned-offset `LDR Wt, [Rn, #imm12*4]` (or X-form,
   scale 8) to consecutive scaled offsets fold into a single
   `LDP Wt1, Wt2, [Rn, #imm7*4]`. Analogous for stores ->
@@ -362,6 +377,7 @@ code, and documents corners of the A64 instruction set.
   always 64-bit destination, load-only, 4-byte transfer.
 
 ### BFXIL synthesis via AND-AND-ORR
+
 * `AND Rd, Rd, #~mask ; AND Rt, Rs, #mask ; ORR Rd, Rd, Rt` (with
   `mask = (1<<w)-1`, the two ANDs in either order, and the ORR's
   second-and-third operands in either order) is equivalent to a
@@ -383,6 +399,7 @@ code, and documents corners of the A64 instruction set.
 * Useful for hand-written assembly and legacy object code.
 
 ### CSEL same-operand identity (`CSEL Rd, Rn, Rn, cond`)
+
 * When the CSEL's `Rn == Rm`, both branches produce `Rn`, so the
   cond is irrelevant and the instruction is equivalent to `MOV Rd,
   Rn`. The CSEL also reads NZCV for no reason. Both W- and X-form.
@@ -395,6 +412,7 @@ code, and documents corners of the A64 instruction set.
   excluded for consistency with the other self-op identity check.
 
 ### ADD/SUB #0 is redundant
+
 * The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a
   no-op when `Rd == Rn` and is equivalent to `MOV Rd, Rn` when
   `Rd != Rn`. The explicit `ADD #0` shows up occasionally in real
@@ -413,6 +431,7 @@ code, and documents corners of the A64 instruction set.
   so it's not actionable.
 
 ### redundant zero-CMP/TST after a flag-setting ALU
+
 * `adds/subs/ands/bics/adcs/sbcs Rd, ... ; cmp Rd, #0 ; b.eq/b.ne L`
   -- the S-variant ALU already set `Z = (Rd == 0)`, so the `CMP/TST`
   is recomputing the same `Z`. The `B.EQ/B.NE` can read the
@@ -430,6 +449,7 @@ code, and documents corners of the A64 instruction set.
   identical downstream behaviour.
 
 ### MUL by constant foldable to shift/add
+
 * `mov xc, #(1<<N) ; mul xd, xa, xc` instead of `lsl xd, xa, #N`
   (power-of-2 multiplier). Same for W-form.
 * `mov xc, #(2^N + 1) ; mul xd, xa, xc` instead of
@@ -463,6 +483,7 @@ code, and documents corners of the A64 instruction set.
   use is seldom reused) but can occur in hand-written assembly.
 
 ### MNEG by constant foldable to NEG/SUB
+
 * Direct symmetric counterpart to the MUL strength reduction.
   `MNEG Rd, Rn, Rm` is the canonical alias for
   `MSUB Rd, Rn, Rm, ZR`; same MOV-chain plumbing applies, including
@@ -480,6 +501,7 @@ code, and documents corners of the A64 instruction set.
   `MOV+MNEG`.
 
 ### UDIV by constant foldable to shift
+
 * `mov xc, #(1<<N) ; udiv xd, xn, xc` -> `lsr xd, xn, #N`. Same
   MOV-chain plumbing as the MUL/MNEG checks, including the
   dead-constant caveat.
@@ -500,6 +522,7 @@ code, and documents corners of the A64 instruction set.
   excluded as different idioms.
 
 ### MOV + ADD/SUB foldable to immediate form
+
 * `mov xc, #C ; add xd, xn, xc` instead of `add xd, xn, #C` when
   `C` fits the ADD/SUB immediate encoding (12-bit unsigned with
   optional `LSL #12`: `C` in `[1, 0xFFF]` or `C` a multiple of
@@ -516,6 +539,7 @@ code, and documents corners of the A64 instruction set.
   (degenerate MOV/NEG).
 
 ### MOV + AND/ORR/EOR/ANDS foldable to bitmask immediate
+
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when
   `C` is a valid AArch64 bitmask immediate (a rotated run of
   consecutive 1s at one of esize=2/4/8/16/32/64). Same for
@@ -530,6 +554,7 @@ code, and documents corners of the A64 instruction set.
   destination. Shares the MUL check's dead-constant caveat.
 
 ### MOV #0 + use foldable to ZR
+
 * `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Three consumer
   families:
   * `STR` (B/H/W/X, unsigned-offset) with `Rt == mov_rd`
@@ -549,6 +574,7 @@ code, and documents corners of the A64 instruction set.
   silently change semantics.
 
 ### MUL + ADD/SUB foldable to MADD/MSUB
+
 * `mul xt, xa, xb ; add xd, xt, xc` -> `madd xd, xa, xb, xc`.
   Standard array-indexing pattern (`base + i*stride`). Same for the
   commuted ADD (`add xd, xc, xt`) and for SUB with Rm=xt
@@ -572,6 +598,7 @@ code, and documents corners of the A64 instruction set.
   instruction.
 
 ### SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
+
 * The widening (32x32 -> 64) analogue of the MUL+ADD check.
   `smull xt, wa, wb ; add xt, xt, xc` -> `smaddl xt, wa, wb, xc`.
   Same for the commuted ADD (`add xt, xc, xt`) and for SUB with
@@ -601,6 +628,7 @@ code, and documents corners of the A64 instruction set.
   essentially for free, plus one instruction.
 
 ### NEG + ADD/SUB foldable to SUB/ADD
+
 * `neg xt, xs ; add xd, xc, xt` -> `sub xd, xc, xs`. The ADD is
   commutative, so `neg xt, xs ; add xd, xt, xc` folds the same
   way. The SUB consumer mirrors:
@@ -620,6 +648,7 @@ code, and documents corners of the A64 instruction set.
   path.
 
 ### MVN + AND/ORR/EOR foldable to BIC/ORN/EON
+
 * The logical-op counterpart of the NEG fold. `mvn wt, ws` (bitwise
   NOT) feeding a logical op collapses into that op's built-in
   negated-operand form:
@@ -644,6 +673,7 @@ code, and documents corners of the A64 instruction set.
   off the critical path.
 
 ### ADD + LDR foldable to register-offset LDR
+
 * `add xt, xn, xm{, lsl #s} ; ldr xt, [xt]` ->
   `ldr xt, [xn, xm{, lsl #s}]`. Saves the ADD by letting the LDR
   do the address arithmetic via its register-offset addressing
@@ -662,6 +692,7 @@ code, and documents corners of the A64 instruction set.
   (degenerate ADD) is skipped for cleanliness.
 
 ### SXTW + register-offset LDR foldable into the load
+
 * The extend analogue of the check above: where that absorbs an `ADD`
   into the load's register offset, this absorbs a sign-extend into the
   offset's *extend* modifier. The canonical 32-bit-signed-index idiom:
@@ -687,6 +718,7 @@ code, and documents corners of the A64 instruction set.
   literal `UXTW` instruction.
 
 ### ADD + LDR foldable to immediate-offset LDR
+
 * `add xt, xn, #a ; ldr xt, [xt, #b]` -> `ldr xt, [xn, #(a+b)]`,
   with `b == 0` the most common case. The immediate-form
   complement of the register-offset fold: same Rd-overwrite
@@ -706,6 +738,7 @@ code, and documents corners of the A64 instruction set.
   no negative-immediate encoding.
 
 ### LDR/STR + ADD/SUB foldable to post-indexed LDR/STR
+
 * `ldr xt, [xn] ; add xn, xn, #imm` -> `ldr xt, [xn], #imm`, and the
   negative-direction `ldr xt, [xn] ; sub xn, xn, #imm` ->
   `ldr xt, [xn], #-imm`. Same for STR and all four access sizes
@@ -747,6 +780,7 @@ code, and documents corners of the A64 instruction set.
   into the unsigned-offset form rather than post-index.
 
 ### ADD/SUB + LDR/STR foldable to pre-indexed LDR/STR
+
 * `add xn, xn, #imm ; ldr xt, [xn]` -> `ldr xt, [xn, #imm]!`, and the
   negative-direction `sub xn, xn, #imm ; ldr xt, [xn]` ->
   `ldr xt, [xn, #-imm]!`. Same for STR and all four access sizes
@@ -781,19 +815,19 @@ code, and documents corners of the A64 instruction set.
 armlint depends on [Capstone](https://www.capstone-engine.org/) and uses
 `pkg-config` to locate it. On macOS:
 
-```
+```sh
 brew install capstone
 ```
 
 On Debian/Ubuntu:
 
-```
+```sh
 apt install libcapstone-dev pkg-config
 ```
 
 Build:
 
-```
+```sh
 git clone https://github.com/gaul/armlint.git armlint
 cd armlint
 make all
@@ -816,7 +850,7 @@ armlint is intended to be part of compiler test suites which should
 `#include "armlint.h"` and link `libarmlint.a`. It can also read
 arbitrary AArch64 binaries (ELF, thin Mach-O, or universal/fat Mach-O):
 
-```
+```sh
 ./armlint /path/to/aarch64/binary
 ./armlint /bin/ls
 ```
@@ -827,7 +861,7 @@ followed by a total and the number of instructions scanned. A large
 binary can have hundreds of thousands of opportunities, so the
 per-opportunity detail is suppressed unless requested:
 
-```
+```console
 $ ./armlint /bin/ls
 Optimization opportunities by type:
       39  ADD + LDR foldable to pre-indexed LDR
@@ -841,7 +875,7 @@ Pass `-v` to also print each opportunity -- its one-line summary plus
 the offending instructions (the form shown in the integration fixtures
 below) -- ahead of the summary:
 
-```
+```console
 $ ./armlint -v /bin/ls
 ADD + LDR foldable to immediate-offset LDR at offset: 0x60: -> ldr w8, [x8, #0x2c] (2 instructions)
   add x8, x8, #0x2c
