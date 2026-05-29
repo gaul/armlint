@@ -887,8 +887,39 @@ before committing.
 ## Usage
 
 armlint is intended to be part of compiler test suites which should
-`#include "armlint.h"` and link `libarmlint.a`. It can also read
-arbitrary AArch64 binaries (ELF, thin Mach-O, or universal/fat Mach-O):
+`#include "armlint.h"` and link `libarmlint.a`. Disassemble the
+just-emitted machine code with `check_instructions`; its return value is
+the number of opportunities found, which a test can assert is zero:
+
+```c
+#include "armlint.h"   // also includes <capstone/capstone.h>
+
+// code/code_len: the AArch64 bytes to check (e.g. a function the
+// compiler just emitted); base_addr is the address they load at.
+// Returns the opportunity count (0 == clean), or -1 on a decode error.
+int lint(const uint8_t *code, size_t code_len, uint64_t base_addr)
+{
+    csh handle;
+    if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &handle) != CS_ERR_OK) {
+        return -1;
+    }
+    cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+
+    armlint_summary *summary = armlint_summary_create();
+    int findings = check_instructions(
+        handle, code, code_len, base_addr, /*verbose=*/true, summary);
+    armlint_summary_print(summary);   // optional by-type tally
+
+    armlint_summary_destroy(summary);
+    cs_close(&handle);
+    return findings;
+}
+```
+
+The `summary` is optional -- pass `NULL` to skip the by-type tally --
+and `verbose` controls whether each opportunity is printed as it is
+found. armlint can also read arbitrary AArch64 binaries (ELF, thin
+Mach-O, or universal/fat Mach-O) directly:
 
 ```sh
 ./armlint /path/to/aarch64/binary
