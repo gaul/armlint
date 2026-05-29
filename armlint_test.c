@@ -2891,6 +2891,39 @@ static void mul_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
     write_le32(out, op);
 }
 
+// SMULL Xd, Wn, Wm (SMADDL with Ra=11111). Base 0x9B207C00.
+static void smull_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x9B207C00u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// UMULL Xd, Wn, Wm (UMADDL with Ra=11111). Base 0x9BA07C00.
+static void umull_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x9BA07C00u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// SMADDL Xd, Wn, Wm, Xa with explicit Xa != XZR. Base 0x9B200000.
+// Used to confirm a real (non-alias) SMADDL is not itself flagged.
+static void smaddl_x(uint8_t out[4], unsigned rd, unsigned rn,
+                     unsigned rm, unsigned ra)
+{
+    uint32_t op = 0x9B200000u
+        | ((rm & 0x1Fu) << 16)
+        | ((ra & 0x1Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
 // MADD Xd, Xn, Xm, Xa with explicit Xa != XZR. Base 0x9B000000.
 static void madd_x(uint8_t out[4], unsigned rd, unsigned rn,
                    unsigned rm, unsigned ra)
@@ -3825,6 +3858,104 @@ static void test_mul_add_sub_fold(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+static void test_widening_mul_add_sub_fold(void)
+{
+    uint8_t code[16];
+
+    // smull x8, w0, w1 ; add x8, x8, x2  -> smaddl x8, w0, w1, x2.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 8, 8, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Commutativity: smull x8, w0, w1 ; add x8, x2, x8.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 8, 2, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB with Rm = product (xd = xc - xt) -> smsubl x8, w0, w1, x2.
+    smull_x(&code[0], 8, 0, 1);
+    sub_x(&code[4], 8, 2, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // UMULL + ADD -> umaddl.
+    umull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 8, 8, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // UMULL + SUB (xd = xc - xt) -> umsubl.
+    umull_x(&code[0], 8, 0, 1);
+    sub_x(&code[4], 8, 2, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Aliasing positive: accumulator shares its number with a multiply
+    // operand. smull x8, w0, w1 ; add x8, x8, x0 -> smaddl x8, w0, w1, x0.
+    // The accumulator reads the full (unmodified) x0; the multiply reads
+    // w0, its low half. Sound because x0 is not written between the two.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 8, 8, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Aliasing positive: product register aliases a multiply operand.
+    // smull x0, w0, w1 ; add x0, x0, x2 -> smaddl x0, w0, w1, x2. The
+    // folded SMADDL reads w0 = pre-SMULL low half of x0 (x0 is not
+    // modified before the single folded instruction), matching the
+    // original sequence.
+    smull_x(&code[0], 0, 0, 1);
+    add_x(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // W-form consumer: the 64-bit product cannot fold into a 32-bit
+    // ADD. smull x8, w0, w1 ; add w8, w8, w2.
+    smull_x(&code[0], 8, 0, 1);
+    add_w(&code[4], 8, 8, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB with Rn = product (xd = xt - xc) -- NOT foldable: SMSUBL
+    // computes Xa - Wn*Wm, not Wn*Wm - Xa.
+    smull_x(&code[0], 8, 0, 1);
+    sub_x(&code[4], 8, 8, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADDS (S-variant): the long MAC has no flag-setting form.
+    smull_x(&code[0], 8, 0, 1);
+    encode_sr(&code[4], 0xAB000000u, 8, 8, 2);  // ADDS X8, X8, X2
+    assert(run_helper_check(code, 8) == 0);
+
+    // Rd != product (the product is alive after the ADD).
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 9, 8, 2);   // writes X9, not X8
+    assert(run_helper_check(code, 8) == 0);
+
+    // accumulator == product (xc == xt aliasing): add x8, x8, x8.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 8, 8, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADD does not consume the product.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 6, 4, 5);   // X6 = X4 + X5; no read of X8
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction breaks adjacency.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 5, 5, 6);   // unrelated
+    add_x(&code[8], 8, 8, 2);
+    assert(run_helper_check(code, 12) == 0);
+
+    // SMULL writing XZR (Rd=31) does not open pending.
+    smull_x(&code[0], 31, 0, 1);
+    add_x(&code[4], 31, 31, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // A real SMADDL (Ra != XZR) is not the SMULL alias, so it does not
+    // open the pending state; a following ADD finds nothing to fold.
+    smaddl_x(&code[0], 8, 0, 1, 3);   // smaddl x8, w0, w1, x3
+    add_x(&code[4], 8, 8, 2);
+    assert(run_helper_check(code, 8) == 0);
+}
+
 // Encode X-form ADD (shifted-register, LSL #shift). Base 0x8B000000
 // carries sf=1, op=0 (ADD), S=0, shifted-register opcode and shift
 // type = LSL.
@@ -4699,6 +4830,7 @@ int main(void)
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
     test_mul_add_sub_fold();
+    test_widening_mul_add_sub_fold();
     test_neg_add_sub_fold();
     test_add_ldr_register_offset();
     test_add_ldr_imm_offset();

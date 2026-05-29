@@ -1,0 +1,25 @@
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x0: -> smaddl x8, w0, w1, x2 (2 instructions)
+  smull x8, w0, w1
+  add x8, x8, x2
+
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x8: -> smaddl x8, w0, w1, x2 (2 instructions)
+  smull x8, w0, w1
+  add x8, x2, x8
+
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x10: -> smsubl x8, w0, w1, x2 (2 instructions)
+  smull x8, w0, w1
+  sub x8, x2, x8
+
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x18: -> umaddl x8, w0, w1, x2 (2 instructions)
+  umull x8, w0, w1
+  add x8, x8, x2
+
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x20: -> umsubl x8, w0, w1, x2 (2 instructions)
+  umull x8, w0, w1
+  sub x8, x2, x8
+
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x28: -> smaddl x8, w0, w1, x0 (2 instructions)
+  smull x8, w0, w1
+  add x8, x8, x0
+
+6 errors

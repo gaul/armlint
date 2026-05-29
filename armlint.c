@@ -197,6 +197,22 @@ struct armlint_state {
     size_t mul_pending_offset;
     char mul_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending widening multiply SMULL/UMULL Xt, Wa, Wb awaiting an
+    // adjacent X-form ADD/SUB consumer whose Rd overwrites Xt and whose
+    // accumulator operand is not Xt -- the pair folds to SMADDL/UMADDL
+    // (ADD) or SMSUBL/UMSUBL (SUB). The 32x32->64 product is always
+    // 64-bit, so the consumer must be X-form. wmul_pending_rn/rm are the
+    // W-form multiply operands; the destination and accumulator are
+    // X-form. wmul_pending_signed selects the S* vs U* mnemonic family.
+    // Strict adjacency: any non-matching instruction expires the state.
+    bool wmul_pending;
+    bool wmul_pending_signed;
+    unsigned wmul_pending_rd;
+    unsigned wmul_pending_rn;
+    unsigned wmul_pending_rm;
+    size_t wmul_pending_offset;
+    char wmul_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending NEG Rt, Rs (the SUB Rt, XZR, Rs alias, no shift, non-S)
     // awaiting an adjacent ADD/SUB consumer whose Rd overwrites Rt and
     // whose negated-operand slot is Rt -- the pair folds to a single
@@ -443,6 +459,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->bfx_isolate_seen = false;
     state->lsp_active = false;
     state->mul_pending = false;
+    state->wmul_pending = false;
     state->neg_pending = false;
     state->add_pending = false;
     state->addi_pending = false;
@@ -3284,6 +3301,135 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode the widening multiply aliases SMULL / UMULL Xd, Wn, Wm -- the
+// Ra == XZR forms of SMADDL / UMADDL (Data-processing 3-source). Both
+// have sf = 1 (X destination), op54 = 00, class 11011, o0 = 0 (the
+// MADDL not MSUBL form), and Ra = 11111. op31 (bits 23..21) selects the
+// family: 001 = SMADDL, 101 = UMADDL. The mask 0xFFE0FC00 fixes sf, the
+// class, op31, o0, and Ra (bits 14..10 = 11111 -> 0x7C00), leaving Rm,
+// Rn, Rd free. Returns is_signed = true for SMULL, false for UMULL.
+static bool decode_widening_mul(uint32_t op, bool *out_is_signed,
+                                unsigned *out_rd, unsigned *out_rn,
+                                unsigned *out_rm)
+{
+    if ((op & 0xFFE0FC00u) == 0x9B207C00u) {
+        *out_is_signed = true;
+    } else if ((op & 0xFFE0FC00u) == 0x9BA07C00u) {
+        *out_is_signed = false;
+    } else {
+        return false;
+    }
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+bool check_widening_mul_add_sub_fold(armlint_state *state,
+                                     const cs_insn *insn,
+                                     size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->wmul_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: is this an X-form ADD/SUB consuming the pending
+    //     widening MUL? The 32x32->64 product is 64-bit, so a W-form
+    //     consumer (sf == 0) would operate on only the low half and is
+    //     rejected.
+    if (state->wmul_pending) {
+        unsigned sf, rd, rn, rm;
+        bool is_sub, is_s;
+        if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                        &rd, &rn, &rm)
+                && !is_s
+                && sf == 1u) {
+            unsigned t = state->wmul_pending_rd;
+            bool valid = false;
+            unsigned xc = 0;
+            if (rd == t) {
+                if (is_sub) {
+                    // Only "sub xd, xc, xt" folds (Rm == t, Rn != t):
+                    // SMSUBL/UMSUBL compute Xa - Wn*Wm.
+                    if (rm == t && rn != t) {
+                        valid = true;
+                        xc = rn;
+                    }
+                } else {
+                    // ADD is commutative -- Rm == t OR Rn == t (but not
+                    // both, which is the xc == t aliasing case).
+                    if (rm == t && rn != t) {
+                        valid = true;
+                        xc = rn;
+                    } else if (rn == t && rm != t) {
+                        valid = true;
+                        xc = rm;
+                    }
+                }
+            }
+
+            if (valid) {
+                bool sgn = state->wmul_pending_signed;
+                const char *fold_mnem = is_sub
+                    ? (sgn ? "smsubl" : "umsubl")
+                    : (sgn ? "smaddl" : "umaddl");
+                const char *cons_mnem = is_sub ? "sub" : "add";
+
+                out->name =
+                    "SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL";
+                out->start_offset = state->wmul_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                // Destination and accumulator are X-form; the multiply
+                // operands are W-form.
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s x%u, w%u, w%u, x%u",
+                    fold_mnem, rd,
+                    state->wmul_pending_rn, state->wmul_pending_rm, xc);
+
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->wmul_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s x%u, x%u, x%u", cons_mnem, rd, rn, rm);
+
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->wmul_pending = false;
+    }
+
+    // (2) Try to open: is this an SMULL / UMULL?
+    bool m_signed;
+    unsigned m_rd, m_rn, m_rm;
+    if (decode_widening_mul(op, &m_signed, &m_rd, &m_rn, &m_rm)) {
+        // Rd == 31 discards the product; nothing to fold against.
+        if (m_rd != 31) {
+            state->wmul_pending = true;
+            state->wmul_pending_signed = m_signed;
+            state->wmul_pending_rd = m_rd;
+            state->wmul_pending_rn = m_rn;
+            state->wmul_pending_rm = m_rm;
+            state->wmul_pending_offset = offset;
+            snprintf(state->wmul_pending_disasm,
+                sizeof(state->wmul_pending_disasm),
+                "%s x%u, w%u, w%u",
+                m_signed ? "smull" : "umull", m_rd, m_rn, m_rm);
+        }
+    }
+
+    return produced;
+}
+
 // Decode NEG Rd, Rs (the SUB Rd, XZR, Rs alias) with shift_type = LSL,
 // imm6 = 0, S = 0. NEG (shifted-register, no shift) is the most common
 // form emitted by compilers; the shifted form (NEG Rd, Rs, LSL #n) is
@@ -4480,6 +4626,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_ldp_stp_coalesce,
     check_redundant_cmp_after_s_variant,
     check_mul_add_sub_fold,
+    check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,
     check_add_ldr_register_offset,
     check_add_ldr_imm_offset,

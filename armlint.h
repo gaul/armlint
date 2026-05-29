@@ -351,6 +351,33 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// Widening-multiply analogue of check_mul_add_sub_fold. Detect
+// SMULL/UMULL Xt, Wa, Wb (the Ra == XZR aliases of SMADDL/UMADDL)
+// immediately followed by an X-form ADD/SUB (shifted-register, LSL #0,
+// non-S-variant) that consumes Xt. The pair folds to a single
+// long multiply-accumulate:
+//   smull xt, wa, wb ; add xt, xt, xc -> smaddl xt, wa, wb, xc
+//   smull xt, wa, wb ; add xt, xc, xt -> smaddl xt, wa, wb, xc  (ADD
+//                                                            commutes)
+//   smull xt, wa, wb ; sub xt, xc, xt -> smsubl xt, wa, wb, xc
+// and the UMULL forms fold to UMADDL/UMSUBL. The form `sub xt, xt, xc`
+// is NOT foldable (SMSUBL computes Xa - Wn*Wm, not Wn*Wm - Xa).
+//
+// The 32x32->64 product is always 64-bit, so the consumer MUST be
+// X-form; a W-form ADD/SUB would operate on only the low half and is
+// rejected. Signedness must match the producer (SMULL -> SMADDL/SMSUBL,
+// UMULL -> UMADDL/UMSUBL). The multiply operands stay W-form in the
+// rewrite while the destination and accumulator are X-form.
+//
+// Soundness (conservative): identical to check_mul_add_sub_fold -- Rd
+// of the ADD/SUB must equal Xt (so the product is overwritten and
+// dead), and the accumulator operand must not equal Xt. S-variants
+// (ADDS/SUBS) are skipped because the long MAC has no flag-setting
+// form. SMULL/UMULL writing to ZR is excluded (result discarded).
+bool check_widening_mul_add_sub_fold(armlint_state *state,
+                                     const cs_insn *insn,
+                                     size_t offset, armlint_finding *out);
+
 // Detect NEG Rt, Rs (the SUB Rt, XZR, Rs alias, no shift, non-S)
 // immediately followed by an ADD/SUB (shifted-register, LSL #0,
 // non-S-variant) that consumes Rt. The pair folds to a single

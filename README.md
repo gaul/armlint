@@ -472,6 +472,32 @@ code, and documents corners of the A64 instruction set.
   Compilers reliably fuse MUL+ADD into MADD; the residual hits
   are in code paths where the optimizer didn't see the data flow.
 
+### SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
+* The widening (32x32 -> 64) analogue of the MUL+ADD check.
+  `smull xt, wa, wb ; add xt, xt, xc` -> `smaddl xt, wa, wb, xc`.
+  Same for the commuted ADD (`add xt, xc, xt`) and for SUB with
+  Rm=xt (`sub xt, xc, xt -> smsubl xt, wa, wb, xc`). The `UMULL`
+  forms fold to `UMADDL` / `UMSUBL`. `SMULL`/`UMULL` are the
+  `Ra == XZR` aliases of `SMADDL`/`UMADDL`.
+* Width asymmetry vs. the MUL+ADD check: the 32x32 product is
+  64-bit, so the consumer ADD/SUB **must** be X-form. A W-form
+  consumer would operate on only the low 32 bits and is rejected.
+  In the rewrite the multiply operands stay W-form (`wa`, `wb`)
+  while the destination and accumulator are X-form.
+* `sub xt, xt, xc` is NOT folded: `SMSUBL` computes `Xa - Wn*Wm`,
+  not `Wn*Wm - Xa` -- the same asymmetry that blocks `sub xd, xt, xc`
+  in the MUL+ADD check.
+* Conservative soundness (identical to MUL+ADD): Rd of the ADD/SUB
+  must equal Xt (so the 64-bit product is overwritten and dead), and
+  the accumulator operand must not equal Xt. Signedness must match
+  the producer (`SMULL` pairs only with `SMADDL`/`SMSUBL`, `UMULL`
+  only with `UMADDL`/`UMSUBL`). S-variants (ADDS/SUBS) are skipped
+  (no flag-setting long MAC); `SMULL`/`UMULL` writing to ZR is
+  excluded.
+* Hit density mirrors the MUL+ADD check (low; compilers usually fuse
+  widening multiply-accumulates), so the residual cases are where
+  the optimizer didn't connect the multiply to the accumulation.
+
 ### NEG + ADD/SUB foldable to SUB/ADD
 * `neg xt, xs ; add xd, xc, xt` -> `sub xd, xc, xs`. The ADD is
   commutative, so `neg xt, xs ; add xd, xt, xc` folds the same
