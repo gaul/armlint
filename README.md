@@ -72,11 +72,7 @@ code, and documents corners of the A64 instruction set.
   dependency chain. (A few cores route extended/shifted ADD to a
   slightly slower pipe, but the single op is still no slower than the
   original pair.) It also frees the scratch register that held the
-  extended value. Hit density is low in `-O2` output -- this is the
-  array-indexing idiom (`base + (int64)i`), which compilers almost
-  always emit pre-fused as `add x, base, w, sxtw #scale`; residuals
-  appear where the optimizer didn't connect the extend to its use, and
-  in hand-written assembly.
+  extended value.
 * `ADD`/`ADDS` commute, so the extend result may be in the consumer's
   Rn or Rm slot (it is swapped to Rm); `SUB`/`SUBS` only fold when it
   is already Rm.
@@ -152,9 +148,6 @@ code, and documents corners of the A64 instruction set.
     bits below `a-b` zeroed. With `asr` it folds to `sbfiz`
     (sign-extending the high bits from `ws[datasize-a-1]`).
   * Same for X-form.
-* Compilers occasionally leave the two-shift form when bit-tracking
-  can't prove the LSL invariant; armlint flags such pairs as a
-  missed combine.
 * v1 requires the consumer's `Rd` and `Rn` to equal the LSL's `Rd`
   so the LSL result is dead after the rewrite.
 * Fuse win (see the LSL fold): two shifts become one bitfield op --
@@ -245,9 +238,8 @@ code, and documents corners of the A64 instruction set.
 ### `MOV Xd, Xd` is a literal no-op
 * The X-form register MOV alias (`ORR Xd, XZR, Xm, LSL #0`) with
   `Rm = Rd` reads `Xd` and writes the same 64 bits back; the
-  instruction has no architectural effect and can be removed. Modern
-  optimisers almost never emit this, but it shows up occasionally in
-  hand-written assembly and in legacy object code.
+  instruction has no architectural effect and can be removed. It shows
+  up occasionally in hand-written assembly and in legacy object code.
 * The W-form `MOV Wd, Wd` is NOT a no-op: writing through `Wd`
   clears `X[63:32]`. It is handled instead as a consumer of the
   redundant-zero-extension check above, where it fires only when a
@@ -315,9 +307,8 @@ code, and documents corners of the A64 instruction set.
   real self-op) are excluded.
 * On uarches with move elimination, `MOV Rd, Rs` is zero-cycle
   while `AND/ORR Rd, Rs, Rs` goes through the ALU. `EOR Rd, Rs, Rs`
-  is the canonical x86 zero idiom that occasionally bleeds into
-  AArch64 toolchain output; the canonical AArch64 form is `MOV Rd,
-  XZR` (eight occurrences observed in dyld at the time of writing).
+  is the canonical x86 zero idiom; the canonical AArch64 form is
+  `MOV Rd, XZR`.
 
 ### adjacent LDR/STR foldable into LDP/STP
 * Two unsigned-offset `LDR Wt, [Rn, #imm12*4]` (or X-form,
@@ -353,8 +344,7 @@ code, and documents corners of the A64 instruction set.
   ascending address. The load-aliasing concern is about source
   order, not address order, so the constraint is on the FIRST
   instruction in source order regardless of which offset it
-  targets. Reverse-order pairs are common in Go-compiled
-  binaries (~24% of total LDP/STP coalesce findings in kubectl).
+  targets.
 * Four consecutive LDR/STRs fold into TWO non-overlapping
   LDP/STPs (after firing, the state resets so the second LDR
   isn't also used as the first of a new pair).
@@ -369,10 +359,7 @@ code, and documents corners of the A64 instruction set.
   `Rt != Rn`, first imm12 <= 63), with the added requirement that
   the kind matches: a pending `LDR` does not pair with an `LDRSW`
   (different opcode, different sign-extension semantics). LDPSW is
-  always 64-bit destination, load-only, 4-byte transfer. LLVM is
-  aggressive about emitting LDPSW directly, so LLVM-built system
-  binaries show 0 hits; Go-compiled binaries (`kubectl`, `docker`,
-  ...) commonly leave un-coalesced LDRSW pairs.
+  always 64-bit destination, load-only, 4-byte transfer.
 
 ### BFXIL synthesis via AND-AND-ORR
 * `AND Rd, Rd, #~mask ; AND Rt, Rs, #mask ; ORR Rd, Rd, Rt` (with
@@ -393,9 +380,7 @@ code, and documents corners of the A64 instruction set.
   Rs is the just-cleared register yields the wrong result -- the
   original sequence zeros Rd's low bits, but BFXIL Rd, Rd, ... is
   a no-op).
-* Modern compilers fuse this pattern themselves; 0 hits in the
-  system-binary sample. Useful for hand-written assembly and
-  legacy object code.
+* Useful for hand-written assembly and legacy object code.
 
 ### CSEL same-operand identity (`CSEL Rd, Rn, Rn, cond`)
 * When the CSEL's `Rn == Rm`, both branches produce `Rn`, so the
@@ -412,9 +397,8 @@ code, and documents corners of the A64 instruction set.
 ### ADD/SUB #0 is redundant
 * The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a
   no-op when `Rd == Rn` and is equivalent to `MOV Rd, Rn` when
-  `Rd != Rn`. Modern toolchains usually emit the `MOV` (ORR-alias)
-  form directly, but the explicit `ADD #0` shows up occasionally in
-  real code, notably as a way to set up a function argument from a
+  `Rd != Rn`. The explicit `ADD #0` shows up occasionally in real
+  code, notably as a way to set up a function argument from a
   callee-saved register.
 * The `ADDS`/`SUBS` flag-setting variants are not flagged: writing
   `Rd` and setting `Z = (Rn == 0)` may both be wanted. The SP
@@ -464,10 +448,6 @@ code, and documents corners of the A64 instruction set.
   `SUB Xd, Xn, Xn, LSL #N` gives `x*(1 - 2^N)`, the negation, so
   the rewrite would be two instructions (`LSL+SUB` or `SUB+NEG`)
   at parity with `MOV+MUL` in count.
-* Compilers strength-reduce constant multiplies aggressively, so
-  real-binary hit density is low; survey of a dozen system and
-  application binaries found 10 hits in Firefox's XUL and 0 in
-  `kubectl`, `dyld`, `git`, `python3`, etc.
 * Dead-constant caveat (shared by every MOV-chain fold below --
   `MNEG`, `UDIV`, `MOV + ADD/SUB`, `MOV + AND/ORR/EOR`, and
   `MOV #0 + use`): the reported saving assumes the constant register
@@ -498,9 +478,6 @@ code, and documents corners of the A64 instruction set.
 * `2^N + 1` is not folded for MNEG: the rewrite is two
   instructions (`ADD-shifted` then `NEG`), at parity with
   `MOV+MNEG`.
-* Hit density is even lower than MUL: real MNEGs almost always
-  have computed (non-constant) operands. Survey of the same
-  dozen binaries found 0 hits.
 
 ### UDIV by constant foldable to shift
 * `mov xc, #(1<<N) ; udiv xd, xn, xc` -> `lsr xd, xn, #N`. Same
@@ -537,10 +514,6 @@ code, and documents corners of the A64 instruction set.
 * `C == 0` is excluded (the no-op / MOV-to-Rn case is covered by
   check_add_sub_zero); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
-* Hit density is modest -- compilers usually fold these, but
-  Go-compiled binaries (`kubectl`, `docker`) and Firefox's `XUL`
-  leak the pattern often; survey found 230 hits in XUL, 35 each
-  in kubectl/docker, 12 in dyld, with smaller counts elsewhere.
 
 ### MOV + AND/ORR/EOR/ANDS foldable to bitmask immediate
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when
@@ -555,11 +528,6 @@ code, and documents corners of the A64 instruction set.
   immediate form in AArch64 and is excluded by the decoder.
 * All four are commutative; either Rn or Rm may be the MOV
   destination. Shares the MUL check's dead-constant caveat.
-* Real-binary survey: 187 hits in Firefox's XUL (mostly single-bit
-  or shifted-bit OR patterns like `orr xd, xn, #(1<<40)`), 0 in
-  kubectl/docker/dyld/git/python3/openssl. Different distribution
-  from the ADD/SUB-imm check because the bitmask-imm encoding
-  excludes most arbitrary small constants.
 
 ### MOV #0 + use foldable to ZR
 * `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Three consumer
@@ -579,9 +547,6 @@ code, and documents corners of the A64 instruction set.
 * The Rn (base) slot of STR is intentionally excluded: register 31
   in addressing means SP, not ZR, so replacing the base would
   silently change semantics.
-* Hit density is very high in XUL (4466), modest in dyld (40) and
-  openssl (46); 0 in kubectl/docker/git/python3 -- Go's compiler
-  is good about emitting `STR XZR` directly.
 
 ### MUL + ADD/SUB foldable to MADD/MSUB
 * `mul xt, xa, xb ; add xd, xt, xc` -> `madd xd, xa, xb, xc`.
@@ -601,10 +566,6 @@ code, and documents corners of the A64 instruction set.
   reads pre-MUL values, diverging).
 * S-variants (ADDS/SUBS) skipped: MADD/MSUB have no flag-setting
   form. Widths must match (both W or both X).
-* Real-binary survey hits: XUL 2, libmozinference 7, libmozglue 4,
-  libgkcodecs 1; 0 in kubectl/docker/dyld/git/python3/openssl.
-  Compilers reliably fuse MUL+ADD into MADD; the residual hits
-  are in code paths where the optimizer didn't see the data flow.
 * Fuse win (a "producer into consumer" fold, see the LSL fold):
   `MADD`/`MSUB` has the same latency as the bare multiply, so the fold
   removes the dependent `ADD`/`SUB` essentially for free, plus one
@@ -635,9 +596,6 @@ code, and documents corners of the A64 instruction set.
   only with `UMADDL`/`UMSUBL`). S-variants (ADDS/SUBS) are skipped
   (no flag-setting long MAC); `SMULL`/`UMULL` writing to ZR is
   excluded.
-* Hit density mirrors the MUL+ADD check (low; compilers usually fuse
-  widening multiply-accumulates), so the residual cases are where
-  the optimizer didn't connect the multiply to the accumulation.
 * Fuse win: same as `MUL + ADD -> MADD` above -- `SMADDL`/`UMADDL` has
   the latency of the widening multiply, so the dependent add is removed
   essentially for free, plus one instruction.
@@ -681,9 +639,6 @@ code, and documents corners of the A64 instruction set.
   (the consumer would shift the complemented value, not `ws`). `MVN`
   to ZR, and `MVN` of ZR (the all-ones `mov wd, #-1` idiom), are
   excluded.
-* Modern compilers usually emit `BIC`/`ORN`/`EON` directly, so
-  expect low hit density -- residuals appear where the optimizer
-  materialized the complement into a temporary first.
 * Fuse win (see the LSL fold): the `MVN` is absorbed into the
   consumer's negated-operand form -- one fewer instruction, the `MVN`
   off the critical path.
@@ -705,11 +660,6 @@ code, and documents corners of the A64 instruction set.
 * Rn = XZR in the ADD is excluded because Rn = 31 in the LDR's
   register-offset form means SP, a semantic mismatch. Rm = XZR
   (degenerate ADD) is skipped for cleanliness.
-* Real-binary survey hits: XUL 155, libgkcodecs 5; 0 in
-  git/python3/openssl/dyld/libmozglue/libmozinference. Compilers
-  fuse most cases via the register-offset addressing mode; the
-  residual hits are in code paths where the address temporary's
-  liveness wasn't fully analyzed.
 
 ### SXTW + register-offset LDR foldable into the load
 * The extend analogue of the check above: where that absorbs an `ADD`
