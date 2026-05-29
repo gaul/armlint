@@ -4127,6 +4127,23 @@ static void test_mul_add_sub_fold(void)
     mul_x(&code[0], 3, 1, 1);
     add_x(&code[4], 3, 3, 4);
     assert(run_helper_check(code, 8) == 1);
+
+    // NEG consumer (sub xt, xzr, xt): folds to MNEG, not MSUB...xzr.
+    // mul x3, x1, x2 ; neg x3, x3 -> mneg x3, x1, x2.
+    mul_x(&code[0], 3, 1, 2);
+    write_le32(&code[4], 0xCB0003E0u | (3u << 16) | 3u);  // neg x3, x3
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form NEG.
+    mul_w(&code[0], 3, 1, 2);
+    write_le32(&code[4], 0x4B0003E0u | (3u << 16) | 3u);  // neg w3, w3
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: NEG into a different register (Rd != Rt), so the MUL
+    // result is not overwritten/dead.
+    mul_x(&code[0], 3, 1, 2);
+    write_le32(&code[4], 0xCB0003E0u | (3u << 16) | 5u);  // neg x5, x3
+    assert(run_helper_check(code, 8) == 0);
 }
 
 static void test_widening_mul_add_sub_fold(void)
@@ -4224,6 +4241,21 @@ static void test_widening_mul_add_sub_fold(void)
     // open the pending state; a following ADD finds nothing to fold.
     smaddl_x(&code[0], 8, 0, 1, 3);   // smaddl x8, w0, w1, x3
     add_x(&code[4], 8, 8, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // NEG consumer: smull x8, w0, w1 ; neg x8, x8 -> smnegl x8, w0, w1.
+    smull_x(&code[0], 8, 0, 1);
+    write_le32(&code[4], 0xCB0003E0u | (8u << 16) | 8u);  // neg x8, x8
+    assert(run_helper_check(code, 8) == 1);
+
+    // UMULL + NEG -> umnegl.
+    umull_x(&code[0], 8, 0, 1);
+    write_le32(&code[4], 0xCB0003E0u | (8u << 16) | 8u);  // neg x8, x8
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: NEG into a different register (product stays live).
+    smull_x(&code[0], 8, 0, 1);
+    write_le32(&code[4], 0xCB0003E0u | (8u << 16) | 9u);  // neg x9, x8
     assert(run_helper_check(code, 8) == 0);
 }
 

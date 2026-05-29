@@ -31,6 +31,12 @@ _main:
     smull   x8, w0, w1
     add     x8, x8, x0             // -> smaddl x8, w0, w1, x0
 
+    // 7) NEG consumer -> SMNEGL / UMNEGL.
+    smull   x8, w0, w1
+    neg     x8, x8                 // -> smnegl x8, w0, w1
+    umull   x8, w0, w1
+    neg     x8, x8                 // -> umnegl x8, w0, w1
+
     // Negatives:
     // N1) W-form consumer: the 64-bit product can't fold into a 32-bit ADD.
     smull   x8, w0, w1

@@ -591,6 +591,9 @@ code, and documents corners of the A64 instruction set.
 * `sub xd, xt, xc` is NOT folded: MSUB computes `Ra - Rn*Rm`, not
   `Rn*Rm - Ra`. There is no AArch64 instruction matching the
   latter form in one op.
+* `mul xt, xa, xb ; neg xt, xt` (the `sub xt, xzr, xt` form, so the
+  accumulator is XZR) folds to `mneg xt, xa, xb` -- the `MSUB`-with-ZR
+  alias -- and is reported separately as "MUL + NEG foldable to MNEG".
 * Conservative soundness: Rd of the ADD/SUB must equal Rt (so the
   MUL's destination is overwritten and its post-MUL value is
   dead), and the accumulator operand must not equal Rt (otherwise
@@ -622,6 +625,9 @@ code, and documents corners of the A64 instruction set.
 * `sub xt, xt, xc` is NOT folded: `SMSUBL` computes `Xa - Wn*Wm`,
   not `Wn*Wm - Xa` -- the same asymmetry that blocks `sub xd, xt, xc`
   in the MUL+ADD check.
+* `smull xt, wa, wb ; neg xt, xt` folds to `smnegl xt, wa, wb` (and the
+  `UMULL` form to `umnegl`) -- the long `MSUB`-with-ZR alias -- reported
+  as "SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL".
 * Conservative soundness (identical to MUL+ADD): Rd of the ADD/SUB
   must equal Xt (so the 64-bit product is overwritten and dead), and
   the accumulator operand must not equal Xt. Signedness must match

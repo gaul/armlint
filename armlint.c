@@ -3572,32 +3572,51 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
 
             if (valid) {
                 char w_or_x = state->mul_pending_is_64bit ? 'x' : 'w';
-                const char *fold_mnem = is_sub ? "msub" : "madd";
-                const char *cons_mnem = is_sub ? "sub" : "add";
 
-                out->name = "MUL + ADD/SUB foldable to MADD/MSUB";
-                out->start_offset = state->mul_pending_offset;
-                out->insn_count = 2;
-                clear_finding_strings(out);
+                if (is_sub && xc == 31) {
+                    // sub xd, xzr, xt is NEG xd, xt, so the fold is the
+                    // MSUB-with-ZR alias MNEG -- render it as such.
+                    out->name = "MUL + NEG foldable to MNEG";
+                    out->start_offset = state->mul_pending_offset;
+                    out->insn_count = 2;
+                    clear_finding_strings(out);
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> mneg %c%u, %c%u, %c%u",
+                        w_or_x, rd, w_or_x, state->mul_pending_rn,
+                        w_or_x, state->mul_pending_rm);
+                    snprintf(out->lines[0], sizeof(out->lines[0]),
+                        "%s", state->mul_pending_disasm);
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "neg %c%u, %c%u", w_or_x, rd, w_or_x, rm);
+                    produced = true;
+                } else {
+                    const char *fold_mnem = is_sub ? "msub" : "madd";
+                    const char *cons_mnem = is_sub ? "sub" : "add";
 
-                snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %c%u, %c%u, %c%u, %c%u",
-                    fold_mnem,
-                    w_or_x, rd,
-                    w_or_x, state->mul_pending_rn,
-                    w_or_x, state->mul_pending_rm,
-                    w_or_x, xc);
+                    out->name = "MUL + ADD/SUB foldable to MADD/MSUB";
+                    out->start_offset = state->mul_pending_offset;
+                    out->insn_count = 2;
+                    clear_finding_strings(out);
 
-                snprintf(out->lines[0], sizeof(out->lines[0]),
-                    "%s", state->mul_pending_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %c%u, %c%u, %c%u",
-                    cons_mnem,
-                    w_or_x, rd,
-                    w_or_x, rn,
-                    w_or_x, rm);
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, %c%u, %c%u, %c%u",
+                        fold_mnem,
+                        w_or_x, rd,
+                        w_or_x, state->mul_pending_rn,
+                        w_or_x, state->mul_pending_rm,
+                        w_or_x, xc);
 
-                produced = true;
+                    snprintf(out->lines[0], sizeof(out->lines[0]),
+                        "%s", state->mul_pending_disasm);
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "%s %c%u, %c%u, %c%u",
+                        cons_mnem,
+                        w_or_x, rd,
+                        w_or_x, rn,
+                        w_or_x, rm);
+
+                    produced = true;
+                }
             }
         }
         // Strict adjacency: clear regardless of match.
@@ -3699,30 +3718,51 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
 
             if (valid) {
                 bool sgn = state->wmul_pending_signed;
-                const char *fold_mnem = is_sub
-                    ? (sgn ? "smsubl" : "umsubl")
-                    : (sgn ? "smaddl" : "umaddl");
-                const char *cons_mnem = is_sub ? "sub" : "add";
 
-                out->name =
-                    "SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL";
-                out->start_offset = state->wmul_pending_offset;
-                out->insn_count = 2;
-                clear_finding_strings(out);
+                if (is_sub && xc == 31) {
+                    // sub xd, xzr, xt is NEG xd, xt, so the fold is the
+                    // long MSUB-with-ZR alias SMNEGL / UMNEGL.
+                    out->name =
+                        "SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL";
+                    out->start_offset = state->wmul_pending_offset;
+                    out->insn_count = 2;
+                    clear_finding_strings(out);
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s x%u, w%u, w%u",
+                        sgn ? "smnegl" : "umnegl", rd,
+                        state->wmul_pending_rn, state->wmul_pending_rm);
+                    snprintf(out->lines[0], sizeof(out->lines[0]),
+                        "%s", state->wmul_pending_disasm);
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "neg x%u, x%u", rd, rm);
+                    produced = true;
+                } else {
+                    const char *fold_mnem = is_sub
+                        ? (sgn ? "smsubl" : "umsubl")
+                        : (sgn ? "smaddl" : "umaddl");
+                    const char *cons_mnem = is_sub ? "sub" : "add";
 
-                // Destination and accumulator are X-form; the multiply
-                // operands are W-form.
-                snprintf(out->detail, sizeof(out->detail),
-                    "-> %s x%u, w%u, w%u, x%u",
-                    fold_mnem, rd,
-                    state->wmul_pending_rn, state->wmul_pending_rm, xc);
+                    out->name =
+                        "SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL";
+                    out->start_offset = state->wmul_pending_offset;
+                    out->insn_count = 2;
+                    clear_finding_strings(out);
 
-                snprintf(out->lines[0], sizeof(out->lines[0]),
-                    "%s", state->wmul_pending_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s x%u, x%u, x%u", cons_mnem, rd, rn, rm);
+                    // Destination and accumulator are X-form; the
+                    // multiply operands are W-form.
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s x%u, w%u, w%u, x%u",
+                        fold_mnem, rd,
+                        state->wmul_pending_rn, state->wmul_pending_rm,
+                        xc);
 
-                produced = true;
+                    snprintf(out->lines[0], sizeof(out->lines[0]),
+                        "%s", state->wmul_pending_disasm);
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "%s x%u, x%u, x%u", cons_mnem, rd, rn, rm);
+
+                    produced = true;
+                }
             }
         }
         // Strict adjacency: clear regardless of match.

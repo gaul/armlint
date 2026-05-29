@@ -29,6 +29,10 @@ _main:
     mul     x3, x1, x1
     add     x3, x3, x4              // -> madd x3, x1, x1, x4
 
+    // 7) NEG consumer (sub x3, xzr, x3): folds to MNEG, not MSUB,xzr.
+    mul     x3, x1, x2
+    neg     x3, x3                  // -> mneg x3, x1, x2
+
     // Negatives:
     // N1) SUB with Rn=Rt (xt - xc, NOT MSUB).
     mul     x3, x1, x2

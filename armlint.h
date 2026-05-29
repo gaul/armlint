@@ -383,7 +383,9 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
 //     twice while the MADD rewrite reads pre-MUL values, diverging.
 // Widths must match: both W or both X. MUL writing to ZR is excluded
 // (the pending slot is not opened for MUL Xd=XZR since the result
-// is discarded).
+// is discarded). The degenerate SUB case `sub xt, xzr, xt` (i.e.
+// NEG xt, xt) folds to the MSUB-with-ZR alias MNEG and is reported as
+// such ("MUL + NEG foldable to MNEG").
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
@@ -409,7 +411,9 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
 // of the ADD/SUB must equal Xt (so the product is overwritten and
 // dead), and the accumulator operand must not equal Xt. S-variants
 // (ADDS/SUBS) are skipped because the long MAC has no flag-setting
-// form. SMULL/UMULL writing to ZR is excluded (result discarded).
+// form. SMULL/UMULL writing to ZR is excluded (result discarded). The
+// degenerate SUB case `sub xt, xzr, xt` (NEG) folds to the long
+// MSUB-with-ZR alias SMNEGL / UMNEGL and is reported as such.
 bool check_widening_mul_add_sub_fold(armlint_state *state,
                                      const cs_insn *insn,
                                      size_t offset, armlint_finding *out);
