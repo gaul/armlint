@@ -31,4 +31,19 @@ _main:
     add     x23, x23, x23
     add     x21, x24, x21
 
+    // Positive: LSL result in the consumer's Rn slot. ADD commutes, so
+    // it folds by swapping operands.
+    lsl     x0, x1, #3
+    add     x0, x0, x4              // -> add x0, x4, x1, lsl #3
+
+    // Negative: SUB with the LSL result in Rn does not commute.
+    lsl     w8, w9, #2
+    sub     w8, w8, w11
+
+    // Negative: both ADD sources are the LSL dest (add wt, wt, wt). The
+    // fold would read a stale pre-LSL value for the second operand, so
+    // it must not fire.
+    lsl     w0, w1, #3
+    add     w0, w0, w0
+
     ret

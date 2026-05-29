@@ -89,9 +89,17 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
 // Detect an LSL (immediate) immediately followed by an arithmetic or
-// logical shifted-register op that consumes the LSL's destination as
-// its Rm, with the consumer overwriting that register. The pair can be
-// replaced by a single shifted-register form.
+// logical shifted-register op that consumes the LSL's destination, with
+// the consumer overwriting that register. The pair can be replaced by a
+// single shifted-register form (the shift rides on the consumer's Rm).
+//
+// The LSL result may sit in the consumer's Rm slot (any consumer) or
+// its Rn slot (commutative consumers only -- ADD/ADDS/AND/ANDS/ORR/EOR
+// and EON, which is XNOR; the fold swaps the two sources so the shifted
+// value lands on Rm). The other ("independent") source operand must not
+// also be the LSL destination: with both sources equal to it (e.g.
+// `lsl wt,ws,#k ; add wt,wt,wt`) the rewrite would read a stale pre-LSL
+// value, so that case is rejected.
 bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
 

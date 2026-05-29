@@ -10,4 +10,8 @@ LSL foldable into shifted-register form at offset: 0x10: -> sub w8, w11, w9, lsl
   lsl w8, w9, #2
   sub w8, w11, w8
 
-3 errors
+LSL foldable into shifted-register form at offset: 0x34: -> add x0, x4, x1, lsl #3 (2 instructions)
+  lsl x0, x1, #3
+  add x0, x0, x4
+
+4 errors

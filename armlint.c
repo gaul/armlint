@@ -628,7 +628,8 @@ static bool decode_shifted_register_consumer(
     unsigned *out_rd,
     unsigned *out_rn,
     unsigned *out_rm,
-    const char **out_mnem)
+    const char **out_mnem,
+    bool *out_commutes)
 {
     bool is_arith = (op & 0x1f200000u) == 0x0b000000u;
     bool is_logic = (op & 0x1f000000u) == 0x0a000000u;
@@ -664,6 +665,8 @@ static bool decode_shifted_register_consumer(
         unsigned S = (op >> 29) & 0x1u;
         static const char *names[4] = { "add", "adds", "sub", "subs" };
         *out_mnem = names[(arith_op << 1) | S];
+        // ADD/ADDS commute (a+b == b+a, same flags); SUB/SUBS do not.
+        *out_commutes = (arith_op == 0u);
     } else {
         unsigned opc = (op >> 29) & 0x3u;
         unsigned N = (op >> 21) & 0x1u;
@@ -671,6 +674,10 @@ static bool decode_shifted_register_consumer(
             "and", "bic", "orr", "orn", "eor", "eon", "ands", "bics"
         };
         *out_mnem = names[(opc << 1) | N];
+        // The N=0 members (AND/ORR/EOR/ANDS) commute, as does EON
+        // (opc=2, N=1) -- it is bitwise XNOR, so a^~b == b^~a. The other
+        // N=1 members BIC (a & ~b), ORN (a | ~b) and BICS do not.
+        *out_commutes = (N == 0u) || (opc == 2u);
     }
     return true;
 }
@@ -695,40 +702,60 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
     if (state->lsl_active) {
         unsigned c_sf, c_rd, c_rn, c_rm;
         const char *c_mnem;
+        bool c_commutes;
         if (decode_shifted_register_consumer(op, &c_sf, &c_rd, &c_rn, &c_rm,
-                                             &c_mnem)
+                                             &c_mnem, &c_commutes)
                 && c_sf == (state->lsl_is_64bit ? 1u : 0u)
-                && c_rm == state->lsl_rd
                 && c_rd == state->lsl_rd
                 && state->lsl_rd != 31) {
-            char w_or_x = state->lsl_is_64bit ? 'x' : 'w';
+            // The shifted-register form carries the shift on Rm only, so
+            // the LSL result must be exactly one source operand and the
+            // other -- the "independent" operand that becomes the new Rn
+            // -- must NOT also be the LSL destination (else the fold,
+            // which reads pre-LSL register values, would use the wrong
+            // value for it). When the LSL result is in Rn, only a
+            // commutative consumer can move it to Rm by swapping sources.
+            unsigned indep;
+            bool foldable = false;
+            if (c_rm == state->lsl_rd && c_rn != state->lsl_rd) {
+                indep = c_rn;
+                foldable = true;
+            } else if (c_rn == state->lsl_rd && c_rm != state->lsl_rd
+                       && c_commutes) {
+                indep = c_rm;
+                foldable = true;
+            }
 
-            out->name = "LSL foldable into shifted-register form";
-            out->start_offset = state->lsl_offset;
-            out->insn_count = 2;
-            clear_finding_strings(out);
+            if (foldable) {
+                char w_or_x = state->lsl_is_64bit ? 'x' : 'w';
 
-            snprintf(out->detail, sizeof(out->detail),
-                "-> %s %c%u, %c%u, %c%u, lsl #%u",
-                c_mnem,
-                w_or_x, c_rd,
-                w_or_x, c_rn,
-                w_or_x, state->lsl_rn,
-                state->lsl_shift);
+                out->name = "LSL foldable into shifted-register form";
+                out->start_offset = state->lsl_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
 
-            snprintf(out->lines[0], sizeof(out->lines[0]),
-                "lsl %c%u, %c%u, #%u",
-                w_or_x, state->lsl_rd,
-                w_or_x, state->lsl_rn,
-                state->lsl_shift);
-            snprintf(out->lines[1], sizeof(out->lines[1]),
-                "%s %c%u, %c%u, %c%u",
-                c_mnem,
-                w_or_x, c_rd,
-                w_or_x, c_rn,
-                w_or_x, c_rm);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %c%u, %c%u, lsl #%u",
+                    c_mnem,
+                    w_or_x, c_rd,
+                    w_or_x, indep,
+                    w_or_x, state->lsl_rn,
+                    state->lsl_shift);
 
-            produced = true;
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "lsl %c%u, %c%u, #%u",
+                    w_or_x, state->lsl_rd,
+                    w_or_x, state->lsl_rn,
+                    state->lsl_shift);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, %c%u, %c%u",
+                    c_mnem,
+                    w_or_x, c_rd,
+                    w_or_x, c_rn,
+                    w_or_x, c_rm);
+
+                produced = true;
+            }
         }
         // Strict adjacency: any non-matching instruction expires the LSL.
         state->lsl_active = false;

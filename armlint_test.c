@@ -421,10 +421,62 @@ static void test_lsl_fold(void)
     add_w(&code[4], 5, 2, 0);
     assert(run_helper_check(code, 8) == 0);
 
-    // LSL Rd is at Rn position of the consumer, not Rm. v1 only folds
-    // when the LSL result is at Rm. Don't flag.
+    // LSL result in the consumer's Rn slot. ADD commutes, so it folds
+    // by swapping operands: lsl w0,w1,#3 ; add w0,w0,w2
+    //   -> add w0, w2, w1, lsl #3.
     lsl_w(&code[0], 0, 1, 3);
     add_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Rn-slot folds for the other commutative consumers (AND/ORR/EOR/
+    // EON/ANDS) and the flag-setting ADDS.
+    lsl_w(&code[0], 0, 1, 3);
+    and_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+    lsl_w(&code[0], 0, 1, 3);
+    orr_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+    lsl_w(&code[0], 0, 1, 3);
+    eor_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+    lsl_w(&code[0], 0, 1, 3);
+    eon_w(&code[4], 0, 0, 2);   // EON is XNOR -> commutative
+    assert(run_helper_check(code, 8) == 1);
+    lsl_w(&code[0], 0, 1, 3);
+    ands_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+    lsl_w(&code[0], 0, 1, 3);
+    adds_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: Rn-slot with a non-commutative consumer cannot fold
+    //    (the shifted-register form only shifts Rm, and these ops are
+    //    not symmetric in their two sources). --
+
+    // SUB: (w1<<3) - w2 has no shifted-register form with the shift on
+    // the minuend.
+    lsl_w(&code[0], 0, 1, 3);
+    sub_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+    // BIC (a & ~b): not commutative.
+    lsl_w(&code[0], 0, 1, 3);
+    bic_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+    // ORN (a | ~b): not commutative.
+    lsl_w(&code[0], 0, 1, 3);
+    orn_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: both consumer sources are the LSL destination
+    //    (OP wt, wt, wt). The fold reads pre-LSL register values, so
+    //    substituting the shift into one slot while reading the stale
+    //    value in the other would be wrong (e.g. add w0,w0,w0 after
+    //    lsl w0,w1,#3 doubles the shifted value = w1<<4, not
+    //    w0 + (w1<<3)). Must not fire. (ADD is used here because the
+    //    logical self-ops like `orr w0,w0,w0` are independently flagged
+    //    by check_self_op, which would mask this check's behaviour.) --
+    lsl_w(&code[0], 0, 1, 3);
+    add_w(&code[4], 0, 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Width mismatch (W LSL followed by X consumer).

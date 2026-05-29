@@ -27,9 +27,24 @@ code, and documents corners of the A64 instruction set.
 ### LSL foldable into shifted-register form
 * `lsl w0, w1, #3 ; add w0, w2, w0` instead of
   `add w0, w2, w1, lsl #3`. Same for SUB, AND, ORR, EOR (and
-  flag-setting variants). Conservative: v1 only flags when the
+  flag-setting variants). Conservative: only flags when the
   consumer overwrites the LSL destination, guaranteeing the LSL
   result is dead.
+* The shifted-register form carries the shift on `Rm` only. When the
+  LSL result is the consumer's `Rm`, any consumer folds. When it is the
+  consumer's `Rn`, only a commutative consumer folds, by swapping the
+  two sources so the shifted value moves to `Rm`: `lsl w0, w1, #3 ;
+  add w0, w0, w2` -> `add w0, w2, w1, lsl #3`. The commutative set is
+  `ADD`/`ADDS`, `AND`/`ANDS`, `ORR`, `EOR`, and `EON` (bitwise XNOR,
+  so `a ^ ~b == b ^ ~a`); `SUB`/`SUBS`, `BIC`/`BICS` and `ORN` are not
+  symmetric in their two sources and so do not fold from the `Rn` slot.
+* The "independent" source (the one that is not the LSL result, which
+  becomes the new `Rn`) must not itself be the LSL destination. The
+  degenerate `lsl wt, ws, #k ; add wt, wt, wt` -- both consumer sources
+  equal to the LSL destination -- is therefore not flagged: it doubles
+  the shifted value (`ws << (k+1)`), which the single shifted-register
+  form cannot express, and a naive rewrite would read a stale pre-LSL
+  value for the second operand.
 
 ### compare-zero branch foldable into CBZ/CBNZ
 * `cmp w0, #0 ; b.eq target` instead of `cbz w0, target`. Same for
