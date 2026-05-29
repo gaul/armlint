@@ -22,4 +22,7 @@ self-op identity at offset: 0x18: eon x12, x13, x13 -> mov x12, #-1 (movn x12, #
 self-op identity at offset: 0x1c: and w14, w15, w15 -> mov w14, w15 (1 instructions)
   and w14, w15, w15
 
-8 errors
+Optimization opportunities by type:
+       8  self-op identity
+
+8 optimization opportunities in 12 instructions

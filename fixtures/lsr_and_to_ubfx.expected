@@ -10,4 +10,7 @@ LSR+AND foldable into UBFX at offset: 0x10: -> ubfx w4, w5, #4, #4 (2 instructio
   lsr w4, w5, #4
   and w4, w4, #0xf
 
-3 errors
+Optimization opportunities by type:
+       3  LSR+AND foldable into UBFX
+
+3 optimization opportunities in 14 instructions

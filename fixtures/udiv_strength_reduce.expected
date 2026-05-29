@@ -18,4 +18,7 @@ UDIV by constant foldable to shift at offset: 0x20: -> lsr x3, x2, #16 (2 instru
   movz x0, #0x1, lsl #16
   udiv x3, x2, x0
 
-5 errors
+Optimization opportunities by type:
+       5  UDIV by constant foldable to shift
+
+5 optimization opportunities in 26 instructions

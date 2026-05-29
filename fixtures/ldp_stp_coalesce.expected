@@ -14,4 +14,10 @@ adjacent LDRSWs foldable into LDPSW at offset: 0x18: -> ldpsw x6, x7, [x13, #0] 
   ldrsw x6, [x13]
   ldrsw x7, [x13, #4]
 
-4 errors
+Optimization opportunities by type:
+       1  adjacent LDRSWs foldable into LDPSW
+       1  adjacent LDRs foldable into LDP
+       1  adjacent LDRs foldable into LDP (reverse order)
+       1  adjacent STRs foldable into STP
+
+4 optimization opportunities in 17 instructions

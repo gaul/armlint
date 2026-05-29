@@ -26,4 +26,7 @@ ADD + LDR foldable to register-offset LDR at offset: 0x30: -> ldr x3, [x3, x2] (
   add x3, x3, x2
   ldr x3, [x3]
 
-7 errors
+Optimization opportunities by type:
+       7  ADD + LDR foldable to register-offset LDR
+
+7 optimization opportunities in 30 instructions

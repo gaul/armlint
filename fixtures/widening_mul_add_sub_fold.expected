@@ -22,4 +22,7 @@ SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x28: -> smaddl x8, w
   smull x8, w0, w1
   add x8, x8, x0
 
-6 errors
+Optimization opportunities by type:
+       6  SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
+
+6 optimization opportunities in 28 instructions

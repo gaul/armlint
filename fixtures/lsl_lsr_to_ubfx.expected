@@ -14,4 +14,7 @@ LSL+LSR/ASR foldable into bitfield op at offset: 0x18: -> ubfx w6, w7, #8, #16 (
   lsl w6, w7, #8
   lsr w6, w6, #16
 
-4 errors
+Optimization opportunities by type:
+       4  LSL+LSR/ASR foldable into bitfield op
+
+4 optimization opportunities in 16 instructions

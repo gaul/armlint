@@ -8,4 +8,7 @@ BFXIL synthesis via AND-AND-ORR at offset: 0xc: -> bfxil x8, x7, #0, #16 (3 inst
   and x6, x7, #0xffff
   orr x8, x8, x6
 
-2 errors
+Optimization opportunities by type:
+       2  BFXIL synthesis via AND-AND-ORR
+
+2 optimization opportunities in 14 instructions

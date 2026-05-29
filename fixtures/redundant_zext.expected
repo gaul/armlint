@@ -22,4 +22,7 @@ redundant zero-extension after W-form op at offset: 0x28: mov w12, w12 is a no-o
   add w12, w13, w14
   mov w12, w12
 
-6 errors
+Optimization opportunities by type:
+       6  redundant zero-extension after W-form op
+
+6 optimization opportunities in 19 instructions

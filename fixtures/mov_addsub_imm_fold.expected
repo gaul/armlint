@@ -38,4 +38,7 @@ MOV + ADD/SUB foldable to immediate form at offset: 0x48: -> add x3, x2, #0x1000
   movz x0, #0x1000
   add x3, x2, x0
 
-10 errors
+Optimization opportunities by type:
+      10  MOV + ADD/SUB foldable to immediate form
+
+10 optimization opportunities in 29 instructions

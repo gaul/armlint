@@ -22,4 +22,7 @@ MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x28: -> madd x3, x1, x1, x4 (2 i
   mul x3, x1, x1
   add x3, x3, x4
 
-6 errors
+Optimization opportunities by type:
+       6  MUL + ADD/SUB foldable to MADD/MSUB
+
+6 optimization opportunities in 26 instructions

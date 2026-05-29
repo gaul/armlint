@@ -14,4 +14,7 @@ TST+B.EQ/NE foldable into TBZ/TBNZ at offset: 0x18: -> tbnz w3, #31, 0x30 (2 ins
   tst w3, #0x80000000
   b.ne 0x30
 
-4 errors
+Optimization opportunities by type:
+       4  TST+B.EQ/NE foldable into TBZ/TBNZ
+
+4 optimization opportunities in 13 instructions

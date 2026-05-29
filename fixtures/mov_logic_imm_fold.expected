@@ -34,4 +34,7 @@ MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x40: -> and x3, x2, 
   movz x0, #0xffff, lsl #16
   and x3, x2, x0
 
-9 errors
+Optimization opportunities by type:
+       9  MOV + AND/ORR/EOR foldable to bitmask immediate
+
+9 optimization opportunities in 25 instructions

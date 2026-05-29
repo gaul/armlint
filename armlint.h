@@ -663,10 +663,34 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
 // if the closed sequence is reportable.
 bool armlint_flush(armlint_state *state, armlint_finding *out);
 
+// Tallies optimization opportunities by type (finding name) across one
+// or more check_instructions runs, so the driver can print a
+// by-prevalence summary. Opaque; created/destroyed by the caller.
+typedef struct armlint_summary armlint_summary;
+
+armlint_summary *armlint_summary_create(void);
+void armlint_summary_destroy(armlint_summary *summary);
+
+// Print the accumulated counts as "Optimization opportunities by type",
+// one line per finding name sorted by descending count (ties broken by
+// name). Emits a trailing blank line; a no-op when empty.
+void armlint_summary_print(const armlint_summary *summary);
+
+// Total instructions decoded across the check_instructions runs tallied
+// into this summary (data-in-text slots are not counted). Returns 0 for
+// a NULL summary.
+size_t armlint_summary_instructions(const armlint_summary *summary);
+
 // Top-level driver: disassemble inst[0..len) at base_addr, run all
-// checks, print findings to stdout, return the number of findings (or
-// -1 on a decoding error).
+// checks, and return the number of findings (or -1 on a decoding
+// error). In verbose mode each finding is printed -- its one-line
+// summary followed by the offending instructions (indented). Otherwise
+// nothing is printed per finding (a large binary may have tens of
+// thousands); the caller's by-type summary is the whole report. If
+// summary is non-NULL, every finding is tallied into it by type and the
+// decoded-instruction total is accumulated, regardless of verbosity.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
-                       uint64_t base_addr);
+                       uint64_t base_addr, bool verbose,
+                       armlint_summary *summary);
 
 #endif

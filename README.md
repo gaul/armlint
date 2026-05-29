@@ -844,6 +844,37 @@ arbitrary AArch64 binaries (ELF, thin Mach-O, or universal/fat Mach-O):
 ./armlint /bin/ls
 ```
 
+By default armlint prints only a summary: the opportunities grouped by
+type and sorted by prevalence, so it is clear which to look at first,
+followed by a total and the number of instructions scanned. A large
+binary can have hundreds of thousands of opportunities, so the
+per-opportunity detail is suppressed unless requested:
+
+```
+$ ./armlint /bin/ls
+Optimization opportunities by type:
+      39  ADD + LDR foldable to pre-indexed LDR
+      36  ADD + LDR foldable to immediate-offset LDR
+       1  adjacent STRs foldable into STP
+
+76 optimization opportunities in 4153 instructions
+```
+
+Pass `-v` to also print each opportunity -- its one-line summary plus
+the offending instructions (the form shown in the integration fixtures
+below) -- ahead of the summary:
+
+```
+$ ./armlint -v /bin/ls
+ADD + LDR foldable to immediate-offset LDR at offset: 0x60: -> ldr w8, [x8, #0x2c] (2 instructions)
+  add x8, x8, #0x2c
+  ldr w8, [x8]
+...
+```
+
+The process exits non-zero when any opportunity is found, so armlint
+can gate a compiler test suite.
+
 ## References
 
 * [Arm Architecture Reference Manual](https://developer.arm.com/documentation/ddi0487/latest/) - A64 instruction set

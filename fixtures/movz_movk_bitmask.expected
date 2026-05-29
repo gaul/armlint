@@ -8,4 +8,7 @@ suboptimal MOVZ/MOVK sequence at offset: 0x8: x1 = 0xf0f0f0f0f0f0f0f (4 instruct
   movk x1, #0xf0f, lsl #32
   movk x1, #0xf0f, lsl #48
 
-2 errors
+Optimization opportunities by type:
+       2  suboptimal MOVZ/MOVK sequence
+
+2 optimization opportunities in 12 instructions

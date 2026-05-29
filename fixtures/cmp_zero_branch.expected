@@ -14,4 +14,8 @@ compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0x18: -> tbnz x3, #
   cmp x3, #0
   b.mi 0x30
 
-4 errors
+Optimization opportunities by type:
+       3  compare-zero branch foldable into CBZ/CBNZ
+       1  compare-zero signed-branch foldable into TBZ/TBNZ
+
+4 optimization opportunities in 13 instructions

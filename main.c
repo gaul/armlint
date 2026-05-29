@@ -171,6 +171,12 @@ static bool read_at(FILE *f, long off, void *buf, size_t n)
     return fread(buf, 1, n, f) == n;
 }
 
+// CLI-level reporting state, set once in main() and read by scan_code
+// (the only caller of check_instructions). Kept here rather than
+// threaded through scan_elf/scan_macho/scan_fat, which don't need it.
+static bool g_verbose = false;
+static armlint_summary *g_summary = NULL;
+
 // Read `size` bytes at `base_offset` and run all checks. vmaddr is the
 // section's runtime base, reported back to the user in findings.
 static int scan_code(FILE *f, const char *path, long base_offset,
@@ -194,7 +200,8 @@ static int scan_code(FILE *f, const char *path, long base_offset,
         free(buf);
         return -1;
     }
-    int n = check_instructions(handle, buf, aligned, vmaddr);
+    int n = check_instructions(handle, buf, aligned, vmaddr,
+                               g_verbose, g_summary);
     free(buf);
     return n;
 }
@@ -419,11 +426,21 @@ static int scan_fat(FILE *f, const char *path, bool is_fat_64,
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <FILE>\n", argv[0]);
+    const char *path = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-v") == 0) {
+            g_verbose = true;
+        } else if (path == NULL && argv[i][0] != '-') {
+            path = argv[i];
+        } else {
+            fprintf(stderr, "usage: %s [-v] <FILE>\n", argv[0]);
+            return 1;
+        }
+    }
+    if (path == NULL) {
+        fprintf(stderr, "usage: %s [-v] <FILE>\n", argv[0]);
         return 1;
     }
-    const char *path = argv[1];
 
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
@@ -463,6 +480,9 @@ int main(int argc, char **argv)
     capstone_open = true;
     cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
 
+    // NULL is tolerated by the summary API (tallying is simply skipped).
+    g_summary = armlint_summary_create();
+
     int errors = -1;
     if (memcmp(magic, ELFMAG, SELFMAG) == 0) {
         errors = scan_elf(f, path, file_size, handle);
@@ -490,10 +510,13 @@ int main(int argc, char **argv)
     if (errors < 0) {
         goto out;
     }
-    printf("%d errors\n", errors);
+    armlint_summary_print(g_summary);
+    printf("%d optimization opportunities in %zu instructions\n",
+        errors, armlint_summary_instructions(g_summary));
     rc = errors != 0;
 
 out:
+    armlint_summary_destroy(g_summary);
     if (capstone_open) {
         cs_close(&handle);
     }

@@ -72,9 +72,12 @@ for s in "$ROOT"/fixtures/*.s; do
     actual="$PROBE/$name.actual"
 
     clang "${CC_FLAGS[@]}" -c -o "$obj" "$s" 2>/dev/null
+    # Snapshot the verbose output: it is the superset (the one-line
+    # opportunities plus their disassembled instructions plus the
+    # by-type summary), so it exercises all of the report formatting.
     # armlint exits with the finding count, so any positive result
     # would trip `set -e`; we want the output, not the exit code.
-    "$ROOT/armlint" "$obj" > "$actual" || true
+    "$ROOT/armlint" -v "$obj" > "$actual" || true
 
     if [ "$MODE" = "regen" ]; then
         cp "$actual" "$expected"

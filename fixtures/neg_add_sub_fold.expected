@@ -14,4 +14,7 @@ NEG + ADD/SUB foldable to SUB/ADD at offset: 0x18: -> add x3, x2, x1 (2 instruct
   neg x3, x1
   sub x3, x2, x3
 
-4 errors
+Optimization opportunities by type:
+       4  NEG + ADD/SUB foldable to SUB/ADD
+
+4 optimization opportunities in 24 instructions

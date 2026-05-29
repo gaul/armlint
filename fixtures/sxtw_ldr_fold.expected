@@ -18,4 +18,7 @@ SXTW + register-offset LDR foldable into the load at offset: 0x20: -> ldr x0, [s
   sxtw x0, w1
   ldr x0, [sp, x0]
 
-5 errors
+Optimization opportunities by type:
+       5  SXTW + register-offset LDR foldable into the load
+
+5 optimization opportunities in 17 instructions

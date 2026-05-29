@@ -5203,8 +5203,101 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
-static void report_finding(const armlint_finding *finding)
+// Distinct finding names are bounded by the registry's output variants;
+// 128 is comfortably above the few dozen that exist.
+#define ARMLINT_SUMMARY_MAX 128
+
+struct armlint_summary {
+    struct {
+        const char *name;
+        unsigned count;
+    } entries[ARMLINT_SUMMARY_MAX];
+    size_t count;
+    size_t instructions;   // total decoded instructions across all runs
+};
+
+armlint_summary *armlint_summary_create(void)
 {
+    return calloc(1, sizeof(struct armlint_summary));
+}
+
+void armlint_summary_destroy(armlint_summary *summary)
+{
+    free(summary);
+}
+
+size_t armlint_summary_instructions(const armlint_summary *summary)
+{
+    return summary == NULL ? 0 : summary->instructions;
+}
+
+// Tally one finding by its name (a stable string literal owned by the
+// check). Linear scan -- the table is tiny. Silently ignores overflow
+// (cannot happen with the current check set) and a NULL summary.
+static void summary_add(armlint_summary *summary, const char *name)
+{
+    if (summary == NULL || name == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < summary->count; i++) {
+        if (strcmp(summary->entries[i].name, name) == 0) {
+            summary->entries[i].count++;
+            return;
+        }
+    }
+    if (summary->count < ARMLINT_SUMMARY_MAX) {
+        summary->entries[summary->count].name = name;
+        summary->entries[summary->count].count = 1;
+        summary->count++;
+    }
+}
+
+void armlint_summary_print(const armlint_summary *summary)
+{
+    if (summary == NULL || summary->count == 0) {
+        return;
+    }
+
+    // Order by descending count, ties broken by name for determinism.
+    size_t order[ARMLINT_SUMMARY_MAX];
+    for (size_t i = 0; i < summary->count; i++) {
+        order[i] = i;
+    }
+    for (size_t i = 0; i < summary->count; i++) {
+        size_t best = i;
+        for (size_t j = i + 1; j < summary->count; j++) {
+            unsigned cj = summary->entries[order[j]].count;
+            unsigned cb = summary->entries[order[best]].count;
+            if (cj > cb
+                || (cj == cb
+                    && strcmp(summary->entries[order[j]].name,
+                              summary->entries[order[best]].name) < 0)) {
+                best = j;
+            }
+        }
+        size_t tmp = order[i];
+        order[i] = order[best];
+        order[best] = tmp;
+    }
+
+    printf("Optimization opportunities by type:\n");
+    for (size_t i = 0; i < summary->count; i++) {
+        const char *name = summary->entries[order[i]].name;
+        unsigned count = summary->entries[order[i]].count;
+        printf("  %6u  %s\n", count, name);
+    }
+    printf("\n");
+}
+
+static void report_finding(const armlint_finding *finding, bool verbose)
+{
+    // The default output is the by-type summary only -- a large binary
+    // can have tens of thousands of opportunities, so listing each one
+    // is unhelpful. Verbose mode prints every finding: its one-line
+    // summary followed by the offending instructions (indented).
+    if (!verbose) {
+        return;
+    }
     if (finding->detail[0] != '\0') {
         printf("%s at offset: 0x%zx: %s (%u instructions)\n",
             finding->name, finding->start_offset,
@@ -5272,7 +5365,8 @@ const size_t armlint_check_registry_count =
 // 4-byte slot. cs_disasm_iter recycles a single cs_insn and lets us
 // skip past data-in-text by hand.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
-                       uint64_t base_addr)
+                       uint64_t base_addr, bool verbose,
+                       armlint_summary *summary)
 {
     armlint_state *state = armlint_state_create();
     if (state == NULL) {
@@ -5292,12 +5386,16 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     while (size >= 4) {
         uint64_t insn_addr = address;
         if (cs_disasm_iter(handle, &code, &size, &address, insn)) {
+            if (summary != NULL) {
+                summary->instructions++;
+            }
             size_t offset = (size_t)(insn_addr - base_addr);
             for (size_t k = 0; k < armlint_check_registry_count; k++) {
                 armlint_finding finding;
                 if (armlint_check_registry[k](state, insn, offset,
                                               &finding)) {
-                    report_finding(&finding);
+                    report_finding(&finding, verbose);
+                    summary_add(summary, finding.name);
                     errors++;
                 }
             }
@@ -5307,7 +5405,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             // straddle the gap.
             armlint_finding finding;
             if (armlint_flush(state, &finding)) {
-                report_finding(&finding);
+                report_finding(&finding, verbose);
+                summary_add(summary, finding.name);
                 errors++;
             }
             code += 4;
@@ -5318,7 +5417,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
 
     armlint_finding finding;
     if (armlint_flush(state, &finding)) {
-        report_finding(&finding);
+        report_finding(&finding, verbose);
+        summary_add(summary, finding.name);
         errors++;
     }
 

@@ -54,4 +54,7 @@ MOV #0 + use foldable to ZR at offset: 0x68: -> tst x2, xzr (2 instructions)
   movz x0, #0x0
   tst x2, x0
 
-14 errors
+Optimization opportunities by type:
+      14  MOV #0 + use foldable to ZR
+
+14 optimization opportunities in 37 instructions

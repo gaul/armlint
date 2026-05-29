@@ -33,4 +33,8 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0x34: -> cbz x13, 0x3c (2 
   cmp x13, #0
   b.eq 0x3c
 
-8 errors
+Optimization opportunities by type:
+       5  compare-zero branch foldable into CBZ/CBNZ
+       3  redundant zero-CMP/TST after flag-setting ALU
+
+8 optimization opportunities in 16 instructions
