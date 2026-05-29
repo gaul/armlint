@@ -30,6 +30,14 @@ code, and documents corners of the A64 instruction set.
   flag-setting variants). Conservative: only flags when the
   consumer overwrites the LSL destination, guaranteeing the LSL
   result is dead.
+* Why the fuse helps -- shared by the "producer into its consumer"
+  folds (this one; the bitfield-`UBFX`/`UBFIZ` shift/mask pairs;
+  `MUL`/`SMULL` + `ADD` -> `MADD`/`SMADDL`; `NEG` + `ADD`/`SUB`;
+  `MVN` + logical; and the extend fold below): one fewer instruction
+  (4 bytes, a decode/issue slot, I-cache), and the folded-away producer
+  op no longer executes as a separate dependent instruction on the
+  critical path -- it rides in the consumer's ALU operand instead. The
+  scratch register that held the intermediate is freed too.
 * The shifted-register form carries the shift on `Rm` only. When the
   LSL result is the consumer's `Rm`, any consumer folds. When it is the
   consumer's `Rn`, only a commutative consumer folds, by swapping the
@@ -87,6 +95,10 @@ code, and documents corners of the A64 instruction set.
   `cmp Rn, xzr` (SUBS XZR, Rn, XZR) and `tst Rn, Rn`
   (ANDS XZR, Rn, Rn): all three set `Z=1` iff `Rn==0` and so fold
   identically.
+* Why it helps (shared by the `CMP`/`TST` -> `TBZ`/`TBNZ` folds below):
+  one fewer instruction, and the branch no longer depends on a
+  flag-writing `CMP`/`TST` -- `CBZ`/`CBNZ` reads the register directly,
+  removing the NZCV def-use and the scheduling constraint it imposes.
 * Soundness: `CBZ`/`CBNZ` does not write NZCV, but `CMP Rn, #0`
   writes all four flags. Folding is unsound if subsequent code
   reads N, C, or V (e.g. `ADCS`, `CSEL`, `B.LT`, `CCMP`). armlint
@@ -115,6 +127,8 @@ code, and documents corners of the A64 instruction set.
   existing CMP/TST pending slot, which is sufficient because the
   sign-only and EQ/NE conditions are mutually exclusive at the
   same B.cond.
+* Same win as the CMP -> CBZ fold: one fewer instruction, and the
+  branch no longer carries an NZCV dependency.
 
 ### TST single-bit + B.EQ/NE foldable into TBZ/TBNZ
 * `tst w0, #(1<<5) ; b.eq target` instead of `tbz w0, #5, target`.
@@ -125,6 +139,8 @@ code, and documents corners of the A64 instruction set.
   much shorter than `B.cond`'s 19-bit (~1 MB). The fold is
   suggested only when the target fits in the TBZ encoding.
 * Soundness: same NZCV-liveness scan as the CMP-branch check.
+* Same win as the CMP -> CBZ fold: one fewer instruction, and the
+  branch no longer carries an NZCV dependency.
 
 ### bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
 * `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the
@@ -141,6 +157,8 @@ code, and documents corners of the A64 instruction set.
   missed combine.
 * v1 requires the consumer's `Rd` and `Rn` to equal the LSL's `Rd`
   so the LSL result is dead after the rewrite.
+* Fuse win (see the LSL fold): two shifts become one bitfield op --
+  one fewer instruction, second shift off the critical path.
 
 ### shift-and-mask bitfield extraction foldable into UBFX
 * `lsr wd, ws, #n ; and wd, wd, #((1<<w)-1)` extracts bits
@@ -151,6 +169,8 @@ code, and documents corners of the A64 instruction set.
   (`immr=0` and `(N, imms)` encoding `S+1=w` ones at the
   appropriate element size); rotated/non-contiguous masks like
   `#0x6` are correctly skipped.
+* Fuse win (see the LSL fold): shift + mask become one `UBFX` --
+  one fewer instruction, the mask off the critical path.
 
 ### mask-and-shift bitfield extraction foldable into UBFX
 * The opposite ("mask then shift-right") order from the check above.
@@ -174,6 +194,8 @@ code, and documents corners of the A64 instruction set.
   e.g. `0x0f0f0f0f`) and rotated masks that wrap the top of the
   register leave a gap and are skipped. `ANDS` (flag-setting) is
   excluded -- dropping it would lose the NZCV write.
+* Fuse win (see the LSL fold): mask + shift become one `UBFX` --
+  one fewer instruction, the shift off the critical path.
 
 ### redundant zero-extension after a producer that already zeroed those bits
 * Generalises the previous "redundant UXTW after W-form ALU" rule
@@ -282,6 +304,12 @@ code, and documents corners of the A64 instruction set.
   `LDP Wt1, Wt2, [Rn, #imm7*4]`. Analogous for stores ->
   `STP`. Both W- and X-form supported; load+load and store+store
   only (no mixing).
+* Why it helps: one paired access replaces two single ones -- halving
+  the load/store instruction count (decode/issue slots, code size) and,
+  on most cores, the number of memory micro-ops. This is the inverse of
+  the LDP-with-writeback caveat noted for the post-index fold: the plain
+  pair forms are a win, whereas pairing *with* writeback can cost extra
+  micro-ops on Apple cores.
 * v1 supports only the unsigned-offset form. The scaled imm12
   guarantees natural alignment to the access size, which the LDP
   encoding requires. `LDUR` (unscaled) and pre-/post-indexed forms
@@ -401,6 +429,10 @@ code, and documents corners of the A64 instruction set.
   (power-of-2 multiplier). Same for W-form.
 * `mov xc, #(2^N + 1) ; mul xd, xa, xc` instead of
   `add xd, xa, xa, lsl #N`.
+* Why it helps: the multiply runs on a dedicated, multi-cycle,
+  limited-throughput pipe (~3-4 cycle latency), whereas `LSL`/`ADD` are
+  single-cycle on any ALU pipe -- lower latency, and the multiplier is
+  left free for other work.
 * Reuses the MOVZ/MOVK chain state, so wide constants assembled
   via `MOVZ + MOVK` (e.g. `2^16 + 1`) are caught too. The MOV's
   width must match the MUL's. MUL is the canonical alias for
@@ -433,7 +465,8 @@ code, and documents corners of the A64 instruction set.
 * Direct symmetric counterpart to the MUL strength reduction.
   `MNEG Rd, Rn, Rm` is the canonical alias for
   `MSUB Rd, Rn, Rm, ZR`; same MOV-chain plumbing applies, including
-  the dead-constant caveat noted under the MUL check.
+  the dead-constant caveat and the multiplier-avoidance win noted under
+  the MUL check.
 * `mov xc, #1 ; mneg xd, xa, xc` -> `neg xd, xa`
 * `mov xc, #(1<<N) ; mneg xd, xa, xc` -> `neg xd, xa, lsl #N`
 * `mov xc, #(2^N - 1) ; mneg xd, xa, xc` -> `sub xd, xa, xa, lsl #N`
@@ -452,6 +485,10 @@ code, and documents corners of the A64 instruction set.
 * `mov xc, #(1<<N) ; udiv xd, xn, xc` -> `lsr xd, xn, #N`. Same
   MOV-chain plumbing as the MUL/MNEG checks, including the
   dead-constant caveat.
+* Why it helps: integer division is one of the slowest A64 operations
+  -- data-dependent and poorly pipelined (often ~10-20+ cycles, low
+  throughput) -- whereas `LSR` is a single-cycle ALU op on any pipe.
+  This is the largest per-hit win among the strength reductions.
 * UDIV is not commutative, so only the divisor (Rm) coming from
   the MOV chain enables the fold; an Rn-from-MOV match would be a
   reciprocal-multiply problem, not a shift. Non-pow2 divisors have
@@ -544,6 +581,10 @@ code, and documents corners of the A64 instruction set.
   libgkcodecs 1; 0 in kubectl/docker/dyld/git/python3/openssl.
   Compilers reliably fuse MUL+ADD into MADD; the residual hits
   are in code paths where the optimizer didn't see the data flow.
+* Fuse win (a "producer into consumer" fold, see the LSL fold):
+  `MADD`/`MSUB` has the same latency as the bare multiply, so the fold
+  removes the dependent `ADD`/`SUB` essentially for free, plus one
+  instruction.
 
 ### SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
 * The widening (32x32 -> 64) analogue of the MUL+ADD check.
@@ -570,6 +611,9 @@ code, and documents corners of the A64 instruction set.
 * Hit density mirrors the MUL+ADD check (low; compilers usually fuse
   widening multiply-accumulates), so the residual cases are where
   the optimizer didn't connect the multiply to the accumulation.
+* Fuse win: same as `MUL + ADD -> MADD` above -- `SMADDL`/`UMADDL` has
+  the latency of the widening multiply, so the dependent add is removed
+  essentially for free, plus one instruction.
 
 ### NEG + ADD/SUB foldable to SUB/ADD
 * `neg xt, xs ; add xd, xc, xt` -> `sub xd, xc, xs`. The ADD is
@@ -586,6 +630,9 @@ code, and documents corners of the A64 instruction set.
 * S-variants (ADDS/SUBS, NEGS) are skipped: flag definitions
   differ between the original and the rewrite. Widths must match
   (both W or both X). NEG of XZR (computes 0) is excluded.
+* Fuse win (see the LSL fold): the negate is absorbed into the
+  consumer's sign -- one fewer instruction, the `NEG` off the critical
+  path.
 
 ### MVN + AND/ORR/EOR foldable to BIC/ORN/EON
 * The logical-op counterpart of the NEG fold. `mvn wt, ws` (bitwise
@@ -610,6 +657,9 @@ code, and documents corners of the A64 instruction set.
 * Modern compilers usually emit `BIC`/`ORN`/`EON` directly, so
   expect low hit density -- residuals appear where the optimizer
   materialized the complement into a temporary first.
+* Fuse win (see the LSL fold): the `MVN` is absorbed into the
+  consumer's negated-operand form -- one fewer instruction, the `MVN`
+  off the critical path.
 
 ### ADD + LDR foldable to register-offset LDR
 * `add xt, xn, xm{, lsl #s} ; ldr xt, [xt]` ->
