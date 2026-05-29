@@ -253,6 +253,22 @@ struct armlint_state {
     size_t mvn_pending_offset;
     char mvn_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending standalone extend (UXTB/UXTH/SXTB/SXTH/SXTW) Rt, Rs
+    // awaiting an adjacent ADD/SUB (shifted-register, LSL #0) consumer
+    // whose Rd overwrites Rt and one of whose sources is Rt -- the pair
+    // folds into the consumer's extended-register form (the extend, and
+    // optional shift, ride on the consumer's Rm). ADD/ADDS commute so Rt
+    // may be in either source slot; SUB/SUBS need it in Rm. The producer
+    // form (W vs X) must match the consumer's. ext_pending_option is the
+    // ADD/SUB extend option (0 UXTB, 1 UXTH, 4 SXTB, 5 SXTH, 6 SXTW).
+    bool ext_pending;
+    bool ext_pending_is_64bit;
+    unsigned ext_pending_rd;
+    unsigned ext_pending_rs;
+    unsigned ext_pending_option;
+    size_t ext_pending_offset;
+    char ext_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending X-form ADD (shifted-register, LSL #s, non-S-variant)
     // awaiting an adjacent unsigned-offset LDR consumer whose base
     // register and destination register both equal Rd of the ADD. The
@@ -491,6 +507,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->wmul_pending = false;
     state->neg_pending = false;
     state->mvn_pending = false;
+    state->ext_pending = false;
     state->add_pending = false;
     state->addi_pending = false;
     state->lspi_pending = false;
@@ -3899,6 +3916,142 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// ADD/SUB extended-register "option" field names, indexed by the 3-bit
+// option (bits 15..13). UXTX/SXTX (011/111) are the LSL forms and are
+// not produced here.
+static const char *const extend_option_name[8] = {
+    "uxtb", "uxth", "uxtw", "uxtx", "sxtb", "sxth", "sxtw", "sxtx"
+};
+
+// Decode a standalone extend that the extended-register ADD/SUB form can
+// absorb: SXTB/SXTH (W or X form) and SXTW (X form), or W-form UXTB/UXTH.
+// Returns the ADD/SUB extend option, the producer's destination form
+// (W=false, X=true; it must match the consumer), and Rd/Rn (Rn is the
+// source, always read as a W register by these extends).
+//
+// A standalone 32->64 zero-extend (UXTW) is normally a W-register MOV,
+// not a literal instruction, so the X-form UBFM zero-extend is not
+// matched; only the W-form UXTB/UXTH are taken.
+static bool decode_extend_producer(uint32_t op, unsigned *out_option,
+                                   bool *out_is_64bit, unsigned *out_rd,
+                                   unsigned *out_rn)
+{
+    unsigned s, w, c, rd, rn;
+    if (decode_sbfm_sext(op, &s, &w, &rd, &rn)) {
+        // SXTB (s=8), SXTH (s=16), SXTW (s=32).
+        *out_option = (s == 8u) ? 4u : (s == 16u ? 5u : 6u);
+        *out_is_64bit = (w == 64u);
+        *out_rd = rd;
+        *out_rn = rn;
+        return true;
+    }
+    if (decode_ubfm_zext(op, &c, &rd, &rn) && (c == 8u || c == 16u)
+            && ((op >> 31) & 1u) == 0u) {
+        // W-form UXTB (c=8) / UXTH (c=16).
+        *out_option = (c == 8u) ? 0u : 1u;
+        *out_is_64bit = false;
+        *out_rd = rd;
+        *out_rn = rn;
+        return true;
+    }
+    return false;
+}
+
+bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->ext_pending = false;
+        return false;
+    }
+
+    uint32_t op = (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+
+    bool produced = false;
+
+    // (1) Try to close: an ADD/SUB (shifted-register, LSL #0) consuming
+    //     the pending extend? The extended-register form extends the
+    //     consumer's Rm, so the extend result must be Rm (any consumer)
+    //     or Rn (commutative ADD/ADDS only, swapped to Rm). The other
+    //     source must not also be the extend's Rd (a self-op otherwise).
+    if (state->ext_pending) {
+        unsigned sf, rd, rn, rm;
+        bool is_sub, is_s;
+        if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                        &rd, &rn, &rm)
+                && ((sf != 0) == state->ext_pending_is_64bit)) {
+            unsigned t = state->ext_pending_rd;
+            bool valid = false;
+            unsigned indep = 0;
+            if (rd == t && t != 31) {
+                if (rm == t && rn != t) {
+                    valid = true;
+                    indep = rn;
+                } else if (!is_sub && rn == t && rm != t) {
+                    valid = true;
+                    indep = rm;
+                }
+            }
+
+            if (valid) {
+                char w_or_x = state->ext_pending_is_64bit ? 'x' : 'w';
+                const char *mnem = is_sub ? (is_s ? "subs" : "sub")
+                                          : (is_s ? "adds" : "add");
+                const char *ext =
+                    extend_option_name[state->ext_pending_option];
+
+                out->name =
+                    "extend + ADD/SUB foldable to extended-register form";
+                out->start_offset = state->ext_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                // The extended operand is always a W register (UXTB
+                // through SXTW all source 32 bits or fewer).
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %c%u, w%u, %s",
+                    mnem, w_or_x, rd, w_or_x, indep,
+                    state->ext_pending_rs, ext);
+
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->ext_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, %c%u, %c%u",
+                    mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->ext_pending = false;
+    }
+
+    // (2) Try to open: is this a standalone extend?
+    unsigned e_option, e_rd, e_rn;
+    bool e_is_64;
+    if (decode_extend_producer(op, &e_option, &e_is_64, &e_rd, &e_rn)) {
+        // Rd = 31 writes ZR (dead); Rn = 31 extends ZR (= 0, degenerate).
+        if (e_rd != 31 && e_rn != 31) {
+            state->ext_pending = true;
+            state->ext_pending_is_64bit = e_is_64;
+            state->ext_pending_rd = e_rd;
+            state->ext_pending_rs = e_rn;
+            state->ext_pending_option = e_option;
+            state->ext_pending_offset = offset;
+            char pw = e_is_64 ? 'x' : 'w';
+            snprintf(state->ext_pending_disasm,
+                sizeof(state->ext_pending_disasm),
+                "%s %c%u, w%u",
+                extend_option_name[e_option], pw, e_rd, e_rn);
+        }
+    }
+
+    return produced;
+}
+
 // Decode unsigned-offset STR (any size: B/H/W/X), integer-register
 // form only. Mask 0x3FC00000 covers bits 29..22 (the LDR/STR opcode
 // block plus V bit and opc bits). Value 0x39000000 fixes V=0,
@@ -4976,6 +5129,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,
     check_mvn_logic_fold,
+    check_extend_add_sub_fold,
     check_add_ldr_register_offset,
     check_add_ldr_imm_offset,
     check_ldr_str_add_post_indexed,

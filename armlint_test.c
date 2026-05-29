@@ -4580,6 +4580,112 @@ static void test_mvn_logic_fold(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+static void test_extend_add_sub_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positives. --
+
+    // sxtw x0, w1 ; add x0, x3, x0  -> add x0, x3, w1, sxtw (Rm slot).
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Rn slot (ADD commutes): sxtw x0, w1 ; add x0, x0, x3.
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 0, 0, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB (Rm slot only): sxtw x0, w1 ; sub x0, x3, x0.
+    sxtw_x(&code[0], 0, 1);
+    sub_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form sign extends: SXTB, SXTH.
+    sxtb_w(&code[0], 0, 1);
+    add_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+    sxth_w(&code[0], 0, 1);
+    add_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form zero extends: UXTB, UXTH.
+    uxtb_w(&code[0], 0, 1);
+    add_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+    uxth_w(&code[0], 0, 1);
+    add_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form sign extends: SXTB Xd, SXTH Xd.
+    sxtb_x(&code[0], 0, 1);
+    add_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+    sxth_x(&code[0], 0, 1);
+    add_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Flag-setting consumer: sxtw x0, w1 ; adds x0, x3, x0 -> adds ...
+    // sxtw (the extended-register ADDS exists and sets the same flags).
+    sxtw_x(&code[0], 0, 1);
+    encode_sr(&code[4], 0xAB000000u, 0, 3, 0);  // adds x0, x3, x0
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // Rd != extend dest (the extended value would still be live).
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 2, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Consumer does not read the extend dest.
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 2, 3, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB with the extend result in Rn (SUB does not commute).
+    sxtw_x(&code[0], 0, 1);
+    sub_x(&code[4], 0, 0, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Both consumer sources are the extend dest (add x0, x0, x0): not a
+    // single extended-register form, must not fire.
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 0, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch: W-form extend, X-form consumer.
+    sxtb_w(&code[0], 0, 1);
+    add_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Consumer carries a shift (imm6 != 0): add x0, x3, x0, lsl #1.
+    sxtw_x(&code[0], 0, 1);
+    {
+        uint32_t op = 0x8B000000u | (0u << 16) | (1u << 10)
+            | (3u << 5) | 0u;   // add x0, x3, x0, lsl #1
+        write_le32(&code[4], op);
+    }
+    assert(run_helper_check(code, 8) == 0);
+
+    // Extend dest = ZR (Rd=31) does not open: without the guard this
+    // would fold `add xzr, x3, xzr` to `add xzr, x3, w1, sxtw`.
+    sxtw_x(&code[0], 31, 1);
+    add_x(&code[4], 31, 3, 31);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Extend of ZR (Rn=31, = 0) is degenerate, not opened.
+    sxtw_x(&code[0], 0, 31);
+    add_x(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending extend.
+    sxtw_x(&code[0], 0, 1);
+    movz_x(&code[4], 5, 1, 0);
+    add_x(&code[8], 0, 3, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // Encode ADD (immediate), X-form, with the sh bit set (imm12 << 12).
 // Base 0x91000000 carries sf=1, op=0, S=0; OR 0x00400000 sets sh=1.
 static void add_x_imm_sh(uint8_t out[4], unsigned rd, unsigned rn,
@@ -5101,6 +5207,7 @@ int main(void)
     test_widening_mul_add_sub_fold();
     test_neg_add_sub_fold();
     test_mvn_logic_fold();
+    test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_add_ldr_imm_offset();
     test_ldr_str_add_post_indexed();

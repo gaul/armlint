@@ -1,0 +1,25 @@
+extend + ADD/SUB foldable to extended-register form at offset: 0x0: -> add x0, x3, w1, sxtw (2 instructions)
+  sxtw x0, w1
+  add x0, x3, x0
+
+extend + ADD/SUB foldable to extended-register form at offset: 0x8: -> add x0, x3, w1, sxtw (2 instructions)
+  sxtw x0, w1
+  add x0, x0, x3
+
+extend + ADD/SUB foldable to extended-register form at offset: 0x10: -> sub x0, x3, w1, sxtw (2 instructions)
+  sxtw x0, w1
+  sub x0, x3, x0
+
+extend + ADD/SUB foldable to extended-register form at offset: 0x18: -> add w0, w3, w1, sxtb (2 instructions)
+  sxtb w0, w1
+  add w0, w3, w0
+
+extend + ADD/SUB foldable to extended-register form at offset: 0x20: -> add w0, w3, w1, uxtb (2 instructions)
+  uxtb w0, w1
+  add w0, w3, w0
+
+extend + ADD/SUB foldable to extended-register form at offset: 0x28: -> add x0, x3, w1, sxtb (2 instructions)
+  sxtb x0, w1
+  add x0, x3, x0
+
+6 errors

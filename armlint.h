@@ -447,6 +447,27 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
 bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Extend-analogue of the LSL fold. Detect a standalone extend
+// (UXTB/UXTH (W-form), SXTB/SXTH (W or X), SXTW (X)) immediately
+// followed by an ADD/SUB (shifted-register, LSL #0) that consumes its
+// destination. The pair folds into the consumer's extended-register
+// form, where the extend rides on the consumer's Rm:
+//   sxtw x0, w1 ; add x0, x3, x0 -> add x0, x3, w1, sxtw
+//   uxtb w0, w1 ; sub w0, w3, w0 -> sub w0, w3, w1, uxtb
+// ADD/ADDS commute, so the extend result may be in Rn or Rm; SUB/SUBS
+// need it in Rm. The extended operand is always rendered as a W
+// register (these extends source 32 bits or fewer).
+//
+// Soundness (conservative, mirrors the LSL fold): Rd of the consumer
+// must equal the extend's Rd (so the extended value is dead), the other
+// source operand must not also be it, and the producer form (W vs X)
+// must match the consumer's -- this keeps the extend semantics
+// identical without per-case width reasoning. Extend of/into ZR is
+// excluded. The standalone 32->64 zero-extend (UXTW, normally a W MOV)
+// is not matched as a producer.
+bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out);
+
 // Detect an X-form ADD (shifted-register, LSL #s, non-S-variant)
 // immediately followed by an unsigned-offset LDR with imm12 = 0
 // whose base register and destination register both equal Rd of the

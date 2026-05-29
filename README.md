@@ -46,6 +46,41 @@ code, and documents corners of the A64 instruction set.
   form cannot express, and a naive rewrite would read a stale pre-LSL
   value for the second operand.
 
+### extend foldable into shifted/extended-register form
+* The extend counterpart of the LSL fold: where that absorbs a shift,
+  this absorbs an extension. A standalone `UXTB`/`UXTH` (W-form),
+  `SXTB`/`SXTH` (W or X), or `SXTW` (X) feeding an `ADD`/`SUB` folds
+  into the consumer's extended-register form, where the extend (and an
+  optional shift) ride on the consumer's Rm:
+  * `sxtw x0, w1 ; add x0, x3, x0` -> `add x0, x3, w1, sxtw`
+  * `uxtb w0, w1 ; sub w0, w3, w0` -> `sub w0, w3, w1, uxtb`
+  The extended operand is always rendered as a `W` register, since
+  these extends source 32 bits or fewer.
+* What you actually save: one instruction (4 bytes, a decode slot,
+  I-cache), and -- unlike the pre-/post-index LDR/STR folds, which are
+  backend-neutral -- usually a cycle of latency. The extended-register
+  ADD/SUB performs the extension in the ALU's operand path, so two
+  *dependent* ops (extend, then add) collapse to one, shortening the
+  dependency chain. (A few cores route extended/shifted ADD to a
+  slightly slower pipe, but the single op is still no slower than the
+  original pair.) It also frees the scratch register that held the
+  extended value. Hit density is low in `-O2` output -- this is the
+  array-indexing idiom (`base + (int64)i`), which compilers almost
+  always emit pre-fused as `add x, base, w, sxtw #scale`; residuals
+  appear where the optimizer didn't connect the extend to its use, and
+  in hand-written assembly.
+* `ADD`/`ADDS` commute, so the extend result may be in the consumer's
+  Rn or Rm slot (it is swapped to Rm); `SUB`/`SUBS` only fold when it
+  is already Rm.
+* Conservative soundness (mirrors the LSL fold): Rd of the consumer
+  must equal the extend's destination (so the extended value is dead),
+  the other source operand must not also be it, and the producer form
+  (W vs X) must match the consumer's -- which keeps the extend
+  semantics identical without per-case width reasoning. Extend of, or
+  into, ZR is excluded. The standalone 32->64 zero-extend `UXTW` is not
+  matched as a producer: it is normally a `W`-register `MOV` (a `W`
+  write already zeros the upper half), not a literal instruction.
+
 ### compare-zero branch foldable into CBZ/CBNZ
 * `cmp w0, #0 ; b.eq target` instead of `cbz w0, target`. Same for
   `b.ne` -> `cbnz`. Also matches the equivalent zero-test idioms
