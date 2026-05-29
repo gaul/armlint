@@ -458,6 +458,19 @@ static void clear_finding_strings(armlint_finding *out)
     }
 }
 
+// Assemble the little-endian 4-byte A64 instruction word. Every check
+// decodes from the raw bytes (rather than Capstone's parsed fields) to
+// avoid ambiguity from alias selection; this centralizes that assembly.
+// Callers guard insn->size == 4 first; the cs_insn byte buffer is always
+// large enough to read four bytes regardless.
+static uint32_t insn_word(const cs_insn *insn)
+{
+    return (uint32_t)insn->bytes[0]
+        | ((uint32_t)insn->bytes[1] << 8)
+        | ((uint32_t)insn->bytes[2] << 16)
+        | ((uint32_t)insn->bytes[3] << 24);
+}
+
 static bool mov_close(armlint_state *state, armlint_finding *out)
 {
     if (!state->mov_active) {
@@ -571,10 +584,7 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
         return mov_close(state, out);
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool is_move_wide = (op & 0x1f800000u) == 0x12800000u;
     if (!is_move_wide) {
@@ -752,10 +762,7 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Try to close: is this instruction a shifted-register consumer
     //     of the pending LSL?
@@ -917,10 +924,7 @@ bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: is this LSR/ASR Rd, Rd, #b consuming the pending LSL?
     if (state->bsx_active) {
@@ -1006,10 +1010,7 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: AND Rd, Rd, #(1<<w)-1 consuming the pending LSR?
     if (state->lra_active) {
@@ -1157,10 +1158,7 @@ bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: LSR Rd, Rd, #n consuming the pending AND? The LSR must
     //     read and write the AND's destination (Rd == Rn == alr_rd).
@@ -1256,10 +1254,7 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: LSL Rd, Rd, #n consuming the pending AND-low-mask / LSR?
     if (state->aul_active) {
@@ -1581,10 +1576,7 @@ bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
         state->pending_active = false;
         return false;
     }
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
     return advance_one_pending(op, &state->pending_active,
                                &state->pending_window,
                                &state->pending_finding, out);
@@ -1598,10 +1590,7 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
         state->pending_sv_active = false;
         return false;
     }
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
     return advance_one_pending(op, &state->pending_sv_active,
                                &state->pending_sv_window,
                                &state->pending_sv_finding, out);
@@ -1617,10 +1606,7 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: is this a B.EQ/B.NE (CBZ/CBNZ form) or B.MI/PL/LT/GE
     //     (sign-bit TBZ/TBNZ form) consuming the pending CMP?
@@ -1774,10 +1760,7 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Stage 3: B.EQ/B.NE consuming the sv+cmp chain?
     if (state->sv_cmp_active) {
@@ -1890,10 +1873,7 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: is this a B.EQ/B.NE consuming the pending TST?
     if (state->tst_active) {
@@ -2134,10 +2114,7 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: is this a UBFM/AND-imm/MOV-self consumer that clears
     //     bits already known zero?
@@ -2297,10 +2274,7 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (1) Close: is this a SXT consumer (sign re-extension), or a
     //     zero-extension consumer that masks the sign-extension?
@@ -2398,10 +2372,7 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -2544,10 +2515,7 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     unsigned sf, rd, rn;
     const char *mnem;
@@ -2620,10 +2588,7 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // CSEL: sf | 0 | 0 | 11010100 | Rm | cond | 00 | Rn | Rd. op2
     // (bits 11..10) = 00 distinguishes CSEL from CSINC (01), CSINV
@@ -2717,10 +2682,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // Categorize the current instruction.
     unsigned width = 0, and_rd = 0, and_rn = 0;
@@ -2869,10 +2831,7 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     unsigned sf, rd, rn, rm;
     if (!decode_mul(op, &sf, &rd, &rn, &rm)) {
@@ -3015,10 +2974,7 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     unsigned sf, rd, rn, rm;
     if (!decode_mneg(op, &sf, &rd, &rn, &rm)) {
@@ -3166,10 +3122,7 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     unsigned sf, rd, rn, rm;
     if (!decode_udiv(op, &sf, &rd, &rn, &rm)) {
@@ -3303,10 +3256,7 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     unsigned sf, rd, rn, rm;
     bool is_sub, is_s;
@@ -3473,10 +3423,7 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     unsigned sf, opc, rd, rn, rm;
     if (!decode_logic_shifted_lsl0(op, &sf, &opc, &rd, &rn, &rm)) {
@@ -3588,10 +3535,7 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -3714,10 +3658,7 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -3839,10 +3780,7 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -3960,10 +3898,7 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -4100,10 +4035,7 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -4264,10 +4196,7 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // (a) STR (any size, unsigned-offset) with Rt == mov_rd.
     {
@@ -4474,10 +4403,7 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool is_load = false, is_64bit = false, is_sext = false;
     unsigned imm12, rn, rt;
@@ -4697,10 +4623,7 @@ bool check_add_ldr_register_offset(armlint_state *state,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -4818,10 +4741,7 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -4910,10 +4830,7 @@ bool check_add_ldr_imm_offset(armlint_state *state,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -5019,10 +4936,7 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -5169,10 +5083,7 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     bool produced = false;
 
@@ -5294,10 +5205,7 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    uint32_t op = (uint32_t)insn->bytes[0]
-        | ((uint32_t)insn->bytes[1] << 8)
-        | ((uint32_t)insn->bytes[2] << 16)
-        | ((uint32_t)insn->bytes[3] << 24);
+    uint32_t op = insn_word(insn);
 
     // X-form MOV Xd, Xm = ORR Xd, XZR, Xm with shift=LSL #0. Base
     // 0xAA0003E0 carries sf=1, opc=01 (ORR), class=01010, shift=LSL,
