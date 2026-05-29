@@ -5,6 +5,9 @@ soundness, and what each rewrite saves. See the
 [README](README.md) for an at-a-glance table and the project's
 design and soundness model.
 
+Throughout, `datasize` is the operand width in bits: 32 for the W-form,
+64 for the X-form.
+
 ## suboptimal MOVZ/MOVK sequence
 
 * `movz w0, #0x6666 ; movk w0, #0x6666, lsl #16` instead of
@@ -140,7 +143,7 @@ design and soundness model.
     bits below `a-b` zeroed. With `asr` it folds to `sbfiz`
     (sign-extending the high bits from `ws[datasize-a-1]`).
   * Same for X-form.
-* v1 requires the consumer's `Rd` and `Rn` to equal the LSL's `Rd`
+* Currently requires the consumer's `Rd` and `Rn` to equal the LSL's `Rd`
   so the LSL result is dead after the rewrite.
 * Fuse win (see the LSL fold): two shifts become one bitfield op --
   one fewer instruction, second shift off the critical path.
@@ -224,7 +227,7 @@ design and soundness model.
   w0,w0`, `ldrb w8,[x9] ; and w8,w8,#0xff`. Counter-example (`P >
   C`, not flagged): `ldr w0,[x1] ; uxth w0,w0` -- LDR W loads 32
   valid bits, so UXTH would actually clear bits 31..16.
-* v1 still requires `Rd == Rn == producer.Rd` so the consumer is
+* Currently requires `Rd == Rn == producer.Rd` so the consumer is
   purely dead. Producer set covers all W-form DP classes (`ADD/SUB`
   immediate/shifted/extended, logical immediate, `MOVZ/MOVN/MOVK`,
   bitfield `SBFM/BFM/UBFM`, `EXTR`, logical shifted register,
@@ -322,7 +325,7 @@ design and soundness model.
   the LDP-with-writeback caveat noted for the post-index fold: the plain
   pair forms are a win, whereas pairing *with* writeback can cost extra
   micro-ops on Apple cores.
-* v1 supports only the unsigned-offset form. The scaled imm12
+* Currently supports only the unsigned-offset form. The scaled imm12
   guarantees natural alignment to the access size, which the LDP
   encoding requires. `LDUR` (unscaled) and pre-/post-indexed forms
   are deferred: their byte offsets aren't constrained to be a
@@ -421,7 +424,7 @@ design and soundness model.
   -- the S-variant ALU already set `Z = (Rd == 0)`, so the `CMP/TST`
   is recomputing the same `Z`. The `B.EQ/B.NE` can read the
   S-variant's flags directly; the `CMP/TST` is dead.
-* v1 requires the full three-instruction window: S-variant
+* Currently requires the full three-instruction window: S-variant
   immediately followed by `CMP Rd, #0` / `CMP Rd, ZR` / `TST Rd, Rd`,
   immediately followed by `B.EQ`/`B.NE`. The same forward
   NZCV-liveness scan as the CMP+B.cond check confirms that
@@ -520,7 +523,7 @@ design and soundness model.
   `Rn == mov_rd` would need a reverse-subtract that AArch64 lacks.
   Width of the MOV chain must match the consumer's.
 * `C == 0` is excluded (the no-op / MOV-to-Rn case is covered by
-  check_add_sub_zero); `ZR` as the non-MOV operand is excluded
+  `check_add_sub_zero`); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
 
 ## MOV + AND/ORR/EOR/ANDS foldable to bitmask immediate
@@ -786,7 +789,7 @@ design and soundness model.
   `Rn`). Rt == Rn writeback is rejected (UNPREDICTABLE / CONSTRAINED
   UNPREDICTABLE), except when Rn == 31 (Rn means SP, Rt means XZR;
   distinct registers).
-* Cross-check interaction with [check_add_ldr_imm_offset]: when
+* Cross-check interaction with `check_add_ldr_imm_offset`: when
   Rt == Rn == ADD's Rd, that earlier check fires instead and folds
   to the unsigned-offset form (no writeback) -- but only for `ADD`,
   since the unsigned-offset form has no negative immediate, so a

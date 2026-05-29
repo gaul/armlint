@@ -193,8 +193,7 @@ Optimization opportunities by type:
 ```
 
 Pass `-v` to also print each opportunity -- its one-line summary plus
-the offending instructions (the form shown in the integration fixtures
-below) -- ahead of the summary:
+the offending instructions, as shown below -- ahead of the summary:
 
 ```console
 $ ./armlint -v /bin/ls
