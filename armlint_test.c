@@ -1635,6 +1635,65 @@ static void and_x_highmask(uint8_t out[4], unsigned rd, unsigned rn,
     write_le32(out, op);
 }
 
+// AND Xd, Xn, #~(((1<<w)-1)<<lsb): clears a w-bit field at position lsb.
+// The set bits form a (64-w)-run; sf=1, N=1, imms=63-w, immr rotated so
+// the cleared gap sits at lsb. (lsb=0 reduces to and_x_highmask.)
+static void and_x_field_clear(uint8_t out[4], unsigned rd, unsigned rn,
+                              unsigned lsb, unsigned w)
+{
+    unsigned imms = 63u - w;
+    unsigned immr = (64u - w - lsb) & 0x3Fu;
+    uint32_t op = 0x92400000u
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// AND Wd, Wn, #~(((1<<w)-1)<<lsb), W-form: sf=0, N=0, imms=31-w,
+// immr=(32-w-lsb) mod 32.
+static void and_w_field_clear(uint8_t out[4], unsigned rd, unsigned rn,
+                              unsigned lsb, unsigned w)
+{
+    unsigned imms = 31u - w;
+    unsigned immr = (32u - w - lsb) & 0x1Fu;
+    uint32_t op = 0x12000000u
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// UBFIZ Xd, Xn, #lsb, #w: UBFM (sf=1, N=1) with immr=64-lsb, imms=w-1.
+static void ubfiz_x(uint8_t out[4], unsigned rd, unsigned rn,
+                    unsigned lsb, unsigned w)
+{
+    unsigned immr = (64u - lsb) & 0x3Fu;
+    unsigned imms = w - 1u;
+    uint32_t op = 0xD3400000u
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// UBFIZ Wd, Wn, #lsb, #w: UBFM (sf=0, N=0) with immr=32-lsb, imms=w-1.
+static void ubfiz_w(uint8_t out[4], unsigned rd, unsigned rn,
+                    unsigned lsb, unsigned w)
+{
+    unsigned immr = (32u - lsb) & 0x1Fu;
+    unsigned imms = w - 1u;
+    uint32_t op = 0x53000000u
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
 // AND Wd, Wn, #0x6 (mask 0b110 -- not contiguous-low). Used to verify
 // the decoder rejects non-low-run masks.
 static void and_w_non_contig_lo(uint8_t out[4], unsigned rd, unsigned rn)
@@ -2922,6 +2981,60 @@ static void test_bfxil_synth(void)
 
     orr_w(&code[0], 0, 0, 5);
     assert(run_helper_check(code, 4) == 0);
+
+    // ===== BFI generalization (field at lsb > 0). =====
+
+    // -- Positive: BFI X-form. clear [8,16) ; ubfiz x2,x1,#8,#8 ; orr
+    //    x0,x0,x2 -> bfi x0, x1, #8, #8. --
+    and_x_field_clear(&code[0], 0, 0, 8, 8);
+    ubfiz_x(&code[4], 2, 1, 8, 8);
+    orr_x(&code[8], 0, 0, 2);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: reversed order (isolate first), W-form. --
+    ubfiz_w(&code[0], 4, 5, 4, 4);
+    and_w_field_clear(&code[4], 3, 3, 4, 4);
+    orr_w(&code[8], 3, 3, 4);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: ORR commuted (Rd, Rt, Rd). --
+    and_x_field_clear(&code[0], 0, 0, 8, 8);
+    ubfiz_x(&code[4], 2, 1, 8, 8);
+    orr_x(&code[8], 0, 2, 0);   // commuted
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: field reaches the top of the register (lsb+w ==
+    //    datasize). The UBFIZ encodes identically to LSL #56; the
+    //    encoding-based match still applies. --
+    and_x_field_clear(&code[0], 0, 0, 56, 8);
+    ubfiz_x(&code[4], 2, 1, 56, 8);
+    orr_x(&code[8], 0, 0, 2);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: position mismatch (clear at lsb 8, isolate at lsb 4). --
+    and_x_field_clear(&code[0], 0, 0, 8, 8);
+    ubfiz_x(&code[4], 2, 1, 4, 8);
+    orr_x(&code[8], 0, 0, 2);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: width mismatch (clear w=8, isolate w=4). --
+    and_x_field_clear(&code[0], 0, 0, 8, 8);
+    ubfiz_x(&code[4], 2, 1, 8, 4);
+    orr_x(&code[8], 0, 0, 2);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: aliasing -- Rt == Rs (isolate modifies the source). --
+    and_x_field_clear(&code[0], 0, 0, 8, 8);
+    ubfiz_x(&code[4], 1, 1, 8, 8);   // Rt == Rs == x1
+    orr_x(&code[8], 0, 0, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: isolate is not in-place clear but clear writes a
+    //    separate temp (Rd != Rn) -- not the in-place clear pattern. --
+    and_x_field_clear(&code[0], 7, 0, 8, 8);   // clear writes x7, reads x0
+    ubfiz_x(&code[4], 2, 1, 8, 8);
+    orr_x(&code[8], 7, 7, 2);
+    assert(run_helper_check(code, 12) == 0);
 }
 
 static void test_ldp_stp_coalesce(void)

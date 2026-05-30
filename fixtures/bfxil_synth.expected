@@ -8,7 +8,23 @@ BFXIL synthesis via AND-AND-ORR at offset: 0xc: -> bfxil x8, x7, #0, #16 (3 inst
   and x6, x7, #0xffff
   orr x8, x8, x6
 
+BFI synthesis via AND-UBFIZ-ORR at offset: 0x34: -> bfi x0, x1, #8, #8 (3 instructions)
+  and x0, x0, #0xffffffffffff00ff
+  ubfiz x2, x1, #8, #8
+  orr x0, x0, x2
+
+BFI synthesis via AND-UBFIZ-ORR at offset: 0x40: -> bfi w3, w5, #4, #4 (3 instructions)
+  and w3, w3, #0xffffff0f
+  ubfiz w4, w5, #4, #4
+  orr w3, w3, w4
+
+BFI synthesis via AND-UBFIZ-ORR at offset: 0x4c: -> bfi x6, x7, #56, #8 (3 instructions)
+  and x6, x6, #0xffffffffffffff
+  lsl x8, x7, #0x38
+  orr x6, x6, x8
+
 Optimization opportunities by type:
+       3  BFI synthesis via AND-UBFIZ-ORR
        2  BFXIL synthesis via AND-AND-ORR
 
-2 optimization opportunities in 14 instructions
+5 optimization opportunities in 26 instructions

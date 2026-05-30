@@ -200,19 +200,24 @@ struct armlint_state {
     bool adr_recent;
     unsigned adr_recent_rd;
 
-    // BFXIL synthesis pattern: AND Rd, Rd, #~mask ; AND Rt, Rs, #mask
-    // ; ORR Rd, Rd, Rt -> BFXIL Rd, Rs, #0, #w. The two ANDs can
-    // appear in either order; we track them independently. Both
-    // flags being set means we are waiting for the ORR. Strict
-    // adjacency: any unrecognized instruction expires both flags.
+    // BFXIL/BFI synthesis: clear a w-bit field at position lsb, isolate
+    // the same field from a source, and OR them together --
+    //   AND Rd, Rd, #~(mask<<lsb) ; <isolate Rt> ; ORR Rd, Rd, Rt
+    //     -> BFXIL Rd, Rs, #0, #w   (lsb == 0)
+    //     -> BFI   Rd, Rs, #lsb, #w (lsb >  0)
+    // The isolate is a low-mask AND (lsb == 0) or a UBFIZ (lsb > 0). The
+    // clear and isolate can appear in either order; we track them
+    // independently. Both flags set means we are waiting for the ORR.
+    // Strict adjacency: any unrecognized instruction expires both flags.
     bool bfx_clear_seen;
     bool bfx_isolate_seen;
     bool bfx_is_64bit;
     unsigned bfx_width;
-    unsigned bfx_clear_rd;     // Rd from "AND Rd, Rd, #~mask"
-    unsigned bfx_isolate_rt;   // destination of "AND Rt, Rs, #mask"
+    unsigned bfx_lsb;          // field position; 0 == BFXIL, >0 == BFI
+    unsigned bfx_clear_rd;     // Rd from "AND Rd, Rd, #~(mask<<lsb)"
+    unsigned bfx_isolate_rt;   // destination of the isolate (AND/UBFIZ)
     unsigned bfx_isolate_rn;   // Rs (the source of the bitfield)
-    size_t bfx_first_offset;   // offset of whichever AND came first
+    size_t bfx_first_offset;   // offset of whichever op came first
     char bfx_clear_disasm[ARMLINT_FINDING_LINE_LEN];
     char bfx_isolate_disasm[ARMLINT_FINDING_LINE_LEN];
 
@@ -2630,30 +2635,83 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
 // bitmask-immediate encoding for this shape has immr = imms + 1
 // (R = datasize - w, S = datasize - w - 1). Returns the width w of
 // the zero region in the low bits.
-static bool decode_and_imm_highmask(uint32_t op, unsigned *out_w,
-                                    unsigned *out_rd, unsigned *out_rn)
+// Decode UBFIZ Rd, Rn, #lsb, #w -- the zero-extending bitfield-insert
+// alias of UBFM with imms < immr. The lsb == 0 case (immr == 0) is
+// excluded: that is a plain low-mask zero-extend, matched as the
+// isolate's AND form instead. The field always fits (lsb + w <=
+// datasize) because imms < immr.
+static bool decode_ubfiz(uint32_t op, unsigned *out_sf, unsigned *out_lsb,
+                         unsigned *out_w, unsigned *out_rd, unsigned *out_rn)
 {
     unsigned sf = (op >> 31) & 1u;
-    uint32_t base = sf ? 0x92400000u : 0x12000000u;
+    uint32_t base = sf ? 0xD3400000u : 0x53000000u;   // UBFM, N == sf
     if ((op & 0xFFC00000u) != base) {
         return false;
     }
     unsigned immr = (op >> 16) & 0x3Fu;
     unsigned imms = (op >> 10) & 0x3Fu;
-    if (immr != imms + 1) {
+    if (sf == 0 && (immr > 31u || imms > 31u)) {
+        return false;       // W-form fields are in [0, 31]
+    }
+    if (immr == 0 || imms >= immr) {
+        return false;       // immr == 0 -> lsb 0 (AND form); imms >= immr -> UBFX
+    }
+    unsigned datasize = sf ? 64u : 32u;
+    *out_sf = sf;
+    *out_lsb = datasize - immr;
+    *out_w = imms + 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// Decode an AND-immediate that clears a single contiguous run of w bits
+// at position lsb (the "clear the destination field" step). The mask is
+// reconstructed to its concrete value and accepted only when the cleared
+// bits (~mask) form one unbroken, non-wrapping run; rotated/split masks
+// have no single BFI/BFXIL field and are rejected. lsb == 0 is the BFXIL
+// clear (clears the low w bits); lsb > 0 generalizes to BFI. ANDS is not
+// matched by decode_and_imm, so the flag-setting form is excluded.
+static bool decode_and_imm_field_clear(uint32_t op, unsigned *out_lsb,
+                                       unsigned *out_w, unsigned *out_rd,
+                                       unsigned *out_rn)
+{
+    unsigned sf, rd, rn;
+    uint64_t mask;
+    if (!decode_and_imm(op, &sf, &mask, &rd, &rn)) {
         return false;
     }
     unsigned datasize = sf ? 64u : 32u;
-    // Exclude all-ones (w = 0) and out-of-encoding values.
-    if (sf == 0 && imms >= 31) {
-        return false;
+    uint64_t dmask = (datasize == 64u) ? ~(uint64_t)0
+                                       : (((uint64_t)1 << datasize) - 1u);
+    uint64_t cleared = (~mask) & dmask;
+    if (cleared == 0) {
+        return false;               // clears nothing
     }
-    if (sf == 1 && imms >= 63) {
-        return false;
+    // Find the cleared run [lo, hi] and confirm it is contiguous, the
+    // same idiom the AND+LSR -> UBFX check uses for the kept run.
+    unsigned lo = 0;
+    while (lo < datasize && ((cleared >> lo) & 1u) == 0) {
+        lo++;
     }
-    *out_w = datasize - imms - 1;
-    *out_rd = op & 0x1Fu;
-    *out_rn = (op >> 5) & 0x1Fu;
+    unsigned hi = datasize - 1u;
+    while (hi > lo && ((cleared >> hi) & 1u) == 0) {
+        hi--;
+    }
+    unsigned runlen = hi - lo + 1u;
+    uint64_t runmask = (runlen >= 64u)
+        ? ~(uint64_t)0
+        : (((uint64_t)1 << runlen) - 1u) << lo;
+    if (datasize == 32u) {
+        runmask &= 0xFFFFFFFFu;
+    }
+    if (cleared != runmask) {
+        return false;               // split or wrapping run -- no single field
+    }
+    *out_lsb = lo;
+    *out_w = runlen;
+    *out_rd = rd;
+    *out_rn = rn;
     return true;
 }
 
@@ -2685,21 +2743,48 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
 
     // Categorize the current instruction.
-    unsigned width = 0, and_rd = 0, and_rn = 0;
+    unsigned width = 0, and_rd = 0, and_rn = 0, lsb = 0;
     unsigned orr_sf = 0, orr_rd = 0, orr_rn = 0, orr_rm = 0;
+    unsigned c_lsb, c_w, c_rd, c_rn;       // field-clear AND
+    unsigned l_w, l_rd, l_rn;              // low-mask isolate AND
+    unsigned u_sf, u_lsb, u_w, u_rd, u_rn; // UBFIZ isolate
     unsigned sf = (op >> 31) & 1u;
     bool is_clear = false, is_isolate = false, is_combine = false;
 
-    if (decode_and_imm_highmask(op, &width, &and_rd, &and_rn)) {
-        // CLEAR requires in-place: Rd == Rn. Excludes Rd=31.
-        if (and_rd == and_rn && and_rd != 31) {
-            is_clear = true;
-        }
-    } else if (decode_and_imm_lowmask(op, &width, &and_rd, &and_rn)) {
-        // ISOLATE: any Rd, Rn != 31.
-        if (and_rd != 31 && and_rn != 31) {
-            is_isolate = true;
-        }
+    // An AND-immediate plays one of two roles, distinguished by whether
+    // it writes in place. The clear is "AND Rd, Rd, #~(mask<<lsb)"
+    // (in-place, Rd == Rn); a low-mask isolate is "AND Rt, Rs, #mask"
+    // into a separate temp (Rd != Rn). The split matters because an
+    // in-place low-mask AND -- e.g. one whose cleared field reaches the
+    // top of the register -- matches both shapes; Rd == Rn fixes the
+    // role, since a sound isolate always needs Rt != Rs anyway. Every
+    // low-mask AND is also a field-clear shape (its high bits form a
+    // contiguous cleared run), so the clear branch is tried first and
+    // the non-in-place ones fall through to the isolate branch.
+    if (decode_and_imm_field_clear(op, &c_lsb, &c_w, &c_rd, &c_rn)
+            && c_rd == c_rn && c_rd != 31) {
+        is_clear = true;
+        lsb = c_lsb;
+        width = c_w;
+        and_rd = c_rd;
+        and_rn = c_rn;
+    } else if (decode_and_imm_lowmask(op, &l_w, &l_rd, &l_rn)
+            && l_rd != l_rn && l_rd != 31 && l_rn != 31) {
+        // Low-mask isolate keeps bits [0, w), so lsb == 0 (BFXIL).
+        is_isolate = true;
+        lsb = 0;
+        width = l_w;
+        and_rd = l_rd;
+        and_rn = l_rn;
+    } else if (decode_ubfiz(op, &u_sf, &u_lsb, &u_w, &u_rd, &u_rn)
+            && u_rd != 31 && u_rn != 31) {
+        // UBFIZ isolate positions the field at lsb > 0 (BFI).
+        is_isolate = true;
+        sf = u_sf;
+        width = u_w;
+        lsb = u_lsb;
+        and_rd = u_rd;
+        and_rn = u_rn;
     } else if (decode_orr_reg_shift0(op, &orr_sf, &orr_rd, &orr_rn,
                                      &orr_rm)) {
         is_combine = true;
@@ -2730,14 +2815,22 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
             bool alias_ok = tt != cd && tt != rs && rs != cd;
             if (combo_ok && alias_ok) {
                 char w_or_x = state->bfx_is_64bit ? 'x' : 'w';
-                out->name = "BFXIL synthesis via AND-AND-ORR";
+                unsigned lo = state->bfx_lsb;
                 out->start_offset = state->bfx_first_offset;
                 out->insn_count = 3;
                 clear_finding_strings(out);
 
-                snprintf(out->detail, sizeof(out->detail),
-                    "-> bfxil %c%u, %c%u, #0, #%u",
-                    w_or_x, cd, w_or_x, rs, state->bfx_width);
+                if (lo == 0) {
+                    out->name = "BFXIL synthesis via AND-AND-ORR";
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> bfxil %c%u, %c%u, #0, #%u",
+                        w_or_x, cd, w_or_x, rs, state->bfx_width);
+                } else {
+                    out->name = "BFI synthesis via AND-UBFIZ-ORR";
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> bfi %c%u, %c%u, #%u, #%u",
+                        w_or_x, cd, w_or_x, rs, lo, state->bfx_width);
+                }
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->bfx_clear_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -2750,11 +2843,12 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
         state->bfx_clear_seen = false;
         state->bfx_isolate_seen = false;
     } else if (is_clear) {
-        // If isolate already pending with matching width and sf, add
-        // clear to it. Otherwise reset and open fresh clear.
+        // If isolate already pending with matching field (sf, width,
+        // lsb), add clear to it. Otherwise reset and open fresh clear.
         if (state->bfx_isolate_seen
                 && state->bfx_is_64bit == (sf != 0)
-                && state->bfx_width == width) {
+                && state->bfx_width == width
+                && state->bfx_lsb == lsb) {
             state->bfx_clear_seen = true;
             state->bfx_clear_rd = and_rd;
             snprintf(state->bfx_clear_disasm,
@@ -2765,6 +2859,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
             state->bfx_clear_seen = true;
             state->bfx_is_64bit = (sf != 0);
             state->bfx_width = width;
+            state->bfx_lsb = lsb;
             state->bfx_clear_rd = and_rd;
             state->bfx_first_offset = offset;
             snprintf(state->bfx_clear_disasm,
@@ -2774,7 +2869,8 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
     } else if (is_isolate) {
         if (state->bfx_clear_seen
                 && state->bfx_is_64bit == (sf != 0)
-                && state->bfx_width == width) {
+                && state->bfx_width == width
+                && state->bfx_lsb == lsb) {
             state->bfx_isolate_seen = true;
             state->bfx_isolate_rt = and_rd;
             state->bfx_isolate_rn = and_rn;
@@ -2786,6 +2882,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
             state->bfx_isolate_seen = true;
             state->bfx_is_64bit = (sf != 0);
             state->bfx_width = width;
+            state->bfx_lsb = lsb;
             state->bfx_isolate_rt = and_rd;
             state->bfx_isolate_rn = and_rn;
             state->bfx_first_offset = offset;

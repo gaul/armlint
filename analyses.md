@@ -364,26 +364,39 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (different opcode, different sign-extension semantics). LDPSW is
   always 64-bit destination, load-only, 4-byte transfer.
 
-## BFXIL synthesis via AND-AND-ORR
+## BFXIL and BFI bitfield-insert synthesis
 
-* `AND Rd, Rd, #~mask ; AND Rt, Rs, #mask ; ORR Rd, Rd, Rt` (with
-  `mask = (1<<w)-1`, the two ANDs in either order, and the ORR's
-  second-and-third operands in either order) is equivalent to a
-  single `BFXIL Rd, Rs, #0, #w`. Both W- and X-form. The check
-  detects the 3-instruction window with strict adjacency.
-* The high-mask `AND Rd, Rd, #~mask` is identified by the
-  bitmask-immediate encoding `immr = imms + 1` (S =
-  `datasize-w-1`, R = `datasize-w`, esize = datasize). The
-  low-mask consumer reuses the existing `decode_and_imm_lowmask`
-  decoder. The ORR is logical-shifted-register with LSL #0.
-* Aliasing constraints needed for the BFXIL rewrite to be
-  semantically equivalent: `Rt != clear.Rd` (else the isolate
-  clobbers the cleared register in place), `Rt != Rs` (else the
-  isolate modifies the source -- BFXIL leaves the source
-  unchanged), and `Rs != clear.Rd` (the degenerate case where
-  Rs is the just-cleared register yields the wrong result -- the
-  original sequence zeros Rd's low bits, but BFXIL Rd, Rd, ... is
-  a no-op).
+* The "clear a field, isolate the same field from a source, OR the two
+  together" idiom collapses to a single bitfield-insert. With the field
+  at the low end it is `BFXIL`; at an arbitrary position `lsb` it is
+  `BFI`:
+  * `AND Rd, Rd, #~mask ; AND Rt, Rs, #mask ; ORR Rd, Rd, Rt`
+    -> `BFXIL Rd, Rs, #0, #w` (with `mask = (1<<w)-1`)
+  * `AND Rd, Rd, #~(mask<<lsb) ; UBFIZ Rt, Rs, #lsb, #w ; ORR Rd, Rd, Rt`
+    -> `BFI Rd, Rs, #lsb, #w`
+  The clear and isolate may appear in either order, and the ORR's
+  second-and-third operands in either order. Both W- and X-form. The
+  check detects the 3-instruction window with strict adjacency.
+* The clear is an in-place AND (`Rd == Rn`) whose mask, reconstructed to
+  its concrete value, zeros a single contiguous run of `w` bits at
+  position `lsb`; rotated or split masks have no single-field form and
+  are rejected. The isolate is either a low-mask `AND Rt, Rs, #mask`
+  (`lsb == 0`) or a `UBFIZ Rt, Rs, #lsb, #w` (`lsb > 0`); when the field
+  reaches the top of the register the UBFIZ encodes identically to `LSL`
+  and is matched the same way. The ORR is logical-shifted-register with
+  LSL #0.
+* Clear and isolate are told apart by whether the AND writes in place: a
+  clear is always `AND Rd, Rd, ...`, while a sound isolate writes a
+  separate temp. This matters because an in-place low-mask AND -- e.g.
+  one clearing a field that reaches the top bit -- matches both shapes;
+  `Rd == Rn` fixes the role.
+* Aliasing constraints needed for the rewrite to be semantically
+  equivalent: `Rt != clear.Rd` (else the isolate clobbers the cleared
+  register in place), `Rt != Rs` (else the isolate modifies the source --
+  the insert leaves `Rs` unchanged), and `Rs != clear.Rd` (the
+  degenerate case where `Rs` is the just-cleared register yields the
+  wrong result -- the original sequence zeros the field, but `BFI Rd, Rd,
+  ...` would re-read it).
 * Useful for hand-written assembly and legacy object code.
 
 ## CSEL same-operand identity (`CSEL Rd, Rn, Rn, cond`)
