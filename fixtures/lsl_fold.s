@@ -46,4 +46,27 @@ _main:
     lsl     w0, w1, #3
     add     w0, w0, w0
 
+    // Positive: LSR feeding an ADD -- the consumer's shift type
+    // carries the producer's shift.
+    lsr     x0, x1, #4
+    add     x0, x4, x0              // -> add x0, x4, x1, lsr #4
+
+    // Positive: ASR feeding a SUB.
+    asr     w8, w9, #3
+    sub     w8, w11, w8             // -> sub w8, w11, w9, asr #3
+
+    // Positive: ROR (same-register EXTR) feeding an ORR.
+    ror     w0, w1, #5
+    orr     w0, w4, w0              // -> orr w0, w4, w1, ror #5
+
+    // Negative: ROR feeding an ADD -- the arithmetic shifted-register
+    // encoding reserves shift type 11 (ROR).
+    ror     w0, w1, #5
+    add     w0, w4, w0
+
+    // Negative: EXTR with distinct sources is a funnel shift, not a
+    // rotate.
+    extr    w0, w1, w2, #5
+    orr     w0, w4, w0
+
     ret

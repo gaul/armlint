@@ -38,13 +38,19 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   some values, are not yet modeled -- the reported minimum is an
   upper bound on the true one.
 
-## LSL foldable into shifted-register form
+## shift foldable into shifted-register form
 
 * `lsl w0, w1, #3 ; add w0, w2, w0` instead of
   `add w0, w2, w1, lsl #3`. Same for SUB, AND, ORR, EOR (and
-  flag-setting variants). Conservative: only flags when the
-  consumer overwrites the LSL destination, guaranteeing the LSL
-  result is dead.
+  flag-setting variants), and for the other shift producers: LSR and
+  ASR fold the same way with the consumer carrying their shift type
+  (`lsr x0, x1, #4 ; add x0, x2, x0` -> `add x0, x2, x1, lsr #4`),
+  and a ROR -- the same-register `EXTR Rd, Rs, Rs, #n` alias -- folds
+  into the logical consumers only, because the arithmetic
+  shifted-register encoding reserves shift type 11. An EXTR with
+  distinct sources is a funnel shift and does not fold. Conservative:
+  only flags when the consumer overwrites the shift's destination,
+  guaranteeing the shifted value is dead.
 * Why the fuse helps -- shared by the "producer into its consumer"
   folds (this one; the bitfield-`UBFX`/`UBFIZ` shift/mask pairs;
   `MUL`/`SMULL` + `ADD` -> `MADD`/`SMADDL`; `NEG` + `ADD`/`SUB`;
@@ -54,24 +60,24 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   critical path -- it rides in the consumer's ALU operand instead. The
   scratch register that held the intermediate is freed too.
 * The shifted-register form carries the shift on `Rm` only. When the
-  LSL result is the consumer's `Rm`, any consumer folds. When it is the
+  shift result is the consumer's `Rm`, any consumer folds. When it is the
   consumer's `Rn`, only a commutative consumer folds, by swapping the
   two sources so the shifted value moves to `Rm`: `lsl w0, w1, #3 ;
   add w0, w0, w2` -> `add w0, w2, w1, lsl #3`. The commutative set is
   `ADD`/`ADDS`, `AND`/`ANDS`, `ORR`, `EOR`, and `EON` (bitwise XNOR,
   so `a ^ ~b == b ^ ~a`); `SUB`/`SUBS`, `BIC`/`BICS` and `ORN` are not
   symmetric in their two sources and so do not fold from the `Rn` slot.
-* The "independent" source (the one that is not the LSL result, which
-  becomes the new `Rn`) must not itself be the LSL destination. The
+* The "independent" source (the one that is not the shift result, which
+  becomes the new `Rn`) must not itself be the shift destination. The
   degenerate `lsl wt, ws, #k ; add wt, wt, wt` -- both consumer sources
-  equal to the LSL destination -- is therefore not flagged: it doubles
+  equal to the shift destination -- is therefore not flagged: it doubles
   the shifted value (`ws << (k+1)`), which the single shifted-register
-  form cannot express, and a naive rewrite would read a stale pre-LSL
+  form cannot express, and a naive rewrite would read a stale pre-shift
   value for the second operand.
 
 ## extend foldable into shifted/extended-register form
 
-* The extend counterpart of the LSL fold: where that absorbs a shift,
+* The extend counterpart of the shift fold: where that absorbs a shift,
   this absorbs an extension. A standalone `UXTB`/`UXTH` (W-form),
   `SXTB`/`SXTH` (W or X), or `SXTW` (X) feeding an `ADD`/`SUB` folds
   into the consumer's extended-register form, where the extend (and an
@@ -92,7 +98,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * `ADD`/`ADDS` commute, so the extend result may be in the consumer's
   Rn or Rm slot (it is swapped to Rm); `SUB`/`SUBS` only fold when it
   is already Rm.
-* Conservative soundness (mirrors the LSL fold): Rd of the consumer
+* Conservative soundness (mirrors the shift fold): Rd of the consumer
   must equal the extend's destination (so the extended value is dead),
   the other source operand must not also be it, and the producer form
   (W vs X) must match the consumer's -- which keeps the extend
@@ -169,8 +175,8 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
     (sign-extending the high bits from `ws[datasize-a-1]`).
   * Same for X-form.
 * Currently requires the consumer's `Rd` and `Rn` to equal the LSL's `Rd`
-  so the LSL result is dead after the rewrite.
-* Fuse win (see the LSL fold): two shifts become one bitfield op --
+  so the shift result is dead after the rewrite.
+* Fuse win (see the shift fold): two shifts become one bitfield op --
   one fewer instruction, second shift off the critical path.
 
 ## shift-and-mask bitfield extraction foldable into UBFX
@@ -183,7 +189,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (`immr=0` and `(N, imms)` encoding `S+1=w` ones at the
   appropriate element size); rotated/non-contiguous masks like
   `#0x6` are correctly skipped.
-* Fuse win (see the LSL fold): shift + mask become one `UBFX` --
+* Fuse win (see the shift fold): shift + mask become one `UBFX` --
   one fewer instruction, the mask off the critical path.
 
 ## mask-and-shift bitfield extraction foldable into UBFX
@@ -209,7 +215,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   e.g. `0x0f0f0f0f`) and rotated masks that wrap the top of the
   register leave a gap and are skipped. `ANDS` (flag-setting) is
   excluded -- dropping it would lose the NZCV write.
-* Fuse win (see the LSL fold): mask + shift become one `UBFX` --
+* Fuse win (see the shift fold): mask + shift become one `UBFX` --
   one fewer instruction, the shift off the critical path.
 
 ## mask-and-shift-left foldable into UBFIZ, or shift round-trip into a clearing AND
@@ -231,7 +237,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   -- see the two-shift check above). The `LSL` must read and write the
   producer's destination, and `ANDS` (flag-setting) is excluded by the
   low-mask decoder.
-* Fuse win (see the LSL fold): two instructions become one, with the
+* Fuse win (see the shift fold): two instructions become one, with the
   shift/mask off the critical path.
 
 ## redundant zero-extension after a producer that already zeroed those bits
@@ -618,7 +624,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   reads pre-MUL values, diverging).
 * S-variants (ADDS/SUBS) skipped: MADD/MSUB have no flag-setting
   form. Widths must match (both W or both X).
-* Fuse win (a "producer into consumer" fold, see the LSL fold):
+* Fuse win (a "producer into consumer" fold, see the shift fold):
   `MADD`/`MSUB` has the same latency as the bare multiply, so the fold
   removes the dependent `ADD`/`SUB` essentially for free, plus one
   instruction.
@@ -669,7 +675,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * S-variants (ADDS/SUBS, NEGS) are skipped: flag definitions
   differ between the original and the rewrite. Widths must match
   (both W or both X). NEG of XZR (computes 0) is excluded.
-* Fuse win (see the LSL fold): the negate is absorbed into the
+* Fuse win (see the shift fold): the negate is absorbed into the
   consumer's sign -- one fewer instruction, the `NEG` off the critical
   path.
 
@@ -694,7 +700,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (the consumer would shift the complemented value, not `ws`). `MVN`
   to ZR, and `MVN` of ZR (the all-ones `mov wd, #-1` idiom), are
   excluded.
-* Fuse win (see the LSL fold): the `MVN` is absorbed into the
+* Fuse win (see the shift fold): the `MVN` is absorbed into the
   consumer's negated-operand form -- one fewer instruction, the `MVN`
   off the critical path.
 

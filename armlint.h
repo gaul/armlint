@@ -94,18 +94,21 @@ extern const size_t armlint_check_registry_count;
 bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
-// Detect an LSL (immediate) immediately followed by an arithmetic or
-// logical shifted-register op that consumes the LSL's destination, with
-// the consumer overwriting that register. The pair can be replaced by a
-// single shifted-register form (the shift rides on the consumer's Rm).
+// Detect a shift (immediate) -- LSL/LSR/ASR, or ROR via the
+// same-register EXTR alias -- immediately followed by an arithmetic or
+// logical shifted-register op that consumes the shift's destination,
+// with the consumer overwriting that register. The pair can be
+// replaced by a single shifted-register form (the shift rides on the
+// consumer's Rm). ROR folds only into the logical consumers: the
+// arithmetic shifted-register encoding reserves shift type 11.
 //
-// The LSL result may sit in the consumer's Rm slot (any consumer) or
+// The shift result may sit in the consumer's Rm slot (any consumer) or
 // its Rn slot (commutative consumers only -- ADD/ADDS/AND/ANDS/ORR/EOR
 // and EON, which is XNOR; the fold swaps the two sources so the shifted
 // value lands on Rm). The other ("independent") source operand must not
-// also be the LSL destination: with both sources equal to it (e.g.
-// `lsl wt,ws,#k ; add wt,wt,wt`) the rewrite would read a stale pre-LSL
-// value, so that case is rejected.
+// also be the shift destination: with both sources equal to it (e.g.
+// `lsl wt,ws,#k ; add wt,wt,wt`) the rewrite would read a stale
+// pre-shift value, so that case is rejected.
 bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
 
@@ -471,7 +474,7 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
 bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
-// Extend-analogue of the LSL fold. Detect a standalone extend
+// Extend-analogue of the shift fold. Detect a standalone extend
 // (UXTB/UXTH (W-form), SXTB/SXTH (W or X), SXTW (X)) immediately
 // followed by an ADD/SUB (shifted-register, LSL #0) that consumes its
 // destination. The pair folds into the consumer's extended-register
@@ -482,7 +485,7 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
 // need it in Rm. The extended operand is always rendered as a W
 // register (these extends source 32 bits or fewer).
 //
-// Soundness (conservative, mirrors the LSL fold): Rd of the consumer
+// Soundness (conservative, mirrors the shift fold): Rd of the consumer
 // must equal the extend's Rd (so the extended value is dead), the other
 // source operand must not also be it, and the producer form (W vs X)
 // must match the consumer's -- this keeps the extend semantics

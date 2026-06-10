@@ -1,20 +1,32 @@
-LSL foldable into shifted-register form at offset: 0x0: -> add x0, x4, x1, lsl #3 (2 instructions)
+shift foldable into shifted-register form at offset: 0x0: -> add x0, x4, x1, lsl #3 (2 instructions)
   lsl x0, x1, #3
   add x0, x4, x0
 
-LSL foldable into shifted-register form at offset: 0x8: -> and x5, x7, x6, lsl #4 (2 instructions)
+shift foldable into shifted-register form at offset: 0x8: -> and x5, x7, x6, lsl #4 (2 instructions)
   lsl x5, x6, #4
   and x5, x7, x5
 
-LSL foldable into shifted-register form at offset: 0x10: -> sub w8, w11, w9, lsl #2 (2 instructions)
+shift foldable into shifted-register form at offset: 0x10: -> sub w8, w11, w9, lsl #2 (2 instructions)
   lsl w8, w9, #2
   sub w8, w11, w8
 
-LSL foldable into shifted-register form at offset: 0x34: -> add x0, x4, x1, lsl #3 (2 instructions)
+shift foldable into shifted-register form at offset: 0x34: -> add x0, x4, x1, lsl #3 (2 instructions)
   lsl x0, x1, #3
   add x0, x0, x4
 
-Optimization opportunities by type:
-       4  LSL foldable into shifted-register form
+shift foldable into shifted-register form at offset: 0x4c: -> add x0, x4, x1, lsr #4 (2 instructions)
+  lsr x0, x1, #4
+  add x0, x4, x0
 
-4 optimization opportunities in 20 instructions
+shift foldable into shifted-register form at offset: 0x54: -> sub w8, w11, w9, asr #3 (2 instructions)
+  asr w8, w9, #3
+  sub w8, w11, w8
+
+shift foldable into shifted-register form at offset: 0x5c: -> orr w0, w4, w1, ror #5 (2 instructions)
+  ror w0, w1, #5
+  orr w0, w4, w0
+
+Optimization opportunities by type:
+       7  shift foldable into shifted-register form
+
+7 optimization opportunities in 30 instructions

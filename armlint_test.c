@@ -327,8 +327,7 @@ static void lsl_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
     write_le32(out, op);
 }
 
-// LSR (immediate) -- UBFM with imms = imms_max, immr = shift. Used to
-// verify our LSL decoder does NOT mistake LSR for LSL.
+// LSR (immediate) -- UBFM with imms = imms_max, immr = shift.
 static void lsr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
 {
     uint32_t op = 0x53000000u
@@ -387,6 +386,45 @@ static void add_w_lsl1(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
     write_le32(out, op);
+}
+
+// Defined below with the other UBFM/SBFM alias encoders.
+static void lsr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
+static void asr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
+static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
+
+// EXTR Rd, Rn, Rm, #lsb. W base 0x13800000; X base 0x93C00000 (N = sf).
+static void extr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
+                   unsigned lsb)
+{
+    uint32_t op = 0x13800000u
+        | ((rm & 0x1fu) << 16)
+        | ((lsb & 0x3fu) << 10)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    write_le32(out, op);
+}
+
+static void extr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
+                   unsigned lsb)
+{
+    uint32_t op = 0x93C00000u
+        | ((rm & 0x1fu) << 16)
+        | ((lsb & 0x3fu) << 10)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    write_le32(out, op);
+}
+
+// ROR (immediate) = EXTR Rd, Rs, Rs, #shift.
+static void ror_w(uint8_t out[4], unsigned rd, unsigned rs, unsigned shift)
+{
+    extr_w(out, rd, rs, rs, shift);
+}
+
+static void ror_x(uint8_t out[4], unsigned rd, unsigned rs, unsigned shift)
+{
+    extr_x(out, rd, rs, rs, shift);
 }
 
 static void test_lsl_fold(void)
@@ -533,9 +571,61 @@ static void test_lsl_fold(void)
     lsl_w(&code[0], 0, 1, 3);
     assert(run_helper_check(code, 4) == 0);
 
-    // LSR -- different alias of UBFM; must not be misread as LSL.
+    // -- LSR/ASR/ROR producers: the same fold, with the consumer
+    //    carrying the producer's shift type. --
+
+    // lsr w0, w1, #3 ; add w0, w2, w0 -> add w0, w2, w1, lsr #3 (flag).
     lsr_w(&code[0], 0, 1, 3);
     add_w(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsr x0, x1, #4 ; add x0, x2, x0 (X-form; flag).
+    lsr_x(&code[0], 0, 1, 4);
+    add_x(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr w0, w1, #3 ; sub w0, w2, w0 -> sub w0, w2, w1, asr #3 (flag).
+    asr_w(&code[0], 0, 1, 3);
+    sub_w(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr x0, x1, #7 ; and x0, x0, x2 (Rn slot, AND commutes; flag).
+    asr_x(&code[0], 0, 1, 7);
+    and_x(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ror w0, w1, #5 ; orr w0, w2, w0 -> orr w0, w2, w1, ror #5 (flag).
+    ror_w(&code[0], 0, 1, 5);
+    orr_w(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ror x0, x1, #13 ; eor x0, x2, x0 (X-form rotate; flag).
+    ror_x(&code[0], 0, 1, 13);
+    eor_x(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: ROR + ADD -- the arithmetic shifted-register encoding
+    // reserves shift type 11 (ROR), so a rotate can ride only on a
+    // logical consumer.
+    ror_w(&code[0], 0, 1, 5);
+    add_w(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: LSR + SUB with the shift result in the Rn slot -- SUB
+    // does not commute, so the shift cannot move to Rm.
+    lsr_w(&code[0], 0, 1, 3);
+    sub_w(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: EXTR with distinct sources is a funnel shift, not a
+    // rotate -- must not open the pending state.
+    extr_w(&code[0], 0, 1, 2, 5);
+    orr_w(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: EXTR #0 (a plain register copy) is not a rotate.
+    extr_w(&code[0], 0, 1, 1, 0);
+    orr_w(&code[4], 0, 3, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Back-to-back LSLs: the first has no consumer, the second is alone.

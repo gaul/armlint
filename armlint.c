@@ -39,13 +39,17 @@ struct armlint_state {
     unsigned mov_insn_count;
     mov_entry mov_entries[MOV_CHAIN_MAX];
 
-    // LSL pending a shifted-register consumer.
-    bool lsl_active;
-    bool lsl_is_64bit;
-    unsigned lsl_rd;
-    unsigned lsl_rn;
-    unsigned lsl_shift;
-    size_t lsl_offset;
+    // Shift-immediate (LSL/LSR/ASR, or ROR via same-register EXTR)
+    // pending a shifted-register consumer. shf_type holds the
+    // consumer encoding's shift-type field value (0=LSL, 1=LSR,
+    // 2=ASR, 3=ROR).
+    bool shf_active;
+    bool shf_is_64bit;
+    unsigned shf_type;
+    unsigned shf_rd;
+    unsigned shf_rn;
+    unsigned shf_shift;
+    size_t shf_offset;
 
     // LSL pending an LSR/ASR consumer for UBFX/SBFX folding. The state
     // is tracked separately from lsl_* because that check expects a
@@ -623,13 +627,13 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
 
 bool armlint_flush(armlint_state *state, armlint_finding *out)
 {
-    // The LSL, CMP, and TST checks never produce a finding from flush
-    // alone -- an isolated LSL, CMP, or TST is not actionable -- but
+    // The shift, CMP, and TST checks never produce a finding from flush
+    // alone -- an isolated shift, CMP, or TST is not actionable -- but
     // their state must be cleared so a new region starts fresh. Any
     // pending CMP+B.EQ/NE or TST+B.EQ/NE finding is discarded too:
     // without seeing a safe stopper before end-of-region, we cannot
     // prove the fold is sound.
-    state->lsl_active = false;
+    state->shf_active = false;
     state->bsx_active = false;
     state->lra_active = false;
     state->alr_active = false;
@@ -787,13 +791,61 @@ static bool decode_lsl_imm(uint32_t op,
     return true;
 }
 
+static bool decode_lsr_imm(uint32_t op, unsigned *out_sf,
+                           unsigned *out_rd, unsigned *out_rn,
+                           unsigned *out_shift);
+static bool decode_asr_imm(uint32_t op, unsigned *out_sf,
+                           unsigned *out_rd, unsigned *out_rn,
+                           unsigned *out_shift);
+
+// Shift-type names indexed by the shifted-register encoding's
+// shift-type field (bits 23..22).
+static const char *const shift_type_name[4] = {
+    "lsl", "lsr", "asr", "ror"
+};
+
+// Decode ROR (immediate) -- the EXTR Rd, Rs, Rs, #shift alias (Rn ==
+// Rm). EXTR: sf | 00 | 100111 | N(= sf) | 0 | Rm(5) | imms(6) | Rn(5)
+// | Rd(5); the W-form requires imms < 32. The shift equals imms;
+// imms == 0 is rejected (EXTR #0 is a plain register copy, not a
+// rotate).
+static bool decode_ror_imm(uint32_t op, unsigned *out_sf,
+                           unsigned *out_rd, unsigned *out_rn,
+                           unsigned *out_shift)
+{
+    unsigned sf = (op >> 31) & 1u;
+    uint32_t base = sf ? 0x93C00000u : 0x13800000u;
+    if ((op & 0xFFE00000u) != base) {
+        return false;
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    if (rm != rn) {
+        return false;
+    }
+    unsigned imms = (op >> 10) & 0x3Fu;
+    if (imms == 0) {
+        return false;
+    }
+    if (!sf && imms >= 32) {
+        return false;
+    }
+    *out_sf = sf;
+    *out_rd = op & 0x1Fu;
+    *out_rn = rn;
+    *out_shift = imms;
+    return true;
+}
+
 // Detect arithmetic-shifted-register (ADD/SUB and S-variants) or
 // logical-shifted-register (AND/ORR/EOR + N-variants and S-variants)
-// whose immediate shift amount is zero, so the LSL can be folded in.
+// whose immediate shift amount is zero, so a shift can be folded in.
 //
 // Fills *out_mnem with the canonical underlying mnemonic (without the
 // CMP/CMN/TST/MOV/MVN/NEG aliases -- those have Rd==31 or Rn==31 which
-// the caller will inspect separately if needed).
+// the caller will inspect separately if needed). *out_is_arith
+// distinguishes the families: the arithmetic one reserves shift type
+// 11 (ROR), so only logical consumers can absorb a rotate.
 static bool decode_shifted_register_consumer(
     uint32_t op,
     unsigned *out_sf,
@@ -801,7 +853,8 @@ static bool decode_shifted_register_consumer(
     unsigned *out_rn,
     unsigned *out_rm,
     const char **out_mnem,
-    bool *out_commutes)
+    bool *out_commutes,
+    bool *out_is_arith)
 {
     bool is_arith = (op & 0x1f200000u) == 0x0b000000u;
     bool is_logic = (op & 0x1f000000u) == 0x0a000000u;
@@ -831,6 +884,7 @@ static bool decode_shifted_register_consumer(
     *out_rd = op & 0x1fu;
     *out_rn = (op >> 5) & 0x1fu;
     *out_rm = (op >> 16) & 0x1fu;
+    *out_is_arith = is_arith;
 
     if (is_arith) {
         unsigned arith_op = (op >> 30) & 0x1u;
@@ -860,62 +914,69 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
     bool produced = false;
 
     if (insn->size != 4) {
-        state->lsl_active = false;
+        state->shf_active = false;
         return false;
     }
 
     uint32_t op = insn_word(insn);
 
     // (1) Try to close: is this instruction a shifted-register consumer
-    //     of the pending LSL?
-    if (state->lsl_active) {
+    //     of the pending shift?
+    if (state->shf_active) {
         unsigned c_sf, c_rd, c_rn, c_rm;
         const char *c_mnem;
-        bool c_commutes;
+        bool c_commutes, c_is_arith;
         if (decode_shifted_register_consumer(op, &c_sf, &c_rd, &c_rn, &c_rm,
-                                             &c_mnem, &c_commutes)
-                && c_sf == (state->lsl_is_64bit ? 1u : 0u)
-                && c_rd == state->lsl_rd
-                && state->lsl_rd != 31) {
+                                             &c_mnem, &c_commutes,
+                                             &c_is_arith)
+                && c_sf == (state->shf_is_64bit ? 1u : 0u)
+                && c_rd == state->shf_rd
+                && state->shf_rd != 31
+                // Arithmetic shifted-register reserves type 11 (ROR):
+                // a rotate can ride only on a logical consumer.
+                && !(c_is_arith && state->shf_type == 3u)) {
             // The shifted-register form carries the shift on Rm only, so
-            // the LSL result must be exactly one source operand and the
+            // the shift result must be exactly one source operand and the
             // other -- the "independent" operand that becomes the new Rn
-            // -- must NOT also be the LSL destination (else the fold,
-            // which reads pre-LSL register values, would use the wrong
-            // value for it). When the LSL result is in Rn, only a
+            // -- must NOT also be the shift destination (else the fold,
+            // which reads pre-shift register values, would use the wrong
+            // value for it). When the shift result is in Rn, only a
             // commutative consumer can move it to Rm by swapping sources.
             unsigned indep;
             bool foldable = false;
-            if (c_rm == state->lsl_rd && c_rn != state->lsl_rd) {
+            if (c_rm == state->shf_rd && c_rn != state->shf_rd) {
                 indep = c_rn;
                 foldable = true;
-            } else if (c_rn == state->lsl_rd && c_rm != state->lsl_rd
+            } else if (c_rn == state->shf_rd && c_rm != state->shf_rd
                        && c_commutes) {
                 indep = c_rm;
                 foldable = true;
             }
 
             if (foldable) {
-                char w_or_x = state->lsl_is_64bit ? 'x' : 'w';
+                char w_or_x = state->shf_is_64bit ? 'x' : 'w';
+                const char *shift_mnem = shift_type_name[state->shf_type];
 
-                out->name = "LSL foldable into shifted-register form";
-                out->start_offset = state->lsl_offset;
+                out->name = "shift foldable into shifted-register form";
+                out->start_offset = state->shf_offset;
                 out->insn_count = 2;
                 clear_finding_strings(out);
 
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %c%u, %c%u, %c%u, lsl #%u",
+                    "-> %s %c%u, %c%u, %c%u, %s #%u",
                     c_mnem,
                     w_or_x, c_rd,
                     w_or_x, indep,
-                    w_or_x, state->lsl_rn,
-                    state->lsl_shift);
+                    w_or_x, state->shf_rn,
+                    shift_mnem,
+                    state->shf_shift);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
-                    "lsl %c%u, %c%u, #%u",
-                    w_or_x, state->lsl_rd,
-                    w_or_x, state->lsl_rn,
-                    state->lsl_shift);
+                    "%s %c%u, %c%u, #%u",
+                    shift_mnem,
+                    w_or_x, state->shf_rd,
+                    w_or_x, state->shf_rn,
+                    state->shf_shift);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
                     "%s %c%u, %c%u, %c%u",
                     c_mnem,
@@ -926,23 +987,39 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                 produced = true;
             }
         }
-        // Strict adjacency: any non-matching instruction expires the LSL.
-        state->lsl_active = false;
+        // Strict adjacency: any non-matching instruction expires the
+        // pending shift.
+        state->shf_active = false;
     }
 
-    // (2) Try to open: is this an LSL (immediate)?
+    // (2) Try to open: is this a shift (immediate)? LSL/LSR/ASR are
+    //     UBFM/SBFM aliases; ROR is the same-register EXTR alias.
     unsigned sf, rd, rn, shift;
+    unsigned type = 0;
+    bool opened = false;
     if (decode_lsl_imm(op, &sf, &rd, &rn, &shift)) {
-        // Writing to XZR makes the LSL pointless and there is nothing
-        // for a consumer to fold against; skip.
-        if (rd != 31) {
-            state->lsl_active = true;
-            state->lsl_is_64bit = (sf != 0);
-            state->lsl_rd = rd;
-            state->lsl_rn = rn;
-            state->lsl_shift = shift;
-            state->lsl_offset = offset;
-        }
+        type = 0;
+        opened = true;
+    } else if (decode_lsr_imm(op, &sf, &rd, &rn, &shift)) {
+        type = 1;
+        opened = true;
+    } else if (decode_asr_imm(op, &sf, &rd, &rn, &shift)) {
+        type = 2;
+        opened = true;
+    } else if (decode_ror_imm(op, &sf, &rd, &rn, &shift)) {
+        type = 3;
+        opened = true;
+    }
+    // Writing to XZR makes the shift pointless and there is nothing
+    // for a consumer to fold against; skip.
+    if (opened && rd != 31) {
+        state->shf_active = true;
+        state->shf_is_64bit = (sf != 0);
+        state->shf_type = type;
+        state->shf_rd = rd;
+        state->shf_rn = rn;
+        state->shf_shift = shift;
+        state->shf_offset = offset;
     }
 
     return produced;
