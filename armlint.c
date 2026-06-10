@@ -305,6 +305,22 @@ struct armlint_state {
     size_t sxl_offset;
     char sxl_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending zero-extending unsigned-offset load (LDRB/LDRH/LDR Wt)
+    // awaiting an adjacent in-place sign-extend (SXTB/SXTH/SXTW, W- or
+    // X-form) of the loaded register whose sign threshold equals the
+    // load's access width -- the pair folds to the matching
+    // sign-extending load LDRSB/LDRSH/LDRSW. The consumer overwrites
+    // the load's Rt, so the zero-extended intermediate is dead.
+    // lsx_size is the load's size field (0=B, 1=H, 2=W). Strict
+    // adjacency: any non-matching instruction expires the state.
+    bool lsx_active;
+    unsigned lsx_size;
+    unsigned lsx_rt;
+    unsigned lsx_rn;
+    unsigned lsx_imm12;
+    size_t lsx_offset;
+    char lsx_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending X-form ADD (shifted-register, LSL #s, non-S-variant)
     // awaiting an adjacent unsigned-offset LDR consumer whose base
     // register and destination register both equal Rd of the ADD. The
@@ -656,6 +672,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->mvn_pending = false;
     state->ext_pending = false;
     state->sxl_pending = false;
+    state->lsx_active = false;
     state->add_pending = false;
     state->addi_pending = false;
     state->lspi_pending = false;
@@ -5144,6 +5161,91 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->lsx_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    bool produced = false;
+
+    // (1) Try to close: an in-place SXTB/SXTH/SXTW of the loaded
+    //     register whose sign threshold equals the load's access
+    //     width? The threshold equality is the soundness pivot: a
+    //     threshold below the width would shrink the memory access in
+    //     the LDRS rewrite (not architecturally identical), and one
+    //     above it sign-extends from a bit the load provably zeroed (a
+    //     no-op, not this rewrite). c_w (32 or 64) picks the LDRS
+    //     destination width; SXTW only exists X-form, so a word load
+    //     always folds to LDRSW Xt.
+    if (state->lsx_active) {
+        unsigned c_s, c_w, c_rd, c_rn;
+        if (decode_sbfm_sext(op, &c_s, &c_w, &c_rd, &c_rn)
+                && c_rd == state->lsx_rt
+                && c_rn == state->lsx_rt
+                && c_s == (8u << state->lsx_size)) {
+            static const char *const ldrs_mnem[3] = {
+                "ldrsb", "ldrsh", "ldrsw"
+            };
+            const char *mnem = ldrs_mnem[state->lsx_size];
+            char rt_wx = (c_w == 64u) ? 'x' : 'w';
+            unsigned bytes = state->lsx_imm12 << state->lsx_size;
+            char base_buf[8];
+            if (state->lsx_rn == 31) {
+                snprintf(base_buf, sizeof(base_buf), "sp");
+            } else {
+                snprintf(base_buf, sizeof(base_buf), "x%u",
+                    state->lsx_rn);
+            }
+
+            out->name =
+                "load + sign-extend foldable to LDRSB/LDRSH/LDRSW";
+            out->start_offset = state->lsx_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            if (bytes == 0) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, [%s]",
+                    mnem, rt_wx, state->lsx_rt, base_buf);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, [%s, #0x%x]",
+                    mnem, rt_wx, state->lsx_rt, base_buf, bytes);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->lsx_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            produced = true;
+        }
+        // Strict adjacency: clear regardless of match.
+        state->lsx_active = false;
+    }
+
+    // (2) Try to open: a zero-extending unsigned-offset load (B/H/W)?
+    //     Size 3 (LDR Xt) is full-width -- no sign-extend consumer can
+    //     fold it. Rt = 31 discards the load; skip.
+    unsigned size, imm12, rn, rt;
+    if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
+            && size <= 2u && rt != 31) {
+        state->lsx_active = true;
+        state->lsx_size = size;
+        state->lsx_rt = rt;
+        state->lsx_rn = rn;
+        state->lsx_imm12 = imm12;
+        state->lsx_offset = offset;
+        snprintf(state->lsx_disasm, sizeof(state->lsx_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
 bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset,
@@ -5707,6 +5809,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_extend_add_sub_fold,
     check_add_ldr_register_offset,
     check_sxtw_ldr_fold,
+    check_ldr_sext_fold,
     check_add_ldr_imm_offset,
     check_ldr_str_add_post_indexed,
     check_add_ldr_str_pre_indexed,

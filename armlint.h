@@ -546,6 +546,31 @@ bool check_add_ldr_register_offset(armlint_state *state,
 bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
 
+// Detect a zero-extending unsigned-offset load (LDRB/LDRH/LDR Wt)
+// immediately followed by an in-place sign-extend (SXTB/SXTH/SXTW, W-
+// or X-form) of the loaded register whose sign threshold equals the
+// load's access width. The pair folds to the matching sign-extending
+// load:
+//   ldrb wt, [xn]     ; sxtb wt, wt -> ldrsb wt, [xn]
+//   ldrb wt, [xn]     ; sxtb xt, wt -> ldrsb xt, [xn]
+//   ldrh wt, [xn, #2] ; sxth wt, wt -> ldrsh wt, [xn, #2]
+//   ldr  wt, [xn, #4] ; sxtw xt, wt -> ldrsw xt, [xn, #4]
+//
+// Soundness (structural): the consumer reads and overwrites the
+// load's Rt, so the zero-extended intermediate is dead, and the
+// rewrite performs the identical memory access (same address, same
+// size) with the extension moved into the load. A threshold below the
+// access width is NOT folded -- the LDRS rewrite would shrink the
+// memory access, which is not architecturally identical -- and a
+// threshold above it sign-extends from a bit the load provably zeroed
+// (a no-op, but not this rewrite). Rt = 31 (load discarded) is
+// excluded. v1 matches the unsigned-offset addressing form only, like
+// the other load-rewriting folds; the unscaled, pre-/post-indexed and
+// register-offset forms have LDRS equivalents and could fold the same
+// way.
+bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect an X-form ADD-immediate (non-S-variant) immediately followed
 // by an unsigned-offset LDR whose base register and destination
 // register both equal Rd of the ADD. The pair folds to a single

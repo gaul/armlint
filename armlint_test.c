@@ -4814,6 +4814,73 @@ static void test_sxtw_ldr_fold(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+static void test_ldr_sext_fold(void)
+{
+    uint8_t code[12];
+
+    // ldrb w3, [x1] ; sxtb w3, w3 -> ldrsb w3, [x1] (flag).
+    ldrb_w(&code[0], 3, 1, 0);
+    sxtb_w(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrb w3, [x1] ; sxtb x3, w3 -> ldrsb x3, [x1] (X-form
+    // consumer widens to 64 bits; flag).
+    ldrb_w(&code[0], 3, 1, 0);
+    sxtb_x(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w4, [x1, #2] ; sxth w4, w4 -> ldrsh w4, [x1, #2] (flag).
+    ldrh_w(&code[0], 4, 1, 1);
+    sxth_w(&code[4], 4, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrh w4, [x1] ; sxth x4, w4 -> ldrsh x4, [x1] (flag).
+    ldrh_w(&code[0], 4, 1, 0);
+    sxth_x(&code[4], 4, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr w2, [sp, #4] ; sxtw x2, w2 -> ldrsw x2, [sp, #4] (flag).
+    ldr_w(&code[0], 2, 31, 1);
+    sxtw_x(&code[4], 2, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: threshold above the access width -- sxth after ldrb
+    // sign-extends from a bit the load zeroed (a no-op, but not this
+    // check's rewrite).
+    ldrb_w(&code[0], 3, 1, 0);
+    sxth_w(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: threshold below the access width -- the LDRSB rewrite
+    // would shrink the 4-byte access to 1 byte.
+    ldr_w(&code[0], 2, 1, 0);
+    sxtb_w(&code[4], 2, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: the sign-extend reads/writes a different register.
+    ldrb_w(&code[0], 3, 1, 0);
+    sxtb_w(&code[4], 5, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: consumer source differs from its destination (not an
+    // in-place re-extension of the loaded register).
+    ldrb_w(&code[0], 3, 1, 0);
+    sxtb_w(&code[4], 4, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: X-form load is full-width -- LDRSW after it would
+    // shrink the 8-byte access to 4.
+    ldr_x(&code[0], 2, 1, 0);
+    sxtw_x(&code[4], 2, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: intervening instruction expires the pending load.
+    ldrb_w(&code[0], 3, 1, 0);
+    movz_w(&code[4], 5, 1);
+    sxtb_w(&code[8], 3, 3);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // Encode NEG Xd, Xm (the SUB Xd, XZR, Xm alias, no shift, non-S).
 // Base 0xCB0003E0: sf=1, op=1 (SUB), S=0, class=01011, shift_type=LSL,
 // bit 21=0, imm6=0, Rn=31 (XZR).
@@ -5667,6 +5734,7 @@ int main(void)
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();
+    test_ldr_sext_fold();
     test_add_ldr_imm_offset();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();

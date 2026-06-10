@@ -749,6 +749,36 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   standalone 32->64 zero-extend is normally a `W`-register `MOV`, not a
   literal `UXTW` instruction.
 
+## load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+
+* A zero-extending load immediately re-extended with the sign is the
+  sign-extending load:
+  * `ldrb w3, [x1] ; sxtb w3, w3` -> `ldrsb w3, [x1]`
+  * `ldrb w3, [x1] ; sxtb x3, w3` -> `ldrsb x3, [x1]` (the X-form
+    consumer widens to 64 bits, so the fold is the `Xt` form)
+  * `ldrh w4, [x1, #2] ; sxth w4, w4` -> `ldrsh w4, [x1, #2]`
+  * `ldr w2, [sp, #4] ; sxtw x2, w2` -> `ldrsw x2, [sp, #4]`
+* Fuse win (see the shift fold): one fewer instruction, and the
+  extension moves off the critical path into the load's own writeback
+  -- the dependent `SXT` no longer executes as a separate ALU op.
+* Soundness (structural): the `SXT` reads and overwrites the load's
+  `Rt`, so the zero-extended intermediate is provably dead, and the
+  rewrite performs the identical memory access -- same address, same
+  size -- with only the extension behaviour changed to match what the
+  pair computed.
+* The consumer's sign threshold must equal the load's access width.
+  Below it (`ldr w2, [x1] ; sxtb w2, w2`) the `LDRS` rewrite would
+  shrink the memory access, which is not architecturally identical
+  (alignment, permissions and watchpoints are checked per byte
+  accessed). Above it (`ldrb w3, [x1] ; sxth w3, w3`) the consumer
+  sign-extends from a bit the load provably zeroed -- a no-op worth
+  removing, but not this rewrite. An X-form load never folds: it is
+  already full-width.
+* v1 matches the unsigned-offset addressing form only, like the other
+  load-rewriting folds. The unscaled, pre-/post-indexed and
+  register-offset forms have `LDRS` equivalents and could fold the
+  same way.
+
 ## ADD + LDR foldable to immediate-offset LDR
 
 * `add xt, xn, #a ; ldr xt, [xt, #b]` -> `ldr xt, [xn, #(a+b)]`,

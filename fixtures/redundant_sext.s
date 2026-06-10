@@ -29,8 +29,10 @@ _main:
     ldrsb   w8, [x9]
     sxtb    x8, w8
 
-    // Negative: producer is zero-extending (LDRB), consumer is
-    // sign-extending -- bits >= 8 are zero, not sign-replicated.
+    // Negative for THIS check: producer is zero-extending (LDRB), so
+    // bits >= 8 are zero, not sign-replicated, and the SXTB is doing
+    // real work. The pair flags under check_ldr_sext_fold instead
+    // (-> ldrsb w10, [x11]).
     ldrb    w10, [x11]
     sxtb    w10, w10
 

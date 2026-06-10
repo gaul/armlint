@@ -102,6 +102,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`mvn` + `and`/`orr`/`eor`/`ands`](analyses.md#mvn--andorreor-foldable-to-bicorneon) | `bic`/`orn`/`eon`/`bics` |
 | [`add` + `ldr [xt]`](analyses.md#add--ldr-foldable-to-register-offset-ldr) | `ldr [xn, xm{, lsl #s}]` |
 | [`sxtw` + `ldr [xn, xt]`](analyses.md#sxtw--register-offset-ldr-foldable-into-the-load) | `ldr [xn, ws, sxtw {#s}]` |
+| [`ldrb`/`ldrh`/`ldr` + `sxtb`/`sxth`/`sxtw`](analyses.md#load--sign-extend-foldable-to-ldrsbldrshldrsw) | `ldrsb`/`ldrsh`/`ldrsw` |
 | [`add #a` + `ldr [xt]`](analyses.md#add--ldr-foldable-to-immediate-offset-ldr) | `ldr [xn, #a]` |
 | [`ldr [xn]` + `add`/`sub xn`](analyses.md#ldrstr--addsub-foldable-to-post-indexed-ldrstr) | `ldr [xn], #±imm` (post-index) |
 | [`add`/`sub xn` + `ldr [xn]`](analyses.md#addsub--ldrstr-foldable-to-pre-indexed-ldrstr) | `ldr [xn, #±imm]!` (pre-index) |

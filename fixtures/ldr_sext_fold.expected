@@ -1,0 +1,20 @@
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x0: -> ldrsb w3, [x1] (2 instructions)
+  ldrb w3, [x1]
+  sxtb w3, w3
+
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x8: -> ldrsb x3, [x1] (2 instructions)
+  ldrb w3, [x1]
+  sxtb x3, w3
+
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x10: -> ldrsh w4, [x1, #0x2] (2 instructions)
+  ldrh w4, [x1, #2]
+  sxth w4, w4
+
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x18: -> ldrsw x2, [sp, #0x4] (2 instructions)
+  ldr w2, [sp, #4]
+  sxtw x2, w2
+
+Optimization opportunities by type:
+       4  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+
+4 optimization opportunities in 15 instructions
