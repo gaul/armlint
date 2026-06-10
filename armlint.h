@@ -505,9 +505,14 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
 // as Xt): writing Wt zeros bits 63..32 of Xt, overwriting the
 // address regardless of size.
 //
+// The sign-extending loads (LDRSB/LDRSH, Wt or Xt; LDRSW) fold
+// identically -- they too overwrite the full X register named by Rt
+// and have register-offset forms. PRFM, which shares the encoding
+// family but whose Rt is a prefetch operation, is excluded.
+//
 // Shift constraint: LDR (register, unsigned-offset variant) accepts
 // only LSL #0 or LSL #log2(access_size). access_size in bytes:
-// 1 for LDRB, 2 for LDRH, 4 for LDR W, 8 for LDR X.
+// 1 for LDRB/LDRSB, 2 for LDRH/LDRSH, 4 for LDR W/LDRSW, 8 for LDR X.
 //
 // Soundness (conservative): Rd of the ADD must equal Rt of the LDR
 // (the loaded register). The LDR's write to Wt/Xt destroys the
@@ -531,12 +536,14 @@ bool check_add_ldr_register_offset(armlint_state *state,
 //   sxtw xt, ws ; ldr xt, [xn, xt]          -> ldr xt, [xn, ws, sxtw]
 //   sxtw xt, ws ; ldr xt, [xn, xt, lsl #s]  -> ldr xt, [xn, ws, sxtw #s]
 // This is the array-indexing idiom (a 32-bit signed index into a 64-bit
-// base). All four load sizes (LDRB/LDRH/LDR W/LDR X) are handled; the
+// base). All four zero-extending sizes (LDRB/LDRH/LDR W/LDR X) and the
+// sign-extending loads (LDRSB/LDRSH, Wt or Xt; LDRSW) are handled; the
 // scale bit carries over unchanged.
 //
 // Soundness (conservative, mirrors check_add_ldr_register_offset): the
-// consumer must be a plain LDR (not STR -- no Rt overwrite -- nor a
-// sign-extending load) using the LSL/UXTX index option (a full 64-bit
+// consumer must be an integer load (not STR, which has no Rt overwrite,
+// nor PRFM, whose Rt is a prefetch operation, not a destination) using
+// the LSL/UXTX index option (a full 64-bit
 // register offset, equivalent to the SXTW's result), with Rt == Rm == Xt
 // so the load overwrites the index and the extended value is dead. The
 // base Rn must NOT be Xt: with the SXTW folded away the base would read
@@ -580,7 +587,9 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
 //   add xt, xn, #a  ; ldr xt, [xt, #b]  -> ldr xt, [xn, #(a+b)]
 // The LDR's destination width may be W or X (same register number as
 // Xt): writing Wt zeros bits 63..32 of Xt, overwriting the address
-// regardless of size. LDRB and LDRH consumers fold the same way.
+// regardless of size. LDRB/LDRH and the sign-extending
+// LDRSB/LDRSH/LDRSW consumers fold the same way (PRFM is excluded:
+// its Rt is a prefetch operation, not a destination).
 //
 // Encoding constraint: the combined byte offset must be a multiple of
 // the LDR's access size and its scaled value must fit in 12 bits. The

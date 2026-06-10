@@ -72,4 +72,9 @@ _main:
     add     x5, x5, x6
     ldr     x3, [x3]
 
+    // P) Sign-extending consumer: the offsets combine into LDRSW's
+    // own unsigned-offset form.
+    add     x3, x1, #8
+    ldrsw   x3, [x3, #4]            // -> ldrsw x3, [x1, #0xc]
+
     ret

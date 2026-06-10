@@ -4715,6 +4715,40 @@ static void test_add_ldr_register_offset(void)
     add_x_lsl(&code[0], 3, 1, 3, 0);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
+
+    // -- Sign-extending consumers: LDRS* also overwrites the full X
+    //    register named by Rt, so the same fold applies with the
+    //    LDRS register-offset forms. --
+
+    // add x3, x1, x2 ; ldrsw x3, [x3] -> ldrsw x3, [x1, x2] (flag).
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldrsw_x(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // add x3, x1, x2, lsl #2 ; ldrsw x3, [x3] -- the shift matches
+    // LDRSW's 4-byte access scale (flag).
+    add_x_lsl(&code[0], 3, 1, 2, 2);
+    ldrsw_x(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // add x3, x1, x2, lsl #3 ; ldrsw x3, [x3] -- shift 3 does not
+    // match LDRSW's scale (0 or 2 only); no fold.
+    add_x_lsl(&code[0], 3, 1, 2, 3);
+    ldrsw_x(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // add x3, x1, x2 ; ldrsb w3, [x3] -- the Wt form still overwrites
+    // the full X3 (a W write zeros the upper half); flag.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldrsb_w(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // add x3, x1, x2 ; prfm <op #3>, [x3] -- PRFM shares the encoding
+    // family (size=11, opc=10) but its Rt is a prefetch operation,
+    // not a destination, so the address register stays live; no fold.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    encode_ldr_imm(&code[4], 0xF9800000u, 3, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // Register-offset LDR/STR: size 111 0 00 opc 1 Rm option S 10 Rn Rt.
@@ -4812,6 +4846,28 @@ static void test_sxtw_ldr_fold(void)
     movz_x(&code[4], 5, 1, 0);
     ldr_ro(&code[8], 3, 1, 0, 3, 0, 3, 0);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- Sign-extending consumers: the LDRS* register-offset forms
+    //    take the same SXTW index option, and the load still
+    //    overwrites the index register. --
+
+    // sxtw x0, w1 ; ldrsw x0, [x3, x0, lsl #2]
+    //   -> ldrsw x0, [x3, w1, sxtw #2] (flag).
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 2, 2, 0, 3, 1, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxtw x0, w1 ; ldrsb w0, [x3, x0] -- the Wt form zeros the upper
+    // half, still overwriting the index; flag.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 0, 3, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sxtw x0, w1 ; prfm <op #0>, [x3, x0] -- PRFM's Rt is a prefetch
+    // operation, not a destination; the index stays live. No fold.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 2, 0, 3, 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 static void test_ldr_sext_fold(void)
@@ -5401,6 +5457,26 @@ static void test_add_ldr_imm_offset(void)
     add_x_imm_sh(&code[0], 3, 1, 0x1);
     ldrb_w_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Sign-extending consumers fold the same way. --
+
+    // add x3, x1, #8 ; ldrsw x3, [x3, #4] -> ldrsw x3, [x1, #0xc]
+    // (8 is a multiple of 4 and 12/4 = 3 fits in imm12; flag).
+    add_x_imm(&code[0], 3, 1, 8);
+    ldrsw_x(&code[4], 3, 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // add x3, x1, #2 ; ldrsw x3, [x3] -- the ADD immediate is not a
+    // multiple of LDRSW's 4-byte access size; no fold.
+    add_x_imm(&code[0], 3, 1, 2);
+    ldrsw_x(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // add x3, x1, #16 ; ldrsh x3, [x3] -> ldrsh x3, [x1, #0x10]
+    // (flag).
+    add_x_imm(&code[0], 3, 1, 16);
+    ldrsh_x(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
 }
 
 static void test_ldr_str_add_post_indexed(void)

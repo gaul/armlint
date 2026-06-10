@@ -30,7 +30,11 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x38: -> ldr x3, [x1, #0x1
   add x3, x1, #0x10
   ldr x3, [x3, #0x8]
 
-Optimization opportunities by type:
-       8  ADD + LDR foldable to immediate-offset LDR
+ADD + LDR foldable to immediate-offset LDR at offset: 0x84: -> ldrsw x3, [x1, #0xc] (2 instructions)
+  add x3, x1, #0x8
+  ldrsw x3, [x3, #0x4]
 
-8 optimization opportunities in 34 instructions
+Optimization opportunities by type:
+       9  ADD + LDR foldable to immediate-offset LDR
+
+9 optimization opportunities in 36 instructions

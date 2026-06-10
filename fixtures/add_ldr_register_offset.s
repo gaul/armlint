@@ -63,4 +63,15 @@ _main:
     add     x5, x5, x6              // unrelated
     ldr     x3, [x3]
 
+    // P) Sign-extending consumer: LDRSW overwrites x3 just like a
+    // plain load, so the fold carries over to its register-offset
+    // form.
+    add     x3, x1, x2, lsl #2
+    ldrsw   x3, [x3]                // -> ldrsw x3, [x1, x2, lsl #2]
+
+    // N8) PRFM shares the encoding family but its Rt is a prefetch
+    // operation, not a destination; the address register stays live.
+    add     x3, x1, x2
+    prfm    pldl1keep, [x3]
+
     ret

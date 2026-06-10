@@ -4908,6 +4908,74 @@ static bool decode_ldr_uimm_any_size(uint32_t op,
     return true;
 }
 
+// Map an integer-load (size, opc) pair to its mnemonic and
+// destination-register width, accepting both the zero-extending family
+// (opc=01: LDRB/LDRH/LDR W/LDR X) and the sign-extending one (opc=10
+// -> Xt for B/H/W; opc=11 -> Wt for B/H). Rejects stores (opc=00),
+// PRFM (size=11, opc=10, whose Rt field is a prefetch operation, not a
+// destination), and the unallocated size>=10, opc=11 slots. The access
+// size in bytes is 1 << size for every accepted pair, and every
+// accepted load overwrites the full X register named by Rt (a W-form
+// write zeros bits 63..32) -- the property the Rt == base folds rely
+// on.
+static bool classify_int_load(unsigned size, unsigned opc,
+                              const char **out_mnem, char *out_rt_wx)
+{
+    static const char *const zext_mnem[4] = {
+        "ldrb", "ldrh", "ldr", "ldr"
+    };
+    static const char *const sext_mnem[3] = {
+        "ldrsb", "ldrsh", "ldrsw"
+    };
+    switch (opc) {
+    case 1:
+        *out_mnem = zext_mnem[size];
+        *out_rt_wx = (size == 3u) ? 'x' : 'w';
+        return true;
+    case 2:
+        if (size >= 3u) {
+            return false;       // size=11 is PRFM
+        }
+        *out_mnem = sext_mnem[size];
+        *out_rt_wx = 'x';
+        return true;
+    case 3:
+        if (size >= 2u) {
+            return false;       // only LDRSB/LDRSH have a Wt form
+        }
+        *out_mnem = sext_mnem[size];
+        *out_rt_wx = 'w';
+        return true;
+    default:
+        return false;           // opc=00: store
+    }
+}
+
+// Decode an unsigned-offset integer load of any size and extension
+// family (see classify_int_load). Mask 0x3F000000 / value 0x39000000
+// fixes bits 29..24 (the load/store register class, V=0,
+// unsigned-offset form), leaving size and opc free; classification
+// filters out the non-load members.
+static bool decode_int_load_uimm(uint32_t op, unsigned *out_size,
+                                 const char **out_mnem, char *out_rt_wx,
+                                 unsigned *out_imm12, unsigned *out_rn,
+                                 unsigned *out_rt)
+{
+    if ((op & 0x3F000000u) != 0x39000000u) {
+        return false;
+    }
+    unsigned size = (op >> 30) & 0x3u;
+    unsigned opc = (op >> 22) & 0x3u;
+    if (!classify_int_load(size, opc, out_mnem, out_rt_wx)) {
+        return false;
+    }
+    *out_size = size;
+    *out_imm12 = (op >> 10) & 0xFFFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
 // Decode X-form ADD (immediate), non-S-variant. ADD-imm uses
 // sf 0 0 100010 sh imm12 Rn Rd; sf=1, op=0, S=0 -> base 0x91000000,
 // mask 0xFF800000 (bits 31..23). sh (bit 22) is a free field: when
@@ -4968,28 +5036,25 @@ bool check_add_ldr_register_offset(armlint_state *state,
 
     bool produced = false;
 
-    // (1) Try to close: is this an LDR uimm consuming the pending ADD?
+    // (1) Try to close: is this an integer load (zero- or
+    //     sign-extending; see classify_int_load) consuming the pending
+    //     ADD? A sign-extending consumer folds identically: it too
+    //     overwrites the full X register named by Rt, and the
+    //     register-offset LDRS* forms exist for every accepted pair.
     if (state->add_pending) {
         unsigned size, imm12, ldr_rn, ldr_rt;
-        if (decode_ldr_uimm_any_size(op, &size, &imm12, &ldr_rn, &ldr_rt)
+        const char *ldr_mnem;
+        char rt_wx;
+        if (decode_int_load_uimm(op, &size, &ldr_mnem, &rt_wx,
+                                 &imm12, &ldr_rn, &ldr_rt)
                 && imm12 == 0
                 && ldr_rn == state->add_pending_rd
                 && ldr_rt == state->add_pending_rd) {
-            // The LDR's register-offset form accepts only two shift
+            // The load's register-offset form accepts only two shift
             // amounts: 0 or log2(access_size). size encodes log2
             // directly: 0=B, 1=H, 2=W, 3=X.
             unsigned s = state->add_pending_shift;
             if (s == 0 || s == size) {
-                const char *ldr_mnem;
-                char rt_wx;
-                switch (size) {
-                    case 0: ldr_mnem = "ldrb"; rt_wx = 'w'; break;
-                    case 1: ldr_mnem = "ldrh"; rt_wx = 'w'; break;
-                    case 2: ldr_mnem = "ldr";  rt_wx = 'w'; break;
-                    case 3: ldr_mnem = "ldr";  rt_wx = 'x'; break;
-                    default: ldr_mnem = "ldr"; rt_wx = 'x'; break;
-                }
-
                 out->name = "ADD + LDR foldable to register-offset LDR";
                 out->start_offset = state->add_pending_offset;
                 out->insn_count = 2;
@@ -5090,9 +5155,16 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
     //     as a plain X-register index and loads back into it?
     if (state->sxl_pending) {
         unsigned size, opc, rm, option, s, rn, rt;
+        const char *ldr_mnem;
+        char rt_wx;
         if (decode_ldr_reg_offset(op, &size, &opc, &rm, &option, &s,
                                   &rn, &rt)
-                && opc == 1u            // plain LDR (B/H/W/X), not STR/LDRS
+                // Any integer load, zero- or sign-extending (not STR,
+                // whose Rt is read, nor PRFM, whose Rt is a prefetch
+                // op). Every accepted load overwrites the full X
+                // register named by Rt, so the index-deadness proof is
+                // the same for the LDRS* forms.
+                && classify_int_load(size, opc, &ldr_mnem, &rt_wx)
                 && option == 3u         // LSL/UXTX: a full 64-bit offset
                 && rm == state->sxl_rd  // index is the SXTW result
                 && rt == state->sxl_rd  // the load overwrites it (dead)
@@ -5101,15 +5173,6 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
             // value (the SXTW is removed), changing the address; excluded
             // above. The scale bit S carries over unchanged: it scales
             // the sign-extended index either way.
-            const char *ldr_mnem;
-            char rt_wx;
-            switch (size) {
-                case 0: ldr_mnem = "ldrb"; rt_wx = 'w'; break;
-                case 1: ldr_mnem = "ldrh"; rt_wx = 'w'; break;
-                case 2: ldr_mnem = "ldr";  rt_wx = 'w'; break;
-                case 3: ldr_mnem = "ldr";  rt_wx = 'x'; break;
-                default: ldr_mnem = "ldr"; rt_wx = 'x'; break;
-            }
             char base_buf[8];
             if (rn == 31) {
                 snprintf(base_buf, sizeof(base_buf), "sp");
@@ -5260,10 +5323,17 @@ bool check_add_ldr_imm_offset(armlint_state *state,
 
     bool produced = false;
 
-    // (1) Try to close: is this an LDR uimm consuming the pending ADD?
+    // (1) Try to close: is this an integer load (zero- or
+    //     sign-extending; see classify_int_load) consuming the pending
+    //     ADD? Sign-extending consumers overwrite the full X register
+    //     named by Rt just like plain LDR, and every accepted pair has
+    //     an unsigned-offset LDRS* form, so the fold carries over.
     if (state->addi_pending) {
         unsigned size, imm12, ldr_rn, ldr_rt;
-        if (decode_ldr_uimm_any_size(op, &size, &imm12, &ldr_rn, &ldr_rt)
+        const char *ldr_mnem;
+        char rt_wx;
+        if (decode_int_load_uimm(op, &size, &ldr_mnem, &rt_wx,
+                                 &imm12, &ldr_rn, &ldr_rt)
                 && ldr_rn == state->addi_pending_rd
                 && ldr_rt == state->addi_pending_rd) {
             // The LDR's own byte offset is imm12 * access_size, already
@@ -5278,16 +5348,6 @@ bool check_add_ldr_imm_offset(armlint_state *state,
             uint32_t combined = add_imm + ldr_byte_imm;
             if ((add_imm & (access_size - 1u)) == 0
                     && (combined >> size) <= 0xFFFu) {
-                const char *ldr_mnem;
-                char rt_wx;
-                switch (size) {
-                    case 0: ldr_mnem = "ldrb"; rt_wx = 'w'; break;
-                    case 1: ldr_mnem = "ldrh"; rt_wx = 'w'; break;
-                    case 2: ldr_mnem = "ldr";  rt_wx = 'w'; break;
-                    case 3: ldr_mnem = "ldr";  rt_wx = 'x'; break;
-                    default: ldr_mnem = "ldr"; rt_wx = 'x'; break;
-                }
-
                 out->name = "ADD + LDR foldable to immediate-offset LDR";
                 out->start_offset = state->addi_pending_offset;
                 out->insn_count = 2;

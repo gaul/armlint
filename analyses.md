@@ -717,6 +717,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (the loaded register). The LDR's write to Wt/Xt destroys the
   pre-LDR address value of Xt, so Xt's only consumer was the
   LDR itself.
+* The sign-extending loads (`LDRSB`/`LDRSH`, Wt or Xt; `LDRSW`) fold
+  identically: they too overwrite the full X register named by `Rt`
+  (a W-form write zeros the upper half) and have register-offset
+  forms with the same shift rule. `PRFM`, which shares the encoding
+  family, is excluded -- its `Rt` field is a prefetch operation, not
+  a destination, so the address register stays live.
 * STR is intentionally not flagged: there is no analogous
   Rd-overwrite to prove Xt is dead after the store.
 * Rn = XZR in the ADD is excluded because Rn = 31 in the LDR's
@@ -731,15 +737,17 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   * `sxtw x0, w1 ; ldr x0, [x3, x0]` -> `ldr x0, [x3, w1, sxtw]`
   * `sxtw x0, w1 ; ldr x0, [x3, x0, lsl #3]`
     -> `ldr x0, [x3, w1, sxtw #3]`
-  All four load sizes (LDRB/LDRH/LDR W/LDR X) are handled, and the
-  scale bit carries over.
+  All four zero-extending sizes (LDRB/LDRH/LDR W/LDR X) and the
+  sign-extending loads (`LDRSB`/`LDRSH`, Wt or Xt; `LDRSW`) are
+  handled, and the scale bit carries over.
 * Why it helps: one fewer instruction, and the sign-extend leaves the
   critical path -- the load's address-generation unit does it for free
   rather than a separate dependent op feeding the load. (Same profile
   as the LSL/extend folds; this is the load-addressing form of it.)
 * Soundness (conservative, mirrors the `ADD + LDR` register-offset
-  check): the consumer must be a plain `LDR` (not `STR` -- no `Rt`
-  overwrite to prove the index dead -- nor a sign-extending load) using
+  check): the consumer must be an integer load (not `STR` -- no `Rt`
+  overwrite to prove the index dead -- nor `PRFM`, whose `Rt` is a
+  prefetch operation rather than a destination) using
   the LSL/UXTX index option (a full 64-bit register offset, identical
   to the `SXTW` result), with `Rt == Rm == Xt` so the load overwrites
   the index. The base `Rn` must NOT be `Xt`: with the `SXTW` folded
@@ -786,6 +794,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   complement of the register-offset fold: same Rd-overwrite
   soundness argument, but the ADD's constant offset (plus the
   LDR's, if any) moves into the LDR's unsigned immediate slot.
+  The sign-extending loads (`LDRSB`/`LDRSH`, Wt or Xt; `LDRSW`)
+  fold the same way -- they too overwrite the full X register named
+  by `Rt` and have unsigned-offset forms; `PRFM` is excluded (its
+  `Rt` is a prefetch operation, so the address register stays
+  live).
 * Encoding constraint: the combined byte offset must be a multiple
   of the LDR's access size and its scaled value must fit in 12
   bits. The LDR's own imm12 is already a multiple of access_size,

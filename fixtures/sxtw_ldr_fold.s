@@ -38,4 +38,14 @@ _main:
     sxtw    x0, w1
     ldr     x0, [x0, x0]
 
+    // P) Sign-extending consumer: LDRSW still overwrites the index,
+    // and its register-offset form takes the same SXTW option.
+    sxtw    x0, w1
+    ldrsw   x0, [x3, x0, lsl #2]    // -> ldrsw x0, [x3, w1, sxtw #2]
+
+    // N4) PRFM's Rt is a prefetch operation, not a destination; the
+    // index stays live.
+    sxtw    x0, w1
+    prfm    pldl1keep, [x3, x0]
+
     ret
