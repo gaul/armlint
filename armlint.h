@@ -79,12 +79,18 @@ typedef bool (*armlint_check_fn)(armlint_state *state, const cs_insn *insn,
 extern const armlint_check_fn armlint_check_registry[];
 extern const size_t armlint_check_registry_count;
 
-// Examine insn (already decoded by Capstone) in the context of recent
-// instructions. Returns true if a finding is produced (in *out); false
-// otherwise. May produce a finding when a non-matching instruction
-// closes a previously open sequence, so callers must invoke
-// armlint_flush after the last instruction of a region to catch a
-// trailing sequence.
+// Track MOVZ/MOVN + MOVK chains and flag one whose final value is
+// reachable more cheaply: either as a single bitmask-immediate MOV
+// (ORR Rd, ZR, #imm), or by a shorter move-wide sequence -- the
+// minimal length is one instruction per non-zero halfword for a
+// MOVZ-based chain and one per non-0xFFFF halfword for a MOVN-based
+// chain (each with a floor of one), whichever is smaller. Despite the
+// name, the bitmask immediate is just one of the two rewrites.
+//
+// May produce a finding when a non-matching instruction closes a
+// previously open sequence, so callers must invoke armlint_flush
+// after the last instruction of a region to catch a trailing
+// sequence.
 bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 

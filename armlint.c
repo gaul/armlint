@@ -476,6 +476,89 @@ static uint32_t insn_word(const cs_insn *insn)
         | ((uint32_t)insn->bytes[3] << 24);
 }
 
+// Minimal number of move-wide instructions (MOVZ/MOVN + MOVKs) that
+// can materialize value at reg_width: a MOVZ-based chain needs one
+// instruction per non-zero halfword, a MOVN-based chain one per
+// non-0xffff halfword, each with a floor of one (MOVZ #0 / MOVN #0
+// for the all-zeros / all-ones values).
+static unsigned minimal_mov_wide_count(uint64_t value, unsigned reg_width)
+{
+    unsigned halfwords = reg_width / 16u;
+    unsigned nonzero = 0, nonones = 0;
+    for (unsigned i = 0; i < halfwords; i++) {
+        unsigned hw = (value >> (i * 16u)) & 0xffffu;
+        if (hw != 0) {
+            nonzero++;
+        }
+        if (hw != 0xffffu) {
+            nonones++;
+        }
+    }
+    unsigned movz_len = nonzero ? nonzero : 1u;
+    unsigned movn_len = nonones ? nonones : 1u;
+    return movz_len < movn_len ? movz_len : movn_len;
+}
+
+// Render the minimal MOVZ/MOVN + MOVK sequence for value into buf,
+// instructions separated by " ; ". Ties between the MOVZ- and
+// MOVN-based forms go to MOVZ (the canonical spelling). A flagged
+// chain's suggestion is at most one instruction per halfword minus
+// one, which fits the detail buffer.
+static void render_minimal_mov_wide(char *buf, size_t bufsz,
+                                    char w_or_x, unsigned rd,
+                                    uint64_t value, unsigned reg_width)
+{
+    unsigned halfwords = reg_width / 16u;
+    unsigned nonzero = 0, nonones = 0;
+    for (unsigned i = 0; i < halfwords; i++) {
+        unsigned hw = (value >> (i * 16u)) & 0xffffu;
+        if (hw != 0) {
+            nonzero++;
+        }
+        if (hw != 0xffffu) {
+            nonones++;
+        }
+    }
+    bool use_movn = (nonones ? nonones : 1u) < (nonzero ? nonzero : 1u);
+    unsigned skip_hw = use_movn ? 0xffffu : 0u;
+
+    if ((use_movn ? nonones : nonzero) == 0) {
+        // All-zeros (MOVZ) or all-ones (MOVN): a single base insn.
+        snprintf(buf, bufsz, "%s %c%u, #0x0",
+            use_movn ? "movn" : "movz", w_or_x, rd);
+        return;
+    }
+
+    size_t pos = 0;
+    bool first = true;
+    for (unsigned i = 0; i < halfwords && pos < bufsz; i++) {
+        unsigned hw = (value >> (i * 16u)) & 0xffffu;
+        if (hw == skip_hw) {
+            continue;
+        }
+        // MOVN materializes ~(imm16 << shift), so the base instruction
+        // carries the complemented halfword; the MOVKs that follow
+        // overwrite with the actual halfword values.
+        const char *mnem = first ? (use_movn ? "movn" : "movz") : "movk";
+        unsigned imm = (first && use_movn) ? (~hw & 0xffffu) : hw;
+        unsigned shift = i * 16u;
+        int n;
+        if (shift == 0) {
+            n = snprintf(buf + pos, bufsz - pos, "%s%s %c%u, #0x%x",
+                first ? "" : " ; ", mnem, w_or_x, rd, imm);
+        } else {
+            n = snprintf(buf + pos, bufsz - pos,
+                "%s%s %c%u, #0x%x, lsl #%u",
+                first ? "" : " ; ", mnem, w_or_x, rd, imm, shift);
+        }
+        if (n < 0) {
+            break;
+        }
+        pos += (size_t)n;
+        first = false;
+    }
+}
+
 static bool mov_close(armlint_state *state, armlint_finding *out)
 {
     if (!state->mov_active) {
@@ -485,7 +568,10 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
     bool produced = false;
     if (state->mov_insn_count >= 2) {
         unsigned reg_width = state->mov_is_64bit ? 64 : 32;
-        if (is_bitmask_immediate(state->mov_value, reg_width)) {
+        bool bitmask = is_bitmask_immediate(state->mov_value, reg_width);
+        unsigned minimal =
+            minimal_mov_wide_count(state->mov_value, reg_width);
+        if (bitmask || state->mov_insn_count > minimal) {
             char w_or_x = state->mov_is_64bit ? 'x' : 'w';
 
             out->name = "suboptimal MOVZ/MOVK sequence";
@@ -493,9 +579,20 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
             out->insn_count = state->mov_insn_count;
             clear_finding_strings(out);
 
-            snprintf(out->detail, sizeof(out->detail),
-                "%c%u = 0x%" PRIx64,
-                w_or_x, state->mov_rd, state->mov_value);
+            if (bitmask) {
+                // Encodable as a single bitmask-immediate MOV (ORR).
+                snprintf(out->detail, sizeof(out->detail),
+                    "%c%u = 0x%" PRIx64,
+                    w_or_x, state->mov_rd, state->mov_value);
+            } else {
+                // Not a bitmask immediate, but a shorter MOVZ/MOVN +
+                // MOVK chain reaches the same value.
+                char seq[ARMLINT_FINDING_DETAIL_LEN - 4];
+                render_minimal_mov_wide(seq, sizeof(seq), w_or_x,
+                    state->mov_rd, state->mov_value, reg_width);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s", seq);
+            }
 
             unsigned n = state->mov_insn_count;
             if (n > ARMLINT_FINDING_LINES) {

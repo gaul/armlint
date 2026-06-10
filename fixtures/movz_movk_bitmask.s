@@ -23,9 +23,29 @@ _main:
     // Negative: single MOVZ -- nothing to shrink.
     movz    w3, #0x6666
 
-    // Negative: 0xFFFFFFFF is the all-ones-at-width case, excluded
-    // from the bitmask-immediate definition.
+    // Positive: 0xFFFFFFFF is the all-ones-at-width case, excluded
+    // from the bitmask-immediate definition -- but a single
+    // MOVN w4, #0 builds it, so the two-instruction chain is long.
     movz    w4, #0xFFFF
     movk    w4, #0xFFFF, lsl #16
+
+    // Positive: 0xFFFFFFFF12345678 is not a bitmask immediate, but
+    // two of its four halfwords are 0xFFFF -- the MOVN-based chain
+    // (movn x5, #0xA987 ; movk x5, #0x1234, lsl #16) reaches it in
+    // two instructions instead of four.
+    movz    x5, #0x5678
+    movk    x5, #0x1234, lsl #16
+    movk    x5, #0xFFFF, lsl #32
+    movk    x5, #0xFFFF, lsl #48
+
+    // Positive: 0xFFFFEDCB is a single MOVN w6, #0x1234.
+    movz    w6, #0xEDCB
+    movk    w6, #0xFFFF, lsl #16
+
+    // Negative: 0xFFFFFFFF5678EDCB -- not a bitmask immediate, and
+    // the MOVN-based chain is already minimal (two halfwords differ
+    // from 0xFFFF).
+    movn    x7, #0x1234
+    movk    x7, #0x5678, lsl #16
 
     ret

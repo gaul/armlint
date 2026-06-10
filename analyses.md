@@ -12,6 +12,31 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * `movz w0, #0x6666 ; movk w0, #0x6666, lsl #16` instead of
   `mov w0, #0x66666666` (single bitmask-immediate ORR)
+* More generally, any MOVZ/MOVN + MOVK chain longer than the minimal
+  move-wide sequence for its final value. The minimal length is one
+  instruction per non-zero halfword for a MOVZ-based chain, one per
+  non-0xFFFF halfword for a MOVN-based chain (each with a floor of
+  one), whichever is smaller. So the four-instruction
+  `movz x0, #0x5678 ; movk x0, #0x1234, lsl #16 ;
+  movk x0, #0xffff, lsl #32 ; movk x0, #0xffff, lsl #48`
+  (0xFFFFFFFF12345678) flags with the two-instruction rewrite
+  `movn x0, #0xa987 ; movk x0, #0x1234, lsl #16`, and a MOVK that
+  rewrites a halfword the base instruction already set (`movk #0`
+  over MOVZ, `movk #0xffff` over MOVN) flags as plainly redundant.
+* The chain is accumulated per register -- a MOVZ or MOVN opens it,
+  same-register same-width MOVKs extend it -- and the final value is
+  judged when the chain closes (any other instruction, or end of
+  region). Judging the net value catches chains whose individual
+  steps look necessary but whose result is cheap.
+* Soundness: the rewrite materializes the same constant in the same
+  register; no flags or memory are involved. Like every multi-
+  instruction fold, it assumes control flow does not enter the middle
+  of the chain.
+* What it saves: one to three instructions per constant (4 bytes and
+  a decode slot each). Hybrid constructions (a bitmask-immediate ORR
+  or MOV followed by MOVKs), which beat both pure move-wide forms for
+  some values, are not yet modeled -- the reported minimum is an
+  upper bound on the true one.
 
 ## LSL foldable into shifted-register form
 

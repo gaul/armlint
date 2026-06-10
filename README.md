@@ -71,7 +71,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 
 | Pattern | Rewrite |
 | --- | --- |
-| [`movz` + `movk` (full-width constant)](analyses.md#suboptimal-movzmovk-sequence) | single bitmask-immediate `mov` |
+| [`movz`/`movn` + `movk` (over-long constant)](analyses.md#suboptimal-movzmovk-sequence) | bitmask-immediate `mov`, or minimal `movz`/`movn` + `movk` chain |
 | [`lsl` + `add`/`sub`/`and`/`orr`/`eor`](analyses.md#lsl-foldable-into-shifted-register-form) | `add Rd, Rn, Rm, lsl #n` |
 | [`sxtw`/`uxtb`/`sxtb` + `add`/`sub`](analyses.md#extend-foldable-into-shiftedextended-register-form) | `add Rd, Rn, Wm, sxtw` |
 | [`cmp #0` + `b.eq`/`b.ne`](analyses.md#compare-zero-branch-foldable-into-cbzcbnz) | `cbz`/`cbnz` |

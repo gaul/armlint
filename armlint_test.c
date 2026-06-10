@@ -230,20 +230,51 @@ static void test_movz_movk_sequences(void)
     movk_x(&code[12], 0, 0x5555, 3);
     assert(run_helper_check(code, 16) == 1);
 
-    // Same 4-instruction shape, but final value 0x1234567890abcdef is not
-    // a bitmask immediate.
+    // Same 4-instruction shape, but final value 0x1234567890abcdef is
+    // not a bitmask immediate and all four halfwords are non-zero and
+    // non-0xffff -- the chain is already minimal.
     movz_x(&code[0], 0, 0xcdef, 0);
     movk_x(&code[4], 0, 0x90ab, 1);
     movk_x(&code[8], 0, 0x5678, 2);
     movk_x(&code[12], 0, 0x1234, 3);
     assert(run_helper_check(code, 16) == 0);
 
-    // MOVN x0, #0, lsl #0 followed by MOVK -- MOVN starts the sequence
-    // (value = ~0 in 64-bit = all ones, which is excluded). Then MOVK
-    // clobbers the low 16 bits to 0xffff (still all-ones overall).
-    // Final value is the all-ones value, not bitmask-encodable. No flag.
+    // MOVN x0, #0, lsl #0 followed by MOVK #0xffff -- the MOVK
+    // rewrites the low 16 bits with the 0xffff they already hold. The
+    // all-ones value is not bitmask-encodable, but the single MOVN
+    // reaches it alone, so the two-instruction chain is flagged.
     movn_x(&code[0], 0, 0x0000, 0);
     movk_x(&code[4], 0, 0xffff, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 4-instruction chain for 0xffffffff12345678: not a bitmask
+    // immediate, but two of the four halfwords are 0xffff, so the
+    // MOVN-based chain (movn ; movk) reaches it in two -- flag.
+    movz_x(&code[0], 0, 0x5678, 0);
+    movk_x(&code[4], 0, 0x1234, 1);
+    movk_x(&code[8], 0, 0xffff, 2);
+    movk_x(&code[12], 0, 0xffff, 3);
+    assert(run_helper_check(code, 16) == 1);
+
+    // movz w0, #0xedcb ; movk w0, #0xffff, lsl #16 -> 0xffffedcb,
+    // reachable by a single MOVN w0, #0x1234 -- flag.
+    movz_w(&code[0], 0, 0xedcb);
+    movk_w(&code[4], 0, 0xffff, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // movz w0, #5 ; movk w0, #0, lsl #16 -- the MOVK writes a
+    // halfword the MOVZ already zeroed; the MOVZ alone suffices --
+    // flag.
+    movz_w(&code[0], 0, 5);
+    movk_w(&code[4], 0, 0, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // movn x0, #0x1234 ; movk x0, #0x5678, lsl #16 ->
+    // 0xffffffff5678edcb. Two halfwords differ from 0xffff, so the
+    // MOVN-based chain is already minimal, and the value is not a
+    // bitmask immediate -- no flag.
+    movn_x(&code[0], 0, 0x1234, 0);
+    movk_x(&code[4], 0, 0x5678, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // movz x0, #0xffff, lsl #16 ; movk x0, #0xffff, lsl #32
