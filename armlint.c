@@ -1494,6 +1494,19 @@ static liveness_t classify_liveness(uint32_t op)
     if ((op & 0x1FE00000u) == 0x1A000000u) {
         return LIV_READ;
     }
+    // FCSEL (FP conditional select) reads NZCV: bits 31..24 = 00011110,
+    // bit 21 = 1, bits 11..10 = 11 -- the field that distinguishes it
+    // from FCMP (bits 11..10 = 00). FCCMP/FCCMPE (FP conditional compare)
+    // read NZCV too, with bits 11..10 = 01, before conditionally writing
+    // it. A later integer instruction may overwrite the flags, but the FP
+    // conditional op has already consumed them, so dropping the CMP/TST is
+    // unsound -- classify both as reads.
+    if ((op & 0xFF200C00u) == 0x1E200C00u) {
+        return LIV_READ;   // FCSEL
+    }
+    if ((op & 0xFF200C00u) == 0x1E200400u) {
+        return LIV_READ;   // FCCMP / FCCMPE
+    }
 
     // ADDS/SUBS immediate (S=1): bit 29 = 1, bits 28..23 = 100010.
     if ((op & 0x3F800000u) == 0x31000000u) {
@@ -1514,9 +1527,9 @@ static liveness_t classify_liveness(uint32_t op)
     }
     // FCMP/FCMPE (any FP type): bits 31..24 = 00011110, bit 21 = 1,
     // bits 15..10 = 001000, bits 2..0 = 000. Covers register-register
-    // and register-zero variants. FCSEL and FCCMP/FCCMPE -- which DO
-    // read NZCV -- have different bits 11..10 (11 and 01 respectively)
-    // and will not match this mask.
+    // and register-zero variants. This is a pure NZCV writer; the
+    // NZCV-reading FP conditionals FCSEL (bits 11..10 = 11) and
+    // FCCMP/FCCMPE (bits 11..10 = 01) are caught as reads above.
     if ((op & 0xFF20FC07u) == 0x1E202000u) {
         return LIV_OVERWRITE;
     }

@@ -47,11 +47,17 @@ equivalent; the constraints below are the ones they share.
   without a liveness pass. The consumer rewrite itself stays valid
   regardless.
 * **Flag liveness uses a bounded forward scan.** The branch- and
-  flag-folding checks drop a `CMP`/`TST` only after confirming that no
-  later instruction reads N/C/V before they are overwritten, scanning the
-  fall-through path for a limited window. The branch-target path is never
-  followed, so a finding near a taken edge is suppressed rather than
-  risked.
+  flag-folding checks drop a `CMP`/`TST` only after a bounded scan of the
+  fall-through path confirms that no later instruction reads N/C/V before
+  they are overwritten. Every NZCV reader is recognized -- the integer
+  conditionals (`B.cond`, `CSEL`/`CSINC`/..., `CCMP`/`CCMN`, `ADC`/`SBC`)
+  and the floating-point ones (`FCSEL`, `FCCMP`/`FCCMPE`) -- and an
+  unconditional branch on the path (whose destination the scan cannot
+  see) ends it conservatively. The scan does not follow the folded
+  branch's own taken edge, so these folds assume N/C/V is dead at every
+  branch target. That holds for compiled code, where the flags are
+  defined within a basic block, but not for hand-written assembly that
+  deliberately keeps a flag live into a branch target.
 
 Findings are *opportunities*, not guaranteed speedups: some -- the pre-
 and post-indexed addressing folds -- are code-size and front-end wins
