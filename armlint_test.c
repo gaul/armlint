@@ -1023,6 +1023,19 @@ static inline void ldrsh_x(uint8_t out[4], unsigned rt, unsigned rn, unsigned im
 static inline void ldrsh_w(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x79C00000u, rt, rn, imm); }
 static inline void ldrsw_x(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0xB9800000u, rt, rn, imm); }
 
+// SIMD&FP LDR/STR, unsigned-offset form (V=1). imm12 is in scaled
+// units (x4 for S, x8 for D, x16 for Q).
+//   B: size=00 opc=0x  H: size=01  S: size=10  D: size=11
+//   Q: size=00 opc=1x
+static inline void ldr_b_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x3D400000u, rt, rn, imm); }
+static inline void ldr_h_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x7D400000u, rt, rn, imm); }
+static inline void ldr_s_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0xBD400000u, rt, rn, imm); }
+static inline void str_s_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0xBD000000u, rt, rn, imm); }
+static inline void ldr_d_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0xFD400000u, rt, rn, imm); }
+static inline void str_d_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0xFD000000u, rt, rn, imm); }
+static inline void ldr_q_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x3DC00000u, rt, rn, imm); }
+static inline void str_q_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x3D800000u, rt, rn, imm); }
+
 // SBFM SXT* aliases. SXTB/SXTH (W- and X-form) and SXTW (X-form only).
 //   SXTB Wd, Wn: SBFM Wd, Wn, #0, #7  -> sf=0, N=0, imms=7  -> 0x13001C00
 //   SXTH Wd, Wn: SBFM Wd, Wn, #0, #15 -> sf=0, N=0, imms=15 -> 0x13003C00
@@ -3418,6 +3431,63 @@ static void test_ldp_stp_coalesce(void)
     str_w(&code[0], 1, 2, 1);
     str_w(&code[4], 2, 2, 0);   // second STR uses Rt = x2 (the base)
     assert(run_helper_check(code, 8) == 1);
+
+    // -- SIMD&FP pairs: S/D/Q have LDP/STP forms; B/H do not. --
+
+    // ldr d0, [x1] ; ldr d1, [x1, #8] -> ldp d0, d1, [x1] (flag).
+    ldr_d_fp(&code[0], 0, 1, 0);
+    ldr_d_fp(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // str q0, [x1] ; str q1, [x1, #16] -> stp q0, q1, [x1] (flag).
+    str_q_fp(&code[0], 0, 1, 0);
+    str_q_fp(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr s2, [x1, #4] ; ldr s3, [x1] -- reverse order (flag).
+    ldr_s_fp(&code[0], 2, 1, 1);
+    ldr_s_fp(&code[4], 3, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr d3, [x3] ; ldr d4, [x3, #8] -- an FP Rt numerically equal
+    // to the integer base is NOT a base clobber (different register
+    // files); must still flag.
+    ldr_d_fp(&code[0], 3, 3, 0);
+    ldr_d_fp(&code[4], 4, 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Size mismatch: D then S does not pair.
+    ldr_d_fp(&code[0], 0, 1, 0);
+    ldr_s_fp(&code[4], 1, 1, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Class mismatch: FP then integer does not pair.
+    ldr_d_fp(&code[0], 0, 1, 0);
+    ldr_x(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Same destination register: LDP requires Rt1 != Rt2.
+    ldr_d_fp(&code[0], 0, 1, 0);
+    ldr_d_fp(&code[4], 0, 1, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Direction mismatch: FP load then FP store.
+    ldr_d_fp(&code[0], 0, 1, 0);
+    str_d_fp(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // B and H loads have no pair encoding.
+    ldr_b_fp(&code[0], 0, 1, 0);
+    ldr_b_fp(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 0);
+    ldr_h_fp(&code[0], 0, 1, 0);
+    ldr_h_fp(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Range: the lower scaled offset must fit LDP's imm7 (<= 63).
+    ldr_d_fp(&code[0], 0, 1, 64);
+    ldr_d_fp(&code[4], 1, 1, 65);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // MUL Wd, Wn, Wm encoding (MADD with Ra=11111). Base 0x1B007C00.
@@ -5698,6 +5768,35 @@ static void test_ldr_str_add_post_indexed(void)
     movz_x(&code[4], 9, 5, 0);
     add_x_imm(&code[8], 1, 1, 16);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- SIMD&FP accesses: every FP size has a post-indexed form. --
+
+    // ldr d2, [x9] ; add x9, x9, #8 -> ldr d2, [x9], #8 (flag).
+    ldr_d_fp(&code[0], 2, 9, 0);
+    add_x_imm(&code[4], 9, 9, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // str q0, [x0] ; add x0, x0, #16 -> str q0, [x0], #16 (flag).
+    str_q_fp(&code[0], 0, 0, 0);
+    add_x_imm(&code[4], 0, 0, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr b1, [x0] ; add x0, x0, #1 -- the B size folds too (flag).
+    ldr_b_fp(&code[0], 1, 0, 0);
+    add_x_imm(&code[4], 0, 0, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr d3, [x3] ; add x3, x3, #8 -- an FP Rt numerically equal to
+    // the base is not a writeback alias (different register files);
+    // flag.
+    ldr_d_fp(&code[0], 3, 3, 0);
+    add_x_imm(&code[4], 3, 3, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldr s0, [x9] ; sub x9, x9, #16 -> ldr s0, [x9], #-16 (flag).
+    ldr_s_fp(&code[0], 0, 9, 0);
+    sub_x_imm(&code[4], 9, 9, 16);
+    assert(run_helper_check(code, 8) == 1);
 }
 
 static void test_add_ldr_str_pre_indexed(void)
@@ -5841,6 +5940,25 @@ static void test_add_ldr_str_pre_indexed(void)
     movz_x(&code[4], 9, 5, 0);
     ldr_x_uimm0(&code[8], 3, 1);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- SIMD&FP accesses: every FP size has a pre-indexed form. --
+
+    // add x9, x9, #16 ; ldr q0, [x9] -> ldr q0, [x9, #16]! (flag).
+    add_x_imm(&code[0], 9, 9, 16);
+    ldr_q_fp(&code[4], 0, 9, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // add x3, x3, #8 ; str d3, [x3] -- an FP Rt numerically equal to
+    // the base is not a writeback alias (different register files);
+    // flag.
+    add_x_imm(&code[0], 3, 3, 8);
+    str_d_fp(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sub x9, x9, #4 ; ldr h2, [x9] -> ldr h2, [x9, #-4]! (flag).
+    sub_x_imm(&code[0], 9, 9, 4);
+    ldr_h_fp(&code[4], 2, 9, 0);
+    assert(run_helper_check(code, 8) == 1);
 }
 
 int main(void)

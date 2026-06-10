@@ -362,8 +362,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Two unsigned-offset `LDR Wt, [Rn, #imm12*4]` (or X-form,
   scale 8) to consecutive scaled offsets fold into a single
   `LDP Wt1, Wt2, [Rn, #imm7*4]`. Analogous for stores ->
-  `STP`. Both W- and X-form supported; load+load and store+store
-  only (no mixing).
+  `STP`. Both W- and X-form supported, and the SIMD&FP S/D/Q sizes
+  (scales 4/8/16) coalesce the same way into their own `LDP`/`STP`
+  forms -- the FP B and H sizes have no pair encoding and are not
+  flagged. Load+load and store+store only; no mixing of direction,
+  size, or register file.
 * Why it helps: one paired access replaces two single ones -- halving
   the load/store instruction count (decode/issue slots, code size) and,
   on most cores, the number of memory micro-ops. This is the inverse of
@@ -379,11 +382,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (some cores fault even when single `LDR/STR` works under
   `SCTLR_EL1.A = 0`).
 * Constraints checked: same base register `Rn`; same access size
-  (both W or both X); same direction (load/load or store/store);
-  consecutive offsets (`imm12_2 = imm12_1 + 1` in scaled units);
-  `Rt1 != Rt2` (LDP/STP requires distinct destinations); for
-  loads, the first instruction's `Rt != Rn` (else the first load
-  clobbers the base before the second load reads it). The LOWER
+  (both W, both X, or the same S/D/Q); same direction (load/load or
+  store/store); consecutive offsets (`imm12_2 = imm12_1 + 1` in
+  scaled units); `Rt1 != Rt2` (LDP/STP requires distinct
+  destinations); for integer loads, the first instruction's
+  `Rt != Rn` (else the first load clobbers the base before the
+  second load reads it) -- a SIMD&FP `Rt` can never alias the
+  integer base, so that guard does not apply to FP pairs. The LOWER
   of the two imm12s must also fit LDP's signed-7-bit imm7 (i.e.,
   be at most 63 for non-negative unsigned-offset sources).
 * Reverse-order pairs (`ldr Rt2, [Rn, #imm+1] ; ldr Rt1, [Rn,
@@ -830,8 +835,10 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * `ldr xt, [xn] ; add xn, xn, #imm` -> `ldr xt, [xn], #imm`, and the
   negative-direction `ldr xt, [xn] ; sub xn, xn, #imm` ->
-  `ldr xt, [xn], #-imm`. Same for STR and all four access sizes
-  (B/H/W/X). The post-indexed encoding already expresses "load/store
+  `ldr xt, [xn], #-imm`. Same for STR, all four integer access sizes
+  (B/H/W/X), and every SIMD&FP size (B/H/S/D/Q) -- an FP Rt never
+  aliases the integer base, so the Rt == Rn writeback restriction
+  is integer-only. The post-indexed encoding already expresses "load/store
   from `[xn]` and then bump `xn` by ±imm", so the rewrite is a literal
   source-to-encoding fold with no semantic change.
 * What you actually save: 4 bytes per fold and one fetch/decode
@@ -872,8 +879,10 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * `add xn, xn, #imm ; ldr xt, [xn]` -> `ldr xt, [xn, #imm]!`, and the
   negative-direction `sub xn, xn, #imm ; ldr xt, [xn]` ->
-  `ldr xt, [xn, #-imm]!`. Same for STR and all four access sizes
-  (B/H/W/X). The pre-indexed encoding already expresses "bump `xn` by
+  `ldr xt, [xn, #-imm]!`. Same for STR, all four integer access sizes
+  (B/H/W/X), and every SIMD&FP size (B/H/S/D/Q) -- an FP Rt never
+  aliases the integer base, so the Rt == Rn writeback restriction
+  is integer-only. The pre-indexed encoding already expresses "bump `xn` by
   ±imm and then load/store from the new `xn`", which is exactly what
   the source sequence does.
 * Same code-size and decode-slot win as the post-index check. The

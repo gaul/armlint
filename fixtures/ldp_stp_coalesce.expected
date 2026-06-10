@@ -14,10 +14,22 @@ adjacent LDRSWs foldable into LDPSW at offset: 0x18: -> ldpsw x6, x7, [x13, #0] 
   ldrsw x6, [x13]
   ldrsw x7, [x13, #4]
 
-Optimization opportunities by type:
-       1  adjacent LDRSWs foldable into LDPSW
-       1  adjacent LDRs foldable into LDP
-       1  adjacent LDRs foldable into LDP (reverse order)
-       1  adjacent STRs foldable into STP
+adjacent LDRs foldable into LDP at offset: 0x40: -> ldp d0, d1, [x2, #0] (2 instructions)
+  ldr d0, [x2]
+  ldr d1, [x2, #8]
 
-4 optimization opportunities in 17 instructions
+adjacent STRs foldable into STP at offset: 0x48: -> stp q2, q3, [x2, #0] (2 instructions)
+  str q2, [x2]
+  str q3, [x2, #0x10]
+
+adjacent LDRs foldable into LDP (reverse order) at offset: 0x50: -> ldp s5, s4, [x2, #0] (2 instructions)
+  ldr s4, [x2, #4]
+  ldr s5, [x2]
+
+Optimization opportunities by type:
+       2  adjacent LDRs foldable into LDP
+       2  adjacent LDRs foldable into LDP (reverse order)
+       2  adjacent STRs foldable into STP
+       1  adjacent LDRSWs foldable into LDPSW
+
+7 optimization opportunities in 27 instructions

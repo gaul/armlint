@@ -359,10 +359,15 @@ struct armlint_state {
     // single post-indexed LDR/STR with the ADD/SUB's byte immediate in
     // the post-index slot. Post-index uses a 9-bit signed immediate
     // (-256..255): ADD imm in 1..255 folds to a positive writeback,
-    // SUB imm in 1..256 to a negative one. Strict adjacency: any
-    // non-matching instruction expires the state.
+    // SUB imm in 1..256 to a negative one. SIMD&FP accesses
+    // (lspi_pending_is_fp; size is then the log2 transfer bytes,
+    // 0..4 for B/H/S/D/Q) fold the same way -- every FP size has a
+    // post-indexed form, and the FP Rt can never alias the integer
+    // base. Strict adjacency: any non-matching instruction expires
+    // the state.
     bool lspi_pending;
     bool lspi_pending_is_load;
+    bool lspi_pending_is_fp;
     unsigned lspi_pending_size;
     unsigned lspi_pending_rn;
     unsigned lspi_pending_rt;
@@ -387,17 +392,21 @@ struct armlint_state {
 
     // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
     // partner for LDP/STP/LDPSW coalescing. The next instruction of
-    // the same kind (sext or zext) with the same Rn, same direction
-    // (load/load or store/store), same access size (W/W or X/X), and
-    // imm12 = previous + 1 (in scaled units) closes the pair into an
-    // LDP/STP/LDPSW. Strict adjacency: any non-matching instruction
+    // the same kind (sext or zext, integer or SIMD&FP) with the same
+    // Rn, same direction (load/load or store/store), same access size,
+    // and imm12 = previous + 1 (in scaled units) closes the pair into
+    // an LDP/STP/LDPSW. Strict adjacency: any non-matching instruction
     // expires the state. lsp_is_sext flags an LDRSW (always Xt, load,
-    // 4-byte transfer); otherwise lsp_is_64bit selects W/X and
+    // 4-byte transfer); lsp_is_fp a SIMD&FP access (S/D/Q -- the only
+    // FP sizes with a pair form -- with lsp_lg2size the log2 transfer
+    // bytes, 2/3/4); otherwise lsp_is_64bit selects W/X and
     // lsp_is_load selects load/store.
     bool lsp_active;
     bool lsp_is_load;
     bool lsp_is_64bit;
     bool lsp_is_sext;
+    bool lsp_is_fp;
+    unsigned lsp_lg2size;
     unsigned lsp_rt;
     unsigned lsp_rn;
     unsigned lsp_imm12;
@@ -4803,6 +4812,76 @@ static bool decode_ldrsw_uimm(uint32_t op, unsigned *out_imm12,
     return true;
 }
 
+// Decode an unsigned-offset SIMD&FP LDR/STR of any size. V=1
+// unsigned-offset form: size(2) 111 1 01 opc(2) imm12 Rn Rt; the
+// transfer size is size + 4*opc[1] (B/H/S/D for opc[1]=0, Q for
+// size=00 with opc[1]=1; other opc[1]=1 sizes are unallocated) and
+// opc[0] selects load. Returns lg2size in 0..4 (B/H/S/D/Q).
+static bool decode_fp_ldr_str_uimm(uint32_t op, bool *out_is_load,
+                                   unsigned *out_lg2size,
+                                   unsigned *out_imm12, unsigned *out_rn,
+                                   unsigned *out_rt)
+{
+    if ((op & 0x3F000000u) != 0x3D000000u) {
+        return false;
+    }
+    unsigned size = (op >> 30) & 0x3u;
+    unsigned opc = (op >> 22) & 0x3u;
+    unsigned lg2 = size + ((opc & 0x2u) << 1);
+    if (lg2 > 4u) {
+        return false;   // opc[1] with size != 00 is unallocated
+    }
+    *out_is_load = (opc & 1u) != 0;
+    *out_lg2size = lg2;
+    *out_imm12 = (op >> 10) & 0xFFFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// Register-class letter for a load/store data register: SIMD&FP sizes
+// render their own class letter (b/h/s/d/q by log2 transfer size);
+// integer sizes render w (B/H/W) or x.
+static char ls_rt_letter(bool is_fp, unsigned size)
+{
+    static const char fp_letter[5] = { 'b', 'h', 's', 'd', 'q' };
+    if (is_fp) {
+        return fp_letter[size];
+    }
+    return size == 3u ? 'x' : 'w';
+}
+
+// Load/store mnemonic for a single-register access: the integer
+// sub-word sizes carry a suffix (ldrb/ldrh, strb/strh); SIMD&FP
+// accesses use the plain mnemonic with the class carried by the
+// register operand.
+static const char *ls_mnemonic(bool is_fp, bool is_load, unsigned size)
+{
+    static const char *const int_load[4]  = {
+        "ldrb", "ldrh", "ldr", "ldr"
+    };
+    static const char *const int_store[4] = {
+        "strb", "strh", "str", "str"
+    };
+    if (is_fp) {
+        return is_load ? "ldr" : "str";
+    }
+    return is_load ? int_load[size] : int_store[size];
+}
+
+// Format a load/store data register. Register 31 is ZR only in the
+// integer file; b31/h31/s31/d31/q31 are ordinary SIMD&FP registers.
+static void format_ls_rt(char *buf, size_t bufsz, bool is_fp,
+                         unsigned size, unsigned rt)
+{
+    char c = ls_rt_letter(is_fp, size);
+    if (!is_fp && rt == 31) {
+        snprintf(buf, bufsz, "%czr", c);
+    } else {
+        snprintf(buf, bufsz, "%c%u", c, rt);
+    }
+}
+
 bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -4814,6 +4893,8 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
 
     bool is_load = false, is_64bit = false, is_sext = false;
+    bool is_fp = false;
+    unsigned lg2size = 0;
     unsigned imm12, rn, rt;
 
     if (decode_ldrsw_uimm(op, &imm12, &rn, &rt)) {
@@ -4821,9 +4902,19 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         is_load = true;
         is_64bit = true;
         is_sext = true;
-    } else if (!decode_ldr_str_uimm(op, &is_load, &is_64bit, &imm12,
-                                    &rn, &rt)) {
-        // Non-LDR/STR/LDRSW expires the window (strict adjacency).
+    } else if (decode_ldr_str_uimm(op, &is_load, &is_64bit, &imm12,
+                                   &rn, &rt)) {
+        // Integer W/X form.
+    } else if (decode_fp_ldr_str_uimm(op, &is_load, &lg2size, &imm12,
+                                      &rn, &rt)
+               && lg2size >= 2u) {
+        // SIMD&FP S/D/Q form. The B and H sizes have no LDP/STP
+        // encoding, so they fall to the else and expire the window
+        // like any other non-pairable instruction.
+        is_fp = true;
+    } else {
+        // Non-pairable instruction expires the window (strict
+        // adjacency).
         state->lsp_active = false;
         return false;
     }
@@ -4840,32 +4931,48 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         && state->lsp_imm12 == imm12 + 1;
 
     // Try to close: does this instruction partner the pending one?
-    //   - same kind (sext/zext) -- LDR cannot pair with LDRSW
+    //   - same kind (sext/zext, integer/FP) -- LDR cannot pair with
+    //     LDRSW, nor an integer access with a SIMD&FP one
     //   - same direction (load/load or store/store)
-    //   - same size (W/W or X/X)
+    //   - same size (W/W, X/X, or equal S/D/Q)
     //   - same base Rn
     //   - consecutive in scaled units (forward or reverse)
     //   - distinct destination registers (LDP/STP requires Rt1 != Rt2)
-    //   - pending's Rt != Rn for loads (the FIRST load in source order
-    //     would clobber the base before the second's address is
-    //     computed in the original sequence). The aliasing concern is
-    //     about source order, not offset order, so the same constraint
-    //     applies to both forward and reverse. Doesn't apply to stores.
+    //   - pending's Rt != Rn for integer loads (the FIRST load in
+    //     source order would clobber the base before the second's
+    //     address is computed in the original sequence). The aliasing
+    //     concern is about source order, not offset order, so the same
+    //     constraint applies to both forward and reverse. It doesn't
+    //     apply to stores, nor to SIMD&FP loads: an FP Rt can never
+    //     alias the integer base.
     //   - the LOWER of the two imm12s fits LDP/STP imm7 (signed 7-bit,
     //     scaled), i.e., the lower imm12 must be <= 63 (unsigned).
     unsigned low_imm12 = forward ? state->lsp_imm12 : imm12;
     if ((forward || reverse)
             && state->lsp_is_sext == is_sext
+            && state->lsp_is_fp == is_fp
+            && (!is_fp || state->lsp_lg2size == lg2size)
             && state->lsp_is_load == is_load
-            && state->lsp_is_64bit == is_64bit
+            && (is_fp || state->lsp_is_64bit == is_64bit)
             && state->lsp_rn == rn
             && rt != state->lsp_rt
             && low_imm12 <= 63u
-            && (!is_load || state->lsp_rt != rn)) {
-        // LDPSW always loads Xt with 4-byte transfer; otherwise the
-        // register width follows is_64bit and transfer size matches.
-        char w_or_x = is_sext ? 'x' : (is_64bit ? 'x' : 'w');
-        unsigned xfer = is_sext ? 4u : (is_64bit ? 8u : 4u);
+            && (!is_load || is_fp || state->lsp_rt != rn)) {
+        // LDPSW always loads Xt with 4-byte transfer; SIMD&FP pairs
+        // take their class letter and size; otherwise the register
+        // width follows is_64bit and the transfer size matches.
+        char w_or_x;
+        unsigned xfer;
+        if (is_fp) {
+            w_or_x = ls_rt_letter(true, lg2size);
+            xfer = 1u << lg2size;
+        } else if (is_sext) {
+            w_or_x = 'x';
+            xfer = 4u;
+        } else {
+            w_or_x = is_64bit ? 'x' : 'w';
+            xfer = is_64bit ? 8u : 4u;
+        }
         const char *pair_mnem;
         if (is_sext) {
             pair_mnem = "ldpsw";
@@ -4919,6 +5026,8 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         state->lsp_is_load = is_load;
         state->lsp_is_64bit = is_64bit;
         state->lsp_is_sext = is_sext;
+        state->lsp_is_fp = is_fp;
+        state->lsp_lg2size = lg2size;
         state->lsp_rt = rt;
         state->lsp_rn = rn;
         state->lsp_imm12 = imm12;
@@ -5500,9 +5609,10 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
         uint32_t a_imm;
         // Rt == Rn writeback is UNPREDICTABLE (CONSTRAINED for stores)
         // unless Rn == 31, where 31 means SP for Rn but XZR for Rt --
-        // distinct registers, so no conflict.
-        bool rt_aliases_rn =
-            state->lspi_pending_rt == state->lspi_pending_rn
+        // distinct registers, so no conflict. A SIMD&FP Rt lives in a
+        // different register file and can never alias the base.
+        bool rt_aliases_rn = !state->lspi_pending_is_fp
+            && state->lspi_pending_rt == state->lspi_pending_rn
             && state->lspi_pending_rn != 31;
         bool is_add = decode_add_imm_x(op, &a_rd, &a_rn, &a_imm);
         bool is_sub = !is_add && decode_sub_imm_x(op, &a_rd, &a_rn, &a_imm);
@@ -5519,15 +5629,8 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
                 && a_imm <= (is_sub ? 256u : 255u)) {
             unsigned size = state->lspi_pending_size;
             bool is_load = state->lspi_pending_is_load;
-            const char *mnem;
-            char rt_wx;
-            switch (size) {
-                case 0: mnem = is_load ? "ldrb" : "strb"; rt_wx = 'w'; break;
-                case 1: mnem = is_load ? "ldrh" : "strh"; rt_wx = 'w'; break;
-                case 2: mnem = is_load ? "ldr"  : "str";  rt_wx = 'w'; break;
-                case 3: mnem = is_load ? "ldr"  : "str";  rt_wx = 'x'; break;
-                default: mnem = "ldr"; rt_wx = 'x'; break;
-            }
+            bool is_fp = state->lspi_pending_is_fp;
+            const char *mnem = ls_mnemonic(is_fp, is_load, size);
             const char *idx_sign = is_sub ? "-" : "";
             const char *upd_mnem = is_sub ? "sub" : "add";
 
@@ -5545,12 +5648,8 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
             clear_finding_strings(out);
 
             char rt_buf[8];
-            if (state->lspi_pending_rt == 31) {
-                snprintf(rt_buf, sizeof(rt_buf), "%czr", rt_wx);
-            } else {
-                snprintf(rt_buf, sizeof(rt_buf), "%c%u",
-                    rt_wx, state->lspi_pending_rt);
-            }
+            format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size,
+                state->lspi_pending_rt);
             if (state->lspi_pending_rn == 31) {
                 snprintf(out->detail, sizeof(out->detail),
                     "-> %s %s, [sp], #%s0x%x", mnem, rt_buf, idx_sign, a_imm);
@@ -5574,13 +5673,15 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
         state->lspi_pending = false;
     }
 
-    // (2) Try to open: is this an unsigned-offset LDR or STR with
+    // (2) Try to open: is this an unsigned-offset LDR or STR (integer
+    // or SIMD&FP -- every FP size has a post-indexed form) with
     // imm12 == 0? Only the zero-offset case folds cleanly: a non-zero
     // imm12 plus a post-index update has no single-instruction
     // rewrite (pre-indexed handles a different pattern).
     unsigned size, imm12, rn, rt;
     bool opened = false;
     bool is_load = false;
+    bool is_fp = false;
     if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
             && imm12 == 0) {
         opened = true;
@@ -5589,29 +5690,23 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
             && imm12 == 0) {
         opened = true;
         is_load = false;
+    } else if (decode_fp_ldr_str_uimm(op, &is_load, &size, &imm12,
+                                      &rn, &rt)
+            && imm12 == 0) {
+        opened = true;
+        is_fp = true;
     }
     if (opened) {
         state->lspi_pending = true;
         state->lspi_pending_is_load = is_load;
+        state->lspi_pending_is_fp = is_fp;
         state->lspi_pending_size = size;
         state->lspi_pending_rn = rn;
         state->lspi_pending_rt = rt;
         state->lspi_pending_offset = offset;
-        const char *mnem;
-        char rt_wx;
-        switch (size) {
-            case 0: mnem = is_load ? "ldrb" : "strb"; rt_wx = 'w'; break;
-            case 1: mnem = is_load ? "ldrh" : "strh"; rt_wx = 'w'; break;
-            case 2: mnem = is_load ? "ldr"  : "str";  rt_wx = 'w'; break;
-            case 3: mnem = is_load ? "ldr"  : "str";  rt_wx = 'x'; break;
-            default: mnem = "ldr"; rt_wx = 'x'; break;
-        }
+        const char *mnem = ls_mnemonic(is_fp, is_load, size);
         char rt_buf[8];
-        if (rt == 31) {
-            snprintf(rt_buf, sizeof(rt_buf), "%czr", rt_wx);
-        } else {
-            snprintf(rt_buf, sizeof(rt_buf), "%c%u", rt_wx, rt);
-        }
+        format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
         if (rn == 31) {
             snprintf(state->lspi_pending_disasm,
                 sizeof(state->lspi_pending_disasm),
@@ -5646,6 +5741,7 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
         unsigned size, imm12, rn, rt;
         bool matched = false;
         bool is_load = false;
+        bool is_fp = false;
         if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
                 && imm12 == 0
                 && rn == state->lspr_pending_rd) {
@@ -5656,29 +5752,25 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
                 && rn == state->lspr_pending_rd) {
             matched = true;
             is_load = false;
+        } else if (decode_fp_ldr_str_uimm(op, &is_load, &size, &imm12,
+                                          &rn, &rt)
+                && imm12 == 0
+                && rn == state->lspr_pending_rd) {
+            // SIMD&FP access: every FP size has a pre-indexed form.
+            matched = true;
+            is_fp = true;
         }
         // Rt == Rn writeback is UNPREDICTABLE for loads and
         // CONSTRAINED UNPREDICTABLE for stores (same rule as
         // post-index). Rn == 31 is the exception: Rn means SP and Rt
-        // means XZR, so the two encode distinct registers.
-        bool rt_aliases_rn = matched && rt == rn && rn != 31;
+        // means XZR, so the two encode distinct registers. A SIMD&FP
+        // Rt lives in a different register file and never aliases.
+        bool rt_aliases_rn = matched && !is_fp && rt == rn && rn != 31;
         if (matched && !rt_aliases_rn) {
-            const char *mnem;
-            char rt_wx;
-            switch (size) {
-                case 0: mnem = is_load ? "ldrb" : "strb"; rt_wx = 'w'; break;
-                case 1: mnem = is_load ? "ldrh" : "strh"; rt_wx = 'w'; break;
-                case 2: mnem = is_load ? "ldr"  : "str";  rt_wx = 'w'; break;
-                case 3: mnem = is_load ? "ldr"  : "str";  rt_wx = 'x'; break;
-                default: mnem = "ldr"; rt_wx = 'x'; break;
-            }
+            const char *mnem = ls_mnemonic(is_fp, is_load, size);
 
             char rt_buf[8];
-            if (rt == 31) {
-                snprintf(rt_buf, sizeof(rt_buf), "%czr", rt_wx);
-            } else {
-                snprintf(rt_buf, sizeof(rt_buf), "%c%u", rt_wx, rt);
-            }
+            format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
 
             uint32_t imm = state->lspr_pending_imm;
             const char *idx_sign = state->lspr_pending_is_sub ? "-" : "";

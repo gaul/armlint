@@ -633,7 +633,9 @@ bool check_add_ldr_imm_offset(armlint_state *state,
 //   str xt, [xn]    ; add xn, xn, #imm  -> str xt, [xn], #imm
 //   ldr xt, [sp]    ; add sp, sp, #imm  -> ldr xt, [sp], #imm
 //   ldr xt, [xn]    ; sub xn, xn, #imm  -> ldr xt, [xn], #-imm
-// All four access sizes (B/H/W/X) are supported.
+// All four integer access sizes (B/H/W/X) and every SIMD&FP size
+// (B/H/S/D/Q) are supported; an FP Rt never aliases the integer
+// base, so the Rt == Rn writeback restriction is integer-only.
 //
 // Encoding constraint: post-index uses a 9-bit signed immediate
 // (-256..255). An ADD-imm self-update with imm in 1..255 folds to a
@@ -665,7 +667,9 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
 //   add xn, xn, #imm  ; str xt, [xn]  -> str xt, [xn, #imm]!
 //   add sp, sp, #imm  ; ldr xt, [sp]  -> ldr xt, [sp, #imm]!
 //   sub xn, xn, #imm  ; ldr xt, [xn]  -> ldr xt, [xn, #-imm]!
-// All four access sizes (B/H/W/X) are supported.
+// All four integer access sizes (B/H/W/X) and every SIMD&FP size
+// (B/H/S/D/Q) are supported; an FP Rt never aliases the integer
+// base, so the Rt == Rn writeback restriction is integer-only.
 //
 // Encoding constraint: same 9-bit signed range as post-index. An ADD
 // self-update with imm in 1..255 folds to a positive writeback; a SUB
@@ -686,11 +690,15 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
                                    const cs_insn *insn,
                                    size_t offset, armlint_finding *out);
 
-// Detect two adjacent unsigned-offset LDR/STR (both W or both X,
-// same direction, same base, consecutive offsets) foldable into a
-// single LDP/STP; also two adjacent unsigned-offset LDRSW pairs
-// foldable into a single LDPSW (always Xt destinations, 4-byte
-// transfer, load-only). v1 supports only the unsigned-offset form,
+// Detect two adjacent unsigned-offset LDR/STR (both W or both X, or
+// both the same SIMD&FP size S/D/Q -- the FP B and H sizes have no
+// pair form -- same direction, same base, consecutive offsets)
+// foldable into a single LDP/STP; also two adjacent unsigned-offset
+// LDRSW pairs foldable into a single LDPSW (always Xt destinations,
+// 4-byte transfer, load-only). The integer base-clobber guard (first
+// load's Rt != Rn) does not apply to SIMD&FP pairs: an FP Rt can
+// never alias the integer base. v1 supports only the unsigned-offset
+// form,
 // which guarantees natural alignment by construction (imm12 is
 // scaled); LDUR / pre- and post-indexed forms are deferred to avoid
 // the implementation-defined behaviour around unaligned LDP/STP.

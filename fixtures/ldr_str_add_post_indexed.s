@@ -99,4 +99,13 @@ _main:
     mov     x9, #5
     add     x1, x1, #16
 
+    // P) SIMD&FP load: every FP size has a post-indexed form, and the
+    // FP Rt can never alias the integer base.
+    ldr     d2, [x9]
+    add     x9, x9, #8              // -> ldr d2, [x9], #8
+
+    // P) Q store with a negative bump.
+    str     q0, [x9]
+    sub     x9, x9, #16             // -> str q0, [x9], #-16
+
     ret

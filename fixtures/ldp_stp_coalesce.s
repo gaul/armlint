@@ -38,4 +38,26 @@ _main:
     ldr     x22, [x23]
     str     x24, [x23, #8]
 
+    // Positive: SIMD&FP D pair. An FP Rt numerically equal to the
+    // integer base (d2 vs x2 here would be fine too) is not a base
+    // clobber -- different register files.
+    ldr     d0, [x2]
+    ldr     d1, [x2, #8]            // -> ldp d0, d1, [x2]
+
+    // Positive: Q store pair.
+    str     q2, [x2]
+    str     q3, [x2, #16]           // -> stp q2, q3, [x2]
+
+    // Positive: S pair in reverse offset order.
+    ldr     s4, [x2, #4]
+    ldr     s5, [x2]                // -> ldp s5, s4, [x2]
+
+    // Negative: FP size mismatch (D then S).
+    ldr     d6, [x2]
+    ldr     s7, [x2, #2]
+
+    // Negative: B loads have no pair form.
+    ldr     b0, [x2]
+    ldr     b1, [x2, #1]
+
     ret

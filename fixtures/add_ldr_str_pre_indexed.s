@@ -95,4 +95,15 @@ _main:
     mov     x9, #5
     ldr     x3, [x1]
 
+    // P) SIMD&FP load: every FP size has a pre-indexed form, and the
+    // FP Rt can never alias the integer base.
+    add     x9, x9, #16
+    ldr     q0, [x9]                // -> ldr q0, [x9, #16]!
+
+    // P) D store after a negative bump. (A different base register
+    // than the case above, so the ldr q0 / sub pair straddling the
+    // two cases does not itself form a post-index pattern.)
+    sub     x10, x10, #8
+    str     d3, [x10]               // -> str d3, [x10, #-8]!
+
     ret
