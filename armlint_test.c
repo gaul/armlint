@@ -1353,6 +1353,50 @@ static void test_cmp_zero_branch(void)
     adcs_w(&code[8], 1, 2, 3);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 0);
+
+    // -- HI/LS after a SUBS-based zero test: subtracting zero never
+    //    borrows, so C is known set and HI reduces to NE, LS to EQ. --
+
+    // cmp w0,#0 ; b.hi +8 ; ret -> cbnz w0 (flag).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 8 /* HI */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp x5,#0 ; b.ls -16 ; ret -> cbz x5 (flag).
+    cmp_x_imm(&code[0], 5, 0);
+    b_cond(&code[4], 9 /* LS */, -16);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp w3, wzr ; b.hi +8 ; ret -- the register-form zero test is
+    // also SUBS-based (flag).
+    subs_w(&code[0], 31, 3, 31);
+    b_cond(&code[4], 8 /* HI */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // tst w0, w0 ; b.hi ; ret -- ANDS clears C, so HI here means
+    // "never taken", not "Rn != 0"; the fold must not fire.
+    ands_w(&code[0], 31, 0, 0);
+    b_cond(&code[4], 8 /* HI */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // tst w0, w0 ; b.eq ; ret -- the eq/ne fold still applies to the
+    // TST form (flag; Z is form-independent).
+    ands_w(&code[0], 31, 0, 0);
+    b_cond(&code[4], 0 /* EQ */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmp w0,#0 ; b.hi L ; adcs (reads C downstream) -- the same
+    // liveness scan suppresses the hi/ls fold.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 8 /* HI */, 8);
+    adcs_w(&code[8], 1, 2, 3);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
 }
 
 static void test_tst_branch(void)

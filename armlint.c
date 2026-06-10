@@ -104,9 +104,11 @@ struct armlint_state {
     char aul_disasm[ARMLINT_FINDING_LINE_LEN];
 
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / TST Rn,Rn) pending a
-    // B.EQ/B.NE consumer.
+    // B.EQ/B.NE consumer (any form), a B.HI/B.LS consumer (the SUBS
+    // forms only -- cmp_is_subs), or a sign-condition B.cond.
     bool cmp_active;
     bool cmp_is_64bit;
+    bool cmp_is_subs;
     unsigned cmp_rn;
     size_t cmp_offset;
     char cmp_disasm[ARMLINT_FINDING_LINE_LEN];
@@ -1558,13 +1560,20 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
 // All three have Rd=31. Bit 31 (sf) is left free so either operand
 // width matches; for the TST form Rm and Rn must agree, which is
 // verified after the mask check.
-static bool decode_zero_test(uint32_t op,
-                             unsigned *out_sf, unsigned *out_rn)
+//
+// The forms differ in the carry they leave: the SUBS-based CMPs set
+// C = 1 (subtracting zero never borrows), which makes the unsigned
+// HI/LS conditions reduce to NE/EQ; the ANDS-based TST clears C,
+// where HI is never taken and LS always. *out_is_subs reports which
+// family matched so the caller can gate the HI/LS fold.
+static bool decode_zero_test(uint32_t op, unsigned *out_sf,
+                             unsigned *out_rn, bool *out_is_subs)
 {
     // CMP Rn, #0 (SUBS-imm with Rd=31, sh=0, imm12=0).
     if ((op & 0x7FFFFC1Fu) == 0x7100001Fu) {
         *out_sf = (op >> 31) & 1u;
         *out_rn = (op >> 5) & 0x1Fu;
+        *out_is_subs = true;
         return true;
     }
     // CMP Rn, XZR/WZR (SUBS shifted-reg with Rd=31, Rm=31, shift=LSL,
@@ -1572,6 +1581,7 @@ static bool decode_zero_test(uint32_t op,
     if ((op & 0x7FFFFC1Fu) == 0x6B1F001Fu) {
         *out_sf = (op >> 31) & 1u;
         *out_rn = (op >> 5) & 0x1Fu;
+        *out_is_subs = true;
         return true;
     }
     // TST Rn, Rn (ANDS shifted-reg with Rd=31, shift=LSL, N=0, imm6=0,
@@ -1582,6 +1592,7 @@ static bool decode_zero_test(uint32_t op,
         if (rm == rn) {
             *out_sf = (op >> 31) & 1u;
             *out_rn = rn;
+            *out_is_subs = false;
             return true;
         }
     }
@@ -1607,6 +1618,30 @@ static bool decode_b_eq_or_ne(uint32_t op, bool *out_is_eq,
     *out_is_eq = (cond == 0);
     int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
     // Sign-extend from 19 bits to 32.
+    imm19 = (imm19 ^ 0x40000) - 0x40000;
+    *out_imm19 = imm19;
+    return true;
+}
+
+// Detect B.cond with cond in {HI, LS}. After a SUBS-based zero test
+// (CMP Rn, #0 / CMP Rn, ZR) the carry is always set -- subtracting
+// zero never borrows -- so HI (C && !Z) reduces to NE and LS
+// (!C || Z) to EQ, the same CBNZ/CBZ rewrite as the eq/ne forms.
+// Callers must confirm the producer really is the SUBS form: the
+// ANDS-based TST Rn, Rn clears C, where HI is never taken and LS
+// always -- dead-branch territory, not this fold.
+static bool decode_b_hi_or_ls(uint32_t op, bool *out_is_ls,
+                              int32_t *out_imm19)
+{
+    if ((op & 0xFF000010u) != 0x54000000u) {
+        return false;
+    }
+    unsigned cond = op & 0xFu;
+    if (cond != 8 && cond != 9) {
+        return false;
+    }
+    *out_is_ls = (cond == 9);
+    int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
     imm19 = (imm19 ^ 0x40000) - 0x40000;
     *out_imm19 = imm19;
     return true;
@@ -1819,18 +1854,29 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
 
     uint32_t op = insn_word(insn);
 
-    // (1) Close: is this a B.EQ/B.NE (CBZ/CBNZ form) or B.MI/PL/LT/GE
+    // (1) Close: is this a B.EQ/B.NE (CBZ/CBNZ form), a B.HI/B.LS
+    //     (the same form, SUBS producers only -- C is known set, so
+    //     HI reduces to NE and LS to EQ), or a B.MI/PL/LT/GE
     //     (sign-bit TBZ/TBNZ form) consuming the pending CMP?
     if (state->cmp_active) {
-        bool is_eq, is_neg;
+        bool is_eq, is_ls, is_neg;
         unsigned cond;
         int32_t imm19;
+        bool to_cbz = false;
+        const char *bcond_mnem = NULL;
         if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
+            to_cbz = is_eq;
+            bcond_mnem = is_eq ? "b.eq" : "b.ne";
+        } else if (state->cmp_is_subs
+                   && decode_b_hi_or_ls(op, &is_ls, &imm19)) {
+            to_cbz = is_ls;
+            bcond_mnem = is_ls ? "b.ls" : "b.hi";
+        }
+        if (bcond_mnem != NULL) {
             uint64_t target = insn->address
                 + (uint64_t)((int64_t)imm19 * 4);
             char w_or_x = state->cmp_is_64bit ? 'x' : 'w';
-            const char *cb_mnem = is_eq ? "cbz" : "cbnz";
-            const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
+            const char *cb_mnem = to_cbz ? "cbz" : "cbnz";
 
             armlint_finding *p = &state->pending_finding;
             p->name = "compare-zero branch foldable into CBZ/CBNZ";
@@ -1896,9 +1942,11 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
 
     // (2) Open: is this a zero-test of Rn (Rn != XZR)?
     unsigned sf, rn;
-    if (decode_zero_test(op, &sf, &rn) && rn != 31) {
+    bool is_subs;
+    if (decode_zero_test(op, &sf, &rn, &is_subs) && rn != 31) {
         state->cmp_active = true;
         state->cmp_is_64bit = (sf != 0);
+        state->cmp_is_subs = is_subs;
         state->cmp_rn = rn;
         state->cmp_offset = offset;
         snprintf(state->cmp_disasm, sizeof(state->cmp_disasm),
@@ -2007,7 +2055,8 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
     // (2) Stage 2: CMP/TST-zero of sv_rd consuming sv_active?
     if (state->sv_active) {
         unsigned cmp_sf, cmp_rn;
-        if (decode_zero_test(op, &cmp_sf, &cmp_rn)
+        bool cmp_is_subs;   // unused: only the shared Z bit matters here
+        if (decode_zero_test(op, &cmp_sf, &cmp_rn, &cmp_is_subs)
                 && cmp_rn == state->sv_rd
                 && cmp_sf == (state->sv_is_64bit ? 1u : 0u)) {
             state->sv_cmp_active = true;

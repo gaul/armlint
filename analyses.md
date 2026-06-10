@@ -121,6 +121,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `cmp Rn, xzr` (SUBS XZR, Rn, XZR) and `tst Rn, Rn`
   (ANDS XZR, Rn, Rn): all three set `Z=1` iff `Rn==0` and so fold
   identically.
+* The unsigned conditions fold too, for the SUBS-based forms only:
+  subtracting zero never borrows, so `C == 1` and `b.hi` (`C && !Z`)
+  reduces to `b.ne` -> `cbnz`, `b.ls` (`!C || Z`) to `b.eq` -> `cbz`.
+  `tst Rn, Rn` is excluded from this pair -- ANDS clears C, so after
+  it HI is never taken and LS always taken, dead-branch territory
+  rather than a register-test rewrite. (`b.hs`/`b.lo` after any zero
+  test are likewise constant-valued and are not rewritten here.)
 * Why it helps (shared by the `CMP`/`TST` -> `TBZ`/`TBNZ` folds below):
   one fewer instruction, and the branch no longer depends on a
   flag-writing `CMP`/`TST` -- `CBZ`/`CBNZ` reads the register directly,

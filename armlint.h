@@ -114,9 +114,14 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
 
 // Detect CMP Rn, #0 (SUBS XZR, Rn, #0) immediately followed by B.EQ or
 // B.NE; the pair is replaceable by CBZ Rn / CBNZ Rn with the same
-// branch target. Emission is deferred via the pending-finding mechanism
-// so the rewrite is only suggested when downstream code provably does
-// not observe the dropped NZCV state -- see armlint_advance_pending.
+// branch target. The unsigned B.HI / B.LS fold the same way after the
+// SUBS-based zero tests (CMP Rn, #0 / CMP Rn, ZR): subtracting zero
+// never borrows, so C is known set and HI (C && !Z) reduces to NE, LS
+// (!C || Z) to EQ. The TST Rn, Rn form is excluded from the hi/ls
+// fold -- ANDS clears C, making HI never taken and LS always taken.
+// Emission is deferred via the pending-finding mechanism so the
+// rewrite is only suggested when downstream code provably does not
+// observe the dropped NZCV state -- see armlint_advance_pending.
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
