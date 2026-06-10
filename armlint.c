@@ -284,7 +284,9 @@ struct armlint_state {
     // folds into the consumer's extended-register form (the extend, and
     // optional shift, ride on the consumer's Rm). ADD/ADDS commute so Rt
     // may be in either source slot; SUB/SUBS need it in Rm. The producer
-    // form (W vs X) must match the consumer's. ext_pending_option is the
+    // form (W vs X) must match the consumer's, except that a W-form
+    // zero-extend (UXTB/UXTH) also feeds an X-form consumer (the W
+    // write zeroed the high half). ext_pending_option is the
     // ADD/SUB extend option (0 UXTB, 1 UXTH, 4 SXTB, 5 SXTH, 6 SXTW).
     bool ext_pending;
     bool ext_pending_is_64bit;
@@ -4388,24 +4390,40 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
     if (state->ext_pending) {
         unsigned sf, rd, rn, rm;
         bool is_sub, is_s;
+        // The widths must match, with one relaxation: a W-form
+        // zero-extend (UXTB/UXTH, option <= 1) also feeds an X-form
+        // consumer soundly -- the W write zeroed bits 63..32, so the
+        // X read sees exactly the zero-extended value, which is what
+        // the X-form extended-register UXTB/UXTH computes. The W-form
+        // sign-extends do NOT get this relaxation: they too zero the
+        // high half, where the X-form SXT option would replicate the
+        // sign.
         if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
                                         &rd, &rn, &rm)
-                && ((sf != 0) == state->ext_pending_is_64bit)) {
+                && (((sf != 0) == state->ext_pending_is_64bit)
+                    || (sf == 1u && !state->ext_pending_is_64bit
+                        && state->ext_pending_option <= 1u))) {
             unsigned t = state->ext_pending_rd;
             bool valid = false;
             unsigned indep = 0;
+            // The independent operand must not be register 31: the
+            // shifted-register consumer read it as ZR, but Rn = 31 in
+            // the extended-register rewrite means SP, so the fold
+            // would change the operand.
             if (rd == t && t != 31) {
-                if (rm == t && rn != t) {
+                if (rm == t && rn != t && rn != 31) {
                     valid = true;
                     indep = rn;
-                } else if (!is_sub && rn == t && rm != t) {
+                } else if (!is_sub && rn == t && rm != t && rm != 31) {
                     valid = true;
                     indep = rm;
                 }
             }
 
             if (valid) {
-                char w_or_x = state->ext_pending_is_64bit ? 'x' : 'w';
+                // Render at the consumer's width: it differs from the
+                // producer's in the relaxed W-zext-into-X case.
+                char w_or_x = sf ? 'x' : 'w';
                 const char *mnem = is_sub ? (is_s ? "subs" : "sub")
                                           : (is_s ? "adds" : "add");
                 const char *ext =

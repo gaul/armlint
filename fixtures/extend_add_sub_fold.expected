@@ -22,7 +22,11 @@ extend + ADD/SUB foldable to extended-register form at offset: 0x28: -> add x0, 
   sxtb x0, w1
   add x0, x3, x0
 
-Optimization opportunities by type:
-       6  extend + ADD/SUB foldable to extended-register form
+extend + ADD/SUB foldable to extended-register form at offset: 0x30: -> add x0, x3, w1, uxtb (2 instructions)
+  uxtb w0, w1
+  add x0, x3, x0
 
-6 optimization opportunities in 19 instructions
+Optimization opportunities by type:
+       7  extend + ADD/SUB foldable to extended-register form
+
+7 optimization opportunities in 23 instructions

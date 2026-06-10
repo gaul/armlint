@@ -29,6 +29,11 @@ _main:
     sxtb    x0, w1
     add     x0, x3, x0             // -> add x0, x3, w1, sxtb
 
+    // 7) W-form UXTB + X-form ADD: the W write zeroed bits 63..32,
+    // exactly what the X-form extended-register option computes.
+    uxtb    w0, w1
+    add     x0, x3, x0             // -> add x0, x3, w1, uxtb
+
     // Negatives:
     // N1) Consumer's Rd != extend dest (the extended value stays live).
     sxtw    x0, w1
@@ -38,8 +43,16 @@ _main:
     sxtw    x0, w1
     sub     x0, x0, x3
 
-    // N3) Width mismatch: W-form extend, X-form consumer.
+    // N3) Width mismatch: W-form SIGN-extend, X-form consumer. The
+    // sxtb zeroed X0's high half where the X-form sxtb option would
+    // replicate the sign -- no zext-style relaxation for it.
     sxtb    w0, w1
     add     x0, x3, x0
+
+    // N4) Independent operand is register 31: the shifted-register
+    // consumer reads ZR there, but the extended-register rewrite
+    // would read SP.
+    uxtb    w0, w1
+    add     w0, wzr, w0
 
     ret

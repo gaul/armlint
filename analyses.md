@@ -100,9 +100,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   is already Rm.
 * Conservative soundness (mirrors the shift fold): Rd of the consumer
   must equal the extend's destination (so the extended value is dead),
-  the other source operand must not also be it, and the producer form
-  (W vs X) must match the consumer's -- which keeps the extend
-  semantics identical without per-case width reasoning. Extend of, or
+  and the other source operand must not also be it -- nor register 31,
+  which the shifted-register consumer read as ZR but the
+  extended-register rewrite would read as SP. The producer form (W vs
+  X) must match the consumer's, with one relaxation: a W-form
+  zero-extend (`UXTB`/`UXTH`) also folds into an X-form consumer
+  (`uxtb w0, w1 ; add x0, x2, x0` -> `add x0, x2, w1, uxtb`), because
+  the W write zeroed bits 63..32 and that is exactly what the X-form
+  extended-register option computes. The W-form sign-extends do not
+  get the relaxation: they too zero the high half, where the X-form
+  `SXT` option would replicate the sign. Extend of, or
   into, ZR is excluded. The standalone 32->64 zero-extend `UXTW` is not
   matched as a producer: it is normally a `W`-register `MOV` (a `W`
   write already zeros the upper half), not a literal instruction.

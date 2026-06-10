@@ -5263,6 +5263,35 @@ static void test_extend_add_sub_fold(void)
     movz_x(&code[4], 5, 1, 0);
     add_x(&code[8], 0, 3, 0);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- W-form zero-extend into an X-form consumer: the W write
+    //    zeroed bits 63..32, exactly what the X-form extended-register
+    //    UXTB/UXTH option computes. --
+
+    // uxtb w0, w1 ; add x0, x2, x0 -> add x0, x2, w1, uxtb (flag).
+    uxtb_w(&code[0], 0, 1);
+    add_x(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // uxth w0, w1 ; sub x0, x2, x0 -> sub x0, x2, w1, uxth (flag).
+    uxth_w(&code[0], 0, 1);
+    sub_x(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // The W-form SIGN-extends do not get the relaxation: sxtb w0
+    // zeroes X0's high half where the X-form sxtb option would
+    // replicate the sign. (The W-W sxtb case folds; the W-X case is
+    // the width-mismatch negative above.)
+    sxth_w(&code[0], 0, 1);
+    add_x(&code[4], 0, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Independent operand = register 31: the shifted-register
+    // consumer read ZR, but Rn = 31 in the extended-register rewrite
+    // means SP -- must not fold.
+    uxtb_w(&code[0], 0, 1);
+    add_w(&code[4], 0, 31, 0);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // Encode ADD (immediate), X-form, with the sh bit set (imm12 << 12).

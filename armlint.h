@@ -486,12 +486,18 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
 // register (these extends source 32 bits or fewer).
 //
 // Soundness (conservative, mirrors the shift fold): Rd of the consumer
-// must equal the extend's Rd (so the extended value is dead), the other
-// source operand must not also be it, and the producer form (W vs X)
-// must match the consumer's -- this keeps the extend semantics
-// identical without per-case width reasoning. Extend of/into ZR is
-// excluded. The standalone 32->64 zero-extend (UXTW, normally a W MOV)
-// is not matched as a producer.
+// must equal the extend's Rd (so the extended value is dead), and the
+// other source operand must not also be it -- nor register 31, which
+// the shifted-register consumer read as ZR but the extended-register
+// rewrite would read as SP. The producer form (W vs X) must match the
+// consumer's, with one relaxation: a W-form zero-extend (UXTB/UXTH)
+// also folds into an X-form consumer, because the W write zeroed bits
+// 63..32 and that is exactly what the X-form extended-register
+// UXTB/UXTH option computes. The W-form sign-extends do not get the
+// relaxation (they too zero the high half, where the X-form SXT
+// option would replicate the sign). Extend of/into ZR is excluded.
+// The standalone 32->64 zero-extend (UXTW, normally a W MOV) is not
+// matched as a producer.
 bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                                size_t offset, armlint_finding *out);
 
