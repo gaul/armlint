@@ -62,4 +62,10 @@ _main:
     mov     x0, #100
     add     x3, x2, x1
 
+    // N5) Both ADD operands are the constant register: the immediate
+    //     rewrite would still read x0, so the MOV could never be
+    //     deleted; the folded value (200) is the real rewrite.
+    mov     x0, #100
+    add     x3, x0, x0
+
     ret

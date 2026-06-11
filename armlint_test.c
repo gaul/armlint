@@ -3620,12 +3620,14 @@ static void test_mul_strength_reduce(void)
     mul_x(&code[8], 3, 2, 0);
     assert(run_helper_check(code, 12) == 1);
 
-    // Both operands from MOV (Rn == Rm == mov_rd): valid LSL rewrite.
-    // movz x0, #8 ; mul x3, x0, x0  -> lsl x3, x0, #3
-    // (semantically: x3 = 64; rewrite recomputes x0 << 3 = 64).
+    // Negative: both operands from MOV (Rn == Rm == mov_rd). The LSL
+    // rewrite (lsl x3, x0, #3 = 64) is valid only while the MOV
+    // stays, so the chain the finding spans could never be deleted --
+    // and the real rewrite for squaring a known constant is
+    // materializing the folded value. Suppressed.
     movz_x(&code[0], 0, 8, 0);
     mul_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_helper_check(code, 8) == 0);
 
     // Negative: 2^N - 1 case (7) is intentionally not folded.
     movz_x(&code[0], 0, 7, 0);
@@ -3681,6 +3683,18 @@ static void test_mul_strength_reduce(void)
     // Bare MUL with no preceding MOV: no finding.
     mul_x(&code[0], 3, 2, 0);
     assert(run_helper_check(code, 4) == 0);
+
+    // Negative: both MUL operands are the MOV destination (squaring
+    // the constant). The shift/add rewrite would still read x0, so
+    // the MOV could never be deleted.
+    movz_x(&code[0], 0, 4, 0);
+    mul_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Same for the 2^N + 1 path (rewrite reads the operand twice).
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // MNEG Xd, Xn, Xm encoding (MSUB with Ra=11111). Base 0x9B00FC00.
@@ -3811,6 +3825,12 @@ static void test_mneg_strength_reduce(void)
     movz_x(&code[0], 0, 8, 0);
     mul_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
+
+    // Negative: both MNEG operands are the MOV destination. The
+    // rewrite would still read x0, so the MOV could never be deleted.
+    movz_x(&code[0], 0, 8, 0);
+    mneg_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // UDIV Xd, Xn, Xm encoding. Base 0x9AC00800.
@@ -3882,11 +3902,13 @@ static void test_udiv_strength_reduce(void)
     udiv_x(&code[4], 0, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // Rn == mov_rd is also fine (dividend reuses the constant register).
-    // movz x0, #8 ; udiv x3, x0, x0  -> lsr x3, x0, #3.
+    // Negative: Rn == mov_rd (the constant divided by itself). The
+    // LSR rewrite (lsr x3, x0, #3 = 1) is valid only while the MOV
+    // stays, so the chain the finding spans could never be deleted --
+    // and the real rewrite for C / C is mov x3, #1. Suppressed.
     movz_x(&code[0], 0, 8, 0);
     udiv_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_helper_check(code, 8) == 0);
 
     // Negative: non-power-of-2 (C = 3).
     movz_x(&code[0], 0, 3, 0);
@@ -3949,6 +3971,13 @@ static void test_udiv_strength_reduce(void)
     // Negative: Rn = XZR makes the dividend always zero.
     movz_x(&code[0], 0, 8, 0);
     udiv_x(&code[4], 3, 31, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: dividend is the MOV destination itself (the constant
+    // divided by itself). The LSR rewrite would still read x0, so
+    // the MOV could never be deleted.
+    movz_x(&code[0], 0, 8, 0);
+    udiv_x(&code[4], 3, 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: SDIV by 2^N is NOT equivalent to ASR (wrong rounding
@@ -4111,6 +4140,25 @@ static void test_mov_add_sub_imm_fold(void)
     code[5] = (op_lsl2 >> 8) & 0xff;
     code[6] = (op_lsl2 >> 16) & 0xff;
     code[7] = (op_lsl2 >> 24) & 0xff;
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: both ADD operands are the MOV destination. The
+    // immediate rewrite would still read x0, so the MOV could never
+    // be deleted.
+    movz_x(&code[0], 0, 100, 0);
+    add_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB of the constant register against itself: silent here (same
+    // reason); only the self-op identity check flags the SUB.
+    movz_x(&code[0], 0, 100, 0);
+    sub_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMP of the constant register against itself (SUBS ZR via the
+    // S-variant path): also suppressed.
+    movz_x(&code[0], 0, 100, 0);
+    cmp_x_reg_sr(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 }
 

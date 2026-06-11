@@ -26,4 +26,4 @@ MUL by constant foldable to shift/add at offset: 0x28: -> add x3, x2, x2, lsl #1
 Optimization opportunities by type:
        6  MUL by constant foldable to shift/add
 
-6 optimization opportunities in 27 instructions
+6 optimization opportunities in 29 instructions

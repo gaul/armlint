@@ -56,4 +56,10 @@ _main:
     mov     x0, #8
     madd    x3, x2, x0, x4
 
+    // N7) Both operands are the constant register (squaring it): the
+    //     LSL rewrite would still read x0, so the MOV could never be
+    //     deleted; the real rewrite is materializing the folded value.
+    mov     x0, #8
+    mul     x3, x0, x0
+
     ret

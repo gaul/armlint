@@ -532,6 +532,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   treats the chain as a unit whose only output is the final constant.
   The case is rare in compiler output (a scratch constant feeding one
   use is seldom reused) but can occur in hand-written assembly.
+  One shape is suppressed outright across the family: the consumer's
+  surviving operand being the constant register itself
+  (`mul xd, xc, xc`, `udiv xd, xc, xc`, `add xd, xc, xc`, ...). There
+  the rewrite would still read `xc`, so the MOV could never be
+  deleted even if nothing else uses it -- and an op whose every input
+  is a known constant folds to another constant anyway, which is the
+  rewrite a reader actually wants.
 
 ## MNEG by constant foldable to NEG/SUB
 

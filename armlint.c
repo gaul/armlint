@@ -3222,6 +3222,14 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
+    // The surviving operand must not be the MOV destination itself
+    // (MUL Rd, Xc, Xc -- squaring the constant): the shift/add
+    // rewrite would still read the constant register, so the MOV
+    // chain could never be deleted.
+    if (other == state->mov_rd) {
+        return false;
+    }
+
     uint64_t c = state->mov_value;
     if (c < 2) {
         // C == 0: MUL is zero (rewrite is MOV Rd, ZR).
@@ -3357,6 +3365,13 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
     }
 
     if (rd == 31 || other == 31) {
+        return false;
+    }
+
+    // The surviving operand must not be the MOV destination itself
+    // (MNEG Rd, Xc, Xc): the rewrite would still read the constant
+    // register, so the MOV chain could never be deleted.
+    if (other == state->mov_rd) {
         return false;
     }
 
@@ -3505,6 +3520,14 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
     // ZR as Rd discards the result; ZR as Rn (dividend) makes the
     // result always 0 -- a different idiom, not strength reduction.
     if (rd == 31 || rn == 31) {
+        return false;
+    }
+
+    // The dividend must not be the MOV destination itself
+    // (UDIV Rd, Xc, Xc -- the constant divided by itself): the LSR
+    // rewrite would still read the constant register, so the MOV
+    // chain could never be deleted.
+    if (rn == state->mov_rd) {
         return false;
     }
 
@@ -3660,6 +3683,15 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
     // ZR as the other operand makes the ADD/SUB degenerate (it
     // reduces to a MOV/NEG of the constant); not the typical fold.
     if (other == 31) {
+        return false;
+    }
+
+    // The surviving operand must not be the MOV destination itself
+    // (ADD Rd, Xc, Xc; SUB/CMP of Xc against itself): the immediate
+    // rewrite would still read the constant register, so the MOV
+    // chain could never be deleted. SUB Rd, Xc, Xc is the self-op
+    // identity check's territory.
+    if (other == state->mov_rd) {
         return false;
     }
 

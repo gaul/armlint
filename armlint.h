@@ -251,7 +251,10 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
 // rewrite needs two instructions (LSL+SUB or SUB+NEG), at parity with
 // MOV+MUL in instruction count. The MOV chain's width (W vs X) must
 // match the MUL's; MUL is commutative, so either Rn or Rm may be the
-// MOV destination. ZR as Rd or as the "other" operand is excluded.
+// MOV destination. ZR as Rd or as the "other" operand is excluded, as
+// is the surviving operand being the MOV destination itself
+// (MUL Rd, Xc, Xc): the rewrite would still read the constant
+// register, so the MOV could never be deleted.
 //
 // Runs before check_movz_movk_bitmask in the registry: that check
 // closes the MOV chain on any non-MOV instruction, so ours must
@@ -276,6 +279,8 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
 //
 // Same plumbing as check_mul_strength_reduce -- runs before
 // check_movz_movk_bitmask so the MOV chain state is still active.
+// Shares its exclusions, including the surviving operand being the
+// MOV destination itself (MNEG Rd, Xc, Xc).
 bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
@@ -297,7 +302,10 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
 // C == 0 is degenerate (UDIV by zero produces 0 on AArch64, no trap)
 // and C == 1 is the identity case; both are excluded. Rd == ZR
 // discards the result and Rn == ZR makes the dividend always zero --
-// different idioms, not strength reduction.
+// different idioms, not strength reduction. The dividend must also
+// not be the MOV destination itself (UDIV Rd, Xc, Xc): the LSR
+// rewrite would still read the constant register, so the MOV could
+// never be deleted.
 //
 // Runs alongside check_mul_strength_reduce / check_mneg_strength_reduce
 // before check_movz_movk_bitmask so the MOV chain state is still
@@ -323,7 +331,10 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
 // Width of the MOV chain (W vs X) must match the ADD/SUB's. C == 0 is
 // excluded -- that pattern is the MOV-to-Rn or no-op case already
 // handled by check_add_sub_zero. ZR as the non-mov operand is also
-// excluded (it makes the ADD/SUB degenerate).
+// excluded (it makes the ADD/SUB degenerate), as is the surviving
+// operand being the MOV destination itself (ADD Rd, Xc, Xc, or
+// CMP/SUB of Xc against itself): the immediate rewrite would still
+// read the constant register, so the MOV could never be deleted.
 //
 // Runs alongside check_mul_strength_reduce / check_mneg_strength_reduce
 // before check_movz_movk_bitmask so the MOV chain state is still

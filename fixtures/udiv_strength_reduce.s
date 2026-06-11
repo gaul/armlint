@@ -56,4 +56,10 @@ _main:
     mov     x0, #8
     sdiv    x3, x2, x0
 
+    // N8) Dividend is the constant register itself (C / C): the LSR
+    //     rewrite would still read x0, so the MOV could never be
+    //     deleted; the real rewrite is mov x3, #1.
+    mov     x0, #8
+    udiv    x3, x0, x0
+
     ret
