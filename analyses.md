@@ -851,8 +851,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Rn = SP (Rn = 31 in ADD-imm) is intentionally flagged: ADD-imm
   and LDR-uimm both encode 31 as SP, so the canonical stack-
   relative load pattern (`add xt, sp, #imm ; ldr xt, [xt]`) folds
-  correctly. Rd = SP in the ADD is excluded -- folding would
-  discard the observable SP update.
+  correctly. That includes `imm == 0` -- the MOV-from-SP alias:
+  `mov xt, sp ; ldr xt, [xt]` -> `ldr xt, [sp]` (rendered with the
+  `mov` spelling). `imm == 0` with a GPR source stays excluded;
+  that is the redundant ADD `check_add_sub_zero` owns. Rd = SP in
+  the ADD is excluded -- folding would discard the observable SP
+  update.
 * SUB-immediate is not folded: the LDR unsigned-offset form has
   no negative-immediate encoding.
 

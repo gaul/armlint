@@ -5671,6 +5671,38 @@ static void test_add_ldr_imm_offset(void)
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
+    // MOV-from-SP alias (imm == 0, Rn = SP): mov x8, sp ;
+    // ldr x8, [x8] -> ldr x8, [sp]. The base copy folds exactly like
+    // a nonzero stack offset; the LDR overwrites the copy.
+    add_x_imm(&code[0], 8, 31, 0);
+    ldr_x_uimm0(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // MOV-from-SP + offset load: mov x8, sp ; ldr x8, [x8, #16]
+    // -> ldr x8, [sp, #16].
+    add_x_imm(&code[0], 8, 31, 0);
+    ldr_x_uimm_with(&code[4], 8, 8, 2);  // imm12=2 -> byte 16
+    assert(run_helper_check(code, 8) == 1);
+
+    // MOV-from-SP + W-form load (still overwrites the full X reg).
+    add_x_imm(&code[0], 8, 31, 0);
+    ldr_w_uimm0(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: MOV-from-SP feeding a load of another register
+    // (Rt != Rd leaves the copy alive; outside this fold's
+    // structural-deadness tier).
+    add_x_imm(&code[0], 8, 31, 0);
+    ldr_x_uimm0(&code[4], 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: imm == 0 with a GPR source is check_add_sub_zero's
+    // redundant ADD, not the MOV-from-SP alias; this check must not
+    // open on it. (add_sub_zero's own finding is the 1 here.)
+    add_x_imm(&code[0], 8, 9, 0);
+    ldr_x_uimm0(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
     // -- Boundary tests, per access size. The fit guard is
     //    (combined >> size) <= 0xFFF, so the largest valid combined
     //    byte offset is 4095 * (1 << size) and 4096 * (1 << size)

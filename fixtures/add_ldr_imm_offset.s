@@ -77,4 +77,19 @@ _main:
     add     x3, x1, #8
     ldrsw   x3, [x3, #4]            // -> ldrsw x3, [x1, #0xc]
 
+    // P) MOV-from-SP alias (add x8, sp, #0): the base copy folds the
+    // same way.
+    mov     x8, sp
+    ldr     x8, [x8]                // -> ldr x8, [sp]
+
+    // P) MOV-from-SP with an offset on the load.
+    mov     x8, sp
+    ldr     x8, [x8, #16]           // -> ldr x8, [sp, #16]
+
+    // N9) MOV-from-SP feeding a load of another register: Rt != Rd
+    //     leaves the copy alive (outside the structural-deadness
+    //     tier).
+    mov     x8, sp
+    ldr     x0, [x8]
+
     ret

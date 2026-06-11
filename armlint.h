@@ -640,10 +640,12 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
 // Rn = 31 in the ADD-immediate form means SP (not XZR), and Rn = 31
 // in the LDR unsigned-offset form also means SP -- so this is the
 // canonical stack-relative load pattern (`add xt, sp, #imm; ldr xt,
-// [xt]`) and is intentionally flagged. Rd = 31 in ADD-immediate also
-// means SP; folding would write a discarded LDR (Rt=XZR), losing the
-// SP update, so Rd = 31 is excluded. imm = 0 is the MOV-or-no-op
-// case handled by check_add_sub_zero and is also excluded here.
+// [xt]`) and is intentionally flagged. That includes imm = 0, the
+// MOV-from-SP alias: `mov xt, sp; ldr xt, [xt]` -> `ldr xt, [sp]`.
+// Rd = 31 in ADD-immediate also means SP; folding would write a
+// discarded LDR (Rt=XZR), losing the SP update, so Rd = 31 is
+// excluded. imm = 0 with a GPR source is the redundant ADD that
+// check_add_sub_zero owns and is excluded here.
 bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset, armlint_finding *out);

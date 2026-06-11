@@ -5588,7 +5588,14 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 out->insn_count = 2;
                 clear_finding_strings(out);
 
-                if (state->addi_pending_rn == 31) {
+                // combined == 0 is reachable only via the MOV-from-SP
+                // alias (imm == 0 requires Rn = SP) with a zero-offset
+                // load; render the bare [sp] form.
+                if (combined == 0) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, [sp]",
+                        ldr_mnem, rt_wx, ldr_rt);
+                } else if (state->addi_pending_rn == 31) {
                     snprintf(out->detail, sizeof(out->detail),
                         "-> %s %c%u, [sp, #0x%x]",
                         ldr_mnem, rt_wx, ldr_rt, combined);
@@ -5622,17 +5629,25 @@ bool check_add_ldr_imm_offset(armlint_state *state,
     if (decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)) {
         // Rd=31 in ADD-imm means SP, not XZR; folding would write a
         // discarded LDR to XZR while the SP modification is observable
-        // -- exclude. imm == 0 is handled by check_add_sub_zero; not
-        // a strength reduction case. Rn=31 (SP) IS allowed: ADD-imm
-        // and LDR-uimm both encode 31 as SP, so the fold preserves
-        // semantics for the common stack-relative load pattern.
-        if (a_rd != 31 && a_imm != 0) {
+        // -- exclude. imm == 0 with a GPR source is the redundant ADD
+        // that check_add_sub_zero owns, not a strength-reduction case;
+        // but imm == 0 with Rn = SP is the MOV-from-SP alias
+        // (mov xt, sp), whose base copy folds the same way:
+        // mov x8, sp ; ldr x8, [x8] -> ldr x8, [sp]. Rn=31 (SP) IS
+        // allowed generally: ADD-imm and LDR-uimm both encode 31 as
+        // SP, so the fold preserves semantics for the common
+        // stack-relative load pattern.
+        if (a_rd != 31 && (a_imm != 0 || a_rn == 31)) {
             state->addi_pending = true;
             state->addi_pending_rd = a_rd;
             state->addi_pending_rn = a_rn;
             state->addi_pending_imm = a_imm;
             state->addi_pending_offset = offset;
-            if (a_rn == 31) {
+            if (a_rn == 31 && a_imm == 0) {
+                snprintf(state->addi_pending_disasm,
+                    sizeof(state->addi_pending_disasm),
+                    "mov x%u, sp", a_rd);
+            } else if (a_rn == 31) {
                 snprintf(state->addi_pending_disasm,
                     sizeof(state->addi_pending_disasm),
                     "add x%u, sp, #0x%x", a_rd, a_imm);
