@@ -818,14 +818,32 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   rewrite performs the identical memory access -- same address, same
   size -- with only the extension behaviour changed to match what the
   pair computed.
-* The consumer's sign threshold must equal the load's access width.
+* The W-form sign-extending loads (`LDRSB`/`LDRSH Wt`) are a second
+  producer family: re-widened to 64 bits by an X-form consumer, the
+  pair is exactly the X-form load.
+  * `ldrsb w8, [x9] ; sxtb x8, w8` -> `ldrsb x8, [x9]`
+  * `ldrsb w8, [x9] ; sxtw x8, w8` -> `ldrsb x8, [x9]`
+  * `ldrsh w8, [x9, #2] ; sxth x8, w8` -> `ldrsh x8, [x9, #2]`
+  Here the threshold need only be AT OR ABOVE the access width:
+  every bit from the width up is a copy of the loaded sign, so
+  `SXTB`, `SXTH` and `SXTW` all reproduce what the X-form load
+  computes. The W-form consumer is excluded -- after a W-form
+  sign-extending load it changes nothing, which is the
+  redundant-sext check's finding, not a fold.
+* For the zero-extending producers, the consumer's sign threshold
+  must equal the load's access width.
   Below it (`ldr w2, [x1] ; sxtb w2, w2`) the `LDRS` rewrite would
   shrink the memory access, which is not architecturally identical
   (alignment, permissions and watchpoints are checked per byte
-  accessed). Above it (`ldrb w3, [x1] ; sxth w3, w3`) the consumer
-  sign-extends from a bit the load provably zeroed -- a no-op worth
-  removing, but not this rewrite. An X-form load never folds: it is
-  already full-width.
+  accessed) -- the same exclusion applies to below-width thresholds
+  after a sign-extending load (`ldrsh w8, [x9] ; sxtb x8, w8`),
+  where bit 7 of the halfword is data, not its sign. Above it
+  (`ldrb w3, [x1] ; sxth w3, w3`) the consumer sign-extends from a
+  bit the load provably zeroed -- a no-op worth removing, but not
+  this rewrite. An X-form load never folds: LDR Xt is already
+  full-width, and the X-form sign-extending loads are already
+  extended through bit 63 (their re-extensions are the
+  redundant-sext check's no-ops).
 * v1 matches the unsigned-offset addressing form only, like the other
   load-rewriting folds. The unscaled, pre-/post-indexed and
   register-offset forms have `LDRS` equivalents and could fold the

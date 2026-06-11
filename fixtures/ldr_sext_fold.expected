@@ -14,7 +14,24 @@ load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x18: -> ldrsw x2, [
   ldr w2, [sp, #4]
   sxtw x2, w2
 
-Optimization opportunities by type:
-       4  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x38: -> ldrsb x8, [x9] (2 instructions)
+  ldrsb w8, [x9]
+  sxtb x8, w8
 
-4 optimization opportunities in 15 instructions
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x40: -> ldrsb x8, [x9] (2 instructions)
+  ldrsb w8, [x9]
+  sxtw x8, w8
+
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x48: -> ldrsh x8, [x9, #0x2] (2 instructions)
+  ldrsh w8, [x9, #2]
+  sxth x8, w8
+
+redundant sign-extension after sign-extending op at offset: 0x58: sxtb w8, w8 is a no-op (sign already extended from bit 7) (2 instructions)
+  ldrsb w8, [x9]
+  sxtb w8, w8
+
+Optimization opportunities by type:
+       7  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+       1  redundant sign-extension after sign-extending op
+
+8 optimization opportunities in 25 instructions

@@ -14,12 +14,16 @@ redundant sign-extension after sign-extending op at offset: 0x18: sxth w6, w6 is
   sxtb w6, w7
   sxth w6, w6
 
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x20: -> ldrsb x8, [x9] (2 instructions)
+  ldrsb w8, [x9]
+  sxtb x8, w8
+
 load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x28: -> ldrsb w10, [x11] (2 instructions)
   ldrb w10, [x11]
   sxtb w10, w10
 
 Optimization opportunities by type:
        4  redundant sign-extension after sign-extending op
-       1  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+       2  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
 
-5 optimization opportunities in 15 instructions
+6 optimization opportunities in 15 instructions

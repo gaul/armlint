@@ -35,4 +35,29 @@ _main:
     ldrb    w3, [x1]
     sxtb    w5, w5
 
+    // Positive: W-form sign-extending load re-widened to X -- the
+    // pair is exactly the X-form load.
+    ldrsb   w8, [x9]
+    sxtb    x8, w8                  // -> ldrsb x8, [x9]
+
+    // Positive: threshold above the access width is still exact (bits
+    // 8..31 of the LDRSB result are sign copies).
+    ldrsb   w8, [x9]
+    sxtw    x8, w8                  // -> ldrsb x8, [x9]
+
+    // Positive: halfword form, offset carries over.
+    ldrsh   w8, [x9, #2]
+    sxth    x8, w8                  // -> ldrsh x8, [x9, #2]
+
+    // Negative: threshold below the access width -- bit 7 of a loaded
+    // halfword is data, not its sign.
+    ldrsh   w8, [x9]
+    sxtb    x8, w8
+
+    // Negative for THIS check: W-form consumer after the W-form
+    // sign-extending load is a no-op; the redundant-sext check flags
+    // it instead.
+    ldrsb   w8, [x9]
+    sxtb    w8, w8
+
     ret

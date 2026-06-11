@@ -23,9 +23,11 @@ _main:
     sxtb    w6, w7
     sxth    w6, w6
 
-    // Negative: width mismatch. LDRSB Wt sign-extends only through
-    // bit 31; an X-form SXTB writing Xd is NOT redundant because the
-    // W-form write zeroed X[63:32] (not sign-extended).
+    // Negative for THIS check: width mismatch. LDRSB Wt sign-extends
+    // only through bit 31; an X-form SXTB writing Xd is NOT redundant
+    // because the W-form write zeroed X[63:32] (not sign-extended).
+    // The pair flags under check_ldr_sext_fold instead
+    // (-> ldrsb x8, [x9]).
     ldrsb   w8, [x9]
     sxtb    x8, w8
 

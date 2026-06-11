@@ -2387,10 +2387,13 @@ static void test_redundant_sext(void)
 
     // -- Negative: width mismatch. --
 
-    // ldrsb w0, [x1] ; sxtb x0, w0 -- W=32 vs W=64.
+    // ldrsb w0, [x1] ; sxtb x0, w0 -- W=32 vs W=64. Not redundant
+    // (the upper 32 bits change), so THIS check stays silent -- but
+    // the pair is exactly check_ldr_sext_fold's W-form sign-load
+    // re-extension positive (-> ldrsb x0, [x1]), hence 1 finding.
     ldrsb_w(&code[0], 0, 1, 0);
     sxtb_x(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
 
     // ldrsb x0, [x1] ; sxtb w0, w0 -- W=64 vs W=32.
     ldrsb_x(&code[0], 0, 1, 0);
@@ -5166,6 +5169,60 @@ static void test_ldr_sext_fold(void)
     movz_w(&code[4], 5, 1);
     sxtb_w(&code[8], 3, 3);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- W-form sign-extending producers: the re-extension to X folds
+    //    into the X-form load. --
+
+    // ldrsb w8, [x9] ; sxtb x8, w8 -> ldrsb x8, [x9].
+    ldrsb_w(&code[0], 8, 9, 0);
+    sxtb_x(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Threshold above the access width is still exact: bits 8..31 of
+    // the LDRSB result are sign copies, so SXTH and SXTW reproduce
+    // the X-form load too.
+    ldrsb_w(&code[0], 8, 9, 0);
+    sxth_x(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    ldrsb_w(&code[0], 8, 9, 0);
+    sxtw_x(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDRSH with an offset; the offset carries over.
+    ldrsh_w(&code[0], 8, 9, 1);  // imm12=1 -> byte offset 2
+    sxth_x(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    ldrsh_w(&code[0], 8, 9, 0);
+    sxtw_x(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: threshold below the access width -- bit 7 of a loaded
+    // halfword is data, not the sign, so SXTB is not the load's value.
+    ldrsh_w(&code[0], 8, 9, 0);
+    sxtb_x(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // W-form consumer after a W-form sign-extending load is a no-op
+    // (not this fold); the redundant-sext check flags it instead, so
+    // the count is 1, not 2 -- locking in that the two checks do not
+    // double-fire.
+    ldrsb_w(&code[0], 8, 9, 0);
+    sxtb_w(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X-form sign-extending producer: already fully extended, so the
+    // re-extension is the redundant-sext check's finding alone (1).
+    ldrsb_x(&code[0], 8, 9, 0);
+    sxtb_x(&code[4], 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: the re-extension targets a different register (leaves
+    // the loaded W register live).
+    ldrsb_w(&code[0], 8, 9, 0);
+    sxtb_x(&code[4], 10, 8);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // Encode NEG Xd, Xm (the SUB Xd, XZR, Xm alias, no shift, non-S).

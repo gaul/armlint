@@ -309,15 +309,20 @@ struct armlint_state {
     size_t sxl_offset;
     char sxl_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // Pending zero-extending unsigned-offset load (LDRB/LDRH/LDR Wt)
-    // awaiting an adjacent in-place sign-extend (SXTB/SXTH/SXTW, W- or
-    // X-form) of the loaded register whose sign threshold equals the
-    // load's access width -- the pair folds to the matching
-    // sign-extending load LDRSB/LDRSH/LDRSW. The consumer overwrites
-    // the load's Rt, so the zero-extended intermediate is dead.
-    // lsx_size is the load's size field (0=B, 1=H, 2=W). Strict
-    // adjacency: any non-matching instruction expires the state.
+    // Pending unsigned-offset load awaiting an adjacent in-place
+    // sign-extend (SXTB/SXTH/SXTW) of the loaded register -- the pair
+    // folds to the matching sign-extending load LDRSB/LDRSH/LDRSW.
+    // Two producer families: zero-extending loads (LDRB/LDRH/LDR Wt,
+    // lsx_signed = false), where the consumer's sign threshold must
+    // equal the load's access width; and the W-form sign-extending
+    // loads (LDRSB/LDRSH Wt, lsx_signed = true), where any X-form
+    // consumer with threshold >= the access width re-extends a sign
+    // copy and folds to the X-form load. The consumer overwrites the
+    // load's Rt, so the intermediate is dead. lsx_size is the load's
+    // size field (0=B, 1=H, 2=W). Strict adjacency: any non-matching
+    // instruction expires the state.
     bool lsx_active;
+    bool lsx_signed;
     unsigned lsx_size;
     unsigned lsx_rt;
     unsigned lsx_rn;
@@ -5143,6 +5148,32 @@ static bool decode_ldr_uimm_any_size(uint32_t op,
     return true;
 }
 
+// Decode the W-form sign-extending unsigned-offset loads
+// (LDRSB/LDRSH Wt: V=0, opc=11, size 00/01; the size 10/11 slots of
+// opc=11 are unallocated). The X-form family (opc=10) is deliberately
+// not matched where this is used: those already sign-extend through
+// bit 63, so a following SXT* is the redundant-sext check's no-op,
+// not a fold.
+static bool decode_ldrs_w_uimm(uint32_t op,
+                               unsigned *out_size,
+                               unsigned *out_imm12,
+                               unsigned *out_rn,
+                               unsigned *out_rt)
+{
+    if ((op & 0x3FC00000u) != 0x39C00000u) {
+        return false;
+    }
+    unsigned size = (op >> 30) & 0x3u;
+    if (size > 1u) {
+        return false;
+    }
+    *out_size = size;
+    *out_imm12 = (op >> 10) & 0xFFFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
 // Map an integer-load (size, opc) pair to its mnemonic and
 // destination-register width, accepting both the zero-extending family
 // (opc=01: LDRB/LDRH/LDR W/LDR X) and the sign-extending one (opc=10
@@ -5472,20 +5503,28 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
     bool produced = false;
 
     // (1) Try to close: an in-place SXTB/SXTH/SXTW of the loaded
-    //     register whose sign threshold equals the load's access
-    //     width? The threshold equality is the soundness pivot: a
-    //     threshold below the width would shrink the memory access in
-    //     the LDRS rewrite (not architecturally identical), and one
-    //     above it sign-extends from a bit the load provably zeroed (a
-    //     no-op, not this rewrite). c_w (32 or 64) picks the LDRS
-    //     destination width; SXTW only exists X-form, so a word load
-    //     always folds to LDRSW Xt.
+    //     register? The threshold rule differs by producer family.
+    //     Zero-extending loads require the consumer's sign threshold
+    //     to EQUAL the load's access width: below it the LDRS rewrite
+    //     would shrink the memory access (not architecturally
+    //     identical), above it the consumer sign-extends from a bit
+    //     the load provably zeroed (a no-op, not this rewrite). The
+    //     W-form sign-extending loads accept any threshold AT OR ABOVE
+    //     the access width: every bit from the width up is a copy of
+    //     the loaded sign, so SXTB/SXTH/SXTW all reproduce exactly
+    //     what the X-form load computes -- but only the X-form (c_w ==
+    //     64) consumer is a fold; the W-form one changes nothing and
+    //     belongs to the redundant-sext check. c_w (32 or 64) picks
+    //     the LDRS destination width; SXTW only exists X-form, so a
+    //     word load always folds to LDRSW Xt.
     if (state->lsx_active) {
         unsigned c_s, c_w, c_rd, c_rn;
         if (decode_sbfm_sext(op, &c_s, &c_w, &c_rd, &c_rn)
                 && c_rd == state->lsx_rt
                 && c_rn == state->lsx_rt
-                && c_s == (8u << state->lsx_size)) {
+                && (state->lsx_signed
+                        ? (c_w == 64u && c_s >= (8u << state->lsx_size))
+                        : c_s == (8u << state->lsx_size))) {
             static const char *const ldrs_mnem[3] = {
                 "ldrsb", "ldrsh", "ldrsw"
             };
@@ -5525,13 +5564,25 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
         state->lsx_active = false;
     }
 
-    // (2) Try to open: a zero-extending unsigned-offset load (B/H/W)?
-    //     Size 3 (LDR Xt) is full-width -- no sign-extend consumer can
-    //     fold it. Rt = 31 discards the load; skip.
+    // (2) Try to open: a zero-extending unsigned-offset load (B/H/W),
+    //     or a W-form sign-extending one (LDRSB/LDRSH Wt)? Size 3
+    //     (LDR Xt) is full-width -- no sign-extend consumer can fold
+    //     it -- and the X-form sign-extending loads already fill all
+    //     64 bits, so their re-extensions are the redundant-sext
+    //     check's no-ops. Rt = 31 discards the load; skip.
     unsigned size, imm12, rn, rt;
+    bool open_signed = false;
+    bool open = false;
     if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
-            && size <= 2u && rt != 31) {
+            && size <= 2u) {
+        open = true;
+    } else if (decode_ldrs_w_uimm(op, &size, &imm12, &rn, &rt)) {
+        open = true;
+        open_signed = true;
+    }
+    if (open && rt != 31) {
         state->lsx_active = true;
+        state->lsx_signed = open_signed;
         state->lsx_size = size;
         state->lsx_rt = rt;
         state->lsx_rn = rn;
