@@ -41,17 +41,49 @@ _main:
     movz    x0, #0xFFFF, lsl #16
     and     x3, x2, x0          // -> and x3, x2, #0xffff0000
 
+    // 10) BIC: the Rm-inverting family folds with the complemented
+    //     constant when ~C is a bitmask immediate.
+    mov     x0, #0xFF
+    bic     x3, x2, x0          // -> and x3, x2, #0xffffffffffffff00
+
+    // 11) ORN (W form).
+    mov     w0, #1
+    orn     w3, w2, w0          // -> orr w3, w2, #0xfffffffe
+
+    // 12) EON.
+    mov     x0, #1
+    eon     x3, x2, x0          // -> eor x3, x2, #0xfffffffffffffffe
+
+    // 13) BICS, NZCV-identical to ANDS-immediate, and its TST alias.
+    mov     w0, #1
+    bics    w3, w2, w0          // -> ands w3, w2, #0xfffffffe
+
+    mov     w0, #1
+    bics    wzr, w2, w0         // -> tst w2, #0xfffffffe
+
     // Negatives:
     // N1) C = 5 is not a bitmask immediate.
     mov     x0, #5
     and     x3, x2, x0
 
-    // N2) BIC has no immediate form (N = 1).
-    mov     x0, #0xFF
-    bic     x3, x2, x0
+    // N2) ~C is not a bitmask immediate (C = 0xfffffffa, ~C = 5).
+    mov     w0, #-6
+    bic     w3, w2, w0
 
     // N3) Shifted AND.
     mov     x0, #0xFF
     and     x3, x2, x0, lsl #2
+
+    // N4) Constant in BIC's non-inverted slot: C & ~x2 has no
+    //     immediate form.
+    mov     x0, #0xFF
+    bic     x3, x0, x2
+
+    // N5) Surviving operand is the constant register itself: the
+    //     immediate rewrite would still read x0, so the MOV could
+    //     never be deleted. Silent here; the self-op identity check
+    //     flags the AND on its own.
+    mov     x0, #0xFF
+    and     x3, x0, x0
 
     ret

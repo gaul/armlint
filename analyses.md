@@ -589,20 +589,38 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `check_add_sub_zero`); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
 
-## MOV + AND/ORR/EOR/ANDS foldable to bitmask immediate
+## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when
   `C` is a valid AArch64 bitmask immediate (a rotated run of
   consecutive 1s at one of esize=2/4/8/16/32/64). Same for
   `ORR`, `EOR`, and `ANDS` -- and the `TST` alias (`ANDS` with
   `Rd == ZR`).
+* The N = 1 family has no immediate form itself, but computes
+  `Rn op NOT(Rm)` -- so when the *inverted* operand is the
+  constant, the NOT folds into it and the direct-form immediate
+  applies: `mov xc, #C ; bic xd, xn, xc` -> `and xd, xn, #~C`
+  when `~C` (at the operation width) is a bitmask immediate.
+  Same for `ORN -> ORR`, `EON -> EOR`, `BICS -> ANDS` (NZCV
+  matches exactly: A64 logical S-ops set N/Z from the result and
+  C = V = 0 in both register and immediate forms), and the
+  `TST #~C` alias for `BICS` with `Rd == ZR`. Reported under the
+  separate name "MOV + BIC/ORN/EON foldable to bitmask
+  immediate".
 * Reuses `is_bitmask_immediate` as the encodability predicate; 0
   and the all-ones-at-width are not bitmask immediates, so those
-  trivial constants naturally skip.
-* The N = 1 family (`BIC`, `ORN`, `EON`, `BICS`) has no
-  immediate form in AArch64 and is excluded by the decoder.
-* All four are commutative; either Rn or Rm may be the MOV
-  destination. Shares the MUL check's dead-constant caveat.
+  trivial constants naturally skip on either side of the
+  complement.
+* AND/ORR/EOR/ANDS are commutative; either Rn or Rm may be the
+  MOV destination. BIC/ORN/EON/BICS invert Rm only, so the
+  constant must be Rm: `bic xd, xc, xm` computes `C & ~xm`,
+  which has no immediate form. Shares the MUL check's
+  dead-constant caveat.
+* The surviving operand must not be the MOV destination itself
+  (`mov xc, #C ; and xd, xc, xc`): the suggested immediate form
+  would still read `xc`, so the MOV could never be deleted and
+  the rewrite saves nothing. Those shapes are left to the
+  self-op identity check.
 
 ## MOV #0 + use foldable to ZR
 

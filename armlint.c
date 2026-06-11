@@ -3737,15 +3737,15 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 }
 
 // Logical shifted-register (AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS) with
-// LSL #0 and the N bit clear -- i.e., AND/ORR/EOR/ANDS only. The
-// N = 1 family (BIC/ORN/EON/BICS) has no immediate-form equivalent
-// in AArch64, so it's filtered out here. Fixed-bit mask 0x1F000000,
-// value 0x0A000000; shift_type at bits 23..22 must be 00 (LSL); N at
-// bit 21 must be 0; imm6 at bits 15..10 must be 0. opc at bits 30..29
-// selects: 00=AND, 01=ORR, 10=EOR, 11=ANDS.
+// LSL #0. Fixed-bit mask 0x1F000000, value 0x0A000000; shift_type at
+// bits 23..22 must be 00 (LSL); imm6 at bits 15..10 must be 0. opc at
+// bits 30..29 selects 00=AND, 01=ORR, 10=EOR, 11=ANDS; N at bit 21
+// selects the Rm-inverting family (1: BIC/ORN/EON/BICS). Callers that
+// only handle the direct forms filter on *out_n == 0.
 static bool decode_logic_shifted_lsl0(uint32_t op,
                                       unsigned *out_sf,
                                       unsigned *out_opc,
+                                      unsigned *out_n,
                                       unsigned *out_rd,
                                       unsigned *out_rn,
                                       unsigned *out_rm)
@@ -3757,16 +3757,13 @@ static bool decode_logic_shifted_lsl0(uint32_t op,
     if (shift_type != 0) {
         return false;
     }
-    unsigned N = (op >> 21) & 0x1u;
-    if (N != 0) {
-        return false;
-    }
     unsigned imm6 = (op >> 10) & 0x3Fu;
     if (imm6 != 0) {
         return false;
     }
     *out_sf = (op >> 31) & 1u;
     *out_opc = (op >> 29) & 0x3u;
+    *out_n = (op >> 21) & 0x1u;
     *out_rd = op & 0x1Fu;
     *out_rn = (op >> 5) & 0x1Fu;
     *out_rm = (op >> 16) & 0x1Fu;
@@ -3786,8 +3783,8 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 
     uint32_t op = insn_word(insn);
 
-    unsigned sf, opc, rd, rn, rm;
-    if (!decode_logic_shifted_lsl0(op, &sf, &opc, &rd, &rn, &rm)) {
+    unsigned sf, opc, n_bit, rd, rn, rm;
+    if (!decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn, &rm)) {
         return false;
     }
 
@@ -3796,17 +3793,27 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    // ANDS (opc=3) with Rd=ZR is TST -- a meaningful flag-setting
-    // instruction. Other variants writing ZR are dead and skipped.
+    // ANDS/BICS (opc=3) with Rd=ZR is TST(-of-the-complement) -- a
+    // meaningful flag-setting instruction. Other variants writing ZR
+    // are dead and skipped.
+    bool inverted = (n_bit != 0);
     bool is_ands = (opc == 3);
     if (rd == 31 && !is_ands) {
         return false;
     }
 
-    // AND/ORR/EOR/ANDS are all commutative -- either operand may be
-    // the MOV destination.
+    // Identify the operand from the MOV chain. The direct forms
+    // (AND/ORR/EOR/ANDS) are commutative -- either operand may be the
+    // MOV destination. The N = 1 forms (BIC/ORN/EON/BICS) invert Rm
+    // only: the constant must sit in Rm for the complemented-immediate
+    // rewrite; Rn from the MOV (C op ~Rm) has no immediate form.
     unsigned other;
-    if (rm == state->mov_rd) {
+    if (inverted) {
+        if (rm != state->mov_rd) {
+            return false;
+        }
+        other = rn;
+    } else if (rm == state->mov_rd) {
         other = rn;
     } else if (rn == state->mov_rd) {
         other = rm;
@@ -3814,39 +3821,52 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
+    // The surviving operand must not itself be the MOV destination
+    // (e.g. AND Rd, Xc, Xc): the suggested immediate form would still
+    // read the constant register, so the MOV chain it spans could
+    // never be deleted and the rewrite saves nothing. Rn == Rm shapes
+    // are check_self_op territory anyway.
+    if (other == state->mov_rd) {
+        return false;
+    }
+
     // ZR as the non-MOV operand makes the op degenerate:
     //   AND/ANDS Rd, ZR, X<C>  = MOV Rd, ZR (always zero)
     //   ORR Rd, ZR, X<C>       = MOV Rd, X<C>  (the canonical MOV)
     //   EOR Rd, ZR, X<C>       = MOV Rd, X<C>
+    //   BIC/BICS Rd, ZR, X<C>  = always zero / constant flags
+    //   ORN/EON Rd, ZR, X<C>   = MVN X<C> (materializes ~C)
     // None match the typical bitmask-imm fold pattern.
     if (other == 31) {
         return false;
     }
 
-    uint64_t c = state->mov_value;
+    // The immediate the rewrite needs: C itself for the direct forms;
+    // ~C at the operation width for BIC/ORN/EON/BICS, which compute
+    // Rn op NOT(Rm), so the NOT folds into the constant. The NZCV
+    // behavior of BICS matches ANDS-immediate (N/Z from the result,
+    // C = V = 0 -- A64 logical S-ops have no shifter carry-out).
     unsigned reg_width = is_64bit ? 64u : 32u;
-    if (!is_bitmask_immediate(c, reg_width)) {
+    uint64_t c = state->mov_value;
+    uint64_t imm = inverted ? (~c & width_mask(reg_width)) : c;
+    if (!is_bitmask_immediate(imm, reg_width)) {
         return false;
     }
 
     char w_or_x = is_64bit ? 'x' : 'w';
-    const char *mnem;
-    const char *alias = NULL;
-    switch (opc) {
-        case 0: mnem = "and"; break;
-        case 1: mnem = "orr"; break;
-        case 2: mnem = "eor"; break;
-        case 3:
-            mnem = "ands";
-            if (rd == 31) {
-                alias = "tst";
-            }
-            break;
-        default:
-            return false;
-    }
+    static const char *const logic_mnems[2][4] = {
+        { "and", "orr", "eor", "ands" },  // N = 0: direct forms
+        { "bic", "orn", "eon", "bics" },  // N = 1: Rm-inverting forms
+    };
+    const char *cons_mnem = logic_mnems[inverted ? 1 : 0][opc];
+    // The suggestion always uses the direct family -- the only one
+    // with an immediate form.
+    const char *mnem = logic_mnems[0][opc];
+    const char *alias = (is_ands && rd == 31) ? "tst" : NULL;
 
-    out->name = "MOV + AND/ORR/EOR foldable to bitmask immediate";
+    out->name = inverted
+        ? "MOV + BIC/ORN/EON foldable to bitmask immediate"
+        : "MOV + AND/ORR/EOR foldable to bitmask immediate";
     out->start_offset = state->mov_start_offset;
     out->insn_count = state->mov_insn_count + 1;
     clear_finding_strings(out);
@@ -3854,11 +3874,11 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     if (alias != NULL) {
         snprintf(out->detail, sizeof(out->detail),
             "-> %s %c%u, #0x%" PRIx64,
-            alias, w_or_x, other, c);
+            alias, w_or_x, other, imm);
     } else {
         snprintf(out->detail, sizeof(out->detail),
             "-> %s %c%u, %c%u, #0x%" PRIx64,
-            mnem, w_or_x, rd, w_or_x, other, c);
+            mnem, w_or_x, rd, w_or_x, other, imm);
     }
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
@@ -3883,7 +3903,7 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     }
     snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
         "%s %c%u, %c%u, %c%u",
-        mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+        cons_mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
 
     return true;
 }
@@ -4304,9 +4324,12 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
     bool produced = false;
 
     // (1) Try to close: is this an AND/ORR/EOR/ANDS consuming the MVN?
+    // Direct (N = 0) forms only: the N = 1 forms already invert Rm,
+    // so folding the MVN in would need the un-inverted op instead.
     if (state->mvn_pending) {
-        unsigned sf, opc, rd, rn, rm;
-        if (decode_logic_shifted_lsl0(op, &sf, &opc, &rd, &rn, &rm)
+        unsigned sf, opc, n_bit, rd, rn, rm;
+        if (decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn, &rm)
+                && n_bit == 0
                 && ((sf != 0) == state->mvn_pending_is_64bit)) {
             unsigned t = state->mvn_pending_rd;
             bool valid = false;
@@ -4716,10 +4739,14 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
         }
     }
 
-    // (c) AND/ORR/EOR/ANDS shifted-register-LSL0 with mov_rd as Rn or Rm.
+    // (c) AND/ORR/EOR/ANDS shifted-register-LSL0 with mov_rd as Rn or
+    // Rm. Direct (N = 0) forms only: substituting ZR into the N = 1
+    // forms would be valid too but reduces to identities/MVN, a
+    // different rewrite shape.
     {
-        unsigned sf, opc_l, rd, rn, rm;
-        if (decode_logic_shifted_lsl0(op, &sf, &opc_l, &rd, &rn, &rm)) {
+        unsigned sf, opc_l, n_bit, rd, rn, rm;
+        if (decode_logic_shifted_lsl0(op, &sf, &opc_l, &n_bit, &rd, &rn, &rm)
+                && n_bit == 0) {
             if (rn == state->mov_rd || rm == state->mov_rd) {
                 char wx = (sf != 0) ? 'x' : 'w';
                 const char *mnem;

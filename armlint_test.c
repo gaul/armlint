@@ -193,6 +193,15 @@ static void movn_x(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
     write_le32(out, op);
 }
 
+// MOVN Wd, #imm16 (hw=0). Encoding base: 0x12800000
+static void movn_w(uint8_t out[4], unsigned rd, uint16_t imm16)
+{
+    uint32_t op = 0x12800000u
+        | ((uint32_t)(imm16 & 0xffffu) << 5)
+        | (rd & 0x1fu);
+    write_le32(out, op);
+}
+
 static int run_helper_check(uint8_t *bytes, size_t len)
 {
     return run_check(bytes, len);
@@ -367,7 +376,9 @@ static inline void bics_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
 static inline void orn_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x2a200000u, rd, rn, rm); }
 static inline void eon_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x4a200000u, rd, rn, rm); }
 static inline void bic_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x8a200000u, rd, rn, rm); }
+static inline void bics_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0xea200000u, rd, rn, rm); }
 static inline void orn_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xaa200000u, rd, rn, rm); }
+static inline void eon_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xca200000u, rd, rn, rm); }
 static inline void orr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x2a000000u, rd, rn, rm); }
 static inline void orr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xaa000000u, rd, rn, rm); }
 static inline void eor_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x4a000000u, rd, rn, rm); }
@@ -3444,6 +3455,11 @@ static void test_ldp_stp_coalesce(void)
     str_q_fp(&code[4], 1, 1, 1);
     assert(run_helper_check(code, 8) == 1);
 
+    // str s0, [x1] ; str s1, [x1, #4] -> stp s0, s1, [x1] (flag).
+    str_s_fp(&code[0], 0, 1, 0);
+    str_s_fp(&code[4], 1, 1, 1);
+    assert(run_helper_check(code, 8) == 1);
+
     // ldr s2, [x1, #4] ; ldr s3, [x1] -- reverse order (flag).
     ldr_s_fp(&code[0], 2, 1, 1);
     ldr_s_fp(&code[4], 3, 1, 0);
@@ -4164,15 +4180,68 @@ static void test_mov_logic_imm_fold(void)
     and_x(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // Negative: BIC (N = 1 in the encoding) has no immediate form.
+    // BIC (N = 1) folds via the complemented immediate:
+    // movz x0, #0xff ; bic x3, x2, x0 -> and x3, x2, #0xffffffffffffff00.
     movz_x(&code[0], 0, 0xFF, 0);
     bic_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
 
-    // Negative: ORN (N = 1).
+    // ORN -> ORR #~C.
     movz_x(&code[0], 0, 0xFF, 0);
     orn_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // EON (W form) -> EOR #~C (= #0xfffffffe).
+    movz_w(&code[0], 0, 1);
+    eon_w(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // EON (X form).
+    movz_x(&code[0], 0, 1, 0);
+    eon_x(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // BICS -> ANDS #~C. NZCV is identical: A64 logical S-ops set N/Z
+    // from the result and C = V = 0, in both register and immediate
+    // forms.
+    movz_w(&code[0], 0, 1);
+    bics_w(&code[4], 3, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // BICS with Rd = ZR: the TST-of-complement alias.
+    movz_x(&code[0], 0, 1, 0);
+    bics_x(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: ~C is not a bitmask immediate. C = 0xfffffffa (via
+    // MOVN #5) complements to 5 = 0b101, non-contiguous.
+    movn_w(&code[0], 0, 5);
+    bic_w(&code[4], 3, 2, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // Negative: the constant must be the inverted operand (Rm).
+    // BIC x3, x0, x2 computes C & ~x2, which has no immediate form.
+    movz_x(&code[0], 0, 0xFF, 0);
+    bic_x(&code[4], 3, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Negative: non-BICS write to ZR is dead code.
+    movz_x(&code[0], 0, 0xFF, 0);
+    bic_x(&code[4], 31, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Surviving operand == MOV destination (AND x3, x0, x0): the
+    // immediate rewrite would still read the constant register, so
+    // the chain could never be deleted -- the fold stays silent for
+    // both families. The self-op identity check still flags the
+    // consumer on its own, hence 1 finding rather than 2.
+    movz_x(&code[0], 0, 0xFF, 0);
+    and_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    movz_x(&code[0], 0, 0xFF, 0);
+    bic_x(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
 
     // Negative: width mismatch.
     movz_w(&code[0], 0, 0xFF);

@@ -34,7 +34,32 @@ MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x40: -> and x3, x2, 
   movz x0, #0xffff, lsl #16
   and x3, x2, x0
 
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x48: -> and x3, x2, #0xffffffffffffff00 (2 instructions)
+  movz x0, #0xff
+  bic x3, x2, x0
+
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x50: -> orr w3, w2, #0xfffffffe (2 instructions)
+  movz w0, #0x1
+  orn w3, w2, w0
+
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x58: -> eor x3, x2, #0xfffffffffffffffe (2 instructions)
+  movz x0, #0x1
+  eon x3, x2, x0
+
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x60: -> ands w3, w2, #0xfffffffe (2 instructions)
+  movz w0, #0x1
+  bics w3, w2, w0
+
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x68: -> tst w2, #0xfffffffe (2 instructions)
+  movz w0, #0x1
+  bics w31, w2, w0
+
+self-op identity at offset: 0x94: and x3, x0, x0 -> mov x3, x0 (1 instructions)
+  and x3, x0, x0
+
 Optimization opportunities by type:
        9  MOV + AND/ORR/EOR foldable to bitmask immediate
+       5  MOV + BIC/ORN/EON foldable to bitmask immediate
+       1  self-op identity
 
-9 optimization opportunities in 25 instructions
+15 optimization opportunities in 39 instructions

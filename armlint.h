@@ -331,22 +331,34 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
 bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
-// Detect AND/ORR/EOR/ANDS (shifted-register, LSL #0, N = 0) where one
-// operand is set by an immediately preceding MOV chain to a constant
-// C that is a valid AArch64 bitmask immediate at the consumer's width.
-// The pair folds to the immediate form:
+// Detect a logical shifted-register op (LSL #0) where one operand is
+// set by an immediately preceding MOV chain to a constant C, and the
+// constant the immediate form needs is a valid AArch64 bitmask
+// immediate at the consumer's width. The pair folds to the immediate
+// form. For the direct (N = 0) ops the immediate is C itself:
 //   mov xc, #C ; and  xd, xn, xc -> and  xd, xn, #C
 //   mov xc, #C ; orr  xd, xn, xc -> orr  xd, xn, #C
 //   mov xc, #C ; eor  xd, xn, xc -> eor  xd, xn, #C
 //   mov xc, #C ; ands xd, xn, xc -> ands xd, xn, #C   (TST when Rd=ZR)
-// is_bitmask_immediate is used as the encodability predicate; values
-// 0 and the all-ones-at-width are not bitmask immediates, so the
-// trivial-constant cases naturally skip.
+// The N = 1 ops (BIC/ORN/EON/BICS) compute Rn op NOT(Rm), so when the
+// constant is the inverted operand the NOT folds into it -- the
+// rewrite is the direct-form immediate with ~C:
+//   mov xc, #C ; bic  xd, xn, xc -> and  xd, xn, #~C
+//   mov xc, #C ; orn  xd, xn, xc -> orr  xd, xn, #~C
+//   mov xc, #C ; eon  xd, xn, xc -> eor  xd, xn, #~C
+//   mov xc, #C ; bics xd, xn, xc -> ands xd, xn, #~C  (TST when Rd=ZR)
+// (BICS and ANDS-immediate set identical NZCV: N/Z from the result,
+// C = V = 0.) is_bitmask_immediate is the encodability predicate;
+// values 0 and the all-ones-at-width are not bitmask immediates, so
+// the trivial-constant cases naturally skip on either side.
 //
-// The N = 1 family (BIC/ORN/EON/BICS) has no immediate-form
-// equivalent in AArch64 and is not folded. AND/ORR/EOR/ANDS are all
-// commutative, so either Rn or Rm may be the MOV destination. ZR as
-// the non-MOV operand is excluded (degenerate).
+// AND/ORR/EOR/ANDS are commutative, so either Rn or Rm may be the MOV
+// destination; BIC/ORN/EON/BICS invert Rm only, so the constant must
+// be Rm (Rn from the MOV computes C op ~Rm, which has no immediate
+// form). The surviving operand must not be the MOV destination itself
+// (the rewrite would still read the constant register, so the chain
+// could never be deleted); ZR as the non-MOV operand is excluded
+// (degenerate). The two families report distinct finding names.
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
