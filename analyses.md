@@ -878,7 +878,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * SUB-immediate is not folded: the LDR unsigned-offset form has
   no negative-immediate encoding.
 
-## LDR/STR + ADD/SUB foldable to post-indexed LDR/STR
+## LDR/STR (or LDP/STP) + ADD/SUB foldable to post-indexed form
 
 * `ldr xt, [xn] ; add xn, xn, #imm` -> `ldr xt, [xn], #imm`, and the
   negative-direction `ldr xt, [xn] ; sub xn, xn, #imm` ->
@@ -888,6 +888,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   is integer-only. The post-indexed encoding already expresses "load/store
   from `[xn]` and then bump `xn` by ±imm", so the rewrite is a literal
   source-to-encoding fold with no semantic change.
+* Pairs fold the same way: `ldp xt, xu, [xn] ; add xn, xn, #imm` ->
+  `ldp xt, xu, [xn], #imm`, covering the integer W/X pairs, `LDPSW`,
+  and the SIMD&FP S/D/Q pairs. The flagship shape is the canonical
+  frame epilogue, `ldp x29, x30, [sp] ; add sp, sp, #imm` ->
+  `ldp x29, x30, [sp], #imm` -- exactly what compilers emit, so its
+  unfused spelling is a reliable tell of naive codegen (baseline JIT
+  tiers, hand-written assembly).
 * What you actually save: 4 bytes per fold and one fetch/decode
   slot. The backend cost is typically unchanged -- most modern OoO
   cores (Apple M-series, Cortex-A76+, Neoverse N1+) crack the
@@ -896,25 +903,36 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   instructions. Critical-path latency is unchanged. The wins are in
   code size, I-cache footprint, and front-end bandwidth (helpful
   on decode-bound inner loops); don't expect a measurable cycle
-  drop on backend-bound code. Caveat: an analogous LDP/STP +
-  writeback fold (not implemented here) can be slower on Apple
-  cores because LDP-with-writeback decodes into more micro-ops
-  than the separate-ADD variant -- single-register LDR/STR does
-  not have this issue.
-* Encoding constraint: post-index uses a 9-bit signed immediate
-  (-256..255). An `ADD`-imm self-update with imm in 1..255 folds to a
-  positive writeback; a `SUB`-imm self-update with imm in 1..256 folds
-  to a negative one (-256 is the signed-9-bit minimum, so the negative
-  side reaches one further than the positive). The `sh=1` form
-  (imm >= 4096) is out of range. The LDR/STR must have imm12 == 0 --
-  a non-zero offset combined with a base bump matches the pre-indexed
-  pattern, not post-index.
-* Soundness: the ADD/SUB must be a self-update (`Rd == Rn ==` LDR/STR's
-  `Rn`), since post-index can only update its own base register.
-  Rt == Rn writeback is UNPREDICTABLE for loads and CONSTRAINED
-  UNPREDICTABLE for stores, so that case is rejected -- except
+  drop on backend-bound code. The same accounting holds for the
+  pair forms: a writeback LDP cracks into about the same total
+  micro-op count as the separate LDP + ADD on current big cores, so
+  the pair fold is likewise a size and front-end win rather than a
+  cycle win -- mainstream compilers emit the folded form for every
+  frame prologue/epilogue.
+* Encoding constraint: single post-index uses a 9-bit signed byte
+  immediate (-256..255). An `ADD`-imm self-update with imm in 1..255
+  folds to a positive writeback; a `SUB`-imm self-update with imm in
+  1..256 folds to a negative one (-256 is the signed-9-bit minimum,
+  so the negative side reaches one further than the positive). Pair
+  post-index instead uses a scaled signed 7-bit immediate: the
+  ADD/SUB amount must be a multiple of the per-register transfer
+  size (4 for W/S/`LDPSW`, 8 for X/D, 16 for Q) with quotient 1..63
+  for `ADD` or 1..64 for `SUB` (so X pairs reach +504/-512 bytes and
+  Q pairs +1008/-1024). The `sh=1` form (imm >= 4096) is out of
+  every slot's range. The access's offset must be 0 -- a non-zero
+  offset combined with a base bump matches the pre-indexed pattern,
+  not post-index.
+* Soundness: the ADD/SUB must be a self-update (`Rd == Rn ==` the
+  access's `Rn`), since post-index can only update its own base
+  register. Rt == Rn writeback is UNPREDICTABLE for loads and
+  CONSTRAINED UNPREDICTABLE for stores -- for pairs that applies to
+  either data register -- so those cases are rejected, except
   when Rn == 31, where Rn means SP and Rt means XZR (distinct
-  registers, no conflict). `str xzr, [sp] ; add sp, sp, #imm` and
+  registers, no conflict). A load pair with Rt == Rt2 is CONSTRAINED
+  UNPREDICTABLE even without writeback and is never folded; a store
+  pair with a repeated source is well-defined, so
+  `stp xzr, xzr, [sp] ; add sp, sp, #imm` (the common 16-byte zero
+  store plus bump) is flagged. `str xzr, [sp] ; add sp, sp, #imm` and
   `ldr xt, [sp] ; add sp, sp, #imm` are both flagged as the
   canonical stack-frame teardown patterns.
 * `ADDS`/`SUBS` (flag-setting) are excluded because post-index has no
@@ -922,7 +940,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   which catches the reversed sequence (ADD then LDR) and folds
   into the unsigned-offset form rather than post-index.
 
-## ADD/SUB + LDR/STR foldable to pre-indexed LDR/STR
+## ADD/SUB + LDR/STR (or LDP/STP) foldable to pre-indexed form
 
 * `add xn, xn, #imm ; ldr xt, [xn]` -> `ldr xt, [xn, #imm]!`, and the
   negative-direction `sub xn, xn, #imm ; ldr xt, [xn]` ->
@@ -932,20 +950,35 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   is integer-only. The pre-indexed encoding already expresses "bump `xn` by
   ±imm and then load/store from the new `xn`", which is exactly what
   the source sequence does.
+* Pairs fold the same way: `sub sp, sp, #imm ; stp x29, x30, [sp]`
+  -> `stp x29, x30, [sp, #-imm]!` is THE canonical frame prologue,
+  and the fold covers the integer W/X pairs, `LDPSW`, and the
+  SIMD&FP S/D/Q pairs.
 * Same code-size and decode-slot win as the post-index check. The
   backend cost is also unchanged: most modern OoO cores crack
   pre-indexed loads into two micro-ops (address update and load),
-  the same dependency chain as ADD followed by LDR.
-* Encoding constraint: same 9-bit signed range as post-index. An
-  `ADD` self-update with imm in 1..255 folds to a positive writeback;
-  a `SUB` self-update with imm in 1..256 to a negative one. The LDR/STR
-  must have imm12 == 0 -- a non-zero offset combined with a base bump
-  has no single pre-index expression that preserves both the load
-  address and the final base register value.
-* Soundness: the ADD/SUB must be a self-update (`Rd == Rn ==` LDR/STR's
-  `Rn`). Rt == Rn writeback is rejected (UNPREDICTABLE / CONSTRAINED
-  UNPREDICTABLE), except when Rn == 31 (Rn means SP, Rt means XZR;
-  distinct registers).
+  the same dependency chain as ADD followed by LDR; the pair forms
+  carry the same accounting (see the post-index notes).
+* Encoding constraint: same slots as post-index. Singles use the
+  9-bit signed byte immediate -- an `ADD` self-update with imm in
+  1..255 folds to a positive writeback, a `SUB` self-update with imm
+  in 1..256 to a negative one. Pairs use the scaled signed 7-bit
+  immediate: a multiple of the 4/8/16-byte transfer size with
+  quotient 1..63 (`ADD`) or 1..64 (`SUB`). The pending ADD/SUB is
+  admitted up to the largest pair writeback (1008/1024 bytes) and
+  the consumer's actual slot is re-checked when the access arrives,
+  so `add xn, xn, #304 ; ldp ...` folds while the same bump with a
+  single `ldr` correctly does not. The access's offset must be 0 --
+  a non-zero offset combined with a base bump has no single
+  pre-index expression that preserves both the access address and
+  the final base register value.
+* Soundness: the ADD/SUB must be a self-update (`Rd == Rn ==` the
+  access's `Rn`). Rt == Rn writeback is rejected (UNPREDICTABLE /
+  CONSTRAINED UNPREDICTABLE) -- for pairs, either data register --
+  except when Rn == 31 (Rn means SP, Rt means XZR; distinct
+  registers). A load pair with Rt == Rt2 is CONSTRAINED
+  UNPREDICTABLE on its own and is never folded; a store pair with a
+  repeated source (`stp xzr, xzr`) is well-defined and folds.
 * Cross-check interaction with `check_add_ldr_imm_offset`: when
   Rt == Rn == ADD's Rd, that earlier check fires instead and folds
   to the unsigned-offset form (no writeback) -- but only for `ADD`,

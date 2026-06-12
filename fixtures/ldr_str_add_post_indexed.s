@@ -108,4 +108,48 @@ _main:
     str     q0, [x9]
     sub     x9, x9, #16             // -> str q0, [x9], #-16
 
+    // -- Pairs: the writeback moves into the scaled 7-bit slot. --
+
+    // P) Canonical frame epilogue.
+    ldp     x29, x30, [sp]
+    add     sp, sp, #32             // -> ldp x29, x30, [sp], #32
+
+    // P) Pair store with a negative bump.
+    stp     x1, x2, [x3]
+    sub     x3, x3, #16             // -> stp x1, x2, [x3], #-16
+
+    // P) LDPSW pair (4-byte scale, X destinations).
+    ldpsw   x1, x2, [x5]
+    add     x5, x5, #8              // -> ldpsw x1, x2, [x5], #8
+
+    // P) Q-register pair (16-byte scale).
+    ldp     q0, q1, [x6]
+    add     x6, x6, #32             // -> ldp q0, q1, [x6], #32
+
+    // P) W pair: the 4-byte scale accepts #12.
+    ldp     w1, w2, [x7]
+    add     x7, x7, #12             // -> ldp w1, w2, [x7], #12
+
+    // N) Bump not a multiple of the X-pair access size.
+    ldp     x1, x2, [x10]
+    add     x10, x10, #12
+
+    // N) ADD out of the scaled range (512 / 8 = 64 > 63)...
+    ldp     x1, x2, [x11]
+    add     x11, x11, #512
+
+    // P) ...but SUB reaches quotient 64: -512 is the scaled minimum.
+    ldp     x1, x2, [x12]
+    sub     x12, x12, #512          // -> ldp x1, x2, [x12], #-512
+
+    // N) Pair destination aliases the base: writeback UNPREDICTABLE.
+    ldp     x13, x2, [x13]
+    add     x13, x13, #16
+
+    // P) STP of the same register twice is well-defined: the common
+    //    16-byte zero store. XZR and the SP base both encode 31 but
+    //    are distinct registers.
+    stp     xzr, xzr, [sp]
+    add     sp, sp, #16             // -> stp xzr, xzr, [sp], #16
+
     ret

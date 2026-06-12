@@ -104,8 +104,8 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`sxtw` + `ldr [xn, xt]`](analyses.md#sxtw--register-offset-ldr-foldable-into-the-load) | `ldr [xn, ws, sxtw {#s}]` |
 | [`ldrb`/`ldrh`/`ldr` (or `ldrsb`/`ldrsh Wt`) + `sxtb`/`sxth`/`sxtw`](analyses.md#load--sign-extend-foldable-to-ldrsbldrshldrsw) | `ldrsb`/`ldrsh`/`ldrsw` (`Xt` for the re-widened sign loads) |
 | [`add #a` + `ldr [xt]` (incl. `mov xt, sp`)](analyses.md#add--ldr-foldable-to-immediate-offset-ldr) | `ldr [xn, #a]` / `ldr [sp]` |
-| [`ldr [xn]` + `add`/`sub xn`](analyses.md#ldrstr--addsub-foldable-to-post-indexed-ldrstr) | `ldr [xn], #±imm` (post-index) |
-| [`add`/`sub xn` + `ldr [xn]`](analyses.md#addsub--ldrstr-foldable-to-pre-indexed-ldrstr) | `ldr [xn, #±imm]!` (pre-index) |
+| [`ldr`/`ldp [xn]` + `add`/`sub xn`](analyses.md#ldrstr-or-ldpstp--addsub-foldable-to-post-indexed-form) | `ldr [xn], #±imm` / `ldp [sp], #imm` (post-index) |
+| [`add`/`sub xn` + `ldr`/`stp [xn]`](analyses.md#addsub--ldrstr-or-ldpstp-foldable-to-pre-indexed-form) | `ldr [xn, #±imm]!` / `stp [sp, #-imm]!` (pre-index) |
 
 ## Compilation
 

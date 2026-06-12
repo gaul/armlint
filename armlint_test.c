@@ -1047,6 +1047,34 @@ static inline void str_d_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned i
 static inline void ldr_q_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x3DC00000u, rt, rn, imm); }
 static inline void str_q_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x3D800000u, rt, rn, imm); }
 
+// Load/store pair, signed-offset (no-writeback) form:
+// opc(2) 101 V 010 L imm7 Rt2 Rn Rt. imm7 is in per-register
+// transfer-size units (x4 for W/S and LDPSW, x8 for X/D, x16 for Q).
+//   LDP Xt:  opc=10 V=0 L=1 -> base 0xA9400000
+//   STP Xt:  opc=10 V=0 L=0 -> base 0xA9000000
+//   LDP Wt:  opc=00 V=0 L=1 -> base 0x29400000
+//   LDPSW:   opc=01 V=0 L=1 -> base 0x69400000
+//   LDP Qt:  opc=10 V=1 L=1 -> base 0xAD400000
+//   STP Qt:  opc=10 V=1 L=0 -> base 0xAD000000
+//   STP Dt:  opc=01 V=1 L=0 -> base 0x6D000000
+static void encode_pair_soff(uint8_t out[4], uint32_t base, unsigned rt,
+                             unsigned rt2, unsigned rn, int imm7)
+{
+    uint32_t op = base
+        | (((uint32_t)imm7 & 0x7Fu) << 15)
+        | ((uint32_t)rt2 << 10)
+        | ((uint32_t)rn << 5)
+        | (uint32_t)rt;
+    write_le32(out, op);
+}
+static inline void ldp_x_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xA9400000u, rt, rt2, rn, imm7); }
+static inline void stp_x_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xA9000000u, rt, rt2, rn, imm7); }
+static inline void ldp_w_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x29400000u, rt, rt2, rn, imm7); }
+static inline void ldpsw_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x69400000u, rt, rt2, rn, imm7); }
+static inline void ldp_q_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xAD400000u, rt, rt2, rn, imm7); }
+static inline void stp_q_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xAD000000u, rt, rt2, rn, imm7); }
+static inline void stp_d_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x6D000000u, rt, rt2, rn, imm7); }
+
 // SBFM SXT* aliases. SXTB/SXTH (W- and X-form) and SXTW (X-form only).
 //   SXTB Wd, Wn: SBFM Wd, Wn, #0, #7  -> sf=0, N=0, imms=7  -> 0x13001C00
 //   SXTH Wd, Wn: SBFM Wd, Wn, #0, #15 -> sf=0, N=0, imms=15 -> 0x13003C00
@@ -6003,6 +6031,98 @@ static void test_ldr_str_add_post_indexed(void)
     ldr_s_fp(&code[0], 0, 9, 0);
     sub_x_imm(&code[4], 9, 9, 16);
     assert(run_helper_check(code, 8) == 1);
+
+    // -- Pairs: LDP/STP/LDPSW and the SIMD&FP pair forms fold the
+    // same way, with the writeback in the scaled 7-bit slot. --
+
+    // Canonical frame epilogue: ldp x29, x30, [sp] ; add sp, sp, #32
+    //   -> ldp x29, x30, [sp], #32.
+    ldp_x_soff(&code[0], 29, 30, 31, 0);
+    add_x_imm(&code[4], 31, 31, 32);
+    assert(run_helper_check(code, 8) == 1);
+
+    // X pair off a GPR base.
+    ldp_x_soff(&code[0], 3, 4, 1, 0);
+    add_x_imm(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W pair: the 4-byte scale accepts #12.
+    ldp_w_soff(&code[0], 3, 4, 1, 0);
+    add_x_imm(&code[4], 1, 1, 12);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDPSW pair.
+    ldpsw_soff(&code[0], 3, 4, 1, 0);
+    add_x_imm(&code[4], 1, 1, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Q pair (16-byte scale).
+    ldp_q_soff(&code[0], 0, 1, 2, 0);
+    add_x_imm(&code[4], 2, 2, 64);
+    assert(run_helper_check(code, 8) == 1);
+
+    // D-pair store with a negative bump.
+    stp_d_soff(&code[0], 1, 2, 9, 0);
+    sub_x_imm(&code[4], 9, 9, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // STP of the same register twice -- the common 16-byte zero
+    // store -- is well-defined and folds; Rt = Rt2 = 31 with an SP
+    // base is XZR twice, distinct from the base.
+    stp_x_soff(&code[0], 31, 31, 31, 0);
+    add_x_imm(&code[4], 31, 31, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Boundary: the ADD side tops out at 63 scaled units (504 for X
+    // pairs)...
+    ldp_x_soff(&code[0], 3, 4, 1, 0);
+    add_x_imm(&code[4], 1, 1, 504);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ...and 512 (quotient 64) is out of the ADD side's range.
+    ldp_x_soff(&code[0], 3, 4, 1, 0);
+    add_x_imm(&code[4], 1, 1, 512);
+    assert(run_helper_check(code, 8) == 0);
+
+    // The SUB side reaches quotient 64: writeback -512 is the scaled
+    // 7-bit minimum.
+    ldp_x_soff(&code[0], 3, 4, 1, 0);
+    sub_x_imm(&code[4], 1, 1, 512);
+    assert(run_helper_check(code, 8) == 1);
+
+    // SUB quotient 65 is out of range.
+    ldp_x_soff(&code[0], 3, 4, 1, 0);
+    sub_x_imm(&code[4], 1, 1, 520);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Bump not a multiple of the X-pair access size.
+    ldp_x_soff(&code[0], 3, 4, 1, 0);
+    add_x_imm(&code[4], 1, 1, 12);
+    assert(run_helper_check(code, 8) == 0);
+
+    // An LDP destination aliasing the base makes the writeback
+    // UNPREDICTABLE -- first or second data register alike.
+    ldp_x_soff(&code[0], 1, 4, 1, 0);
+    add_x_imm(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 0);
+    ldp_x_soff(&code[0], 4, 1, 1, 0);
+    add_x_imm(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LDP with Rt == Rt2 is CONSTRAINED UNPREDICTABLE even without
+    // writeback; the opener rejects it. This Capstone refuses to
+    // decode the encoding at all, so the harness reports a decode
+    // error (-1) rather than 0 findings -- either way, no fold. The
+    // opener's own Rt == Rt2 guard stays as defense in depth for
+    // Capstone versions that do decode it.
+    ldp_x_soff(&code[0], 3, 3, 1, 0);
+    add_x_imm(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == -1);
+
+    // A non-zero pair offset cannot combine with a post-index update.
+    ldp_x_soff(&code[0], 3, 4, 1, 1);
+    add_x_imm(&code[4], 1, 1, 16);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 static void test_add_ldr_str_pre_indexed(void)
@@ -6165,6 +6285,90 @@ static void test_add_ldr_str_pre_indexed(void)
     sub_x_imm(&code[0], 9, 9, 4);
     ldr_h_fp(&code[4], 2, 9, 0);
     assert(run_helper_check(code, 8) == 1);
+
+    // -- Pairs. --
+
+    // The canonical frame prologue: sub sp, sp, #32 ;
+    // stp x29, x30, [sp] -> stp x29, x30, [sp, #-32]!.
+    sub_x_imm(&code[0], 31, 31, 32);
+    stp_x_soff(&code[4], 29, 30, 31, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Positive bump + X-pair load.
+    add_x_imm(&code[0], 1, 1, 16);
+    ldp_x_soff(&code[4], 3, 4, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W pair: the 4-byte scale accepts #12.
+    add_x_imm(&code[0], 1, 1, 12);
+    ldp_w_soff(&code[4], 3, 4, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // LDPSW.
+    add_x_imm(&code[0], 1, 1, 4);
+    ldpsw_soff(&code[4], 3, 4, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Q pair at the deepest SUB reach: 1024 = 64 * 16.
+    sub_x_imm(&code[0], 31, 31, 1024);
+    stp_q_soff(&code[4], 0, 1, 31, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // The ADD side tops out one slot earlier: 1008 = 63 * 16...
+    add_x_imm(&code[0], 2, 2, 1008);
+    ldp_q_soff(&code[4], 0, 1, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ...and 1024 is out of range for ADD.
+    add_x_imm(&code[0], 2, 2, 1024);
+    ldp_q_soff(&code[4], 0, 1, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Beyond the singles' 9-bit byte range but fine scaled:
+    // 304 / 8 = 38.
+    add_x_imm(&code[0], 1, 1, 304);
+    ldp_x_soff(&code[4], 3, 4, 1, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // The widened opener must not leak into singles: the same #304
+    // with a single LDR is still outside the 9-bit slot.
+    add_x_imm(&code[0], 1, 1, 304);
+    ldr_x_uimm0(&code[4], 3, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Not a multiple of the X-pair access size.
+    add_x_imm(&code[0], 1, 1, 12);
+    ldp_x_soff(&code[4], 3, 4, 1, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // A pair destination aliasing the base rejects -- either data
+    // register.
+    add_x_imm(&code[0], 1, 1, 16);
+    ldp_x_soff(&code[4], 1, 4, 1, 0);
+    assert(run_helper_check(code, 8) == 0);
+    add_x_imm(&code[0], 1, 1, 16);
+    ldp_x_soff(&code[4], 4, 1, 1, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LDP with Rt == Rt2: CONSTRAINED UNPREDICTABLE on its own; the
+    // closer rejects it. This Capstone refuses to decode the
+    // encoding, so the harness reports a decode error (-1) rather
+    // than 0 findings -- either way, no fold (the in-check guard is
+    // defense in depth for Capstone versions that do decode it).
+    add_x_imm(&code[0], 1, 1, 16);
+    ldp_x_soff(&code[4], 3, 3, 1, 0);
+    assert(run_helper_check(code, 8) == -1);
+
+    // Store pair with a repeated source folds (the zero-fill shape).
+    sub_x_imm(&code[0], 31, 31, 16);
+    stp_x_soff(&code[4], 31, 31, 31, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Non-zero pair offset: no pre-index expression preserves both
+    // the access address and the final base.
+    add_x_imm(&code[0], 1, 1, 16);
+    ldp_x_soff(&code[4], 3, 4, 1, 1);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 int main(void)

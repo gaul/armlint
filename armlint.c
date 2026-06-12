@@ -358,33 +358,45 @@ struct armlint_state {
     size_t addi_pending_offset;
     char addi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // Pending unsigned-offset LDR/STR with imm12 == 0 awaiting an
-    // adjacent X-form ADD-immediate that self-updates the base
-    // register (Rd == Rn == LDR/STR's Rn). The pair folds into a
-    // single post-indexed LDR/STR with the ADD/SUB's byte immediate in
-    // the post-index slot. Post-index uses a 9-bit signed immediate
-    // (-256..255): ADD imm in 1..255 folds to a positive writeback,
-    // SUB imm in 1..256 to a negative one. SIMD&FP accesses
+    // Pending zero-offset load/store -- a single LDR/STR or an
+    // LDP/STP/LDPSW pair -- awaiting an adjacent X-form ADD-immediate
+    // that self-updates the base register (Rd == Rn == the access's
+    // Rn). The two fold into a single post-indexed form with the
+    // ADD/SUB's byte immediate in the post-index slot. Singles use
+    // the 9-bit signed slot (-256..255): ADD imm in 1..255 folds to a
+    // positive writeback, SUB imm in 1..256 to a negative one. Pairs
+    // (lspi_pending_is_pair, second data register in
+    // lspi_pending_rt2) use the scaled 7-bit slot instead: the byte
+    // amount must be a multiple of the per-register transfer size
+    // with quotient 1..63 (ADD) or 1..64 (SUB). SIMD&FP accesses
     // (lspi_pending_is_fp; size is then the log2 transfer bytes,
-    // 0..4 for B/H/S/D/Q) fold the same way -- every FP size has a
-    // post-indexed form, and the FP Rt can never alias the integer
-    // base. Strict adjacency: any non-matching instruction expires
-    // the state.
+    // 0..4 for B/H/S/D/Q singles, 2..4 for the S/D/Q pair forms) fold
+    // the same way -- every such form has a post-indexed counterpart,
+    // and an FP Rt can never alias the integer base.
+    // lspi_pending_is_sw flags LDPSW (4-byte transfers into Xt
+    // destinations). Strict adjacency: any non-matching instruction
+    // expires the state.
     bool lspi_pending;
     bool lspi_pending_is_load;
     bool lspi_pending_is_fp;
+    bool lspi_pending_is_pair;
+    bool lspi_pending_is_sw;
     unsigned lspi_pending_size;
     unsigned lspi_pending_rn;
     unsigned lspi_pending_rt;
+    unsigned lspi_pending_rt2;
     size_t lspi_pending_offset;
     char lspi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
     // Pending X-form ADD-immediate self-update (Rd == Rn) awaiting an
-    // adjacent unsigned-offset LDR/STR with imm12 == 0 whose base
-    // register equals the ADD's Rd. The pair folds into a single
-    // pre-indexed LDR/STR. Same 9-bit signed range as post-index: ADD
-    // imm in 1..255 (positive writeback) or SUB imm in 1..256 (negative
-    // writeback), the sign recorded in lspr_pending_is_sub. Distinct from
+    // adjacent zero-offset LDR/STR or LDP/STP/LDPSW whose base
+    // register equals the ADD's Rd. The two fold into a single
+    // pre-indexed form, the sign recorded in lspr_pending_is_sub. The
+    // opener admits any imm up to the largest pair writeback (1008
+    // for ADD / 1024 for SUB, the Q-pair limits); the close re-checks
+    // the consumer's actual slot -- 9-bit signed for singles (ADD
+    // 1..255 / SUB 1..256), scaled 7-bit for pairs (a multiple of the
+    // transfer size, quotient 1..63 / 1..64). Distinct from
     // check_add_ldr_imm_offset, which catches the related pattern
     // where the LDR's Rt also equals the ADD's Rd (folding to the
     // unsigned-offset form with no writeback).
@@ -5713,6 +5725,77 @@ bool check_add_ldr_imm_offset(armlint_state *state,
     return produced;
 }
 
+// Decode a load/store pair, signed-offset (no-writeback) form:
+// opc(2) 101 V(1) 010 L(1) imm7 Rt2 Rn Rt. Accepts exactly the
+// combinations that have pre-/post-indexed counterparts: integer W
+// (opc=00) and X (opc=10) pairs, LDPSW (opc=01 with L=1: two 4-byte
+// sign-extending loads into Xt destinations, flagged in out_is_sw),
+// and SIMD&FP S/D/Q pairs (V=1, opc=00/01/10). opc=11 and the opc=01
+// integer store are unallocated. out_lg2size is the log2 PER-REGISTER
+// transfer bytes (2/3/4); imm7 (returned sign-extended) and the
+// writeback immediate of the indexed forms are scaled by that size.
+// LDNP/STNP use a different mode field (000) and do not match.
+static bool decode_pair_soff(uint32_t op, bool *out_is_load,
+                             bool *out_is_fp, bool *out_is_sw,
+                             unsigned *out_lg2size, int *out_imm7,
+                             unsigned *out_rn, unsigned *out_rt,
+                             unsigned *out_rt2)
+{
+    if ((op & 0x3B800000u) != 0x29000000u) {
+        return false;
+    }
+    unsigned opc = (op >> 30) & 0x3u;
+    bool is_fp = ((op >> 26) & 1u) != 0;
+    bool is_load = ((op >> 22) & 1u) != 0;
+    bool is_sw = false;
+    unsigned lg2;
+    if (opc == 3u) {
+        return false;               // unallocated in both files
+    }
+    if (is_fp) {
+        lg2 = opc + 2u;             // S/D/Q
+    } else if (opc == 1u) {
+        if (!is_load) {
+            return false;           // integer opc=01 store: unallocated
+        }
+        is_sw = true;               // LDPSW
+        lg2 = 2u;
+    } else {
+        lg2 = opc == 0u ? 2u : 3u;  // W / X
+    }
+    *out_is_load = is_load;
+    *out_is_fp = is_fp;
+    *out_is_sw = is_sw;
+    *out_lg2size = lg2;
+    int imm7 = (int)((op >> 15) & 0x7Fu);
+    if (imm7 & 0x40) {
+        imm7 -= 128;
+    }
+    *out_imm7 = imm7;
+    *out_rt2 = (op >> 10) & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// Pair mnemonic: LDPSW carries its own; otherwise ldp/stp by
+// direction (SIMD&FP pairs share the integer mnemonics).
+static const char *pair_mnemonic(bool is_load, bool is_sw)
+{
+    if (is_sw) {
+        return "ldpsw";
+    }
+    return is_load ? "ldp" : "stp";
+}
+
+// Format one data register of a pair. LDPSW transfers 4 bytes per
+// register but writes X destinations, so it renders as size 3.
+static void format_pair_rt(char *buf, size_t bufsz, bool is_fp,
+                           bool is_sw, unsigned lg2size, unsigned rt)
+{
+    format_ls_rt(buf, bufsz, is_fp, is_sw ? 3u : lg2size, rt);
+}
+
 bool check_ldr_str_add_post_indexed(armlint_state *state,
                                     const cs_insn *insn,
                                     size_t offset,
@@ -5728,38 +5811,68 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
     bool produced = false;
 
     // (1) Try to close: is this an X-form ADD-immediate that
-    // self-updates the pending LDR/STR's base?
+    // self-updates the pending access's base?
     if (state->lspi_pending) {
         unsigned a_rd, a_rn;
         uint32_t a_imm;
         // Rt == Rn writeback is UNPREDICTABLE (CONSTRAINED for stores)
         // unless Rn == 31, where 31 means SP for Rn but XZR for Rt --
-        // distinct registers, so no conflict. A SIMD&FP Rt lives in a
+        // distinct registers, so no conflict. A pair extends the rule
+        // to its second data register. A SIMD&FP Rt lives in a
         // different register file and can never alias the base.
         bool rt_aliases_rn = !state->lspi_pending_is_fp
-            && state->lspi_pending_rt == state->lspi_pending_rn
-            && state->lspi_pending_rn != 31;
+            && state->lspi_pending_rn != 31
+            && (state->lspi_pending_rt == state->lspi_pending_rn
+                || (state->lspi_pending_is_pair
+                    && state->lspi_pending_rt2 == state->lspi_pending_rn));
         bool is_add = decode_add_imm_x(op, &a_rd, &a_rn, &a_imm);
         bool is_sub = !is_add && decode_sub_imm_x(op, &a_rd, &a_rn, &a_imm);
-        // ADD self-update folds to a positive writeback (imm 1..255);
-        // SUB to a negative one (imm 1..256, the signed-9-bit slot
-        // reaching -256). The imm range test sits after the
-        // (is_add || is_sub) guard so a_imm is only read once a decoder
-        // has filled it.
+        // Writeback range. Singles use the 9-bit signed byte slot:
+        // ADD imm in 1..255 folds to a positive writeback, SUB imm in
+        // 1..256 to a negative one (-256 is the signed-9-bit minimum).
+        // Pairs use the scaled 7-bit slot: the byte amount must be a
+        // multiple of the per-register transfer size with quotient
+        // 1..63 (ADD) or 1..64 (SUB). The test sits behind the
+        // (is_add || is_sub) guard so a_imm is only read once a
+        // decoder has filled it.
+        bool imm_in_range = false;
+        if (is_add || is_sub) {
+            if (state->lspi_pending_is_pair) {
+                unsigned scale = 1u << state->lspi_pending_size;
+                imm_in_range = a_imm >= scale
+                    && a_imm % scale == 0
+                    && a_imm / scale <= (is_sub ? 64u : 63u);
+            } else {
+                imm_in_range = a_imm >= 1
+                    && a_imm <= (is_sub ? 256u : 255u);
+            }
+        }
         if (!rt_aliases_rn
                 && (is_add || is_sub)
                 && a_rd == state->lspi_pending_rn
                 && a_rn == state->lspi_pending_rn
-                && a_imm >= 1
-                && a_imm <= (is_sub ? 256u : 255u)) {
+                && imm_in_range) {
             unsigned size = state->lspi_pending_size;
             bool is_load = state->lspi_pending_is_load;
             bool is_fp = state->lspi_pending_is_fp;
-            const char *mnem = ls_mnemonic(is_fp, is_load, size);
+            bool is_pair = state->lspi_pending_is_pair;
+            const char *mnem = is_pair
+                ? pair_mnemonic(is_load, state->lspi_pending_is_sw)
+                : ls_mnemonic(is_fp, is_load, size);
             const char *idx_sign = is_sub ? "-" : "";
             const char *upd_mnem = is_sub ? "sub" : "add";
 
-            if (is_load) {
+            if (is_pair) {
+                if (is_load) {
+                    out->name = is_sub
+                        ? "LDP + SUB foldable to post-indexed LDP"
+                        : "LDP + ADD foldable to post-indexed LDP";
+                } else {
+                    out->name = is_sub
+                        ? "STP + SUB foldable to post-indexed STP"
+                        : "STP + ADD foldable to post-indexed STP";
+                }
+            } else if (is_load) {
                 out->name = is_sub
                     ? "LDR + SUB foldable to post-indexed LDR"
                     : "LDR + ADD foldable to post-indexed LDR";
@@ -5772,16 +5885,31 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
             out->insn_count = 2;
             clear_finding_strings(out);
 
+            // rts holds the data-register list: one register for a
+            // single, "rt, rt2" for a pair.
             char rt_buf[8];
-            format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size,
-                state->lspi_pending_rt);
+            char rts[20];
+            if (is_pair) {
+                char rt2_buf[8];
+                format_pair_rt(rt_buf, sizeof(rt_buf), is_fp,
+                    state->lspi_pending_is_sw, size,
+                    state->lspi_pending_rt);
+                format_pair_rt(rt2_buf, sizeof(rt2_buf), is_fp,
+                    state->lspi_pending_is_sw, size,
+                    state->lspi_pending_rt2);
+                snprintf(rts, sizeof(rts), "%s, %s", rt_buf, rt2_buf);
+            } else {
+                format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size,
+                    state->lspi_pending_rt);
+                snprintf(rts, sizeof(rts), "%s", rt_buf);
+            }
             if (state->lspi_pending_rn == 31) {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %s, [sp], #%s0x%x", mnem, rt_buf, idx_sign, a_imm);
+                    "-> %s %s, [sp], #%s0x%x", mnem, rts, idx_sign, a_imm);
             } else {
                 snprintf(out->detail, sizeof(out->detail),
                     "-> %s %s, [x%u], #%s0x%x",
-                    mnem, rt_buf, state->lspi_pending_rn, idx_sign, a_imm);
+                    mnem, rts, state->lspi_pending_rn, idx_sign, a_imm);
             }
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lspi_pending_disasm);
@@ -5798,15 +5926,20 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
         state->lspi_pending = false;
     }
 
-    // (2) Try to open: is this an unsigned-offset LDR or STR (integer
-    // or SIMD&FP -- every FP size has a post-indexed form) with
-    // imm12 == 0? Only the zero-offset case folds cleanly: a non-zero
-    // imm12 plus a post-index update has no single-instruction
-    // rewrite (pre-indexed handles a different pattern).
+    // (2) Try to open: is this a zero-offset unsigned-offset LDR/STR
+    // (integer or SIMD&FP -- every FP size has a post-indexed form)
+    // or a zero-offset LDP/STP/LDPSW pair? Only the zero-offset case
+    // folds cleanly: a non-zero offset plus a post-index update has
+    // no single-instruction rewrite (pre-indexed handles a different
+    // pattern).
     unsigned size, imm12, rn, rt;
+    unsigned rt2 = 0;
+    int pair_imm7 = 0;
     bool opened = false;
     bool is_load = false;
     bool is_fp = false;
+    bool is_pair = false;
+    bool is_sw = false;
     if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
             && imm12 == 0) {
         opened = true;
@@ -5820,26 +5953,51 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
             && imm12 == 0) {
         opened = true;
         is_fp = true;
+    } else if (decode_pair_soff(op, &is_load, &is_fp, &is_sw, &size,
+                                &pair_imm7, &rn, &rt, &rt2)
+            && pair_imm7 == 0
+            && !(is_load && rt == rt2)) {
+        // A load pair with Rt == Rt2 is CONSTRAINED UNPREDICTABLE in
+        // both register files even without writeback, so never treat
+        // it as foldable; a store pair with a repeated source is fine
+        // (stp xzr, xzr is the common 16-byte zero store).
+        opened = true;
+        is_pair = true;
     }
     if (opened) {
         state->lspi_pending = true;
         state->lspi_pending_is_load = is_load;
         state->lspi_pending_is_fp = is_fp;
+        state->lspi_pending_is_pair = is_pair;
+        state->lspi_pending_is_sw = is_sw;
         state->lspi_pending_size = size;
         state->lspi_pending_rn = rn;
         state->lspi_pending_rt = rt;
+        state->lspi_pending_rt2 = rt2;
         state->lspi_pending_offset = offset;
-        const char *mnem = ls_mnemonic(is_fp, is_load, size);
+        const char *mnem = is_pair
+            ? pair_mnemonic(is_load, is_sw)
+            : ls_mnemonic(is_fp, is_load, size);
         char rt_buf[8];
-        format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+        char rts[20];
+        if (is_pair) {
+            char rt2_buf[8];
+            format_pair_rt(rt_buf, sizeof(rt_buf), is_fp, is_sw, size, rt);
+            format_pair_rt(rt2_buf, sizeof(rt2_buf), is_fp, is_sw, size,
+                rt2);
+            snprintf(rts, sizeof(rts), "%s, %s", rt_buf, rt2_buf);
+        } else {
+            format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+            snprintf(rts, sizeof(rts), "%s", rt_buf);
+        }
         if (rn == 31) {
             snprintf(state->lspi_pending_disasm,
                 sizeof(state->lspi_pending_disasm),
-                "%s %s, [sp]", mnem, rt_buf);
+                "%s %s, [sp]", mnem, rts);
         } else {
             snprintf(state->lspi_pending_disasm,
                 sizeof(state->lspi_pending_disasm),
-                "%s %s, [x%u]", mnem, rt_buf, rn);
+                "%s %s, [x%u]", mnem, rts, rn);
         }
     }
 
@@ -5860,13 +6018,17 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
 
     bool produced = false;
 
-    // (1) Try to close: is this an unsigned-offset LDR or STR with
-    // imm12 == 0 whose base matches the pending ADD self-update?
+    // (1) Try to close: is this a zero-offset LDR/STR or
+    // LDP/STP/LDPSW whose base matches the pending ADD self-update?
     if (state->lspr_pending) {
         unsigned size, imm12, rn, rt;
+        unsigned rt2 = 0;
+        int pair_imm7 = 0;
         bool matched = false;
         bool is_load = false;
         bool is_fp = false;
+        bool is_pair = false;
+        bool is_sw = false;
         if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
                 && imm12 == 0
                 && rn == state->lspr_pending_rd) {
@@ -5884,22 +6046,76 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
             // SIMD&FP access: every FP size has a pre-indexed form.
             matched = true;
             is_fp = true;
+        } else if (decode_pair_soff(op, &is_load, &is_fp, &is_sw, &size,
+                                    &pair_imm7, &rn, &rt, &rt2)
+                && pair_imm7 == 0
+                && rn == state->lspr_pending_rd
+                && !(is_load && rt == rt2)) {
+            // A load pair with Rt == Rt2 is CONSTRAINED UNPREDICTABLE
+            // even without writeback; never fold it. Store pairs with
+            // a repeated source are fine.
+            matched = true;
+            is_pair = true;
         }
         // Rt == Rn writeback is UNPREDICTABLE for loads and
         // CONSTRAINED UNPREDICTABLE for stores (same rule as
-        // post-index). Rn == 31 is the exception: Rn means SP and Rt
+        // post-index); a pair extends the rule to its second data
+        // register. Rn == 31 is the exception: Rn means SP and Rt
         // means XZR, so the two encode distinct registers. A SIMD&FP
         // Rt lives in a different register file and never aliases.
-        bool rt_aliases_rn = matched && !is_fp && rt == rn && rn != 31;
-        if (matched && !rt_aliases_rn) {
-            const char *mnem = ls_mnemonic(is_fp, is_load, size);
+        bool rt_aliases_rn = matched && !is_fp && rn != 31
+            && (rt == rn || (is_pair && rt2 == rn));
+        // The opener admits any imm up to the largest pair writeback;
+        // re-check against this consumer's actual slot (9-bit signed
+        // bytes for singles, scaled 7-bit for pairs).
+        bool imm_in_range = false;
+        if (matched) {
+            uint32_t pimm = state->lspr_pending_imm;
+            if (is_pair) {
+                unsigned scale = 1u << size;
+                imm_in_range = pimm >= scale
+                    && pimm % scale == 0
+                    && pimm / scale
+                        <= (state->lspr_pending_is_sub ? 64u : 63u);
+            } else {
+                imm_in_range =
+                    pimm <= (state->lspr_pending_is_sub ? 256u : 255u);
+            }
+        }
+        if (matched && !rt_aliases_rn && imm_in_range) {
+            const char *mnem = is_pair
+                ? pair_mnemonic(is_load, is_sw)
+                : ls_mnemonic(is_fp, is_load, size);
 
+            // rts holds the data-register list: one register for a
+            // single, "rt, rt2" for a pair.
             char rt_buf[8];
-            format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+            char rts[20];
+            if (is_pair) {
+                char rt2_buf[8];
+                format_pair_rt(rt_buf, sizeof(rt_buf), is_fp, is_sw,
+                    size, rt);
+                format_pair_rt(rt2_buf, sizeof(rt2_buf), is_fp, is_sw,
+                    size, rt2);
+                snprintf(rts, sizeof(rts), "%s, %s", rt_buf, rt2_buf);
+            } else {
+                format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+                snprintf(rts, sizeof(rts), "%s", rt_buf);
+            }
 
             uint32_t imm = state->lspr_pending_imm;
             const char *idx_sign = state->lspr_pending_is_sub ? "-" : "";
-            if (is_load) {
+            if (is_pair) {
+                if (is_load) {
+                    out->name = state->lspr_pending_is_sub
+                        ? "SUB + LDP foldable to pre-indexed LDP"
+                        : "ADD + LDP foldable to pre-indexed LDP";
+                } else {
+                    out->name = state->lspr_pending_is_sub
+                        ? "SUB + STP foldable to pre-indexed STP"
+                        : "ADD + STP foldable to pre-indexed STP";
+                }
+            } else if (is_load) {
                 out->name = state->lspr_pending_is_sub
                     ? "SUB + LDR foldable to pre-indexed LDR"
                     : "ADD + LDR foldable to pre-indexed LDR";
@@ -5914,19 +6130,19 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
 
             if (rn == 31) {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %s, [sp, #%s0x%x]!", mnem, rt_buf, idx_sign, imm);
+                    "-> %s %s, [sp, #%s0x%x]!", mnem, rts, idx_sign, imm);
             } else {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %s, [x%u, #%s0x%x]!", mnem, rt_buf, rn, idx_sign, imm);
+                    "-> %s %s, [x%u, #%s0x%x]!", mnem, rts, rn, idx_sign, imm);
             }
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lspr_pending_disasm);
             if (rn == 31) {
                 snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %s, [sp]", mnem, rt_buf);
+                    "%s %s, [sp]", mnem, rts);
             } else {
                 snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %s, [x%u]", mnem, rt_buf, rn);
+                    "%s %s, [x%u]", mnem, rts, rn);
             }
             produced = true;
         }
@@ -5935,9 +6151,11 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
     }
 
     // (2) Try to open: is this an X-form ADD/SUB-immediate self-update
-    // (Rd == Rn) with imm in the 9-bit signed range? ADD imm 1..255 is
-    // a positive writeback; SUB imm 1..256 is a negative one (-256
-    // being the signed-9-bit minimum).
+    // (Rd == Rn) small enough for some writeback slot? The widest is
+    // a Q pair's scaled 7-bit immediate: 63 * 16 = 1008 for ADD,
+    // 64 * 16 = 1024 for SUB. The close re-checks the actual
+    // consumer's range (9-bit signed bytes for singles: ADD 1..255 /
+    // SUB 1..256).
     unsigned a_rd, a_rn;
     uint32_t a_imm;
     bool is_add = decode_add_imm_x(op, &a_rd, &a_rn, &a_imm);
@@ -5945,7 +6163,7 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
     if ((is_add || is_sub)
             && a_rd == a_rn
             && a_imm >= 1
-            && a_imm <= (is_sub ? 256u : 255u)) {
+            && a_imm <= (is_sub ? 1024u : 1008u)) {
         const char *upd_mnem = is_sub ? "sub" : "add";
         state->lspr_pending = true;
         state->lspr_pending_is_sub = is_sub;

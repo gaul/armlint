@@ -664,65 +664,83 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
-// Detect an unsigned-offset LDR or STR with imm12 == 0 immediately
-// followed by an X-form ADD-immediate that self-updates the base
-// register. The pair folds into a single post-indexed LDR/STR with
-// the ADD's byte immediate moved into the post-index slot:
-//   ldr xt, [xn]    ; add xn, xn, #imm  -> ldr xt, [xn], #imm
-//   str xt, [xn]    ; add xn, xn, #imm  -> str xt, [xn], #imm
-//   ldr xt, [sp]    ; add sp, sp, #imm  -> ldr xt, [sp], #imm
-//   ldr xt, [xn]    ; sub xn, xn, #imm  -> ldr xt, [xn], #-imm
+// Detect a zero-offset load/store -- an unsigned-offset LDR/STR or a
+// signed-offset LDP/STP/LDPSW pair -- immediately followed by an
+// X-form ADD-immediate that self-updates the base register. The two
+// fold into a single post-indexed form with the ADD's byte immediate
+// moved into the post-index slot:
+//   ldr xt, [xn]        ; add xn, xn, #imm -> ldr xt, [xn], #imm
+//   str xt, [xn]        ; add xn, xn, #imm -> str xt, [xn], #imm
+//   ldr xt, [sp]        ; add sp, sp, #imm -> ldr xt, [sp], #imm
+//   ldr xt, [xn]        ; sub xn, xn, #imm -> ldr xt, [xn], #-imm
+//   ldp xt, xu, [sp]    ; add sp, sp, #imm -> ldp xt, xu, [sp], #imm
+//     (the canonical frame epilogue)
 // All four integer access sizes (B/H/W/X) and every SIMD&FP size
-// (B/H/S/D/Q) are supported; an FP Rt never aliases the integer
-// base, so the Rt == Rn writeback restriction is integer-only.
+// (B/H/S/D/Q) are supported for singles; pairs cover W/X, LDPSW, and
+// the SIMD&FP S/D/Q forms. An FP Rt never aliases the integer base,
+// so the Rt == Rn writeback restriction is integer-only.
 //
-// Encoding constraint: post-index uses a 9-bit signed immediate
-// (-256..255). An ADD-imm self-update with imm in 1..255 folds to a
-// positive writeback; a SUB-imm self-update with imm in 1..256 folds
-// to a negative one (-256 is the signed-9-bit minimum). The sh=1 form
-// (imm >= 4096) is out of range and rejected.
+// Encoding constraint: single post-index uses a 9-bit signed byte
+// immediate (-256..255): an ADD-imm self-update with imm in 1..255
+// folds to a positive writeback, a SUB-imm self-update with imm in
+// 1..256 to a negative one (-256 is the signed-9-bit minimum). Pair
+// post-index uses a scaled signed 7-bit immediate: the ADD/SUB amount
+// must be a multiple of the per-register transfer size (4/8/16) with
+// quotient 1..63 for ADD or 1..64 for SUB. The sh=1 ADD form
+// (imm >= 4096) is out of every slot's range and rejected.
 //
-// Soundness: ADD's Rd and Rn must both equal the LDR/STR's Rn so
-// that the base receives a self-update (the only form expressible as
+// Soundness: ADD's Rd and Rn must both equal the access's Rn so that
+// the base receives a self-update (the only form expressible as
 // post-index). Rt == Rn writeback is UNPREDICTABLE for loads and
-// CONSTRAINED UNPREDICTABLE for stores, so that pair is rejected --
-// except when Rn == 31, where 31 means SP for the base and XZR for
-// Rt, so the two encode distinct registers and no conflict arises.
-// LDR with Rt = 31 (load to XZR) is allowed for symmetry with STR
-// of XZR. The unsigned-offset LDR/STR must have imm12 == 0; a
-// non-zero LDR offset combined with a post-index update has no
-// single-instruction rewrite (that pattern matches pre-index, not
-// post-index).
+// CONSTRAINED UNPREDICTABLE for stores -- for pairs that applies to
+// either data register -- so those are rejected, except when
+// Rn == 31: 31 means SP for the base and XZR for a data register, so
+// the two encode distinct registers and no conflict arises. A load
+// pair with Rt == Rt2 is CONSTRAINED UNPREDICTABLE even without
+// writeback and is never opened; a store pair with a repeated source
+// (stp xzr, xzr) is well-defined and folds. LDR with Rt = 31 (load
+// to XZR) is allowed for symmetry with STR of XZR. The access's
+// offset must be 0; a non-zero offset combined with a post-index
+// update has no single-instruction rewrite (that pattern matches
+// pre-index, not post-index).
 bool check_ldr_str_add_post_indexed(armlint_state *state,
                                     const cs_insn *insn,
                                     size_t offset, armlint_finding *out);
 
 // Detect an X-form ADD-immediate self-update (Rd == Rn) immediately
-// followed by an unsigned-offset LDR/STR with imm12 == 0 whose base
-// register equals the ADD's Rd. The pair folds into a single
-// pre-indexed LDR/STR with the ADD's byte immediate moved into the
+// followed by a zero-offset LDR/STR or LDP/STP/LDPSW whose base
+// register equals the ADD's Rd. The two fold into a single
+// pre-indexed form with the ADD's byte immediate moved into the
 // pre-index slot:
-//   add xn, xn, #imm  ; ldr xt, [xn]  -> ldr xt, [xn, #imm]!
-//   add xn, xn, #imm  ; str xt, [xn]  -> str xt, [xn, #imm]!
-//   add sp, sp, #imm  ; ldr xt, [sp]  -> ldr xt, [sp, #imm]!
-//   sub xn, xn, #imm  ; ldr xt, [xn]  -> ldr xt, [xn, #-imm]!
+//   add xn, xn, #imm  ; ldr xt, [xn]      -> ldr xt, [xn, #imm]!
+//   add xn, xn, #imm  ; str xt, [xn]      -> str xt, [xn, #imm]!
+//   add sp, sp, #imm  ; ldr xt, [sp]      -> ldr xt, [sp, #imm]!
+//   sub xn, xn, #imm  ; ldr xt, [xn]      -> ldr xt, [xn, #-imm]!
+//   sub sp, sp, #imm  ; stp xt, xu, [sp]  -> stp xt, xu, [sp, #-imm]!
+//     (the canonical frame prologue)
 // All four integer access sizes (B/H/W/X) and every SIMD&FP size
-// (B/H/S/D/Q) are supported; an FP Rt never aliases the integer
-// base, so the Rt == Rn writeback restriction is integer-only.
+// (B/H/S/D/Q) are supported for singles; pairs cover W/X, LDPSW, and
+// the SIMD&FP S/D/Q forms. An FP Rt never aliases the integer base,
+// so the Rt == Rn writeback restriction is integer-only.
 //
-// Encoding constraint: same 9-bit signed range as post-index. An ADD
-// self-update with imm in 1..255 folds to a positive writeback; a SUB
-// self-update with imm in 1..256 to a negative one.
+// Encoding constraint: same slots as post-index -- 9-bit signed bytes
+// for singles (ADD imm in 1..255 / SUB imm in 1..256), scaled signed
+// 7-bit for pairs (a multiple of the 4/8/16-byte transfer size with
+// quotient 1..63 for ADD / 1..64 for SUB). The pending ADD/SUB is
+// admitted up to the largest pair writeback (1008/1024) and the
+// consumer's actual range is re-checked at close.
 //
 // Soundness: distinct from check_add_ldr_imm_offset, which catches
 // the related pattern where the LDR's Rt also equals the ADD's Rd
 // (folding to the unsigned-offset form with no writeback). When
 // Rt == Rd, that earlier check fires and pre-index is rejected here
 // because Rt == Rn writeback is UNPREDICTABLE (CONSTRAINED for
-// stores). The Rn == 31 case is allowed: Rn means SP and Rt means
-// XZR, so the two encode distinct registers. The LDR/STR's imm12
-// must be 0; a non-zero offset combined with a base bump has no
-// pre-index expression that preserves both the load address and
+// stores); for pairs that applies to either data register, and a
+// load pair with Rt == Rt2 (CONSTRAINED UNPREDICTABLE on its own) is
+// never folded. The Rn == 31 case is allowed: Rn means SP and Rt
+// means XZR, so the two encode distinct registers. The access's
+// offset must be 0; a non-zero offset combined with a base bump has
+// no pre-index expression that preserves both the access address and
 // the final base value. Same code-size/decode-slot win as
 // post-index; no backend throughput change on most OoO cores.
 bool check_add_ldr_str_pre_indexed(armlint_state *state,

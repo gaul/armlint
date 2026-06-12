@@ -118,13 +118,45 @@ STR + SUB foldable to post-indexed STR at offset: 0xbc: -> str q0, [x9], #-0x10 
   str q0, [x9]
   sub x9, x9, #0x10
 
+LDP + ADD foldable to post-indexed LDP at offset: 0xc4: -> ldp x29, x30, [sp], #0x20 (2 instructions)
+  ldp x29, x30, [sp]
+  add sp, sp, #0x20
+
+STP + SUB foldable to post-indexed STP at offset: 0xcc: -> stp x1, x2, [x3], #-0x10 (2 instructions)
+  stp x1, x2, [x3]
+  sub x3, x3, #0x10
+
+LDP + ADD foldable to post-indexed LDP at offset: 0xd4: -> ldpsw x1, x2, [x5], #0x8 (2 instructions)
+  ldpsw x1, x2, [x5]
+  add x5, x5, #0x8
+
+LDP + ADD foldable to post-indexed LDP at offset: 0xdc: -> ldp q0, q1, [x6], #0x20 (2 instructions)
+  ldp q0, q1, [x6]
+  add x6, x6, #0x20
+
+LDP + ADD foldable to post-indexed LDP at offset: 0xe4: -> ldp w1, w2, [x7], #0xc (2 instructions)
+  ldp w1, w2, [x7]
+  add x7, x7, #0xc
+
+LDP + SUB foldable to post-indexed LDP at offset: 0xfc: -> ldp x1, x2, [x12], #-0x200 (2 instructions)
+  ldp x1, x2, [x12]
+  sub x12, x12, #0x200
+
+STP + ADD foldable to post-indexed STP at offset: 0x10c: -> stp xzr, xzr, [sp], #0x10 (2 instructions)
+  stp xzr, xzr, [sp]
+  add sp, sp, #0x10
+
 Optimization opportunities by type:
        8  LDR + ADD foldable to post-indexed LDR
        6  ADD + LDR foldable to pre-indexed LDR
        6  ADD + STR foldable to pre-indexed STR
        5  STR + ADD foldable to post-indexed STR
+       4  LDP + ADD foldable to post-indexed LDP
        2  LDR + SUB foldable to post-indexed LDR
        2  SUB + LDR foldable to pre-indexed LDR
+       1  LDP + SUB foldable to post-indexed LDP
+       1  STP + ADD foldable to post-indexed STP
+       1  STP + SUB foldable to post-indexed STP
        1  STR + SUB foldable to post-indexed STR
 
-30 optimization opportunities in 50 instructions
+37 optimization opportunities in 70 instructions
