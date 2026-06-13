@@ -116,16 +116,19 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
 bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
 
-// Detect CMP Rn, #0 (SUBS XZR, Rn, #0) immediately followed by B.EQ or
-// B.NE; the pair is replaceable by CBZ Rn / CBNZ Rn with the same
-// branch target. The unsigned B.HI / B.LS fold the same way after the
-// SUBS-based zero tests (CMP Rn, #0 / CMP Rn, ZR): subtracting zero
-// never borrows, so C is known set and HI (C && !Z) reduces to NE, LS
-// (!C || Z) to EQ. The TST Rn, Rn form is excluded from the hi/ls
-// fold -- ANDS clears C, making HI never taken and LS always taken.
-// Emission is deferred via the pending-finding mechanism so the
-// rewrite is only suggested when downstream code provably does not
-// observe the dropped NZCV state -- see armlint_advance_pending.
+// Detect a zero test of Rn -- any of CMP Rn, #0 / CMP Rn, ZR /
+// CMN Rn, #0 / CMN Rn, ZR / TST Rn, Rn (all Rd=31 aliases that leave
+// Z = (Rn == 0)) -- immediately followed by B.EQ or B.NE; the pair is
+// replaceable by CBZ Rn / CBNZ Rn with the same branch target. The
+// unsigned B.HI / B.LS fold the same way after the SUBS-based zero
+// tests (CMP Rn, #0 / CMP Rn, ZR): subtracting zero never borrows, so
+// C is known set and HI (C && !Z) reduces to NE, LS (!C || Z) to EQ.
+// The TST Rn, Rn and CMN forms are excluded from the hi/ls fold --
+// ANDS clears C, and adding zero never carries, making HI never taken
+// and LS always taken for those spellings. Emission is deferred via
+// the pending-finding mechanism so the rewrite is only suggested when
+// downstream code provably does not observe the dropped NZCV state --
+// see armlint_advance_pending.
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
@@ -780,11 +783,12 @@ bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
 // Detect an S-variant ALU (ADDS/SUBS/ANDS/BICS/ADCS/SBCS) writing Rd,
-// followed immediately by CMP/TST-zero of Rd, followed immediately by
-// B.EQ/B.NE. All S-variants set Z = (Rd == 0), so the CMP/TST is
-// recomputing the same Z bit. The CMP/TST is flagged redundant once
-// the same downstream NZCV-liveness scan as check_cmp_zero_branch
-// confirms dropping it is sound (no N/C/V observation downstream).
+// followed immediately by a CMP/CMN/TST zero test of Rd (any of the
+// decode_zero_test spellings), followed immediately by B.EQ/B.NE. All
+// S-variants set Z = (Rd == 0), so the zero test is recomputing the
+// same Z bit. The zero test is flagged redundant once the same
+// downstream NZCV-liveness scan as check_cmp_zero_branch confirms
+// dropping it is sound (no N/C/V observation downstream).
 // Combines with the existing CMP+B.cond -> CBZ check: both fire for
 // the matching pattern, presenting alternative rewrites.
 bool check_redundant_cmp_after_s_variant(armlint_state *state,

@@ -118,16 +118,18 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * `cmp w0, #0 ; b.eq target` instead of `cbz w0, target`. Same for
   `b.ne` -> `cbnz`. Also matches the equivalent zero-test idioms
-  `cmp Rn, xzr` (SUBS XZR, Rn, XZR) and `tst Rn, Rn`
-  (ANDS XZR, Rn, Rn): all three set `Z=1` iff `Rn==0` and so fold
-  identically.
+  `cmp Rn, xzr` (SUBS XZR, Rn, XZR), `cmn Rn, #0` / `cmn Rn, xzr`
+  (the ADDS-based spellings -- adding zero leaves the same N and Z),
+  and `tst Rn, Rn` (ANDS XZR, Rn, Rn): all five set `Z=1` iff
+  `Rn==0` and so fold identically.
 * The unsigned conditions fold too, for the SUBS-based forms only:
   subtracting zero never borrows, so `C == 1` and `b.hi` (`C && !Z`)
   reduces to `b.ne` -> `cbnz`, `b.ls` (`!C || Z`) to `b.eq` -> `cbz`.
-  `tst Rn, Rn` is excluded from this pair -- ANDS clears C, so after
-  it HI is never taken and LS always taken, dead-branch territory
-  rather than a register-test rewrite. (`b.hs`/`b.lo` after any zero
-  test are likewise constant-valued and are not rewritten here.)
+  `tst Rn, Rn` and the `cmn` spellings are excluded from this pair --
+  ANDS clears C, and adding zero never carries, so after either HI is
+  never taken and LS always taken, dead-branch territory rather than
+  a register-test rewrite. (`b.hs`/`b.lo` after any zero test are
+  likewise constant-valued and are not rewritten here.)
 * Why it helps (shared by the `CMP`/`TST` -> `TBZ`/`TBNZ` folds below):
   one fewer instruction, and the branch no longer depends on a
   flag-writing `CMP`/`TST` -- `CBZ`/`CBNZ` reads the register directly,
@@ -147,10 +149,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 ## compare-zero signed-branch foldable into TBZ/TBNZ
 
 * `cmp wn, #0 ; b.lt target` (or `b.ge`/`b.mi`/`b.pl`) folds to
-  `tbnz wn, #(datasize-1), target` (or `tbz`). After `CMP Rn, #0` /
-  `CMP Rn, ZR` / `TST Rn, Rn`, `V == 0`, so `B.LT` (N != V) reduces
-  to "N == 1" -- exactly a test of the sign bit. `B.MI` directly
-  tests `N`; `B.GE`/`B.PL` are the inverse.
+  `tbnz wn, #(datasize-1), target` (or `tbz`). After any of the
+  zero-test spellings -- `CMP Rn, #0` / `CMP Rn, ZR` / `CMN Rn, #0` /
+  `CMN Rn, ZR` / `TST Rn, Rn` -- `V == 0` and `N = sign(Rn)`, so
+  `B.LT` (N != V) reduces to "N == 1" -- exactly a test of the sign
+  bit. `B.MI` directly tests `N`; `B.GE`/`B.PL` are the inverse.
 * Range: `TBZ`/`TBNZ` use a 14-bit signed offset (~32 KB reach),
   vs. `B.cond`'s 19-bit (~1 MB). The fold is suggested only when
   the target fits in the TBZ encoding.

@@ -978,6 +978,33 @@ static void tst_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
     write_le32(out, op);
 }
 
+// CMN Rn, Rm (ADDS shifted-register form, Rd=31, shift=LSL, imm6=0).
+//   sf 0 1 01011 00 0 Rm 000000 Rn 11111
+static void cmn_w_reg(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x2B00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    write_le32(out, op);
+}
+
+static void cmn_x_reg(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    uint32_t op = 0xAB00001Fu
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5);
+    write_le32(out, op);
+}
+
+// CMN Rn, #imm12 (ADDS immediate form, Rd=31, sh=0).
+static void cmn_w_imm(uint8_t out[4], unsigned rn, unsigned imm12)
+{
+    uint32_t op = 0x3100001Fu
+        | ((imm12 & 0xFFFu) << 10)
+        | ((rn & 0x1Fu) << 5);
+    write_le32(out, op);
+}
+
 // LSR (immediate) Wd, Wn, #b -- UBFM Wd, Wn, #b, #31 (already have
 // lsr_w; here too in X form).
 static void lsr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
@@ -1458,6 +1485,67 @@ static void test_cmp_zero_branch(void)
     adcs_w(&code[8], 1, 2, 3);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 0);
+
+    // -- CMN-based zero tests: ADDS XZR, Rn, ZR / #0. Adding zero
+    //    leaves the same N and Z as CMP #0 (and V = 0), so the eq/ne
+    //    and sign-bit folds apply; C is CLEARED, so hi/ls must not. --
+
+    // cmn w4, wzr ; b.eq ; ret -> cbz w4 (flag).
+    cmn_w_reg(&code[0], 4, 31);
+    b_cond(&code[4], 0 /* EQ */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmn x5, xzr ; b.ne ; ret -> cbnz x5 (flag).
+    cmn_x_reg(&code[0], 5, 31);
+    b_cond(&code[4], 1 /* NE */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmn w4, #0 ; b.eq ; ret -- the immediate spelling (flag).
+    cmn_w_imm(&code[0], 4, 0);
+    b_cond(&code[4], 0 /* EQ */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmn w4, wzr ; b.lt ; ret -- the sign-bit fold applies
+    // (N = sign(Rn), V = 0) -> tbnz w4, #31 (flag).
+    cmn_w_reg(&code[0], 4, 31);
+    b_cond(&code[4], 11 /* LT */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // cmn w4, wzr ; b.hi ; ret -- ADDS clears C, so HI here means
+    // "never taken", not "Rn != 0"; the fold must not fire.
+    cmn_w_reg(&code[0], 4, 31);
+    b_cond(&code[4], 8 /* HI */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmn w4, wzr ; b.ls ; ret -- LS is always taken; no fold.
+    cmn_w_reg(&code[0], 4, 31);
+    b_cond(&code[4], 9 /* LS */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmn w4, w5 ; b.eq -- Rm != ZR is a register compare, not a
+    // zero test.
+    cmn_w_reg(&code[0], 4, 5);
+    b_cond(&code[4], 0 /* EQ */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmn w4, #1 ; b.eq -- non-zero immediate.
+    cmn_w_imm(&code[0], 4, 1);
+    b_cond(&code[4], 0 /* EQ */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // cmn wzr, wzr ; b.eq -- Rn=31 excluded.
+    cmn_w_reg(&code[0], 31, 31);
+    b_cond(&code[4], 0 /* EQ */, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 }
 
 static void test_tst_branch(void)
@@ -2751,6 +2839,15 @@ static void test_redundant_cmp_after_s_variant(void)
     // CMP-with-XZR form: adds w0, w1, w2 ; cmp w0, wzr ; b.eq +8 ; ret.
     adds_w(&code[0], 0, 1, 2);
     cmp_w_reg(&code[4], 0, 31);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // CMN-with-XZR form: adds w0, w1, w2 ; cmn w0, wzr ; b.eq +8 ; ret.
+    // Inherited from decode_zero_test: the CMN spelling recomputes the
+    // same Z bit, so it is just as redundant after an S-variant ALU.
+    adds_w(&code[0], 0, 1, 2);
+    cmn_w_reg(&code[4], 0, 31);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);

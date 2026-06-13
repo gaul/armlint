@@ -47,4 +47,24 @@ _main:
     tst     x8, x8
     b.hi    1f
 
+    // Positive: CMN Rn, WZR ; B.EQ -> CBZ. Adding zero leaves
+    // Z = (Rn == 0) just like CMP #0.
+    cmn     w9, wzr
+    b.eq    1f
+
+    // Positive: CMN Rn, #0 ; B.NE -> CBNZ (the immediate spelling).
+    cmn     x10, #0
+    b.ne    1f
+
+    // Positive: CMN Rn, XZR ; B.LT -> TBNZ Rn, #63 (N = sign(Rn) and
+    // V = 0 after adding zero, so LT reduces to MI).
+    cmn     x11, xzr
+    b.lt    1f
+
+    // Negative: CMN Rn, XZR ; B.HI -- ADDS clears C (adding zero
+    // never carries), so HI after it is never taken; not the CBNZ
+    // rewrite.
+    cmn     x12, xzr
+    b.hi    1f
+
 1:  ret

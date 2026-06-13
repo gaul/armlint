@@ -103,9 +103,11 @@ struct armlint_state {
     size_t aul_offset;
     char aul_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / TST Rn,Rn) pending a
-    // B.EQ/B.NE consumer (any form), a B.HI/B.LS consumer (the SUBS
-    // forms only -- cmp_is_subs), or a sign-condition B.cond.
+    // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / CMN Rn,#0 /
+    // CMN Rn,XZR / TST Rn,Rn) pending a B.EQ/B.NE consumer (any
+    // form), a B.HI/B.LS consumer (the SUBS forms only --
+    // cmp_is_subs; the ADDS/ANDS forms clear C), or a sign-condition
+    // B.cond.
     bool cmp_active;
     bool cmp_is_64bit;
     bool cmp_is_subs;
@@ -1587,24 +1589,29 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
 }
 
 // Detect an instruction that sets Z=1 iff Rn==0, leaving NZCV in a state
-// usable only for an equality-with-zero branch. Three encodings count:
+// usable only for an equality-with-zero branch. Five encodings count:
 //
 //   CMP Rn, #0     = SUBS X/WZR, Rn, #0       (immediate; sh=0, imm12=0)
 //   CMP Rn, X/WZR  = SUBS X/WZR, Rn, X/WZR    (shifted-reg; Rm=31,
+//                                              shift=LSL, imm6=0)
+//   CMN Rn, #0     = ADDS X/WZR, Rn, #0       (immediate; sh=0, imm12=0)
+//   CMN Rn, X/WZR  = ADDS X/WZR, Rn, X/WZR    (shifted-reg; Rm=31,
 //                                              shift=LSL, imm6=0)
 //   TST Rn, Rn     = ANDS X/WZR, Rn, Rn       (logical shifted-reg;
 //                                              Rm=Rn, shift=LSL, N=0,
 //                                              imm6=0)
 //
-// All three have Rd=31. Bit 31 (sf) is left free so either operand
-// width matches; for the TST form Rm and Rn must agree, which is
-// verified after the mask check.
+// All five have Rd=31 and leave Z = (Rn == 0), N = sign(Rn), V = 0
+// (adding or subtracting zero never overflows). Bit 31 (sf) is left
+// free so either operand width matches; for the TST form Rm and Rn
+// must agree, which is verified after the mask check.
 //
 // The forms differ in the carry they leave: the SUBS-based CMPs set
 // C = 1 (subtracting zero never borrows), which makes the unsigned
-// HI/LS conditions reduce to NE/EQ; the ANDS-based TST clears C,
-// where HI is never taken and LS always. *out_is_subs reports which
-// family matched so the caller can gate the HI/LS fold.
+// HI/LS conditions reduce to NE/EQ; the ANDS-based TST and the
+// ADDS-based CMNs clear C (adding zero never carries), where HI is
+// never taken and LS always. *out_is_subs reports which family
+// matched so the caller can gate the HI/LS fold.
 static bool decode_zero_test(uint32_t op, unsigned *out_sf,
                              unsigned *out_rn, bool *out_is_subs)
 {
@@ -1621,6 +1628,21 @@ static bool decode_zero_test(uint32_t op, unsigned *out_sf,
         *out_sf = (op >> 31) & 1u;
         *out_rn = (op >> 5) & 0x1Fu;
         *out_is_subs = true;
+        return true;
+    }
+    // CMN Rn, #0 (ADDS-imm with Rd=31, sh=0, imm12=0).
+    if ((op & 0x7FFFFC1Fu) == 0x3100001Fu) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rn = (op >> 5) & 0x1Fu;
+        *out_is_subs = false;
+        return true;
+    }
+    // CMN Rn, XZR/WZR (ADDS shifted-reg with Rd=31, Rm=31, shift=LSL,
+    // imm6=0).
+    if ((op & 0x7FFFFC1Fu) == 0x2B1F001Fu) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rn = (op >> 5) & 0x1Fu;
+        *out_is_subs = false;
         return true;
     }
     // TST Rn, Rn (ANDS shifted-reg with Rd=31, shift=LSL, N=0, imm6=0,

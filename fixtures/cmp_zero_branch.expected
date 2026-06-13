@@ -1,29 +1,41 @@
-compare-zero branch foldable into CBZ/CBNZ at offset: 0x0: -> cbz x0, 0x48 (2 instructions)
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x0: -> cbz x0, 0x68 (2 instructions)
   cmp x0, #0
-  b.eq 0x48
+  b.eq 0x68
 
-compare-zero branch foldable into CBZ/CBNZ at offset: 0x8: -> cbnz x1, 0x48 (2 instructions)
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x8: -> cbnz x1, 0x68 (2 instructions)
   cmp x1, xzr
-  b.ne 0x48
+  b.ne 0x68
 
-compare-zero branch foldable into CBZ/CBNZ at offset: 0x10: -> cbz x2, 0x48 (2 instructions)
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x10: -> cbz x2, 0x68 (2 instructions)
   tst x2, x2
-  b.eq 0x48
+  b.eq 0x68
 
-compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0x18: -> tbnz x3, #63, 0x48 (2 instructions)
+compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0x18: -> tbnz x3, #63, 0x68 (2 instructions)
   cmp x3, #0
-  b.mi 0x48
+  b.mi 0x68
 
-compare-zero branch foldable into CBZ/CBNZ at offset: 0x30: -> cbnz x6, 0x48 (2 instructions)
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x30: -> cbnz x6, 0x68 (2 instructions)
   cmp x6, #0
-  b.hi 0x48
+  b.hi 0x68
 
-compare-zero branch foldable into CBZ/CBNZ at offset: 0x38: -> cbz x7, 0x48 (2 instructions)
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x38: -> cbz x7, 0x68 (2 instructions)
   cmp x7, #0
-  b.ls 0x48
+  b.ls 0x68
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x48: -> cbz w9, 0x68 (2 instructions)
+  cmn w9, wzr
+  b.eq 0x68
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x50: -> cbnz x10, 0x68 (2 instructions)
+  cmn x10, #0
+  b.ne 0x68
+
+compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0x58: -> tbnz x11, #63, 0x68 (2 instructions)
+  cmn x11, xzr
+  b.lt 0x68
 
 Optimization opportunities by type:
-       5  compare-zero branch foldable into CBZ/CBNZ
-       1  compare-zero signed-branch foldable into TBZ/TBNZ
+       7  compare-zero branch foldable into CBZ/CBNZ
+       2  compare-zero signed-branch foldable into TBZ/TBNZ
 
-6 optimization opportunities in 19 instructions
+9 optimization opportunities in 27 instructions
