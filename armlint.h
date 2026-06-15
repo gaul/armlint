@@ -23,6 +23,10 @@
 
 #include <capstone/capstone.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Pure predicate: true iff imm is encodable as an AArch64 logical
 // (bitmask) immediate at the given register width (32 or 64).
 //
@@ -829,5 +833,9 @@ size_t armlint_summary_instructions(const armlint_summary *summary);
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
                        armlint_summary *summary);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
 
 #endif
