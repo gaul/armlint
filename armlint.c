@@ -1915,11 +1915,18 @@ static void insn_reg_access(const cs_insn *insn, int reg,
         const cs_arm64_op *o = &a->operands[i];
         if (o->type == ARM64_OP_REG) {
             if (arm64_gpr_num(o->reg) == reg) {
-                if (o->access & CS_AC_READ) {
-                    *reads = true;
-                }
+                // A destination operand is write-only in the AArch64 model;
+                // Capstone 4.x spuriously marks move-immediate destinations as
+                // read+write. Honor the read flag only on operands that are not
+                // writes of `reg`, so a pure overwrite (e.g. MOVZ) is not
+                // misread as keeping the register live. A genuine read by a
+                // read-modify-write instruction surfaces as a separate source
+                // operand, the memory-base path below, or the implicit read
+                // list -- none of which this clause suppresses.
                 if (o->access & CS_AC_WRITE) {
                     *writes = true;
+                } else if (o->access & CS_AC_READ) {
+                    *reads = true;
                 }
             }
         } else if (o->type == ARM64_OP_MEM) {
