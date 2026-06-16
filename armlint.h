@@ -800,6 +800,14 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
+// Advance the deferred "MOV #0 + use foldable to ZR" finding's forward
+// register-liveness scan by one instruction. Parallel to
+// armlint_advance_pending; call before per-instruction checks each step. The
+// offset parameter exists for compatibility with the shared armlint_check_fn
+// signature; it is unused.
+bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
 // Close any open sequence at end-of-region. Returns true and fills *out
 // if the closed sequence is reportable.
 bool armlint_flush(armlint_state *state, armlint_finding *out);

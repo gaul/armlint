@@ -198,6 +198,18 @@ struct armlint_state {
     unsigned pending_sv_window;
     armlint_finding pending_sv_finding;
 
+    // Deferred "MOV #0 + use foldable to ZR" finding awaiting forward
+    // register-liveness verification. Dropping the MOV only saves an
+    // instruction when the materialized zero register is dead after the
+    // consumer; without this scan a live loop counter (mov Rd, #0 feeding the
+    // loop-guard CMP and then used as the induction variable) is reported as a
+    // false opportunity. Conservative like the NZCV scan: emit only on a proven
+    // overwrite of Rd before any read or control transfer.
+    bool pending_mz_active;
+    unsigned pending_mz_window;
+    int pending_mz_reg;
+    armlint_finding pending_mz_finding;
+
     // Most-recent instruction was ADR / ADRP with the recorded Rd.
     // Used by check_add_sub_zero to skip the canonical
     // "ADRP Rd, page ; ADD Rd, Rd, #pageoff" addressing pair when
@@ -692,6 +704,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->sv_cmp_active = false;
     state->pending_active = false;
     state->pending_sv_active = false;
+    state->pending_mz_active = false;
     state->adr_recent = false;
     state->bfx_clear_seen = false;
     state->bfx_isolate_seen = false;
@@ -1840,6 +1853,100 @@ static bool advance_one_pending(uint32_t op, bool *active, unsigned *window,
     return false;
 }
 
+// Map a Capstone AArch64 register operand to its 0..30 GPR encoding number,
+// or -1 for the zero register, SP, and non-GPRs (which carry no tracked
+// value). W0..W30 and X0..X28 are contiguous in the Capstone enum; X29/X30 are
+// the FP/LR aliases.
+static int arm64_gpr_num(unsigned reg)
+{
+    if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W30) {
+        return (int)(reg - ARM64_REG_W0);
+    }
+    if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28) {
+        return (int)(reg - ARM64_REG_X0);
+    }
+    if (reg == ARM64_REG_FP) {
+        return 29;
+    }
+    if (reg == ARM64_REG_LR) {
+        return 30;
+    }
+    return -1;
+}
+
+// Determine whether `insn` reads and/or writes GPR `reg` (a 0..30 encoding
+// number), from the Capstone detail: explicit operand access flags, memory
+// base/index registers (always reads), and the implicit register lists. With
+// no detail available, conservatively assume the register is read.
+static void insn_reg_access(const cs_insn *insn, int reg,
+                            bool *reads, bool *writes)
+{
+    *reads = false;
+    *writes = false;
+    const cs_detail *detail = insn->detail;
+    if (detail == NULL) {
+        *reads = true;
+        return;
+    }
+    const cs_arm64 *a = &detail->arm64;
+    for (int i = 0; i < a->op_count; i++) {
+        const cs_arm64_op *o = &a->operands[i];
+        if (o->type == ARM64_OP_REG) {
+            if (arm64_gpr_num(o->reg) == reg) {
+                if (o->access & CS_AC_READ) {
+                    *reads = true;
+                }
+                if (o->access & CS_AC_WRITE) {
+                    *writes = true;
+                }
+            }
+        } else if (o->type == ARM64_OP_MEM) {
+            if (arm64_gpr_num(o->mem.base) == reg
+                    || arm64_gpr_num(o->mem.index) == reg) {
+                *reads = true;
+            }
+        }
+    }
+    for (uint8_t i = 0; i < detail->regs_read_count; i++) {
+        if (arm64_gpr_num(detail->regs_read[i]) == reg) {
+            *reads = true;
+        }
+    }
+    for (uint8_t i = 0; i < detail->regs_write_count; i++) {
+        if (arm64_gpr_num(detail->regs_write[i]) == reg) {
+            *writes = true;
+        }
+    }
+}
+
+// Register-liveness classification for the MOV #0 forward scan, parallel to
+// classify_liveness for NZCV. A read of the zero register means it is live, so
+// dropping the MOV would change behavior (LIV_READ). A write with no prior
+// read means it is dead from here (LIV_OVERWRITE). Any branch, call, or return
+// leaves straight-line code -- the register may be live at the target or be a
+// return value -- so stop conservatively (LIV_TERM_UNSAFE).
+static liveness_t classify_reg_liveness(const cs_insn *insn, int reg)
+{
+    uint32_t op = insn_word(insn);
+    // Control transfers: B.cond, B/BL, CBZ/CBNZ, TBZ/TBNZ, BR/BLR/RET.
+    if ((op & 0xFF000010u) == 0x54000000u
+            || (op & 0x7C000000u) == 0x14000000u
+            || (op & 0x7E000000u) == 0x34000000u
+            || (op & 0x7E000000u) == 0x36000000u
+            || (op & 0xFE000000u) == 0xD6000000u) {
+        return LIV_TERM_UNSAFE;
+    }
+    bool reads, writes;
+    insn_reg_access(insn, reg, &reads, &writes);
+    if (reads) {
+        return LIV_READ;
+    }
+    if (writes) {
+        return LIV_OVERWRITE;
+    }
+    return LIV_UNKNOWN;
+}
+
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out)
 {
@@ -1866,6 +1973,41 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
     return advance_one_pending(op, &state->pending_sv_active,
                                &state->pending_sv_window,
                                &state->pending_sv_finding, out);
+}
+
+// Forward register-liveness scan for a deferred MOV #0 + use finding. Emits the
+// stashed finding only once a later instruction provably overwrites the zero
+// register before any read or control transfer; a read or branch/call/return
+// (or window expiry) discards it -- the MOV is needed and dropping it would
+// save nothing.
+bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (!state->pending_mz_active) {
+        return false;
+    }
+    if (insn->size != 4) {
+        state->pending_mz_active = false;
+        return false;
+    }
+    switch (classify_reg_liveness(insn, state->pending_mz_reg)) {
+    case LIV_OVERWRITE:
+        *out = state->pending_mz_finding;
+        state->pending_mz_active = false;
+        return true;
+    case LIV_READ:
+    case LIV_TERM_SAFE:
+    case LIV_TERM_UNSAFE:
+        state->pending_mz_active = false;
+        return false;
+    case LIV_UNKNOWN:
+        if (state->pending_mz_window == 0 || --state->pending_mz_window == 0) {
+            state->pending_mz_active = false;
+        }
+        return false;
+    }
+    return false;
 }
 
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
@@ -4671,6 +4813,19 @@ static void format_reg(char *buf, size_t bufsz, char w_or_x, unsigned reg)
     }
 }
 
+// Stash a MOV #0 + use finding for forward register-liveness verification
+// instead of emitting it immediately. armlint_advance_pending_mz emits it only
+// once the materialized zero register (state->mov_rd) is shown to be dead after
+// the consumer. Returns false so the driver records no finding at this point.
+static bool mov_zero_defer(armlint_state *state, armlint_finding *out)
+{
+    state->pending_mz_finding = *out;
+    state->pending_mz_active = true;
+    state->pending_mz_window = LIVENESS_WINDOW;
+    state->pending_mz_reg = (int)state->mov_rd;
+    return false;
+}
+
 bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out)
 {
@@ -4730,7 +4885,7 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                     str_mnem, rt_wx, rt, base_buf, bytes);
             }
             mov_zero_finding_render_lines(state, out, consumer_line);
-            return true;
+            return mov_zero_defer(state, out);
         }
     }
 
@@ -4783,7 +4938,7 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                         mnem, rd_buf, orig_rn_buf, orig_rm_buf);
                 }
                 mov_zero_finding_render_lines(state, out, consumer_line);
-                return true;
+                return mov_zero_defer(state, out);
             }
         }
     }
@@ -4841,7 +4996,7 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                         mnem, rd_buf, orig_rn_buf, orig_rm_buf);
                 }
                 mov_zero_finding_render_lines(state, out, consumer_line);
-                return true;
+                return mov_zero_defer(state, out);
             }
         }
     }
@@ -6341,6 +6496,7 @@ static void report_finding(const armlint_finding *finding, bool verbose)
 const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending,
     armlint_advance_pending_sv,
+    armlint_advance_pending_mz,
     check_mul_strength_reduce,
     check_mneg_strength_reduce,
     check_udiv_strength_reduce,

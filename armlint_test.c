@@ -207,6 +207,15 @@ static int run_helper_check(uint8_t *bytes, size_t len)
     return run_check(bytes, len);
 }
 
+// Append an X0 overwrite (movz x0, #1) to a MOV #0 + consumer fragment so the
+// materialized zero register is provably dead after the consumer, satisfying
+// the register-liveness scan. The MOV #0 fixtures all materialize zero into X0.
+static int run_mov_zero_dead(uint8_t *bytes, size_t len)
+{
+    movz_x(&bytes[len], 0, 1, 0);
+    return run_check(bytes, len + 4);
+}
+
 static void test_movz_movk_sequences(void)
 {
     uint8_t code[16];
@@ -4132,10 +4141,10 @@ static void test_mov_add_sub_imm_fold(void)
     // (the rewrite "ADD Rd, Rn, #0" is the MOV-or-no-op case). But
     // check_mov_zero_to_xzr DOES fire on this pattern with a different
     // rewrite suggestion ("use XZR for the second operand"), so the
-    // overall finding count is 1.
+    // overall finding count is 1 -- once X0 is dead after the consumer.
     movz_x(&code[0], 0, 0, 0);
     add_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // Negative: width mismatch (MOV W, ADD X).
     movz_w(&code[0], 0, 100);
@@ -4254,10 +4263,11 @@ static void test_mov_logic_imm_fold(void)
 
     // C = 0 is not a bitmask immediate so check_mov_logic_imm_fold
     // skips, but check_mov_zero_to_xzr fires on it (suggesting "use
-    // XZR for the second AND operand"), so the overall count is 1.
+    // XZR for the second AND operand"), so the overall count is 1 --
+    // once X0 is dead after the consumer.
     movz_x(&code[0], 0, 0, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // BIC (N = 1) folds via the complemented immediate:
     // movz x0, #0xff ; bic x3, x2, x0 -> and x3, x2, #0xffffffffffffff00.
@@ -4404,94 +4414,105 @@ static void test_mov_zero_to_xzr(void)
 {
     uint8_t code[16];
 
-    // (a) STR family:
+    // (a) STR family:  Each positive appends an X0 overwrite via
+    // run_mov_zero_dead so the materialized zero is dead after the consumer;
+    // without that the forward register-liveness scan cannot prove the MOV
+    // droppable and (soundly) emits nothing.
     // STR X form.
     movz_x(&code[0], 0, 0, 0);
     str_x_uimm(&code[4], 0, 1, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // STR W form.
     movz_w(&code[0], 0, 0);
     str_w(&code[4], 0, 1, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // STRB.
     movz_w(&code[0], 0, 0);
     strb_w_uimm(&code[4], 0, 1, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // STRH.
     movz_w(&code[0], 0, 0);
     strh_w_uimm(&code[4], 0, 1, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // STR with non-zero offset.
     movz_x(&code[0], 0, 0, 0);
     str_x_uimm(&code[4], 0, 1, 16);  // offset = 16*8 = 128 bytes
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // STR with SP as base.
     movz_x(&code[0], 0, 0, 0);
     str_x_uimm(&code[4], 0, 31, 0);  // [sp]
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // Width skew: X-form MOV, STR W (low bits of 0 are 0).
     movz_x(&code[0], 0, 0, 0);
     str_w(&code[4], 0, 1, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // (b) ADD/SUB shifted-LSL0:
     // ADD with Rm = mov_rd -> use XZR.
     movz_x(&code[0], 0, 0, 0);
     add_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // ADD with Rn = mov_rd (commutativity).
     movz_x(&code[0], 0, 0, 0);
     add_x(&code[4], 3, 0, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // SUB with Rm = mov_rd (-> MOV Rd, Rn).
     movz_x(&code[0], 0, 0, 0);
     sub_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // SUB with Rn = mov_rd (-> NEG Rd, Rm). The "SUB-from-zero" form.
     movz_x(&code[0], 0, 0, 0);
     sub_x(&code[4], 3, 0, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // CMP (SUBS XZR, Rn, Rm) with Rm = mov_rd -> "cmp xn, xzr".
     movz_x(&code[0], 0, 0, 0);
     cmp_x_reg_sr(&code[4], 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // CMN (ADDS XZR, Rn, Rm).
     movz_x(&code[0], 0, 0, 0);
     cmn_x_reg_sr(&code[4], 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // (c) AND/ORR/EOR shifted-LSL0:
     // AND with Rm = mov_rd.
     movz_x(&code[0], 0, 0, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // ORR with Rm = mov_rd -> MOV Rd, Rn (the canonical MOV
     // register form is ORR Rd, XZR, Rm; this is the mirror).
     movz_x(&code[0], 0, 0, 0);
     orr_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // EOR with Rm = mov_rd -> MOV Rd, Rn (XOR identity).
     movz_x(&code[0], 0, 0, 0);
     eor_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
 
     // TST (ANDS XZR, ...).
     movz_x(&code[0], 0, 0, 0);
     ands_x(&code[4], 31, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_mov_zero_dead(code, 8) == 1);
+
+    // Liveness: a later read of the zero register makes it live, so dropping
+    // the MOV would change behavior -- the finding is (soundly) suppressed.
+    // This is the loop-induction false positive the scan removes.
+    movz_x(&code[0], 0, 0, 0);
+    add_x(&code[4], 3, 2, 0);       // consumer reads X0
+    str_x_uimm(&code[8], 0, 1, 0);  // STR X0, [X1] -- reads X0 -> live
+    assert(run_helper_check(code, 12) == 0);
 
     // Negatives:
     // Mov value not zero.
