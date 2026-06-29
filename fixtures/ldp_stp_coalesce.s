@@ -60,4 +60,18 @@ _main:
     ldr     b0, [x2]
     ldr     b1, [x2, #1]
 
+    // Positive: two adjacent W-form zero stores consolidate into a
+    // single STR xzr rather than STP wzr, wzr.
+    str     wzr, [x12, #8]
+    str     wzr, [x12, #12]        // -> str xzr, [x12, #8]
+
+    // Positive: an odd 4-byte slot needs the unscaled STUR xzr.
+    str     wzr, [x12, #4]
+    str     wzr, [x12, #8]         // -> stur xzr, [x12, #4]
+
+    // Positive: a mixed pair (one wzr source) still coalesces into a
+    // plain STP; the zero operand renders as wzr, not "w31".
+    str     wzr, [x12]
+    str     w5, [x12, #4]          // -> stp wzr, w5, [x12]
+
     ret

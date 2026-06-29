@@ -5208,6 +5208,15 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     //   - the LOWER of the two imm12s fits LDP/STP imm7 (signed 7-bit,
     //     scaled), i.e., the lower imm12 must be <= 63 (unsigned).
     unsigned low_imm12 = forward ? state->lsp_imm12 : imm12;
+
+    // A pair of adjacent W-form zero-register stores writes the same
+    // eight bytes as one STR XZR. The LDP/STP gate below would reject it
+    // for sharing a transfer register (rt == lsp_rt == 31); allow that
+    // single case through and emit the narrower single store instead of
+    // an STP WZR, WZR.
+    bool zero_store = !is_load && !is_fp && !is_64bit && !is_sext
+        && state->lsp_rt == 31u && rt == 31u;
+
     if ((forward || reverse)
             && state->lsp_is_sext == is_sext
             && state->lsp_is_fp == is_fp
@@ -5215,48 +5224,28 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
             && state->lsp_is_load == is_load
             && (is_fp || state->lsp_is_64bit == is_64bit)
             && state->lsp_rn == rn
-            && rt != state->lsp_rt
+            && (rt != state->lsp_rt || zero_store)
             && low_imm12 <= 63u
             && (!is_load || is_fp || state->lsp_rt != rn)) {
         // LDPSW always loads Xt with 4-byte transfer; SIMD&FP pairs
-        // take their class letter and size; otherwise the register
-        // width follows is_64bit and the transfer size matches.
-        char w_or_x;
+        // take their class letter and log2 size; otherwise the register
+        // width follows is_64bit and the transfer size matches. rt_size
+        // feeds format_ls_rt, which renders register 31 as the zero
+        // register rather than the non-assemblable "w31"/"x31".
+        unsigned rt_size;
         unsigned xfer;
         if (is_fp) {
-            w_or_x = ls_rt_letter(true, lg2size);
+            rt_size = lg2size;
             xfer = 1u << lg2size;
         } else if (is_sext) {
-            w_or_x = 'x';
+            rt_size = 3u;            // LDPSW transfers 4 bytes into Xt
             xfer = 4u;
         } else {
-            w_or_x = is_64bit ? 'x' : 'w';
+            rt_size = is_64bit ? 3u : 2u;
             xfer = is_64bit ? 8u : 4u;
         }
-        const char *pair_mnem;
-        if (is_sext) {
-            pair_mnem = "ldpsw";
-        } else {
-            pair_mnem = is_load ? "ldp" : "stp";
-        }
-        // LDP/STP encodes the register at the lower address first.
-        unsigned first_rt  = forward ? state->lsp_rt : rt;
-        unsigned second_rt = forward ? rt : state->lsp_rt;
         unsigned byte_off = low_imm12 * xfer;
 
-        if (is_sext) {
-            out->name = reverse
-                ? "adjacent LDRSWs foldable into LDPSW (reverse order)"
-                : "adjacent LDRSWs foldable into LDPSW";
-        } else if (is_load) {
-            out->name = reverse
-                ? "adjacent LDRs foldable into LDP (reverse order)"
-                : "adjacent LDRs foldable into LDP";
-        } else {
-            out->name = reverse
-                ? "adjacent STRs foldable into STP (reverse order)"
-                : "adjacent STRs foldable into STP";
-        }
         out->start_offset = state->lsp_offset;
         out->insn_count = 2;
         clear_finding_strings(out);
@@ -5267,10 +5256,48 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         } else {
             snprintf(rn_buf, sizeof(rn_buf), "x%u", rn);
         }
-        snprintf(out->detail, sizeof(out->detail),
-            "-> %s %c%u, %c%u, [%s, #%u]",
-            pair_mnem, w_or_x, first_rt, w_or_x, second_rt,
-            rn_buf, byte_off);
+
+        if (zero_store) {
+            // STR's scaled offset must be a non-negative multiple of 8;
+            // the odd 4-byte slot (byte_off % 8 == 4) needs unscaled
+            // STUR. byte_off <= 252 here, in range for both forms.
+            const char *mnem = byte_off % 8u == 0u ? "str" : "stur";
+            out->name = "adjacent zero STRs foldable into STR xzr";
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s xzr, [%s, #%u]", mnem, rn_buf, byte_off);
+        } else {
+            const char *pair_mnem;
+            if (is_sext) {
+                pair_mnem = "ldpsw";
+            } else {
+                pair_mnem = is_load ? "ldp" : "stp";
+            }
+            // LDP/STP encodes the register at the lower address first.
+            unsigned first_rt  = forward ? state->lsp_rt : rt;
+            unsigned second_rt = forward ? rt : state->lsp_rt;
+
+            if (is_sext) {
+                out->name = reverse
+                    ? "adjacent LDRSWs foldable into LDPSW (reverse order)"
+                    : "adjacent LDRSWs foldable into LDPSW";
+            } else if (is_load) {
+                out->name = reverse
+                    ? "adjacent LDRs foldable into LDP (reverse order)"
+                    : "adjacent LDRs foldable into LDP";
+            } else {
+                out->name = reverse
+                    ? "adjacent STRs foldable into STP (reverse order)"
+                    : "adjacent STRs foldable into STP";
+            }
+            char rt1_buf[8], rt2_buf[8];
+            format_ls_rt(rt1_buf, sizeof(rt1_buf), is_fp, rt_size,
+                first_rt);
+            format_ls_rt(rt2_buf, sizeof(rt2_buf), is_fp, rt_size,
+                second_rt);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %s, %s, [%s, #%u]",
+                pair_mnem, rt1_buf, rt2_buf, rn_buf, byte_off);
+        }
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->lsp_disasm);
         snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -5297,6 +5324,70 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     }
 
     return produced;
+}
+
+// STP WZR, WZR, [Xn, #imm] (W-form, signed offset, no writeback) zeroes
+// eight contiguous bytes -- exactly what one STR XZR does -- but as a
+// store-pair op. Recognize the all-zero-source pair and suggest the
+// single wider store. Only the 32-bit form collapses: STP XZR, XZR
+// zeroes sixteen bytes, which has no single-GPR-store equivalent (it is
+// already the canonical 16-byte zero store). Writeback forms (pre- and
+// post-index) and STNP are excluded by the encoding match below; they
+// are not equivalent to a plain STR.
+bool check_stp_wzr_to_str_xzr(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // STP, 32-bit, signed-offset (no writeback): opc=00, 101, V=0,
+    // mode=010, L=0. Mask 0xFFC00000 fixes bits 31..22; value 0x29000000
+    // is the W-form store. Pre-index (011), post-index (001), STNP (000),
+    // the LDP load (L=1), and the X-form (opc=10) all differ in these
+    // bits and so do not match.
+    if ((op & 0xFFC00000u) != 0x29000000u) {
+        return false;
+    }
+
+    unsigned rt  = op & 0x1Fu;
+    unsigned rt2 = (op >> 10) & 0x1Fu;
+    if (rt != 31u || rt2 != 31u) {
+        return false;   // not a pair of zero-register sources
+    }
+
+    unsigned rn = (op >> 5) & 0x1Fu;
+
+    // imm7 is a signed multiple of the 4-byte transfer size.
+    int imm7 = (int)((op >> 15) & 0x7Fu);
+    imm7 = (imm7 ^ 0x40) - 0x40;            // sign-extend bit 6
+    int byte_off = imm7 * 4;
+
+    char rn_buf[8];
+    if (rn == 31) {
+        snprintf(rn_buf, sizeof(rn_buf), "sp");
+    } else {
+        snprintf(rn_buf, sizeof(rn_buf), "x%u", rn);
+    }
+
+    // STR's scaled offset must be a non-negative multiple of 8; a
+    // negative or odd-slot offset needs unscaled STUR. byte_off is in
+    // [-256, 252], in range for whichever form applies.
+    const char *mnem = byte_off >= 0 && byte_off % 8 == 0 ? "str" : "stur";
+
+    out->name = "STP wzr, wzr foldable into STR xzr";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail),
+        "-> %s xzr, [%s, #%d]", mnem, rn_buf, byte_off);
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
 }
 
 // Decode X-form ADD (shifted-register, non-S-variant) with any LSL
@@ -6548,6 +6639,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_csel_self,
     check_bfxil_synth,
     check_ldp_stp_coalesce,
+    check_stp_wzr_to_str_xzr,
     check_redundant_cmp_after_s_variant,
     check_mul_add_sub_fold,
     check_widening_mul_add_sub_fold,

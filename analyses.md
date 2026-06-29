@@ -417,6 +417,54 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (different opcode, different sign-extension semantics). LDPSW is
   always 64-bit destination, load-only, 4-byte transfer.
 
+## adjacent zero stores foldable into STR xzr
+
+* Two consecutive W-form stores of the zero register --
+  `STR WZR, [Rn, #imm12*4] ; STR WZR, [Rn, #(imm12+1)*4]` -- write the
+  same eight bytes as a single `STR XZR`. This is a refinement of the
+  LDP/STP coalescer above: rather than the `STP WZR, WZR` a generic
+  pair fold would emit, both sources being the zero register let one
+  wider store replace the pair outright.
+* Why it helps: a single 8-byte store replaces two 4-byte stores --
+  one fewer instruction (decode/issue slot, code size) and one fewer
+  store micro-op.
+* When the combined 8-byte offset is a non-negative multiple of 8 the
+  rewrite is the scaled `STR XZR, [Rn, #off]`; an odd 4-byte slot
+  (`off % 8 == 4`) is not encodable in the scaled form and is reported
+  as the unscaled `STUR XZR, [Rn, #off]`. The source offsets are bounded
+  by the coalescer's imm7 gate (lower imm12 <= 63), so the byte offset
+  is in [0, 252] -- in range for whichever form applies.
+* Only the W-form collapses. Two X-form zero stores span sixteen bytes,
+  which has no single-GPR-store equivalent (`STP XZR, XZR` is already
+  the canonical 16-byte zero store); they are left to the ordinary pair
+  logic. Reverse order (higher offset first) folds the same way.
+* A mixed pair, where only one source is the zero register, is not a
+  candidate for the single store and coalesces into an ordinary `STP`
+  -- now with the zero operand correctly rendered as `wzr` rather than
+  the non-assemblable `w31`.
+
+## STP wzr, wzr foldable into STR xzr
+
+* A standalone `STP WZR, WZR, [Rn, #imm7*4]` (W-form, signed offset, no
+  writeback) zeroes eight contiguous bytes -- exactly what a single
+  `STR XZR` does -- but as a store-pair operation. Replacing it with the
+  single store drops a micro-op on cores that crack the pair, with no
+  change in architectural effect.
+* Like the two-store consolidation above, the rewrite is the scaled
+  `STR XZR` when the byte offset is a non-negative multiple of 8 and the
+  unscaled `STUR XZR` otherwise (an odd 4-byte slot or a negative
+  offset). The W-form imm7 yields byte offsets in [-256, 252], all in
+  range for whichever form applies.
+* Only the 32-bit pair collapses. `STP XZR, XZR` zeroes sixteen bytes
+  and has no single-GPR-store form; it is the canonical 16-byte zero
+  store and is left alone.
+* Soundness: the match is by encoding, requiring `opc = 00` (W-form),
+  the signed-offset addressing mode (no writeback), and `L = 0` (store),
+  with both transfer registers = 31. Pre- and post-indexed writeback
+  forms additionally update `Rn`, so they are NOT equivalent to a plain
+  `STR` and are excluded by the addressing-mode bits; `STNP`
+  (non-temporal) and the load (`LDP`) likewise do not match.
+
 ## BFXIL and BFI bitfield-insert synthesis
 
 * The "clear a field, isolate the same field from a source, OR the two

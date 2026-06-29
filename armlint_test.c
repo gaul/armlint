@@ -1105,6 +1105,7 @@ static void encode_pair_soff(uint8_t out[4], uint32_t base, unsigned rt,
 }
 static inline void ldp_x_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xA9400000u, rt, rt2, rn, imm7); }
 static inline void stp_x_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xA9000000u, rt, rt2, rn, imm7); }
+static inline void stp_w_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x29000000u, rt, rt2, rn, imm7); }
 static inline void ldp_w_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x29400000u, rt, rt2, rn, imm7); }
 static inline void ldpsw_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x69400000u, rt, rt2, rn, imm7); }
 static inline void ldp_q_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xAD400000u, rt, rt2, rn, imm7); }
@@ -3641,6 +3642,92 @@ static void test_ldp_stp_coalesce(void)
     ldr_d_fp(&code[0], 0, 1, 64);
     ldr_d_fp(&code[4], 1, 1, 65);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Positive: two adjacent W-form zero stores consolidate into a
+    //    single STR XZR rather than STP WZR, WZR. --
+
+    // str wzr, [x2, #8] ; str wzr, [x2, #12] -> str xzr, [x2, #8]
+    str_w(&code[0], 31, 2, 2);
+    str_w(&code[4], 31, 2, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Reverse order folds the same way.
+    str_w(&code[0], 31, 2, 3);
+    str_w(&code[4], 31, 2, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Odd 4-byte slot (byte offset 4) still folds (-> STUR XZR).
+    str_w(&code[0], 31, 2, 1);
+    str_w(&code[4], 31, 2, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: X-form zero stores do NOT consolidate. Two XZR stores
+    //    span 16 bytes (no single-GPR-store form), and their shared
+    //    transfer register keeps them out of the STP path too. --
+
+    str_x(&code[0], 31, 2, 0);
+    str_x(&code[4], 31, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Positive: a mixed pair (only one WZR source) still coalesces
+    //    into a plain STP; the zero operand must render as WZR. --
+
+    str_w(&code[0], 31, 2, 0);   // str wzr, [x2, #0]
+    str_w(&code[4], 0, 2, 1);    // str w0,  [x2, #4]  -> stp wzr, w0
+    assert(run_helper_check(code, 8) == 1);
+}
+
+static void test_stp_wzr_to_str_xzr(void)
+{
+    uint8_t code[4];
+
+    // -- Positive: STP WZR, WZR (signed offset, no writeback) folds to a
+    //    single STR/STUR XZR. The W-form imm7 is scaled by 4. --
+
+    // stp wzr, wzr, [x2, #16]  -> str xzr, [x2, #16]   (8-aligned)
+    stp_w_soff(&code[0], 31, 31, 2, 4);
+    assert(run_helper_check(code, 4) == 1);
+
+    // stp wzr, wzr, [x3, #4]   -> stur xzr, [x3, #4]   (odd slot)
+    stp_w_soff(&code[0], 31, 31, 3, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // stp wzr, wzr, [x5, #-8]  -> stur xzr, [x5, #-8]  (negative offset)
+    stp_w_soff(&code[0], 31, 31, 5, -2);
+    assert(run_helper_check(code, 4) == 1);
+
+    // stp wzr, wzr, [sp]       -> str xzr, [sp]        (SP base)
+    stp_w_soff(&code[0], 31, 31, 31, 0);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Negative: the 64-bit STP XZR, XZR zeroes 16 bytes and has no
+    //    single-store equivalent. --
+
+    stp_x_soff(&code[0], 31, 31, 2, 2);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: only one source is the zero register. --
+
+    stp_w_soff(&code[0], 0, 31, 2, 4);   // stp w0,  wzr
+    assert(run_helper_check(code, 4) == 0);
+    stp_w_soff(&code[0], 31, 0, 2, 4);   // stp wzr, w0
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: the load form (LDP) is not a store. (LDP WZR, WZR
+    //    itself is CONSTRAINED UNPREDICTABLE and will not decode, so use
+    //    distinct destinations.) --
+
+    ldp_w_soff(&code[0], 0, 1, 2, 4);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: writeback forms update the base, so they are not
+    //    equivalent to a plain STR. Pre-index (mode 011) base 0x29800000,
+    //    post-index (mode 001) base 0x28800000. --
+
+    encode_pair_soff(&code[0], 0x29800000u, 31, 31, 2, 4);  // pre-index
+    assert(run_helper_check(code, 4) == 0);
+    encode_pair_soff(&code[0], 0x28800000u, 31, 31, 2, 4);  // post-index
+    assert(run_helper_check(code, 4) == 0);
 }
 
 // MUL Wd, Wn, Wm encoding (MADD with Ra=11111). Base 0x1B007C00.
@@ -6516,6 +6603,7 @@ int main(void)
     test_csel_self();
     test_bfxil_synth();
     test_ldp_stp_coalesce();
+    test_stp_wzr_to_str_xzr();
     test_mul_strength_reduce();
     test_mneg_strength_reduce();
     test_udiv_strength_reduce();

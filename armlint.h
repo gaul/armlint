@@ -770,6 +770,13 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
 bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// STP WZR, WZR (W-form, signed offset, no writeback) zeroes the same
+// eight bytes as a single STR XZR. Report the wider single store. Only
+// the 32-bit pair collapses; the 64-bit STP XZR, XZR is already the
+// canonical 16-byte zero store. Writeback and STNP forms are excluded.
+bool check_stp_wzr_to_str_xzr(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe

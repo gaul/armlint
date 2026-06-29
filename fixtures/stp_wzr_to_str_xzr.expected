@@ -1,0 +1,16 @@
+STP wzr, wzr foldable into STR xzr at offset: 0x0: -> str xzr, [x0, #16] (1 instructions)
+  stp wzr, wzr, [x0, #0x10]
+
+STP wzr, wzr foldable into STR xzr at offset: 0x4: -> stur xzr, [x1, #4] (1 instructions)
+  stp wzr, wzr, [x1, #4]
+
+STP wzr, wzr foldable into STR xzr at offset: 0x8: -> stur xzr, [x2, #-8] (1 instructions)
+  stp wzr, wzr, [x2, #-8]
+
+STP wzr, wzr foldable into STR xzr at offset: 0xc: -> str xzr, [sp, #0] (1 instructions)
+  stp wzr, wzr, [sp]
+
+Optimization opportunities by type:
+       4  STP wzr, wzr foldable into STR xzr
+
+4 optimization opportunities in 10 instructions
