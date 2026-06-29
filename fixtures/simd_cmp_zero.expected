@@ -1,0 +1,32 @@
+MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x0: -> cmeq v16.4s, v0.4s, #0 (2 instructions)
+  movi v16.4s, #0
+  cmeq v16.4s, v16.4s, v0.4s
+
+MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x8: -> cmge v16.4s, v0.4s, #0 (2 instructions)
+  movi v16.4s, #0
+  cmge v16.4s, v0.4s, v16.4s
+
+MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x10: -> cmle v16.4s, v0.4s, #0 (2 instructions)
+  movi v16.4s, #0
+  cmge v16.4s, v16.4s, v0.4s
+
+MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x18: -> cmlt v16.4s, v0.4s, #0 (2 instructions)
+  movi v16.4s, #0
+  cmgt v16.4s, v16.4s, v0.4s
+
+MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x20: -> fcmgt v16.4s, v0.4s, #0.0 (2 instructions)
+  movi v16.4s, #0
+  fcmgt v16.4s, v0.4s, v16.4s
+
+MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x28: -> fcmle v16.2d, v0.2d, #0.0 (2 instructions)
+  movi v16.2d, #0000000000000000
+  fcmge v16.2d, v16.2d, v0.2d
+
+MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x30: -> cmeq v3.16b, v7.16b, #0 (2 instructions)
+  movi v3.8b, #0
+  cmeq v3.16b, v3.16b, v7.16b
+
+Optimization opportunities by type:
+       7  MOVI #0 + vector compare foldable to compare-with-zero
+
+7 optimization opportunities in 21 instructions

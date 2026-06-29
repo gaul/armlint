@@ -3752,6 +3752,156 @@ static void test_ldp_stp_coalesce(void)
     assert(run_helper_check(code, 8) == 1);
 }
 
+// MOVI Vd.4S, #0 (Q=1, 32-bit element, imm8=0): 0x4f000400 | Rd.
+static void movi_zero_4s(uint8_t out[4], unsigned rd)
+{
+    write_le32(out, 0x4F000400u | (rd & 0x1Fu));
+}
+
+// MOVI Vd.2D, #0 (op=1, cmode=0b1110): 0x6f00e400 | Rd.
+static void movi_zero_2d(uint8_t out[4], unsigned rd)
+{
+    write_le32(out, 0x6F00E400u | (rd & 0x1Fu));
+}
+
+// MOVI Vd.8B, #0 (Q=0, 8-bit element): 0x0f00e400 | Rd.
+static void movi_zero_8b(uint8_t out[4], unsigned rd)
+{
+    write_le32(out, 0x0F00E400u | (rd & 0x1Fu));
+}
+
+// MOVI Vd.4S, #1 -- a non-zero modified immediate (defgh = 1).
+static void movi_one_4s(uint8_t out[4], unsigned rd)
+{
+    write_le32(out, 0x4F000400u | (1u << 5) | (rd & 0x1Fu));
+}
+
+// MVNI Vd.4S, #0 (op=1, cmode=0b0000) -- materializes all-ones, not zero.
+static void mvni_zero_4s(uint8_t out[4], unsigned rd)
+{
+    write_le32(out, 0x6F000400u | (rd & 0x1Fu));
+}
+
+// Advanced SIMD three-same integer compare:
+//   0 Q U 01110 size 1 Rm opcode 1 Rn Rd.
+static void simd_cmp_int(uint8_t out[4], unsigned q, unsigned u,
+                         unsigned size, unsigned opcode,
+                         unsigned rd, unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x0E200400u
+        | ((q & 1u) << 30) | ((u & 1u) << 29) | ((size & 3u) << 22)
+        | ((rm & 0x1Fu) << 16) | ((opcode & 0x1Fu) << 11)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// Advanced SIMD three-same FP compare:
+//   0 Q U 01110 E sz 1 Rm 11100 1 Rn Rd.
+static void simd_cmp_fp(uint8_t out[4], unsigned q, unsigned u,
+                        unsigned ebit, unsigned sz,
+                        unsigned rd, unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x0E20E400u
+        | ((q & 1u) << 30) | ((u & 1u) << 29) | ((ebit & 1u) << 23)
+        | ((sz & 1u) << 22) | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_simd_cmp_zero(void)
+{
+    uint8_t code[12];
+
+    // -- Positives: zeroing MOVI + vector compare -> compare-with-#0. --
+
+    // movi v16.4s,#0 ; cmeq v16.4s,v16.4s,v0.4s -> cmeq v16.4s,v0.4s,#0.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x11, 16, 16, 0);   // cmeq, zero in Vn
+    assert(run_helper_check(code, 8) == 1);
+
+    // Zero in Vm: CMEQ is symmetric, still cmeq.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x11, 16, 0, 16);   // cmeq v16,v0,v16
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMGE, zero in Vm -> cmge ...,#0.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 0, 2, 0x07, 16, 0, 16);   // cmge v16,v0,v16
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMGE, zero in Vn -> flips to cmle ...,#0.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 0, 2, 0x07, 16, 16, 0);   // cmge v16,v16,v0
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMGT, zero in Vn -> flips to cmlt ...,#0.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 0, 2, 0x06, 16, 16, 0);   // cmgt v16,v16,v0
+    assert(run_helper_check(code, 8) == 1);
+
+    // FP: FCMGT, zero in Vm -> fcmgt ...,#0.0.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_fp(&code[4], 1, 1, 1, 0, 16, 0, 16);       // fcmgt v16,v0,v16
+    assert(run_helper_check(code, 8) == 1);
+
+    // FP: FCMGE, zero in Vn -> flips to fcmle.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_fp(&code[4], 1, 1, 0, 0, 16, 16, 0);       // fcmge v16,v16,v0
+    assert(run_helper_check(code, 8) == 1);
+
+    // MOVI Vd.2D,#0 producer (op=1 form) feeding a 2D compare.
+    movi_zero_2d(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 3, 0x11, 16, 16, 0);   // cmeq v16.2d,...
+    assert(run_helper_check(code, 8) == 1);
+
+    // Producer arrangement need not match the compare: 8B zero -> 16B cmeq.
+    movi_zero_8b(&code[0], 3);
+    simd_cmp_int(&code[4], 1, 1, 0, 0x11, 3, 3, 7);     // cmeq v3.16b,v3,v7
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // A non-zero MOVI does not open.
+    movi_one_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x11, 16, 16, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // MVNI (all-ones) does not open.
+    mvni_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x11, 16, 16, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Compare does not overwrite the zero register (Vd != Vz): the zero is
+    // not proven dead, so no fold.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x11, 5, 16, 0);    // cmeq v5,v16,v0
+    assert(run_helper_check(code, 8) == 0);
+
+    // Vd == Vz but the zero register is not a compare source.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x11, 16, 17, 0);   // cmeq v16,v17,v0
+    assert(run_helper_check(code, 8) == 0);
+
+    // Both sources are the zero vector (compare of zero against zero).
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x11, 16, 16, 16);  // cmeq v16,v16,v16
+    assert(run_helper_check(code, 8) == 0);
+
+    // Unsigned CMHI has no compare-with-#0 form -> not matched.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 1, 2, 0x06, 16, 0, 16);   // cmhi v16,v0,v16
+    assert(run_helper_check(code, 8) == 0);
+
+    // Bitwise CMTST -> not matched.
+    movi_zero_4s(&code[0], 16);
+    simd_cmp_int(&code[4], 1, 0, 2, 0x11, 16, 0, 16);   // cmtst v16,v0,v16
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending zero vector.
+    movi_zero_4s(&code[0], 16);
+    write_le32(&code[4], 0xD503201Fu);                  // nop
+    simd_cmp_int(&code[8], 1, 1, 2, 0x11, 16, 16, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 static void test_stp_wzr_to_str_xzr(void)
 {
     uint8_t code[4];
@@ -6678,6 +6828,7 @@ int main(void)
     test_csel_self();
     test_bfxil_synth();
     test_ldp_stp_coalesce();
+    test_simd_cmp_zero();
     test_stp_wzr_to_str_xzr();
     test_mul_strength_reduce();
     test_mneg_strength_reduce();

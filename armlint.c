@@ -448,6 +448,15 @@ struct armlint_state {
     unsigned lsp_imm12;
     size_t lsp_offset;
     char lsp_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Pending zeroing MOVI (an all-zero vector in simd_zero_reg) awaiting
+    // an adjacent SIMD compare against it. The compare must overwrite the
+    // zero register (Vd == simd_zero_reg), proving the zero is dead, so the
+    // pair folds to the compare-with-#0 form and the MOVI is dropped.
+    bool simd_zero_active;
+    unsigned simd_zero_reg;
+    size_t simd_zero_offset;
+    char simd_zero_disasm[ARMLINT_FINDING_LINE_LEN];
 };
 
 #define LIVENESS_WINDOW 16
@@ -727,6 +736,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->addi_pending = false;
     state->lspi_pending = false;
     state->lspr_pending = false;
+    state->simd_zero_active = false;
     return mov_close(state, out);
 }
 
@@ -5227,6 +5237,192 @@ static void format_ls_rt(char *buf, size_t bufsz, bool is_fp,
     }
 }
 
+// Decode a MOVI (Advanced SIMD modified immediate) whose result is the
+// all-zero vector -- the zeroing producer of the SIMD compare-with-zero
+// fold. The format is
+//   0 Q op 0111100000 abc cmode 0 1 defgh Rd        imm8 = abc:defgh
+// and the value is zero exactly when imm8 == 0 and (op, cmode) name a MOVI
+// that does not fill in low ones: op=0 with an even cmode other than 0b1100
+// (the MSL #8 form yields 0x..FF), or op=1 with cmode=0b1110 (MOVI Vd.2D).
+// MVNI/BIC (op=1, other cmodes), ORR (op=0, odd cmode), and FMOV (cmode
+// 0b1111) are excluded. The producer's arrangement is irrelevant: any
+// zeroing MOVI clears all 128 bits (a 64-bit form zeros the upper half),
+// so it feeds a compare of any arrangement. Returns the V-register number.
+static bool decode_simd_zero_movi(uint32_t op, unsigned *out_rd)
+{
+    // Fixed modified-immediate bits: bit31=0, 28:19=0111100000, o2(bit11)=0,
+    // bit10=1. Q, op, abc, cmode, defgh, Rd are free.
+    if ((op & 0x9FF80C00u) != 0x0F000400u) {
+        return false;
+    }
+    unsigned imm8 = (((op >> 16) & 0x7u) << 5) | ((op >> 5) & 0x1Fu);
+    if (imm8 != 0u) {
+        return false;
+    }
+    unsigned opbit = (op >> 29) & 1u;
+    unsigned cmode = (op >> 12) & 0xFu;
+    bool zero = opbit == 0u
+        ? ((cmode & 1u) == 0u && cmode != 0xCu)   // MOVI, not MSL/FMOV
+        : (cmode == 0xEu);                          // MOVI Vd.2D, #0
+    if (!zero) {
+        return false;
+    }
+    *out_rd = op & 0x1Fu;
+    return true;
+}
+
+// A decoded vector compare in register form.
+typedef struct {
+    bool is_fp;
+    unsigned kind;          // 0 = EQ, 1 = GE, 2 = GT
+    unsigned vd, vn, vm;
+    unsigned size;          // integer size (23:22), or FP sz (bit 22)
+    unsigned q;
+} simd_cmp_reg_t;
+
+// Decode the signed integer compares CMEQ/CMGE/CMGT and the FP compares
+// FCMEQ/FCMGE/FCMGT in Advanced SIMD three-same register form -- the
+// consumers of the compare-with-zero fold. Unsigned (CMHI/CMHS), bitwise
+// (CMTST), absolute (FACGE/FACGT), and half-precision compares are not
+// matched: they have no direct compare-with-#0 equivalent here. The
+// reserved 1D arrangements (integer size=3 / FP sz=1 with Q=0) are
+// rejected so the suggested rewrite is always a legal encoding.
+static bool decode_simd_cmp_reg(uint32_t op, simd_cmp_reg_t *out)
+{
+    // Outer Advanced SIMD three-same format (integer and FP share it):
+    // bit31=0, 28:24=01110, bit21=1, bit10=1.
+    if ((op & 0x9F200400u) != 0x0E200400u) {
+        return false;
+    }
+    unsigned u = (op >> 29) & 1u;
+    unsigned opcode = (op >> 11) & 0x1Fu;
+    unsigned q = (op >> 30) & 1u;
+    if (opcode == 0x1Cu) {
+        // FP three-same: bit23 is the E-bit, bit22 the sz (single/double).
+        unsigned ebit = (op >> 23) & 1u;
+        if (u == 0u && ebit == 0u) {
+            out->kind = 0;          // FCMEQ
+        } else if (u == 1u && ebit == 0u) {
+            out->kind = 1;          // FCMGE
+        } else if (u == 1u && ebit == 1u) {
+            out->kind = 2;          // FCMGT
+        } else {
+            return false;
+        }
+        out->size = (op >> 22) & 1u;
+        if (out->size == 1u && q == 0u) {
+            return false;           // reserved 1D
+        }
+        out->is_fp = true;
+    } else {
+        // Integer three-same: opcode + U select the signed compares.
+        if (u == 1u && opcode == 0x11u) {
+            out->kind = 0;          // CMEQ
+        } else if (u == 0u && opcode == 0x07u) {
+            out->kind = 1;          // CMGE
+        } else if (u == 0u && opcode == 0x06u) {
+            out->kind = 2;          // CMGT
+        } else {
+            return false;           // CMTST/CMHI/CMHS/ADD/SUB/MUL/...
+        }
+        out->size = (op >> 22) & 3u;
+        if (out->size == 3u && q == 0u) {
+            return false;           // reserved 1D
+        }
+        out->is_fp = false;
+    }
+    out->q = q;
+    out->vm = (op >> 16) & 0x1Fu;
+    out->vn = (op >> 5) & 0x1Fu;
+    out->vd = op & 0x1Fu;
+    return true;
+}
+
+// Arrangement specifier for a vector compare operand (all three share it).
+static const char *simd_arr_str(bool is_fp, unsigned size, unsigned q)
+{
+    if (is_fp) {
+        return size == 0u ? (q ? "4s" : "2s") : "2d";   // sz: single / double
+    }
+    switch (size) {
+    case 0:  return q ? "16b" : "8b";
+    case 1:  return q ? "8h"  : "4h";
+    case 2:  return q ? "4s"  : "2s";
+    default: return "2d";                                // size 3 (Q=0 gated)
+    }
+}
+
+bool check_simd_cmp_zero(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->simd_zero_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a vector compare consuming the pending zero vector. Require
+    //     Vd == the zero register so the compare overwrites it (the zero is
+    //     structurally dead), and exactly one source to be the zero vector
+    //     -- the other is the live operand X.
+    if (state->simd_zero_active) {
+        simd_cmp_reg_t c;
+        if (decode_simd_cmp_reg(op, &c) && c.vd == state->simd_zero_reg) {
+            unsigned vz = state->simd_zero_reg;
+            bool zero_in_vn = (c.vn == vz);
+            bool zero_in_vm = (c.vm == vz);
+            if (zero_in_vn != zero_in_vm) {
+                unsigned x = zero_in_vn ? c.vm : c.vn;
+                // EQ is symmetric. For the ordered compares a zero LEFT
+                // operand flips the sense: 0 >= X == X <= 0, 0 > X == X < 0.
+                const char *mnem;
+                if (c.kind == 0) {
+                    mnem = c.is_fp ? "fcmeq" : "cmeq";
+                } else if (c.kind == 1) {
+                    mnem = zero_in_vm ? (c.is_fp ? "fcmge" : "cmge")
+                                      : (c.is_fp ? "fcmle" : "cmle");
+                } else {
+                    mnem = zero_in_vm ? (c.is_fp ? "fcmgt" : "cmgt")
+                                      : (c.is_fp ? "fcmlt" : "cmlt");
+                }
+                const char *arr = simd_arr_str(c.is_fp, c.size, c.q);
+                const char *imm = c.is_fp ? "#0.0" : "#0";
+
+                out->name =
+                    "MOVI #0 + vector compare foldable to compare-with-zero";
+                out->start_offset = state->simd_zero_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s v%u.%s, v%u.%s, %s",
+                    mnem, c.vd, arr, x, arr, imm);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->simd_zero_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
+        }
+        // Strict adjacency: any non-matching instruction expires the window.
+        state->simd_zero_active = false;
+    }
+
+    // (2) Open: a zeroing MOVI starts a new pending window.
+    unsigned vz;
+    if (decode_simd_zero_movi(op, &vz)) {
+        state->simd_zero_active = true;
+        state->simd_zero_reg = vz;
+        state->simd_zero_offset = offset;
+        snprintf(state->simd_zero_disasm, sizeof(state->simd_zero_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
 bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -6724,6 +6920,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_csel_self,
     check_bfxil_synth,
     check_ldp_stp_coalesce,
+    check_simd_cmp_zero,
     check_stp_wzr_to_str_xzr,
     check_redundant_cmp_after_s_variant,
     check_mul_add_sub_fold,

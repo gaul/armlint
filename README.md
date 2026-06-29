@@ -88,6 +88,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`ldr`+`ldr` / `str`+`str` (consecutive)](analyses.md#adjacent-ldrstr-foldable-into-ldpstp) | `ldp`/`stp` (integer or FP/SIMD, and `ldpsw`) |
 | [`str wzr`+`str wzr` (consecutive zero stores)](analyses.md#adjacent-zero-stores-foldable-into-str-xzr) | `str`/`stur xzr` |
 | [`stp wzr, wzr` (W-form)](analyses.md#stp-wzr-wzr-foldable-into-str-xzr) | `str`/`stur xzr` |
+| [`movi #0` + vector `cmeq`/`cmge`/`cmgt` (or FP `fcm*`)](analyses.md#zeroing-movi-then-vector-compare-foldable-to-compare-with-zero) | `cmeq`/`cmge`/`cmgt`/`cmle`/`cmlt Vd, X, #0` (drop the `movi`) |
 | [`and` + `and`/`ubfiz` + `orr` (clear/isolate/merge)](analyses.md#bfxil-and-bfi-bitfield-insert-synthesis) | `bfxil`/`bfi` |
 | [`csel Rd, Rn, Rn, cond`](analyses.md#csel-same-operand-identity-csel-rd-rn-rn-cond) | `mov Rd, Rn` |
 | [`add`/`sub Rd, Rn, #0`](analyses.md#addsub-0-is-redundant) | `mov Rd, Rn`, or remove |

@@ -512,6 +512,44 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ...` would re-read it).
 * Useful for hand-written assembly and legacy object code.
 
+## Zeroing MOVI then vector compare foldable to compare-with-zero
+
+* The AArch64 SIMD compares have a register form (`CMEQ`/`CMGE`/`CMGT Vd,
+  Vn, Vm`, and the FP `FCMEQ`/`FCMGE`/`FCMGT`) and a compare-against-zero
+  form (`CMEQ`/`CMGE`/`CMGT`/`CMLE`/`CMLT Vd, Vn, #0`, FP `... #0.0`). A
+  `MOVI Vz, #0` that materializes an all-zero vector, immediately consumed
+  by a register compare against `Vz`, is the zero form spelled in two
+  instructions.
+* The fold drops the `MOVI` and rewrites the compare to the `#0` form:
+  * `movi v16.4s, #0 ; cmeq v16.4s, v16.4s, v0.4s` ->
+    `cmeq v16.4s, v0.4s, #0`.
+  * `CMEQ`/`FCMEQ` are symmetric, so the zero may sit in either source.
+    The ordered compares are not: a zero *left* operand flips the sense,
+    because `0 >= X` is `X <= 0` and `0 > X` is `X < 0`. So `cmge Vd, Vz,
+    X` becomes `cmle Vd, X, #0` and `cmgt Vd, Vz, X` becomes `cmlt Vd, X,
+    #0` (likewise `fcmle`/`fcmlt`); a zero *right* operand keeps the
+    mnemonic (`cmge`/`cmgt`/`fcmge`/`fcmgt ..., #0`).
+* Soundness rests on structural liveness: the fold fires only when the
+  compare overwrites the zero register (`Vd == Vz`), proving the
+  materialized zero is dead. The common compiler output -- a throwaway
+  zero temp that the compare reuses as its destination -- has exactly this
+  shape. A compare that writes a *different* register leaves the zero
+  potentially live, so removing the `MOVI` would need a register-liveness
+  pass; that case is left un-flagged.
+* The producer's arrangement is irrelevant: any zeroing `MOVI` clears all
+  128 bits (a 64-bit form zeros the upper half too), so `movi v3.8b, #0`
+  feeds a `.16b` compare as well as a matching `.4s` zero does. Only a
+  `MOVI` (including `MOVI Vd.2D`) with an all-zero immediate qualifies;
+  `MVNI`, a non-zero immediate, and the MSL ones-filling `cmode`s yield
+  non-zero vectors and are excluded.
+* Not matched: the unsigned compares (`CMHI`/`CMHS`) and the bitwise
+  `CMTST` have no direct compare-with-`#0` equivalent (e.g. `CMHI Vd, X,
+  Z` is `X != 0`, which the `#0` forms cannot express), and the absolute
+  FP compares (`FACGE`/`FACGT`) and the half-precision compares are
+  likewise left alone.
+* Saves an instruction and frees a register: the zero vector no longer
+  needs to be materialized or to occupy a register.
+
 ## CSEL same-operand identity (`CSEL Rd, Rn, Rn, cond`)
 
 * When the CSEL's `Rn == Rm`, both branches produce `Rn`, so the

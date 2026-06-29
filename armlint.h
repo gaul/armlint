@@ -777,6 +777,15 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
 bool check_stp_wzr_to_str_xzr(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// A zeroing MOVI (all-zero vector) feeding an adjacent SIMD compare in
+// register form folds into the compare-with-#0 form, dropping the MOVI.
+// Matched compares are the signed integer CMEQ/CMGE/CMGT and the FP
+// FCMEQ/FCMGE/FCMGT; the compare must overwrite the zero register
+// (Vd == the MOVI's destination), which proves the zero is dead. A zero
+// left operand flips the ordered sense (0 >= X => X <= 0, etc.).
+bool check_simd_cmp_zero(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Advance any deferred CMP+B.cond / TST+B.cond finding's flag-liveness
 // scan by one instruction. Returns true and fills *out when a stopper
 // makes prior NZCV state unobservable (or false on a flag read / unsafe
