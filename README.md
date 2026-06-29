@@ -80,7 +80,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`lsl` + `lsr`/`asr`](analyses.md#bitfield-op-via-two-shifts-foldable-into-ubfxsbfx-or-ubfizsbfiz) | `ubfx`/`sbfx`/`ubfiz`/`sbfiz` |
 | [`lsr` + `and #mask`](analyses.md#shift-and-mask-bitfield-extraction-foldable-into-ubfx) | `ubfx` |
 | [`and #mask` + `lsr`](analyses.md#mask-and-shift-bitfield-extraction-foldable-into-ubfx) | `ubfx` |
-| [`and #mask` + `lsl` (or `lsr` + `lsl`)](analyses.md#mask-and-shift-left-foldable-into-ubfiz-or-shift-round-trip-into-a-clearing-and) | `ubfiz` (or clearing `and`) |
+| [`and #mask`/`uxtb`/`uxth`/`uxtw`/`mov` + `lsl` (or `lsr` + `lsl`)](analyses.md#mask-and-shift-left-foldable-into-ubfiz-or-shift-round-trip-into-a-clearing-and) | `ubfiz` (or clearing `and`) |
 | [zeroing producer + `uxtb`/`uxth`/`uxtw`/`and`](analyses.md#redundant-zero-extension-after-a-producer-that-already-zeroed-those-bits) | drop the zero-extension |
 | [`mov xd, xd`](analyses.md#mov-xd-xd-is-a-literal-no-op) | remove (architectural no-op) |
 | [sign-extending producer + `sxtb`/`sxth`/`sxtw`](analyses.md#redundant-sign-extension-after-a-producer-that-already-replicated-the-sign) | drop the sign-extension |

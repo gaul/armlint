@@ -87,16 +87,21 @@ struct armlint_state {
     size_t alr_offset;
     char alr_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // AND-low-mask or LSR pending an LSL consumer (the "shift a field up"
-    // idiom). An AND of the low w bits then LSL #n folds to UBFIZ Rd, Rs,
-    // #n, #w; an LSR #a then LSL #a (equal shifts) clears the low a bits,
-    // i.e. AND Rd, Rs, #~(2^a-1). aul_is_lsr selects which producer;
-    // aul_param holds the mask width w (AND) or the shift a (LSR). aul_rd
-    // is the producer's destination (the LSL reads and writes it), aul_rn
-    // its source (the fold's source).
+    // AND-low-mask, a zero-extension (UXTB/UXTH/UXTW or a W-form MOV), or
+    // LSR pending an LSL consumer (the "shift a field up" idiom). An AND of
+    // the low w bits -- or a zero-extension that keeps the low w bits --
+    // then LSL #n folds to UBFIZ Rd, Rs, #n, #w; an LSR #a then LSL #a
+    // (equal shifts) clears the low a bits, i.e. AND Rd, Rs, #~(2^a-1).
+    // aul_is_lsr selects the LSR producer and aul_zext the zero-extension
+    // producer (both clear for a plain AND); aul_param holds the mask/field
+    // width w (AND, zext) or the shift a (LSR). aul_is_64bit is the width of
+    // the consuming LSL and the emitted rewrite. aul_rd is the producer's
+    // destination (the LSL reads and writes it), aul_rn its source (the
+    // fold's source).
     bool aul_active;
     bool aul_is_64bit;
     bool aul_is_lsr;
+    bool aul_zext;
     unsigned aul_rd;
     unsigned aul_rn;
     unsigned aul_param;
@@ -1485,6 +1490,64 @@ bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode a zero-extension that keeps a low field of `width` bits, the
+// producer side of the UXT*/MOV + LSL => UBFIZ fold. Four spellings
+// qualify, each equivalent to placing "Rn & ((1 << width) - 1)" in the
+// destination with the bits above cleared:
+//
+//   UXTB Wd, Wn  = UBFM Wd, Wn, #0, #7    width 8,  32-bit result
+//   UXTH Wd, Wn  = UBFM Wd, Wn, #0, #15   width 16, 32-bit result
+//   UXTW Xd, Wn  = UBFM Xd, Xn, #0, #31   width 32, 64-bit result
+//   MOV  Wd, Wn  = ORR  Wd, WZR, Wn       width 32, 64-bit result
+//
+// Writing any W register zeros bits 63..32, so the MOV form zero-extends
+// the low 32 bits exactly like UXTW; the UBFIZ it feeds therefore works in
+// the 64-bit (X) domain, hence *out_is_64bit is true for both. *out_is_64bit
+// is the width of the consuming LSL and the emitted UBFIZ (which equals the
+// producer's result width). The source is Rn (bits 9..5) for the UBFM forms
+// but Rm (bits 20..16) for the MOV form, whose Rn is fixed to WZR. Rd=31 is
+// rejected for every form; the MOV form also rejects a WZR source (MOV Wd,
+// WZR is a zeroing idiom, not a zero-extension).
+static bool decode_zext_field_producer(uint32_t op, unsigned *out_width,
+                                       bool *out_is_64bit, unsigned *out_rd,
+                                       unsigned *out_rn)
+{
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31) {
+        return false;
+    }
+    unsigned src;
+    switch (op & 0xFFFFFC00u) {
+    case 0x53001C00u:                       // UXTB Wd, Wn
+        *out_width = 8;  *out_is_64bit = false;
+        src = (op >> 5) & 0x1Fu;
+        break;
+    case 0x53003C00u:                       // UXTH Wd, Wn
+        *out_width = 16; *out_is_64bit = false;
+        src = (op >> 5) & 0x1Fu;
+        break;
+    case 0xD3407C00u:                       // UXTW Xd, Wn
+        *out_width = 32; *out_is_64bit = true;
+        src = (op >> 5) & 0x1Fu;
+        break;
+    default:
+        // MOV Wd, Wn = ORR Wd, WZR, Wn, LSL #0 (Rn = WZR fixed by the
+        // match value); the source register is Rm.
+        if ((op & 0xFFE0FFE0u) != 0x2A0003E0u) {
+            return false;
+        }
+        src = (op >> 16) & 0x1Fu;
+        if (src == 31) {
+            return false;
+        }
+        *out_width = 32; *out_is_64bit = true;
+        break;
+    }
+    *out_rd = rd;
+    *out_rn = src;
+    return true;
+}
+
 bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -1516,7 +1579,9 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
                 if (n + width > datasize) {
                     width = datasize - n;
                 }
-                out->name = "AND+LSL foldable into UBFIZ";
+                out->name = state->aul_zext
+                    ? "zero-extend + LSL foldable into UBFIZ"
+                    : "AND+LSL foldable into UBFIZ";
                 out->start_offset = state->aul_offset;
                 out->insn_count = 2;
                 clear_finding_strings(out);
@@ -1557,12 +1622,31 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
         state->aul_active = false;
     }
 
-    // (2) Open: an AND with a low mask, or an LSR (Rd != XZR)?
+    // (2) Open: an AND with a low mask, a zero-extension (UXT*/MOV), or an
+    //     LSR (Rd != XZR)?
     unsigned w_width, a_rd, a_rn;
+    bool zext_is_64bit;
     if (decode_and_imm_lowmask(op, &w_width, &a_rd, &a_rn) && a_rd != 31) {
         state->aul_active = true;
         state->aul_is_64bit = (((op >> 31) & 1u) != 0u);
         state->aul_is_lsr = false;
+        state->aul_zext = false;
+        state->aul_rd = a_rd;
+        state->aul_rn = a_rn;
+        state->aul_param = w_width;
+        state->aul_offset = offset;
+        snprintf(state->aul_disasm, sizeof(state->aul_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    } else if (decode_zext_field_producer(op, &w_width, &zext_is_64bit,
+                                          &a_rd, &a_rn)) {
+        // A UXTB/UXTH/UXTW or W-form MOV keeps the low w bits with the rest
+        // zeroed -- the same field-then-shift shape as AND #(2^w-1), so it
+        // folds to UBFIZ identically. The field width is fixed by the
+        // extension; the rewrite's width follows the closing LSL.
+        state->aul_active = true;
+        state->aul_is_64bit = zext_is_64bit;
+        state->aul_is_lsr = false;
+        state->aul_zext = true;
         state->aul_rd = a_rd;
         state->aul_rn = a_rn;
         state->aul_param = w_width;
@@ -1576,6 +1660,7 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
             state->aul_active = true;
             state->aul_is_64bit = (l_sf != 0);
             state->aul_is_lsr = true;
+            state->aul_zext = false;
             state->aul_rd = l_rd;
             state->aul_rn = l_rn;
             state->aul_param = l_shift;

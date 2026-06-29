@@ -244,6 +244,18 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
     (capping the width at `datasize-n` when `n+w` would overflow, since
     the high bits shift out). Example: `and w0, w1, #0xff ;
     lsl w0, w0, #4` -> `ubfiz w0, w1, #4, #8`.
+  * A *zero-extension* keeps the same low field as that `AND`, so it
+    folds identically (reported as "zero-extend + LSL foldable into
+    UBFIZ"). The recognised producers are `uxtb`/`uxth`/`uxtw` (the
+    UBFM aliases, `w` = 8/16/32) and the W-form `mov wd, ws`
+    (`orr wd, wzr, ws`, which zero-extends the low 32 bits, `w` = 32).
+    `uxtw` and the W-form `mov` establish a 32-bit field consumed by a
+    *64-bit* `lsl`, so they fold into an `X`-form `ubfiz`; `uxtb`/`uxth`
+    keep a 32-bit-register field consumed by a `W`-form `lsl`. Example:
+    `mov w0, w0 ; lsl x0, x0, #2` -> `ubfiz x0, x0, #2, #32` (the
+    .NET 7 idiom). The producer's result width must match the `lsl`
+    and the emitted `ubfiz`, so a cross-width pair such as
+    `uxtb w0, w1 ; lsl x0, x0, #4` is conservatively left unflagged.
   * `lsr wd, ws, #a ; lsl wd, wd, #a` (equal shifts) is a round-trip
     that clears the low `a` bits; equivalent to `and wd, ws, #~((1<<a)-1)`
     (the high mask is always a valid bitmask immediate). Example:

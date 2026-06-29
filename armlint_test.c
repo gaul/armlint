@@ -2395,6 +2395,81 @@ static void test_and_lsr_lsl_fold(void)
     movz_w(&code[4], 5, 1);
     lsl_w(&code[8], 0, 0, 4);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- Positives: zero-extension (UXT*/MOV) + LSL -> UBFIZ. --
+
+    // uxtb w0, w1 ; lsl w0, w0, #4 -> ubfiz w0, w1, #4, #8.
+    uxtb_w(&code[0], 0, 1);
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // uxth w0, w1 ; lsl w0, w0, #3 -> ubfiz w0, w1, #3, #16.
+    uxth_w(&code[0], 0, 1);
+    lsl_w(&code[4], 0, 0, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // uxtw x0, w1 ; lsl x0, x0, #2 -> ubfiz x0, x1, #2, #32.
+    uxtw(&code[0], 0, 1);
+    lsl_x(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // .NET 7 form: mov w0, w0 ; lsl x0, x0, #2 -> ubfiz x0, x0, #2, #32.
+    // The W-form MOV zero-extends the low 32 bits into the X domain just
+    // like UXTW, so the 64-bit shift folds.
+    mov_w_reg(&code[0], 0, 0);
+    lsl_x(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Non-self MOV source: mov w2, w1 ; lsl x2, x2, #5 -> ubfiz x2,x1,#5,#32.
+    mov_w_reg(&code[0], 2, 1);
+    lsl_x(&code[4], 2, 2, 5);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Width capped: uxth w0, w1 ; lsl w0, w0, #20 -> ubfiz #20,#12
+    // (n + w = 36 > 32, so the field is clipped to 12 surviving bits).
+    uxth_w(&code[0], 0, 1);
+    lsl_w(&code[4], 0, 0, 20);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives: zero-extension producer. --
+
+    // UXTB records a 32-bit field; an X-form LSL is conservatively left
+    // unflagged (the field/shift widths must agree to reuse the close).
+    uxtb_w(&code[0], 0, 1);
+    lsl_x(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // UXTW feeds the 64-bit domain; a W-form LSL does not close it.
+    uxtw(&code[0], 0, 1);
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // W-form MOV + W-form LSL: the "field" is the whole register, so this
+    // is a redundant MOV, not a UBFIZ -- the X-domain shift is required.
+    mov_w_reg(&code[0], 0, 0);
+    lsl_w(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // MOV with a WZR source (mov w0, wzr) is a zeroing idiom, not a zext.
+    mov_w_reg(&code[0], 0, 31);
+    lsl_x(&code[4], 0, 0, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Zero-extension writing the zero register (Rd=31) does not open.
+    uxtb_w(&code[0], 31, 1);
+    lsl_w(&code[4], 31, 31, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LSL Rn reads a different register than the zero-extension wrote.
+    uxtb_w(&code[0], 0, 1);
+    lsl_w(&code[4], 0, 5, 4);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction expires the pending zero-extension.
+    uxtw(&code[0], 0, 1);
+    movz_w(&code[4], 5, 1);
+    lsl_x(&code[8], 0, 0, 2);
+    assert(run_helper_check(code, 12) == 0);
 }
 
 static void test_mov_reg_self(void)

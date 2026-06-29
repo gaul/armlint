@@ -18,8 +18,25 @@ LSR+LSL foldable into bit-clearing AND at offset: 0x20: -> and x0, x1, #0xffffff
   lsr x0, x1, #0xc
   lsl x0, x0, #0xc
 
+zero-extend + LSL foldable into UBFIZ at offset: 0x28: -> ubfiz w0, w1, #4, #8 (2 instructions)
+  uxtb w0, w1
+  lsl w0, w0, #4
+
+zero-extend + LSL foldable into UBFIZ at offset: 0x30: -> ubfiz w0, w1, #20, #12 (2 instructions)
+  uxth w0, w1
+  lsl w0, w0, #0x14
+
+zero-extend + LSL foldable into UBFIZ at offset: 0x38: -> ubfiz x0, x1, #2, #32 (2 instructions)
+  ubfx x0, x1, #0, #0x20
+  lsl x0, x0, #2
+
+zero-extend + LSL foldable into UBFIZ at offset: 0x40: -> ubfiz x0, x0, #2, #32 (2 instructions)
+  mov w0, w0
+  lsl x0, x0, #2
+
 Optimization opportunities by type:
+       4  zero-extend + LSL foldable into UBFIZ
        3  AND+LSL foldable into UBFIZ
        2  LSR+LSL foldable into bit-clearing AND
 
-5 optimization opportunities in 15 instructions
+9 optimization opportunities in 23 instructions
