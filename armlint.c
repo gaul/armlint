@@ -2335,6 +2335,24 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
     return false;
 }
 
+// Stash *out as a deferred finding whose emission is gated on `reg` --
+// the destination of a MOV that the finding proposes to delete -- being
+// dead after the consumer. Such a fold only saves an instruction once a
+// later instruction overwrites `reg` before any read or control
+// transfer; armlint_advance_pending_mz runs that forward scan and emits
+// the stashed finding then. Returns false so the caller records nothing
+// now. Shared by the MOV #0 -> ZR fold and the MOV-constant strength
+// reductions, which all delete the materializing MOV.
+static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
+                           unsigned reg)
+{
+    state->pending_mz_finding = *out;
+    state->pending_mz_active = true;
+    state->pending_mz_window = LIVENESS_WINDOW;
+    state->pending_mz_reg = (int)reg;
+    return false;
+}
+
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out)
 {
@@ -3812,7 +3830,14 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
         "mul %c%u, %c%u, %c%u",
         w_or_x, rd, w_or_x, rn, w_or_x, rm);
 
-    return true;
+    // The rewrite deletes the MOV. If the MUL writes the constant
+    // register itself (Rd == mov_rd), that write already kills the
+    // constant, so emit now; otherwise defer until a later instruction
+    // proves mov_rd dead before any read.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
 }
 
 // MNEG Rd, Rn, Rm is the alias for MSUB Rd, Rn, Rm, ZR.
@@ -3967,7 +3992,14 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
         "mneg %c%u, %c%u, %c%u",
         w_or_x, rd, w_or_x, rn, w_or_x, rm);
 
-    return true;
+    // The rewrite deletes the MOV. If the MNEG writes the constant
+    // register itself (Rd == mov_rd), that write already kills the
+    // constant, so emit now; otherwise defer until a later instruction
+    // proves mov_rd dead before any read.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
 }
 
 // UDIV encoding (Data-processing 2-source):
@@ -4092,7 +4124,14 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
         "udiv %c%u, %c%u, %c%u",
         w_or_x, rd, w_or_x, rn, w_or_x, rm);
 
-    return true;
+    // The rewrite deletes the MOV. If the UDIV writes the constant
+    // register itself (Rd == mov_rd), that write already kills the
+    // constant, so emit now; otherwise defer until a later instruction
+    // proves mov_rd dead before any read.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
 }
 
 // ADD/SUB shifted-register (LSL #0, shift_type = LSL): the form that
@@ -4266,7 +4305,15 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
         "%s %c%u, %c%u, %c%u",
         mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
 
-    return true;
+    // The rewrite deletes the MOV. If the ADD/SUB writes the constant
+    // register itself (Rd == mov_rd), that write already kills the
+    // constant, so emit now; otherwise defer until a later instruction
+    // proves mov_rd dead before any read. (The CMP/CMN alias has Rd = 31,
+    // never mov_rd, so it always defers.)
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
 }
 
 // Logical shifted-register (AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS) with
@@ -4438,7 +4485,15 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
         "%s %c%u, %c%u, %c%u",
         cons_mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
 
-    return true;
+    // The rewrite deletes the MOV. If the logical op writes the constant
+    // register itself (Rd == mov_rd), that write already kills the
+    // constant, so emit now; otherwise defer until a later instruction
+    // proves mov_rd dead before any read. (The TST alias has Rd = 31,
+    // never mov_rd, so it always defers.)
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
 }
 
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
@@ -5161,11 +5216,7 @@ static void format_reg(char *buf, size_t bufsz, char w_or_x, unsigned reg)
 // the consumer. Returns false so the driver records no finding at this point.
 static bool mov_zero_defer(armlint_state *state, armlint_finding *out)
 {
-    state->pending_mz_finding = *out;
-    state->pending_mz_active = true;
-    state->pending_mz_window = LIVENESS_WINDOW;
-    state->pending_mz_reg = (int)state->mov_rd;
-    return false;
+    return defer_dead_mov(state, out, state->mov_rd);
 }
 
 bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,

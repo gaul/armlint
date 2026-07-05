@@ -207,10 +207,11 @@ static int run_helper_check(uint8_t *bytes, size_t len)
     return run_check(bytes, len);
 }
 
-// Append an X0 overwrite (movz x0, #1) to a MOV #0 + consumer fragment so the
-// materialized zero register is provably dead after the consumer, satisfying
-// the register-liveness scan. The MOV #0 fixtures all materialize zero into X0.
-static int run_mov_zero_dead(uint8_t *bytes, size_t len)
+// Append an X0 overwrite (movz x0, #1) so register X0 -- the register the
+// MOV-fold fixtures materialize their value into -- is provably dead after the
+// consumer, satisfying the forward register-liveness scan that gates the
+// MOV-deleting folds (MOV #0 -> ZR and the MOV-constant strength reductions).
+static int run_x0_dead(uint8_t *bytes, size_t len)
 {
     movz_x(&bytes[len], 0, 1, 0);
     return run_check(bytes, len + 4);
@@ -4189,41 +4190,45 @@ static void test_mul_strength_reduce(void)
 {
     uint8_t code[16];
 
+    // Positives use run_x0_dead: the fold deletes the MOV, so it is
+    // deferred until the constant register (x0) is proven dead. The
+    // helper appends a movz x0, #1 overwrite so the scan can emit.
+
     // movz x0, #8 ; mul x3, x2, x0  -> lsl x3, x2, #3  (power of 2).
     movz_x(&code[0], 0, 8, 0);
     mul_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // movz x0, #8 ; mul x3, x0, x2  -> lsl x3, x2, #3  (Rn == mov_rd).
     movz_x(&code[0], 0, 8, 0);
     mul_x(&code[4], 3, 0, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // W form: movz w0, #4 ; mul w3, w2, w0  -> lsl w3, w2, #2.
     movz_w(&code[0], 0, 4);
     mul_w(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // 2^N + 1: movz x0, #3 ; mul x3, x2, x0  -> add x3, x2, x2, lsl #1.
     movz_x(&code[0], 0, 3, 0);
     mul_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // 2^N + 1: movz x0, #5 ; mul x3, x2, x0  -> add x3, x2, x2, lsl #2.
     movz_x(&code[0], 0, 5, 0);
     mul_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // 2^N + 1: movz x0, #9 ; mul x3, x2, x0  -> add x3, x2, x2, lsl #3.
     movz_x(&code[0], 0, 9, 0);
     mul_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Large power-of-2: movz x0, #1, lsl #32 ; mul x3, x2, x0
     //                              -> lsl x3, x2, #32.
     movz_x(&code[0], 0, 1, 2);
     mul_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // 2^16 + 1: movz x0, #1, lsl #16 ; movk x0, #1 ; mul x3, x2, x0
     //                              -> add x3, x2, x2, lsl #16.
@@ -4232,7 +4237,16 @@ static void test_mul_strength_reduce(void)
     movz_x(&code[0], 0, 1, 1);
     movk_x(&code[4], 0, 1, 0);
     mul_x(&code[8], 3, 2, 0);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_x0_dead(code, 12) == 1);
+
+    // Negative: the constant register is live after the MUL, so the fold
+    // must not fire -- deleting the MOV would break the later read.
+    // movz x0,#8 ; mul x3,x2,x0 ; add x5,x6,x0 (reads x0). No trailing
+    // overwrite, so the deferred finding is (correctly) never emitted.
+    movz_x(&code[0], 0, 8, 0);
+    mul_x(&code[4], 3, 2, 0);
+    add_x(&code[8], 5, 6, 0);   // reads x0 -> live
+    assert(run_helper_check(code, 12) == 0);
 
     // Negative: both operands from MOV (Rn == Rm == mov_rd). The LSL
     // rewrite (lsl x3, x0, #3 = 64) is valid only while the MOV
@@ -4347,50 +4361,54 @@ static void test_mneg_strength_reduce(void)
 {
     uint8_t code[16];
 
+    // Positives use run_x0_dead: the fold deletes the MOV, so emission is
+    // deferred until the constant register (x0) is proven dead; the
+    // helper appends a movz x0, #1 overwrite.
+
     // C = 1: movz x0, #1 ; mneg x3, x2, x0  -> neg x3, x2.
     movz_x(&code[0], 0, 1, 0);
     mneg_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // C = 2^N (power of 2): movz x0, #8 ; mneg x3, x2, x0
     //                              -> neg x3, x2, lsl #3.
     movz_x(&code[0], 0, 8, 0);
     mneg_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Commutativity (Rn == mov_rd): movz x0, #2 ; mneg x3, x0, x2
     //                              -> neg x3, x2, lsl #1.
     movz_x(&code[0], 0, 2, 0);
     mneg_x(&code[4], 3, 0, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // W form: movz w0, #4 ; mneg w3, w2, w0  -> neg w3, w2, lsl #2.
     movz_w(&code[0], 0, 4);
     mneg_w(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // C = 2^N - 1: movz x0, #3 ; mneg x3, x2, x0
     //                              -> sub x3, x2, x2, lsl #2.
     movz_x(&code[0], 0, 3, 0);
     mneg_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // C = 2^N - 1: movz x0, #7 ; mneg x3, x2, x0
     //                              -> sub x3, x2, x2, lsl #3.
     movz_x(&code[0], 0, 7, 0);
     mneg_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // C = 2^N - 1: movz x0, #15 ; mneg x3, x2, x0
     //                              -> sub x3, x2, x2, lsl #4.
     movz_x(&code[0], 0, 15, 0);
     mneg_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Large power-of-2 via shifted MOVZ: 2^32.
     movz_x(&code[0], 0, 1, 2);
     mneg_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Negative: 2^N + 1 (5) is intentionally not folded for MNEG.
     movz_x(&code[0], 0, 5, 0);
@@ -4438,7 +4456,7 @@ static void test_mneg_strength_reduce(void)
     // reduction (1 finding), but NOT as MNEG. Total findings == 1.
     movz_x(&code[0], 0, 8, 0);
     mul_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Negative: both MNEG operands are the MOV destination. The
     // rewrite would still read x0, so the MOV could never be deleted.
@@ -4482,35 +4500,41 @@ static void test_udiv_strength_reduce(void)
 {
     uint8_t code[16];
 
+    // Positives use run_x0_dead: the fold deletes the MOV, so emission is
+    // deferred until the constant register (x0) is proven dead; the
+    // helper appends a movz x0, #1 overwrite. (The Rd == mov_rd case
+    // below instead overwrites x0 itself, so it needs no helper.)
+
     // movz x0, #8 ; udiv x3, x2, x0  -> lsr x3, x2, #3.
     movz_x(&code[0], 0, 8, 0);
     udiv_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // W form: movz w0, #4 ; udiv w3, w2, w0  -> lsr w3, w2, #2.
     movz_w(&code[0], 0, 4);
     udiv_w(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Larger power-of-2: movz x0, #1024 ; udiv x3, x2, x0
     //                              -> lsr x3, x2, #10.
     movz_x(&code[0], 0, 1024, 0);
     udiv_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Large power-of-2 via shifted MOVZ: movz x0, #1, lsl #32 ; ...
     movz_x(&code[0], 0, 1, 2);
     udiv_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // 0x10000 (pow2 in upper half) via a single shifted MOVZ.
     // movz x0, #1, lsl #16 ; udiv x3, x2, x0  -> lsr x3, x2, #16.
     movz_x(&code[0], 0, 1, 1);
     udiv_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Rd == mov_rd is fine: rewrite clobbers x0 with a value still
-    // derived from x0 the divisor.
+    // derived from x0 the divisor -- and that clobber is itself the
+    // overwrite that proves the constant dead, so no helper is needed.
     // movz x0, #8 ; udiv x0, x2, x0  -> lsr x0, x2, #3.
     movz_x(&code[0], 0, 8, 0);
     udiv_x(&code[4], 0, 2, 0);
@@ -4628,55 +4652,60 @@ static void test_mov_add_sub_imm_fold(void)
 {
     uint8_t code[16];
 
+    // Positives use run_x0_dead: the fold deletes the MOV, so emission is
+    // deferred until the constant register (x0) is proven dead; the
+    // helper appends a movz x0, #1 overwrite. (The CMP/CMN aliases have
+    // Rd = 31, so they defer too and likewise need the overwrite.)
+
     // movz x0, #100 ; add x3, x2, x0  -> add x3, x2, #100.
     movz_x(&code[0], 0, 100, 0);
     add_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Commutativity: movz x0, #100 ; add x3, x0, x2.
     movz_x(&code[0], 0, 100, 0);
     add_x(&code[4], 3, 0, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // W form: movz w0, #50 ; add w3, w2, w0.
     movz_w(&code[0], 0, 50);
     add_w(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // ADDS variant: movz x0, #100 ; adds x3, x2, x0  -> adds x3, x2, #100.
     movz_x(&code[0], 0, 100, 0);
     encode_sr(&code[4], 0xAB000000u, 3, 2, 0);  // ADDS X3, X2, X0
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // SUB: movz x0, #100 ; sub x3, x2, x0  -> sub x3, x2, #100.
     movz_x(&code[0], 0, 100, 0);
     sub_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // SUBS: movz x0, #100 ; subs x3, x2, x0  -> subs x3, x2, #100.
     movz_x(&code[0], 0, 100, 0);
     subs_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // CMP (SUBS XZR, ...): movz x0, #100 ; cmp x2, x0  -> cmp x2, #100.
     movz_x(&code[0], 0, 100, 0);
     cmp_x_reg_sr(&code[4], 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // CMN (ADDS XZR, ...): movz x0, #100 ; cmn x2, x0  -> cmn x2, #100.
     movz_x(&code[0], 0, 100, 0);
     cmn_x_reg_sr(&code[4], 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // imm12 boundary: C = 0xFFF (= 4095) fits without shift.
     movz_x(&code[0], 0, 0xFFF, 0);
     add_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // imm12 << 12: C = 0x1000 fits with sh=1.
     movz_x(&code[0], 0, 0x1000, 0);
     add_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // imm12 << 12 top boundary: C = 0xFFF000 fits with sh=1. A
     // single MOVZ can't reach 0xFFF000 (12-bit offset within a
@@ -4690,7 +4719,9 @@ static void test_mov_add_sub_imm_fold(void)
     movz_x(&code[0], 0, 0xF000, 0);          // x0 = 0xF000
     movk_x(&code[4], 0, 0xFF, 1);            // x0 = 0x00FF_F000
     add_x(&code[8], 3, 2, 0);
-    assert(run_helper_check(code, 12) == 2);
+    // The bitmask-shrink finding emits immediately at the ADD; the
+    // MOV+ADD fold is deferred and emits at the appended x0 overwrite.
+    assert(run_x0_dead(code, 12) == 2);
 
     // imm12 << 12 above boundary: C = 0x1000000 doesn't fit
     // (alignment is fine, but (C >> 12) = 0x1000 > 0xFFF). Use a
@@ -4718,7 +4749,7 @@ static void test_mov_add_sub_imm_fold(void)
     // overall finding count is 1 -- once X0 is dead after the consumer.
     movz_x(&code[0], 0, 0, 0);
     add_x(&code[4], 3, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Negative: width mismatch (MOV W, ADD X).
     movz_w(&code[0], 0, 100);
@@ -4780,45 +4811,50 @@ static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
 
+    // Positives use run_x0_dead: the fold deletes the MOV, so emission is
+    // deferred until the constant register (x0) is proven dead; the
+    // helper appends a movz x0, #1 overwrite. (The TST alias has Rd = 31,
+    // so it defers too and likewise needs the overwrite.)
+
     // AND: movz x0, #0xff ; and x3, x2, x0  -> and x3, x2, #0xff.
     movz_x(&code[0], 0, 0xFF, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Commutativity (Rn from MOV).
     movz_x(&code[0], 0, 0xFF, 0);
     and_x(&code[4], 3, 0, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // W form.
     movz_w(&code[0], 0, 0xFF);
     and_w(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // ORR.
     movz_x(&code[0], 0, 0xFF, 0);
     orr_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // EOR.
     movz_x(&code[0], 0, 0xFF, 0);
     eor_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // ANDS.
     movz_x(&code[0], 0, 0xFF, 0);
     ands_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // TST alias (ANDS with Rd = XZR).
     movz_x(&code[0], 0, 0xFF, 0);
     ands_x(&code[4], 31, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // 16-bit bitmask: movz x0, #0xffff ; and x3, x2, x0.
     movz_x(&code[0], 0, 0xFFFF, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Two-MOV chain producing 0xffff0000ffff0000 (esize=32 bitmask).
     // 0xFFFF0000 in 64-bit also has a bitmask encoding (rotated run).
@@ -4827,7 +4863,7 @@ static void test_mov_logic_imm_fold(void)
     and_x(&code[4], 3, 2, 0);
     // This is a single MOVZ + AND -- 1 finding from our check;
     // check_movz_movk_bitmask requires chain >= 2 so it doesn't fire.
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Negative: C = 5 (binary 101) is not a bitmask immediate
     // (non-contiguous bits, no replicated-run encoding).
@@ -4841,40 +4877,40 @@ static void test_mov_logic_imm_fold(void)
     // once X0 is dead after the consumer.
     movz_x(&code[0], 0, 0, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // BIC (N = 1) folds via the complemented immediate:
     // movz x0, #0xff ; bic x3, x2, x0 -> and x3, x2, #0xffffffffffffff00.
     movz_x(&code[0], 0, 0xFF, 0);
     bic_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // ORN -> ORR #~C.
     movz_x(&code[0], 0, 0xFF, 0);
     orn_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // EON (W form) -> EOR #~C (= #0xfffffffe).
     movz_w(&code[0], 0, 1);
     eon_w(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // EON (X form).
     movz_x(&code[0], 0, 1, 0);
     eon_x(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // BICS -> ANDS #~C. NZCV is identical: A64 logical S-ops set N/Z
     // from the result and C = V = 0, in both register and immediate
     // forms.
     movz_w(&code[0], 0, 1);
     bics_w(&code[4], 3, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // BICS with Rd = ZR: the TST-of-complement alias.
     movz_x(&code[0], 0, 1, 0);
     bics_x(&code[4], 31, 2, 0);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Negative: ~C is not a bitmask immediate. C = 0xfffffffa (via
     // MOVN #5) complements to 5 = 0b101, non-contiguous.
@@ -4995,90 +5031,90 @@ static void test_mov_zero_to_xzr(void)
     // STR X form.
     movz_x(&code[0], 0, 0, 0);
     str_x_uimm(&code[4], 0, 1, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // STR W form.
     movz_w(&code[0], 0, 0);
     str_w(&code[4], 0, 1, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // STRB.
     movz_w(&code[0], 0, 0);
     strb_w_uimm(&code[4], 0, 1, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // STRH.
     movz_w(&code[0], 0, 0);
     strh_w_uimm(&code[4], 0, 1, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // STR with non-zero offset.
     movz_x(&code[0], 0, 0, 0);
     str_x_uimm(&code[4], 0, 1, 16);  // offset = 16*8 = 128 bytes
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // STR with SP as base.
     movz_x(&code[0], 0, 0, 0);
     str_x_uimm(&code[4], 0, 31, 0);  // [sp]
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Width skew: X-form MOV, STR W (low bits of 0 are 0).
     movz_x(&code[0], 0, 0, 0);
     str_w(&code[4], 0, 1, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // (b) ADD/SUB shifted-LSL0:
     // ADD with Rm = mov_rd -> use XZR.
     movz_x(&code[0], 0, 0, 0);
     add_x(&code[4], 3, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // ADD with Rn = mov_rd (commutativity).
     movz_x(&code[0], 0, 0, 0);
     add_x(&code[4], 3, 0, 2);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // SUB with Rm = mov_rd (-> MOV Rd, Rn).
     movz_x(&code[0], 0, 0, 0);
     sub_x(&code[4], 3, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // SUB with Rn = mov_rd (-> NEG Rd, Rm). The "SUB-from-zero" form.
     movz_x(&code[0], 0, 0, 0);
     sub_x(&code[4], 3, 0, 2);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // CMP (SUBS XZR, Rn, Rm) with Rm = mov_rd -> "cmp xn, xzr".
     movz_x(&code[0], 0, 0, 0);
     cmp_x_reg_sr(&code[4], 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // CMN (ADDS XZR, Rn, Rm).
     movz_x(&code[0], 0, 0, 0);
     cmn_x_reg_sr(&code[4], 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // (c) AND/ORR/EOR shifted-LSL0:
     // AND with Rm = mov_rd.
     movz_x(&code[0], 0, 0, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // ORR with Rm = mov_rd -> MOV Rd, Rn (the canonical MOV
     // register form is ORR Rd, XZR, Rm; this is the mirror).
     movz_x(&code[0], 0, 0, 0);
     orr_x(&code[4], 3, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // EOR with Rm = mov_rd -> MOV Rd, Rn (XOR identity).
     movz_x(&code[0], 0, 0, 0);
     eor_x(&code[4], 3, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // TST (ANDS XZR, ...).
     movz_x(&code[0], 0, 0, 0);
     ands_x(&code[4], 31, 2, 0);
-    assert(run_mov_zero_dead(code, 8) == 1);
+    assert(run_x0_dead(code, 8) == 1);
 
     // Liveness: a later read of the zero register makes it live, so dropping
     // the MOV would change behavior -- the finding is (soundly) suppressed.

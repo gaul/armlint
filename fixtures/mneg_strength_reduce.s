@@ -54,8 +54,11 @@ _main:
     mov     x0, #8
     msub    x3, x2, x0, x4
 
-    // Sanity: a MUL still fires from the MUL check.
+    // Sanity: a MUL still fires from the MUL check. The trailing
+    // "mov x0" overwrites the constant so the deferred MUL fold is
+    // emitted (it deletes the MOV, so the fold waits until x0 is dead).
     mov     x0, #8
     mul     x3, x2, x0          // -> lsl x3, x2, #3 (from MUL check)
+    mov     x0, #1
 
     ret

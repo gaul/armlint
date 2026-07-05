@@ -38,4 +38,4 @@ Optimization opportunities by type:
        8  MNEG by constant foldable to neg/sub
        1  MUL by constant foldable to shift/add
 
-9 optimization opportunities in 27 instructions
+9 optimization opportunities in 28 instructions
