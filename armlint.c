@@ -2038,21 +2038,12 @@ static bool decode_b_sign_cond(uint32_t op, bool *out_is_neg,
     return true;
 }
 
-// Flag-liveness classification of a single instruction observed during
-// the forward scan that runs after a CMP+B.EQ/B.NE candidate.
-typedef enum {
-    LIV_UNKNOWN,        // no effect on NZCV; keep scanning
-    LIV_OVERWRITE,      // writes all NZCV without reading them first
-    LIV_READ,           // reads any of NZCV
-    LIV_TERM_SAFE,      // terminator after which prior NZCV is unobservable
-    LIV_TERM_UNSAFE,    // terminator whose target may observe NZCV
-} liveness_t;
-
-// Classify `op` for the NZCV liveness scan. Conservative on both ends:
-// instructions we don't recognize are LIV_UNKNOWN (keep scanning until
-// the window expires), and ambiguous reads/writes are erred toward
-// LIV_READ.
-static liveness_t classify_liveness(uint32_t op)
+// Classify `op` for the NZCV liveness scan (liveness_t is declared in
+// armlint.h). Conservative on both ends: instructions we don't recognize
+// are LIV_UNKNOWN (keep scanning until the window expires), and ambiguous
+// reads/writes are erred toward LIV_READ. See the header note on why this
+// is hand-rolled rather than taken from Capstone's register-access model.
+liveness_t classify_liveness(uint32_t op)
 {
     // B.cond reads NZCV (which flags depend on cond). BC.cond (the
     // Armv8.8 consistent conditional branch) shares the encoding with

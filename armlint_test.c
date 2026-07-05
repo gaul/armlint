@@ -17,6 +17,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <capstone/capstone.h>
@@ -7130,6 +7131,167 @@ static void test_add_ldr_str_pre_indexed(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// Cross-validate classify_liveness (armlint's hand-rolled NZCV
+// flag-liveness classifier) against Capstone's register-access model for
+// a single 32-bit word. Capstone's implicit-NZCV model is unreliable in
+// BOTH directions: it MISSES readers (BC.cond, MRS NZCV, CFINV/XAFLAG/
+// AXFLAG, RMIF, SETF8/16) and writers (half-precision FCMP), and it
+// OVER-reports the compare/test-and-branch instructions (CBZ/CBNZ/TBZ/
+// TBNZ) as reading NZCV. It is thus only a partial oracle; using its read
+// set one-directionally still yields two soundness properties robust to
+// that noise:
+//
+//   A) If Capstone reports a read, classify must stop the scan without
+//      declaring the flags dead: LIV_READ (a genuine reader) or
+//      LIV_TERM_UNSAFE (a conditional branch Capstone over-reports, whose
+//      taken target the scan does not follow). Never OVERWRITE or UNKNOWN
+//      -- either would let a later overwrite prove the flags dead while
+//      this instruction (or its branch target) still observes them.
+//   B) If classify declares the flags dead here -- LIV_OVERWRITE or the
+//      safe terminator LIV_TERM_SAFE -- Capstone must not report a read.
+//
+// Neither property consults Capstone's (unreliable) write set. Words
+// Capstone cannot decode are skipped (they never reach the scan).
+// Returns 1 if a property is violated (and prints the offender), else 0.
+static int liveness_check_word(cs_insn *insn, uint32_t word)
+{
+    const uint8_t *code = (const uint8_t *)&word;   // host is little-endian
+    size_t size = sizeof(word);
+    uint64_t addr = 0;
+    if (!cs_disasm_iter(g_handle, &code, &size, &addr, insn)) {
+        return 0;
+    }
+    bool reads = false, writes = false;
+    cs_regs regs_read, regs_write;
+    uint8_t nread, nwrite;
+    if (cs_regs_access(g_handle, insn, regs_read, &nread,
+                       regs_write, &nwrite) == CS_ERR_OK) {
+        for (uint8_t i = 0; i < nread; i++) {
+            if (regs_read[i] == ARM64_REG_NZCV) {
+                reads = true;
+            }
+        }
+        for (uint8_t i = 0; i < nwrite; i++) {
+            if (regs_write[i] == ARM64_REG_NZCV) {
+                writes = true;
+            }
+        }
+    }
+    liveness_t liv = classify_liveness(word);
+    // A: a Capstone-reported read must stop the scan (LIV_READ, or
+    //    LIV_TERM_UNSAFE for the over-reported CBZ/TBZ) -- never declare
+    //    the flags dead.
+    bool a_ok = !reads || liv == LIV_READ || liv == LIV_TERM_UNSAFE;
+    // B: an armlint "flags dead here" (LIV_OVERWRITE or the safe
+    //    terminator LIV_TERM_SAFE) must not be a Capstone-known reader.
+    bool b_ok = !(liv == LIV_OVERWRITE || liv == LIV_TERM_SAFE) || !reads;
+    bool bad = !a_ok || !b_ok;
+    if (bad) {
+        fprintf(stderr, "liveness cross-check failed: %08x  %s %s  "
+                "capstone[read=%d write=%d] classify=%d\n",
+                word, insn->mnemonic, insn->op_str,
+                (int)reads, (int)writes, (int)liv);
+    }
+    return bad ? 1 : 0;
+}
+
+// Verify classify_liveness against Capstone. The curated table below
+// pins one representative of every NZCV family (readers, writers,
+// terminators, and neutral instructions), including the blind spots
+// Capstone under-models -- those assert their classification directly,
+// since Capstone cannot corroborate them (this is the regression guard
+// for the readers that must never be dropped, e.g. MRS NZCV / BC.cond).
+// Setting ARMLINT_LIVENESS_SWEEP additionally sweeps the entire
+// 2^32 encoding space (minutes) to catch any family neither the table nor
+// the current masks anticipate.
+static void test_liveness_matches_capstone(void)
+{
+    static const struct { uint32_t word; liveness_t want; const char *name; }
+    cases[] = {
+        // Readers Capstone models (property A has teeth here):
+        { 0x54000000u, LIV_READ, "b.eq" },
+        { 0x9A820020u, LIV_READ, "csel" },
+        { 0x9A820420u, LIV_READ, "csinc" },
+        { 0xDA820020u, LIV_READ, "csinv" },
+        { 0xDA820420u, LIV_READ, "csneg" },
+        { 0xFA410000u, LIV_READ, "ccmp" },
+        { 0xBA410800u, LIV_READ, "ccmn" },
+        { 0x9A020020u, LIV_READ, "adc" },
+        { 0xBA020020u, LIV_READ, "adcs" },
+        { 0xDA020020u, LIV_READ, "sbc" },
+        { 0xFA020020u, LIV_READ, "sbcs" },
+        { 0x1E220C20u, LIV_READ, "fcsel" },
+        { 0x1E210400u, LIV_READ, "fccmp" },
+        { 0x1E210410u, LIV_READ, "fccmpe" },
+        // Readers Capstone does NOT model -- armlint must still catch them
+        // (this is the bug-#3 class: dropping them would be unsound):
+        { 0x54000010u, LIV_READ, "bc.eq" },
+        { 0xD53B4200u, LIV_READ, "mrs x,nzcv" },
+        { 0xD500401Fu, LIV_READ, "cfinv" },
+        { 0xD500403Fu, LIV_READ, "xaflag" },
+        { 0xD500405Fu, LIV_READ, "axflag" },
+        { 0xBA000400u, LIV_READ, "rmif" },
+        { 0x3A00080Du, LIV_READ, "setf8" },
+        { 0x3A00480Du, LIV_READ, "setf16" },
+        // Pure NZCV writers:
+        { 0xAB020020u, LIV_OVERWRITE, "adds" },
+        { 0xF1000420u, LIV_OVERWRITE, "subs" },
+        { 0xF2400020u, LIV_OVERWRITE, "ands" },
+        { 0xEA220020u, LIV_OVERWRITE, "bics" },
+        { 0xEB01001Fu, LIV_OVERWRITE, "cmp" },
+        { 0xAB01001Fu, LIV_OVERWRITE, "cmn" },
+        { 0xEA01001Fu, LIV_OVERWRITE, "tst" },
+        { 0x1E212000u, LIV_OVERWRITE, "fcmp" },
+        { 0x1E212010u, LIV_OVERWRITE, "fcmpe" },
+        // Neutral (no NZCV effect):
+        { 0xAA0103E0u, LIV_UNKNOWN, "mov" },
+        { 0x8B020020u, LIV_UNKNOWN, "add" },
+        { 0xF9400020u, LIV_UNKNOWN, "ldr" },
+        { 0xD503201Fu, LIV_UNKNOWN, "nop" },
+        // MSR NZCV,Xt overwrites the flags but armlint does not yet model
+        // it as an overwrite -- a conservative false negative, not a bug.
+        { 0xD51B4200u, LIV_UNKNOWN, "msr nzcv,x" },
+        // Conditional branches -- unsafe terminators (their taken edge is
+        // not followed). Capstone over-reports these as NZCV reads, which
+        // property A tolerates because LIV_TERM_UNSAFE also stops the scan.
+        { 0x34000000u, LIV_TERM_UNSAFE, "cbz" },
+        { 0x35000000u, LIV_TERM_UNSAFE, "cbnz" },
+        { 0x36000000u, LIV_TERM_UNSAFE, "tbz" },
+        { 0x37000000u, LIV_TERM_UNSAFE, "tbnz" },
+        { 0x14000000u, LIV_TERM_UNSAFE, "b" },
+        // Safe terminators -- prior NZCV is unobservable past them.
+        { 0x94000000u, LIV_TERM_SAFE, "bl" },
+        { 0xD65F03C0u, LIV_TERM_SAFE, "ret" },
+    };
+
+    cs_insn *insn = cs_malloc(g_handle);
+    assert(insn != NULL);
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (classify_liveness(cases[i].word) != cases[i].want) {
+            fprintf(stderr, "classify_liveness(%08x) [%s] = %d, want %d\n",
+                    cases[i].word, cases[i].name,
+                    (int)classify_liveness(cases[i].word), (int)cases[i].want);
+            assert(0);
+        }
+        assert(liveness_check_word(insn, cases[i].word) == 0);
+    }
+
+    if (getenv("ARMLINT_LIVENESS_SWEEP") != NULL) {
+        unsigned long violations = 0;
+        for (uint64_t w = 0; w <= 0xFFFFFFFFu; w++) {
+            violations += (unsigned long)liveness_check_word(insn, (uint32_t)w);
+            if ((w & 0x0FFFFFFFu) == 0x0FFFFFFFu) {
+                fprintf(stderr, "  liveness sweep %2.0f%%  (%lu violations)\n",
+                        100.0 * (double)(w + 1) / 4294967296.0, violations);
+            }
+        }
+        assert(violations == 0);
+    }
+
+    cs_free(insn, 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -7177,6 +7339,7 @@ int main(void)
     test_add_ldr_imm_offset();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
+    test_liveness_matches_capstone();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

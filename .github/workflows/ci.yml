@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
 
 jobs:
   build:
@@ -34,3 +37,21 @@ jobs:
 
       - name: Run integration tests
         run: make integration-test
+
+  liveness-sweep:
+    # Exhaustive classify_liveness-vs-Capstone cross-check over the entire
+    # 2^32 encoding space (several minutes). Too slow for every PR, so it
+    # runs on pushes to master, on a weekly schedule, and on demand; the
+    # per-PR `make test` still runs the fast curated subset of this check.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install capstone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcapstone-dev pkg-config
+
+      - name: Build and run the exhaustive NZCV liveness sweep
+        run: ARMLINT_LIVENESS_SWEEP=1 make test

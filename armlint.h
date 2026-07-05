@@ -34,6 +34,27 @@ extern "C" {
 // all-ones value at the given width.
 bool is_bitmask_immediate(uint64_t imm, unsigned reg_width);
 
+// NZCV flag-liveness classification of a single 32-bit A64 instruction
+// word, used by the forward scan that drops a CMP/TST once the flags are
+// provably dead. Exposed so the test suite can cross-validate it against
+// Capstone's register-access model (test_liveness_matches_capstone).
+//
+// The classifier is hand-rolled rather than derived from Capstone because
+// Capstone's implicit-flag model is incomplete: as of 5.0.x cs_regs_access
+// does not record the NZCV read of BC.cond, MRS NZCV, CFINV/XAFLAG/AXFLAG,
+// RMIF, or SETF8/SETF16 -- precisely the readers that must not be dropped.
+// The cross-check therefore treats Capstone as a one-directional partial
+// oracle (see the test for the exact properties).
+typedef enum {
+    LIV_UNKNOWN,        // no effect on NZCV; keep scanning
+    LIV_OVERWRITE,      // writes all NZCV without reading them first
+    LIV_READ,           // reads any of NZCV
+    LIV_TERM_SAFE,      // terminator after which prior NZCV is unobservable
+    LIV_TERM_UNSAFE,    // terminator whose target may observe NZCV
+} liveness_t;
+
+liveness_t classify_liveness(uint32_t op);
+
 // State carried across instructions for sequence-based checks. Owned by
 // the caller; created once per scan and reset between non-contiguous
 // regions (e.g. between executable sections).
