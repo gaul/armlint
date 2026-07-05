@@ -5184,11 +5184,18 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
 
     uint32_t op = insn_word(insn);
 
-    // (a) STR (any size, unsigned-offset) with Rt == mov_rd.
+    // (a) STR (any size, unsigned-offset) with Rt == mov_rd. The base
+    // Rn must NOT also be mov_rd: only the Rt data slot is rewritten to
+    // ZR, so a store whose base is the zeroed register still reads it as
+    // an address. The forward-liveness scan begins after the store and
+    // never sees that base read, so it could wrongly prove the MOV dead
+    // -- deleting `mov xN, #0` would then change `str xN, [xN]`'s address
+    // from 0 to whatever xN held before.
     {
         unsigned size, imm12, rn, rt;
         if (decode_str_uimm_any_size(op, &size, &imm12, &rn, &rt)
-                && rt == state->mov_rd) {
+                && rt == state->mov_rd
+                && rn != state->mov_rd) {
             const char *str_mnem;
             char rt_wx;
             unsigned scale_shift;

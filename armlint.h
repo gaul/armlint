@@ -415,10 +415,12 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 // simplification (e.g. ADD Rd, Rn, XZR -> MOV Rd, Rn, or
 // SUB Rd, XZR, Rm -> NEG Rd, Rm) is left to the reader.
 //
-// Rn = 31 in addressing means SP (not ZR), so the STR base register
-// is intentionally not considered a fold candidate -- only the Rt
-// data slot. For arithmetic/logical shifted-register forms,
-// Rn = Rm = 31 both denote ZR, so either operand is foldable.
+// Only the STR Rt data slot is rewritten to ZR, never the base Rn:
+// Rn = 31 in addressing means SP (not ZR), and Rn = mov_rd would leave
+// the store reading the zeroed register as an address, so the MOV is
+// not dead and must not be dropped -- both base cases are excluded.
+// For arithmetic/logical shifted-register forms, Rn = Rm = 31 both
+// denote ZR, so either operand is foldable.
 bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 

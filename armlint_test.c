@@ -5105,6 +5105,19 @@ static void test_mov_zero_to_xzr(void)
     str_x_uimm(&code[4], 2, 0, 0);  // STR X2, [X0]; Rt=X2, Rn=X0=mov_rd
     assert(run_helper_check(code, 8) == 0);
 
+    // STR with Rt == Rn == mov_rd (str x0, [x0]): the data slot matches,
+    // but only Rt is rewritten to ZR -- the base still reads x0. The
+    // forward-liveness scan begins after the store and misses that base
+    // read, so a trailing overwrite of x0 would let it wrongly prove x0
+    // dead and suggest deleting `mov x0, #0`, changing the store address
+    // from 0 to garbage. The rn != mov_rd guard must suppress it. (The
+    // trailing movz is what would trip the buggy emit; without the guard
+    // this returns 1.)
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 0, 0);  // STR X0, [X0]; Rt=Rn=X0=mov_rd
+    movz_x(&code[8], 0, 42, 0);     // overwrite x0 (would trigger the emit)
+    assert(run_helper_check(code, 12) == 0);
+
     // LDR (not a store) -> not a STR fold case. The consumer reads
     // mov_rd via Rn (base), which is SP if 31. Even Rt could match
     // mov_rd here (loading INTO the MOV destination, overwriting it
