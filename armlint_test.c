@@ -208,6 +208,21 @@ static int run_helper_check(uint8_t *bytes, size_t len)
     return run_check(bytes, len);
 }
 
+// True iff the linked Capstone build disassembles `len` bytes into exactly
+// len/4 instructions. Encodings newer than the oldest supported Capstone --
+// e.g. the Armv8.8 BC.cond, unknown to the Capstone 4.x that ships on
+// Ubuntu 24.04 -- let their end-to-end tests skip cleanly instead of
+// tripping run_check's "incomplete disassembly" guard (which returns -1).
+static bool capstone_decodes(const uint8_t *bytes, size_t len)
+{
+    cs_insn *insns = NULL;
+    size_t n = cs_disasm(g_handle, bytes, len, 0, 0, &insns);
+    if (insns != NULL) {
+        cs_free(insns, n);
+    }
+    return n == len / 4;
+}
+
 // Append a movz Xreg, #1 overwrite so register `reg` is provably dead after the
 // fragment, satisfying the forward register-liveness scan that gates the folds
 // which delete a value-producing instruction: MOV #0 -> ZR, the MOV-constant
@@ -1412,13 +1427,18 @@ static void test_cmp_zero_branch(void)
 
     // cmp w0,#0 ; b.eq L ; bc.lt M ; adds w2,w3,w4 ; ret -- BC.cond (the
     // Armv8.8 consistent conditional branch) reads NZCV; suppress like a
-    // plain B.cond even though it sets bit 4.
+    // plain B.cond even though it sets bit 4. BC.cond is unknown to Capstone
+    // 4.x (Ubuntu 24.04), so skip the end-to-end check there rather than
+    // fail to disassemble; classify_liveness's handling of it is still
+    // covered portably by the bc.eq entry in test_liveness_matches_capstone.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     bc_cond(&code[8], 11 /* LT */, 8);
     adds_w(&code[12], 2, 3, 4);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    if (capstone_decodes(&code[8], 4)) {
+        assert(run_helper_check(code, 20) == 0);
+    }
 
     // -- Negative: unsafe terminator --
 
