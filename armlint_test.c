@@ -2881,57 +2881,85 @@ static void test_redundant_sext(void)
     assert(run_helper_check(code, 8) == 0);
 
     // -- Positive: sign-extension dead because a following zero-ext
-    //    consumer masks the sign-extended bits. Fires when C_c <= S_p
-    //    (consumer clears at least the producer's sign-extended
-    //    region). --
+    //    consumer masks the sign-extended bits. Requires an IN-PLACE
+    //    SXT (Rn == Rd): only then is dropping the producer sound, since
+    //    Rd's low bits are its own source and survive the removal. Fires
+    //    when C_c <= S_p (the consumer clears at least the producer's
+    //    sign-extended region). --
 
-    // sxtb w0, w1 ; uxtb w0, w0 -- S=8, C=8: dead.
-    sxtb_w(&code[0], 0, 1);
+    // sxtb w0, w0 ; uxtb w0, w0 -- S=8, C=8: dead.
+    sxtb_w(&code[0], 0, 0);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // sxth w0, w1 ; uxtb w0, w0 -- S=16, C=8: dead.
-    sxth_w(&code[0], 0, 1);
+    // sxth w0, w0 ; uxtb w0, w0 -- S=16, C=8: dead.
+    sxth_w(&code[0], 0, 0);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // sxth w0, w1 ; uxth w0, w0 -- S=16, C=16: dead.
-    sxth_w(&code[0], 0, 1);
+    // sxth w0, w0 ; uxth w0, w0 -- S=16, C=16: dead.
+    sxth_w(&code[0], 0, 0);
     uxth_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // sxtw x0, w1 ; uxtw x0, w0 -- S=32, C=32: dead (X-form pair).
-    sxtw_x(&code[0], 0, 1);
+    // sxtw x0, w0 ; uxtw x0, w0 -- S=32, C=32: dead (X-form pair).
+    sxtw_x(&code[0], 0, 0);
     uxtw(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // sxtb x0, w1 ; uxtb w0, w0 -- X-form producer (S=8, W=64) +
+    // sxtb x0, w0 ; uxtb w0, w0 -- X-form producer (S=8, W=64) +
     // W-form consumer (C=8, W=32). W-form auto-zero of X[63:32] clears
     // the high half of the sign-ext; UXTB clears bits 31..8. Dead.
-    sxtb_x(&code[0], 0, 1);
+    sxtb_x(&code[0], 0, 0);
     uxtb_w(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // ldrsb w0, [x1] ; uxtb w0, w0 -- dead (could be ldrb w0, [x1]).
-    ldrsb_w(&code[0], 0, 1, 0);
-    uxtb_w(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 1);
-
-    // ldrsw x0, [x1] ; uxtw x0, w0 -- dead (could be ldr w0, [x1]).
-    ldrsw_x(&code[0], 0, 1, 0);
-    uxtw(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 1);
-
-    // sxtb w0, w1 ; and w0, w0, #0xff -- dead (AND mask C=8 <= S=8).
-    sxtb_w(&code[0], 0, 1);
+    // sxtb w0, w0 ; and w0, w0, #0xff -- dead (AND mask C=8 <= S=8).
+    sxtb_w(&code[0], 0, 0);
     and_w_ff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // sxtw x0, w1 ; mov w0, w0 -- dead (MOV W self C=32 == S=32,
+    // sxtw x0, w0 ; mov w0, w0 -- dead (MOV W self C=32 == S=32,
     // and the W-form write clears X[63:32] including sign-ext bits).
-    sxtw_x(&code[0], 0, 1);
+    sxtw_x(&code[0], 0, 0);
     mov_w_reg(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: the dead path must NOT drop a producer that writes
+    //    fresh data into the low bits the consumer keeps. Removing it
+    //    changes the result (and, for a load, discards the memory
+    //    access). The single-instruction equivalent re-sources the
+    //    consumer / narrows the load -- it is not "delete the producer"
+    //    -- so these are (conservatively) left unflagged. --
+
+    // sxtb w0, w1 ; uxtb w0, w0 -- Rn != Rd. Net = zext(w1[7:0]);
+    // dropping the sxtb makes uxtb read a stale w0 (equivalent would be
+    // uxtb w0, w1).
+    sxtb_w(&code[0], 0, 1);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // sxth x0, w1 ; uxth w0, w0 -- Rn != Rd, X-form producer.
+    sxth_x(&code[0], 0, 1);
+    uxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // sxtb w0, w1 ; and w0, w0, #0xff -- Rn != Rd, AND-mask consumer.
+    sxtb_w(&code[0], 0, 1);
+    and_w_ff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ldrsb w0, [x1] ; uxtb w0, w0 -- load producer: dropping it loses
+    // the memory read (equivalent would be ldrb w0, [x1]).
+    ldrsb_w(&code[0], 0, 1, 0);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ldrsw x0, [x1] ; uxtw x0, w0 -- load producer (equivalent would
+    // be ldr w0, [x1]).
+    ldrsw_x(&code[0], 0, 1, 0);
+    uxtw(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: ASR producer must NOT be reported "dead" by the
     //    zero-extension path. ASR Rd, Rn, #k relocates the data bits

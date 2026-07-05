@@ -178,14 +178,22 @@ struct armlint_state {
     unsigned sxt_upper;
     size_t sxt_offset;
     char sxt_producer_disasm[ARMLINT_FINDING_LINE_LEN];
-    // True when the producer is a data-relocating shift (ASR) rather
-    // than a pure in-place sign-extension (SXTB/SXTH/SXTW, LDRS*). The
-    // redundant-SXT path is sound for both (a following SXT re-extends
-    // the same field in place), but the dead-sign-extension path treats
-    // the producer as removable, which is only valid when the producer
-    // leaves the meaningful data in its original low bits. ASR shifts
-    // those bits, so it must be excluded from the dead path.
-    bool sxt_is_shift;
+    // True when the producer can be dropped outright by the
+    // dead-sign-extension path: it is an in-place register sign-extend
+    // (SXTB/SXTH/SXTW with Rn == Rd), whose only effect is to overwrite
+    // the high bits that a following zero-extension then clears -- so
+    // removing it leaves the meaningful low bits (already sitting in Rd)
+    // untouched.
+    //
+    // False for every producer that instead writes fresh data into those
+    // low bits, where deleting it would change the result:
+    //   - sign-extending loads (LDRSB/LDRSH/LDRSW): the value comes from
+    //     memory, so dropping the load loses it (and the memory access).
+    //   - SXT with Rn != Rd: the value comes from Rn, not Rd's own bits.
+    //   - ASR: a data-relocating shift.
+    // The redundant-SXT path (which removes a following SXT rather than
+    // the producer) stays sound for all of these and does not read this.
+    bool sxt_dead_ok;
 
     // Deferred CMP/TST + B.EQ/NE finding awaiting forward NZCV-liveness
     // verification. Only one of CMP or TST can be pending at a time
@@ -2961,21 +2969,31 @@ static bool decode_sbfm_sext(uint32_t op, unsigned *out_s, unsigned *out_w,
 // mode (the load mask leaves bit 24 free so unsigned-immediate,
 // unscaled, pre-/post-/register-offset forms all match). Producers
 // with Rd=31 are skipped (write goes to ZR).
+//
+// *out_dead_ok reports whether the dead-sign-extension path may drop
+// this producer outright: true only for an in-place register SXT
+// (Rn == Rd), false for loads (data from memory), Rn != Rd SXTs (data
+// from Rn), and ASR (a data-relocating shift). See the sxt_dead_ok
+// state comment.
 static bool decode_sext_producer(uint32_t op, unsigned *out_s,
                                  unsigned *out_w, unsigned *out_rd,
-                                 bool *out_is_shift)
+                                 bool *out_dead_ok)
 {
     unsigned rd_field = op & 0x1Fu;
     if (rd_field == 31) {
         return false;
     }
 
-    unsigned s, w, rd, dummy_rn;
-    if (decode_sbfm_sext(op, &s, &w, &rd, &dummy_rn)) {
+    unsigned s, w, rd, src_rn;
+    if (decode_sbfm_sext(op, &s, &w, &rd, &src_rn)) {
         *out_s = s;
         *out_w = w;
         *out_rd = rd;
-        *out_is_shift = false;
+        // Only an in-place SXT (Rn == Rd) is dead-removable: dropping it
+        // leaves Rd's own low bits in place. An Rn != Rd SXT copies fresh
+        // data from Rn, so the consumer would read a stale Rd if it were
+        // removed.
+        *out_dead_ok = (rd == src_rn);
         return true;
     }
 
@@ -2983,28 +3001,31 @@ static bool decode_sext_producer(uint32_t op, unsigned *out_s,
     // After ASR Rd, Rn, #k, bits [datasize-k, datasize) of Rd equal
     // Rn[datasize-1] = Rd[datasize-k-1], so S = datasize-k, W = datasize
     // (W-form additionally zeros X[63:32] but that's the zext check's
-    // concern; here we only track the sign-extended region).
+    // concern; here we only track the sign-extended region). ASR moves
+    // the data bits down, so it is never dead-removable.
     unsigned asr_sf, asr_rd, asr_rn, asr_shift;
     if (decode_asr_imm(op, &asr_sf, &asr_rd, &asr_rn, &asr_shift)) {
         unsigned datasize = asr_sf ? 64u : 32u;
         *out_s = datasize - asr_shift;
         *out_w = datasize;
         *out_rd = asr_rd;
-        *out_is_shift = true;
+        *out_dead_ok = false;
         return true;
     }
 
-    // Sign-extending loads. (size, opc) -> (S, W):
+    // Sign-extending loads. (size, opc) -> (S, W). A load brings its
+    // value in from memory, so it is never dead-removable (dropping it
+    // would discard the load); *out_dead_ok stays false.
     //   LDRSB Xt: (00, 10) -> (8,  64)
     //   LDRSB Wt: (00, 11) -> (8,  32)
     //   LDRSH Xt: (01, 10) -> (16, 64)
     //   LDRSH Wt: (01, 11) -> (16, 32)
     //   LDRSW Xt: (10, 10) -> (32, 64)
-    if ((op & 0xFEC00000u) == 0x38800000u) { *out_s = 8;  *out_w = 64; *out_rd = rd_field; *out_is_shift = false; return true; }
-    if ((op & 0xFEC00000u) == 0x38C00000u) { *out_s = 8;  *out_w = 32; *out_rd = rd_field; *out_is_shift = false; return true; }
-    if ((op & 0xFEC00000u) == 0x78800000u) { *out_s = 16; *out_w = 64; *out_rd = rd_field; *out_is_shift = false; return true; }
-    if ((op & 0xFEC00000u) == 0x78C00000u) { *out_s = 16; *out_w = 32; *out_rd = rd_field; *out_is_shift = false; return true; }
-    if ((op & 0xFEC00000u) == 0xB8800000u) { *out_s = 32; *out_w = 64; *out_rd = rd_field; *out_is_shift = false; return true; }
+    if ((op & 0xFEC00000u) == 0x38800000u) { *out_s = 8;  *out_w = 64; *out_rd = rd_field; *out_dead_ok = false; return true; }
+    if ((op & 0xFEC00000u) == 0x38C00000u) { *out_s = 8;  *out_w = 32; *out_rd = rd_field; *out_dead_ok = false; return true; }
+    if ((op & 0xFEC00000u) == 0x78800000u) { *out_s = 16; *out_w = 64; *out_rd = rd_field; *out_dead_ok = false; return true; }
+    if ((op & 0xFEC00000u) == 0x78C00000u) { *out_s = 16; *out_w = 32; *out_rd = rd_field; *out_dead_ok = false; return true; }
+    if ((op & 0xFEC00000u) == 0xB8800000u) { *out_s = 32; *out_w = 64; *out_rd = rd_field; *out_dead_ok = false; return true; }
 
     return false;
 }
@@ -3069,7 +3090,11 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
                     && z_rd == state->sxt_rd
                     && z_rn == state->sxt_rd
                     && z_c <= state->sxt_signed_from
-                    && !state->sxt_is_shift) {
+                    // Only when the producer is removable in place: an
+                    // in-place SXT (Rn == Rd). A load or an Rn != Rd SXT
+                    // put fresh data into the low bits the consumer keeps,
+                    // so dropping the producer would change the result.
+                    && state->sxt_dead_ok) {
                 out->name = "dead sign-extension masked by zero-extension";
                 out->start_offset = state->sxt_offset;
                 out->insn_count = 2;
@@ -3093,13 +3118,13 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
 
     // (2) Open: is this a sign-extending producer?
     unsigned p_s, p_w, p_rd;
-    bool p_is_shift;
-    if (decode_sext_producer(op, &p_s, &p_w, &p_rd, &p_is_shift)) {
+    bool p_dead_ok;
+    if (decode_sext_producer(op, &p_s, &p_w, &p_rd, &p_dead_ok)) {
         state->sxt_active = true;
         state->sxt_rd = p_rd;
         state->sxt_signed_from = p_s;
         state->sxt_upper = p_w;
-        state->sxt_is_shift = p_is_shift;
+        state->sxt_dead_ok = p_dead_ok;
         state->sxt_offset = offset;
         snprintf(state->sxt_producer_disasm,
             sizeof(state->sxt_producer_disasm),
