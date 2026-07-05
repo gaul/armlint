@@ -872,6 +872,23 @@ static void b_cond(uint8_t out[4], unsigned cond, int32_t byte_offset)
     write_le32(out, op);
 }
 
+// BC.cond -- the Armv8.8 consistent conditional branch. Same encoding as
+// B.cond but with bit 4 = 1; it also reads NZCV (LIV_READ).
+static void bc_cond(uint8_t out[4], unsigned cond, int32_t byte_offset)
+{
+    int32_t imm19 = byte_offset / 4;
+    uint32_t op = 0x54000010u
+        | (((uint32_t)imm19 & 0x7ffffu) << 5)
+        | (cond & 0xfu);
+    write_le32(out, op);
+}
+
+// MRS Xt, NZCV -- read the condition flags into a GPR (LIV_READ).
+static void mrs_nzcv(uint8_t out[4], unsigned rt)
+{
+    write_le32(out, 0xD53B4200u | (rt & 0x1Fu));
+}
+
 // RET x30 -- the safe-terminator stopper for flag liveness.
 static void ret_(uint8_t out[4])
 {
@@ -1357,6 +1374,28 @@ static void test_cmp_zero_branch(void)
     csel_w(&code[8], 1, 2, 3, 0);
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 0);
+
+    // cmp w0,#0 ; b.eq L ; mrs x1,nzcv ; adds w2,w3,w4 ; ret -- MRS reads
+    // the flags the CMP set, so the fold must be suppressed even though
+    // the ADDS overwrites NZCV afterward. (Without treating MRS as a
+    // reader, that overwrite would wrongly prove the flags dead and the
+    // fold would emit.)
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    mrs_nzcv(&code[8], 1);
+    adds_w(&code[12], 2, 3, 4);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // cmp w0,#0 ; b.eq L ; bc.lt M ; adds w2,w3,w4 ; ret -- BC.cond (the
+    // Armv8.8 consistent conditional branch) reads NZCV; suppress like a
+    // plain B.cond even though it sets bit 4.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    bc_cond(&code[8], 11 /* LT */, 8);
+    adds_w(&code[12], 2, 3, 4);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
 
     // -- Negative: unsafe terminator --
 

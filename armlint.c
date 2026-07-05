@@ -2054,12 +2054,26 @@ typedef enum {
 // LIV_READ.
 static liveness_t classify_liveness(uint32_t op)
 {
-    // B.cond reads NZCV (which flags depend on cond).
-    if ((op & 0xFF000010u) == 0x54000000u) {
+    // B.cond reads NZCV (which flags depend on cond). BC.cond (the
+    // Armv8.8 consistent conditional branch) shares the encoding with
+    // bit 4 = 1 and also reads NZCV, so match bits 31..24 = 0x54 with
+    // bit 4 free to catch both.
+    if ((op & 0xFF000000u) == 0x54000000u) {
         return LIV_READ;
     }
-    // CFINV (Armv8.4): inverts C, depends on prior C value.
-    if (op == 0xD500401Fu) {
+    // CFINV (Armv8.4) inverts C; XAFLAG/AXFLAG (Armv8.5) rewrite NZCV
+    // from the prior flags. All three read the condition flags and share
+    // the flag-manipulation MSR-immediate encoding (CRm = 0, Rt = 31),
+    // differing only in op2 (bits 7..5); the mask leaves op2 free so all
+    // are caught (unallocated op2 values conservatively too). DAIFSet/
+    // DAIFClr/SPSel have a different CRm and are excluded.
+    if ((op & 0xFFFFFF1Fu) == 0xD500401Fu) {
+        return LIV_READ;
+    }
+    // MRS Xt, NZCV reads the condition flags into a GPR (system register
+    // S3_3_C4_C2_0; the mask fixes everything but Rt). Without this a
+    // CMP+B.cond -> CBZ fold could drop flags that a later MRS observes.
+    if ((op & 0xFFFFFFE0u) == 0xD53B4200u) {
         return LIV_READ;
     }
     // Conditional select family CSEL/CSINC/CSINV/CSNEG: reads NZCV.
