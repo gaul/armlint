@@ -2336,13 +2336,14 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
 }
 
 // Stash *out as a deferred finding whose emission is gated on `reg` --
-// the destination of a MOV that the finding proposes to delete -- being
-// dead after the consumer. Such a fold only saves an instruction once a
+// a register produced by an instruction the finding proposes to delete
+// -- being dead afterward. Such a fold only saves an instruction once a
 // later instruction overwrites `reg` before any read or control
 // transfer; armlint_advance_pending_mz runs that forward scan and emits
 // the stashed finding then. Returns false so the caller records nothing
 // now. Shared by the MOV #0 -> ZR fold and the MOV-constant strength
-// reductions, which all delete the materializing MOV.
+// reductions (which delete the materializing MOV) and the BFXIL/BFI
+// synthesis (which drops the isolate's temp register).
 static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
                            unsigned reg)
 {
@@ -3620,7 +3621,13 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
                     "%s", state->bfx_isolate_disasm);
                 snprintf(out->lines[2], sizeof(out->lines[2]),
                     "%s %s", insn->mnemonic, insn->op_str);
-                produced = true;
+                // The rewrite (BFXIL/BFI Rd, Rs) drops the isolate's temp
+                // register tt without writing it, so defer until tt is
+                // proven dead after the ORR -- a later read of the temp
+                // would otherwise make the rewrite unsound. (The ORR
+                // writes Rd, never tt, so tt is never self-overwritten
+                // here.)
+                produced = defer_dead_mov(state, out, tt);
             }
         }
         state->bfx_clear_seen = false;

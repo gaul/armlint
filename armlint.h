@@ -258,6 +258,12 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
 // the isolate doesn't modify the source), and Rs != Rd (the
 // degenerate case where the source is the just-cleared register
 // yields a no-op instead of BFXIL).
+//
+// The BFXIL/BFI rewrite writes only Rd and drops the isolate's temp Rt
+// (it is never written by the rewrite). Emission is therefore deferred
+// until the forward register-liveness scan (armlint_advance_pending_mz)
+// proves Rt dead after the ORR; a downstream read of Rt before it is
+// overwritten would make dropping the isolate unsound.
 bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
                        size_t offset, armlint_finding *out);
 

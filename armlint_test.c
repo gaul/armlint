@@ -207,14 +207,21 @@ static int run_helper_check(uint8_t *bytes, size_t len)
     return run_check(bytes, len);
 }
 
-// Append an X0 overwrite (movz x0, #1) so register X0 -- the register the
-// MOV-fold fixtures materialize their value into -- is provably dead after the
-// consumer, satisfying the forward register-liveness scan that gates the
-// MOV-deleting folds (MOV #0 -> ZR and the MOV-constant strength reductions).
+// Append a movz Xreg, #1 overwrite so register `reg` is provably dead after the
+// fragment, satisfying the forward register-liveness scan that gates the folds
+// which delete a value-producing instruction: MOV #0 -> ZR, the MOV-constant
+// strength reductions, and the BFXIL/BFI synthesis (whose isolate temp is
+// dropped).
+static int run_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
+{
+    movz_x(&bytes[len], reg, 1, 0);
+    return run_check(bytes, len + 4);
+}
+
+// The MOV #0 and MOV-constant fixtures all materialize into x0.
 static int run_x0_dead(uint8_t *bytes, size_t len)
 {
-    movz_x(&bytes[len], 0, 1, 0);
-    return run_check(bytes, len + 4);
+    return run_reg_dead(bytes, len, 0);
 }
 
 static void test_movz_movk_sequences(void)
@@ -3448,6 +3455,11 @@ static void test_bfxil_synth(void)
 {
     uint8_t code[16];
 
+    // Positives use run_reg_dead(..., <Rt>): the BFXIL/BFI rewrite drops
+    // the isolate's temp, so emission is deferred until that temp is
+    // proven dead. The helper appends a movz overwrite of it. The temp is
+    // register 5 for the BFXIL cases below.
+
     // -- Positive: canonical order clear -> isolate -> ORR. --
 
     // and w0, w0, #~0xff ; and w5, w1, #0xff ; orr w0, w0, w5
@@ -3455,7 +3467,7 @@ static void test_bfxil_synth(void)
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 1, 8);
     orr_w(&code[8], 0, 0, 5);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 5) == 1);
 
     // -- Positive: reverse order (isolate first). --
 
@@ -3463,21 +3475,31 @@ static void test_bfxil_synth(void)
     and_w_lowmask(&code[0], 5, 1, 8);
     and_w_highmask(&code[4], 0, 0, 8);
     orr_w(&code[8], 0, 0, 5);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 5) == 1);
 
     // -- Positive: ORR with commuted operands (Rd, Rt, Rd). --
 
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 1, 8);
     orr_w(&code[8], 0, 5, 0);   // commuted
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 5) == 1);
 
     // -- Positive: X-form. --
 
     and_x_highmask(&code[0], 0, 0, 16);
     and_x_lowmask(&code[4], 5, 1, 16);
     orr_x(&code[8], 0, 0, 5);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 5) == 1);
+
+    // -- Negative (the temp-liveness guard): the isolate's temp is live
+    //    after the ORR, so the fold must NOT fire -- dropping the isolate
+    //    would break the later read of the temp. and w0,w0,#~0xff ;
+    //    and w5,w1,#0xff ; orr w0,w0,w5 ; add w9,w9,w5 (reads w5). --
+    and_w_highmask(&code[0], 0, 0, 8);
+    and_w_lowmask(&code[4], 5, 1, 8);
+    orr_w(&code[8], 0, 0, 5);
+    add_w(&code[12], 9, 9, 5);   // reads w5 (the temp) -> live
+    assert(run_helper_check(code, 16) == 0);
 
     // -- Negative: width mismatch. --
 
@@ -3553,31 +3575,32 @@ static void test_bfxil_synth(void)
     // ===== BFI generalization (field at lsb > 0). =====
 
     // -- Positive: BFI X-form. clear [8,16) ; ubfiz x2,x1,#8,#8 ; orr
-    //    x0,x0,x2 -> bfi x0, x1, #8, #8. --
+    //    x0,x0,x2 -> bfi x0, x1, #8, #8. (Temp x2, hence run_reg_dead
+    //    ..., 2.) --
     and_x_field_clear(&code[0], 0, 0, 8, 8);
     ubfiz_x(&code[4], 2, 1, 8, 8);
     orr_x(&code[8], 0, 0, 2);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 2) == 1);
 
-    // -- Positive: reversed order (isolate first), W-form. --
+    // -- Positive: reversed order (isolate first), W-form. Temp w4. --
     ubfiz_w(&code[0], 4, 5, 4, 4);
     and_w_field_clear(&code[4], 3, 3, 4, 4);
     orr_w(&code[8], 3, 3, 4);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 4) == 1);
 
-    // -- Positive: ORR commuted (Rd, Rt, Rd). --
+    // -- Positive: ORR commuted (Rd, Rt, Rd). Temp x2. --
     and_x_field_clear(&code[0], 0, 0, 8, 8);
     ubfiz_x(&code[4], 2, 1, 8, 8);
     orr_x(&code[8], 0, 2, 0);   // commuted
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 2) == 1);
 
     // -- Positive: field reaches the top of the register (lsb+w ==
     //    datasize). The UBFIZ encodes identically to LSL #56; the
-    //    encoding-based match still applies. --
+    //    encoding-based match still applies. Temp x2. --
     and_x_field_clear(&code[0], 0, 0, 56, 8);
     ubfiz_x(&code[4], 2, 1, 56, 8);
     orr_x(&code[8], 0, 0, 2);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_reg_dead(code, 12, 2) == 1);
 
     // -- Negative: position mismatch (clear at lsb 8, isolate at lsb 4). --
     and_x_field_clear(&code[0], 0, 0, 8, 8);
