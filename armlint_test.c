@@ -447,6 +447,36 @@ static void ror_x(uint8_t out[4], unsigned rd, unsigned rs, unsigned shift)
     extr_x(out, rd, rs, rs, shift);
 }
 
+// Shifted-register op carrying an inline shift type (0=LSL, 1=LSR, 2=ASR)
+// and amount, for exercising the funnel-shift (EXTR/ROR) check. base picks
+// the family and width; the shift fields are ORed on top.
+static void encode_sr_sh(uint8_t out[4], uint32_t base, unsigned rd,
+                         unsigned rn, unsigned rm, unsigned type, unsigned amt)
+{
+    uint32_t op = base
+        | ((type & 0x3u) << 22)
+        | ((rm & 0x1fu) << 16)
+        | ((amt & 0x3fu) << 10)
+        | ((rn & 0x1fu) << 5)
+        | (rd & 0x1fu);
+    write_le32(out, op);
+}
+static inline void orr_x_sh(uint8_t o[4], unsigned d, unsigned n, unsigned m,
+                            unsigned t, unsigned a) { encode_sr_sh(o, 0xaa000000u, d, n, m, t, a); }
+static inline void orr_w_sh(uint8_t o[4], unsigned d, unsigned n, unsigned m,
+                            unsigned t, unsigned a) { encode_sr_sh(o, 0x2a000000u, d, n, m, t, a); }
+static inline void eor_x_sh(uint8_t o[4], unsigned d, unsigned n, unsigned m,
+                            unsigned t, unsigned a) { encode_sr_sh(o, 0xca000000u, d, n, m, t, a); }
+static inline void add_x_sh(uint8_t o[4], unsigned d, unsigned n, unsigned m,
+                            unsigned t, unsigned a) { encode_sr_sh(o, 0x8b000000u, d, n, m, t, a); }
+static inline void sub_x_sh(uint8_t o[4], unsigned d, unsigned n, unsigned m,
+                            unsigned t, unsigned a) { encode_sr_sh(o, 0xcb000000u, d, n, m, t, a); }
+static inline void and_x_sh(uint8_t o[4], unsigned d, unsigned n, unsigned m,
+                            unsigned t, unsigned a) { encode_sr_sh(o, 0x8a000000u, d, n, m, t, a); }
+static inline void adds_x_sh(uint8_t o[4], unsigned d, unsigned n, unsigned m,
+                             unsigned t, unsigned a) { encode_sr_sh(o, 0xab000000u, d, n, m, t, a); }
+static inline void nop_insn(uint8_t o[4]) { write_le32(o, 0xd503201fu); }
+
 static void test_lsl_fold(void)
 {
     uint8_t code[16];
@@ -659,6 +689,113 @@ static void test_lsl_fold(void)
     lsl_w(&code[8], 3, 4, 2);
     sub_w(&code[12], 3, 5, 3);
     assert(run_helper_check(code, 16) == 2);
+}
+
+static void test_funnel_to_extr(void)
+{
+    uint8_t code[16];
+
+    // -- Positives: two instructions collapse to one EXTR/ROR. --
+
+    // Pending LSR + ORR<< : lsr x2,x1,#56 ; orr x2,x2,x3,lsl#8
+    //   -> extr x2, x3, x1, #56 (x3 is the high half, x1 the low half).
+    lsr_x(&code[0], 2, 1, 56);
+    orr_x_sh(&code[4], 2, 2, 3, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Pending LSL + ORR>> : lsl x2,x1,#8 ; orr x2,x2,x3,lsr#56
+    //   -> extr x2, x1, x3, #56.
+    lsl_x(&code[0], 2, 1, 8);
+    orr_x_sh(&code[4], 2, 2, 3, 1, 56);
+    assert(run_helper_check(code, 8) == 1);
+
+    // EOR consumer : lsr x0,x1,#40 ; eor x0,x0,x5,lsl#24 -> extr x0,x5,x1,#40.
+    lsr_x(&code[0], 0, 1, 40);
+    eor_x_sh(&code[4], 0, 0, 5, 0, 24);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ADD consumer : lsl x0,x1,#24 ; add x0,x0,x5,lsr#40 -> extr x0,x1,x5,#40.
+    lsl_x(&code[0], 0, 1, 24);
+    add_x_sh(&code[4], 0, 0, 5, 1, 40);
+    assert(run_helper_check(code, 8) == 1);
+
+    // 32-bit width : lsr w2,w1,#24 ; orr w2,w2,w3,lsl#8 -> extr w2,w3,w1,#24.
+    lsr_w(&code[0], 2, 1, 24);
+    orr_w_sh(&code[4], 2, 2, 3, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Both halves the same register is a rotate -> ROR:
+    //   lsr x0,x2,#8 ; orr x0,x0,x2,lsl#56 -> ror x0, x2, #8.
+    lsr_x(&code[0], 0, 2, 8);
+    orr_x_sh(&code[4], 0, 0, 2, 0, 56);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Rotate reached from the LSL side:
+    //   lsl x0,x2,#56 ; orr x0,x0,x2,lsr#8 -> ror x0, x2, #8.
+    lsl_x(&code[0], 0, 2, 56);
+    orr_x_sh(&code[4], 0, 0, 2, 1, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // In-place source shift (shift reads and writes the same register) is
+    // still sound: lsr x0,x0,#56 ; orr x0,x0,x3,lsl#8 -> extr x0, x3, x0, #56.
+    lsr_x(&code[0], 0, 0, 56);
+    orr_x_sh(&code[4], 0, 0, 3, 0, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives: must not fire. --
+
+    // Consumer writes a fresh register, so the shift result may still be
+    // live: lsr x1,x5,#56 ; orr x0,x1,x2,lsl#8. Not provably dead.
+    lsr_x(&code[0], 1, 5, 56);
+    orr_x_sh(&code[4], 0, 1, 2, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Shift amounts do not sum to the register width (40 + 8 != 64).
+    lsr_x(&code[0], 2, 1, 40);
+    orr_x_sh(&code[4], 2, 2, 3, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Same direction (both LSL): not a funnel.
+    lsl_x(&code[0], 2, 1, 56);
+    orr_x_sh(&code[4], 2, 2, 3, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Inline ASR would sign-fill into the other field: reject.
+    lsr_x(&code[0], 2, 1, 56);
+    orr_x_sh(&code[4], 2, 2, 3, 2, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Inline-shifted source == shift destination (orr x2,x2,x2,lsl#8): the
+    // funnel would read the shifted value, not the original register.
+    lsr_x(&code[0], 2, 1, 56);
+    orr_x_sh(&code[4], 2, 2, 2, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB is not a bitwise funnel op.
+    lsl_x(&code[0], 2, 1, 8);
+    sub_x_sh(&code[4], 2, 2, 3, 1, 56);
+    assert(run_helper_check(code, 8) == 0);
+
+    // AND is not a funnel op (disjoint fields AND to zero).
+    lsl_x(&code[0], 2, 1, 8);
+    and_x_sh(&code[4], 2, 2, 3, 1, 56);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Flag-setting ADDS: an EXTR would drop the NZCV write.
+    lsl_x(&code[0], 2, 1, 8);
+    adds_x_sh(&code[4], 2, 2, 3, 1, 56);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Non-adjacent: a NOP separates producer and consumer.
+    lsr_x(&code[0], 2, 1, 56);
+    nop_insn(&code[4]);
+    orr_x_sh(&code[8], 2, 2, 3, 0, 8);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Pending ASR never opens the funnel (arithmetic right shift).
+    asr_x(&code[0], 2, 1, 56);
+    orr_x_sh(&code[4], 2, 2, 3, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // CMP Wn, #imm (no shift) = SUBS WZR, Wn, #imm.
@@ -6813,6 +6950,7 @@ int main(void)
     test_is_bitmask_immediate_64();
     test_movz_movk_sequences();
     test_lsl_fold();
+    test_funnel_to_extr();
     test_cmp_zero_branch();
     test_tst_branch();
     test_redundant_zext();

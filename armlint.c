@@ -51,6 +51,22 @@ struct armlint_state {
     unsigned shf_shift;
     size_t shf_offset;
 
+    // Immediate LSL/LSR shift pending a complementary shifted-register
+    // ORR/EOR/ADD consumer, together a funnel shift foldable to EXTR (or
+    // ROR when both funnel sources are the same register). fnl_is_lsr
+    // records the pending shift's direction; the consumer must carry the
+    // opposite one with the two amounts summing to the register width.
+    // Separate from shf_* because that check wants a zero-shift consumer
+    // to absorb the shift, whereas this one wants a non-zero complementary
+    // inline shift that completes the funnel.
+    bool fnl_active;
+    bool fnl_is_64bit;
+    bool fnl_is_lsr;
+    unsigned fnl_rd;      // shift destination -- the dead intermediate Rt
+    unsigned fnl_rn;      // shift source Ra (one funnel operand)
+    unsigned fnl_shift;   // shift amount
+    size_t fnl_offset;
+
     // LSL pending an LSR/ASR consumer for UBFX/SBFX folding. The state
     // is tracked separately from lsl_* because that check expects a
     // shifted-register consumer while this one expects a bitfield
@@ -1097,6 +1113,183 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
         state->shf_rn = rn;
         state->shf_shift = shift;
         state->shf_offset = offset;
+    }
+
+    return produced;
+}
+
+// Decode the funnel-shift consumer for check_funnel_to_extr: a
+// shifted-register ADD, ORR or EOR (non-flag-setting) whose Rm carries a
+// non-zero LSL or LSR. Only these three ops qualify -- in a funnel the two
+// shifted fields are bit-disjoint, so ADD, ORR and EOR all agree with EXTR
+// -- and only LSL/LSR shift types (ASR would sign-fill into the other
+// field; ROR is not a funnel). SUB and the flag-setting / other logical
+// forms are rejected. Fills the operand fields and the canonical mnemonic.
+static bool decode_funnel_consumer(uint32_t op, unsigned *out_sf,
+                                   unsigned *out_rd, unsigned *out_rn,
+                                   unsigned *out_rm, unsigned *out_shift_type,
+                                   unsigned *out_shift_amt,
+                                   const char **out_mnem)
+{
+    bool is_arith = (op & 0x1f200000u) == 0x0b000000u;
+    bool is_logic = (op & 0x1f000000u) == 0x0a000000u;
+    if (!is_arith && !is_logic) {
+        return false;
+    }
+
+    // Only LSL (0) and LSR (1) reconstruct a funnel.
+    unsigned shift_type = (op >> 22) & 0x3u;
+    if (shift_type != 0u && shift_type != 1u) {
+        return false;
+    }
+    // A funnel consumer must carry a real inline shift.
+    unsigned imm6 = (op >> 10) & 0x3fu;
+    if (imm6 == 0u) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 0x1u;
+    if (!sf && imm6 >= 32u) {
+        return false;
+    }
+
+    const char *mnem;
+    if (is_arith) {
+        // Require plain ADD: bits 30..29 (op|S) == 00. Reject SUB/ADDS/SUBS.
+        if (((op >> 29) & 0x3u) != 0u) {
+            return false;
+        }
+        mnem = "add";
+    } else {
+        // Logical: require N == 0 and opc ORR (01) or EOR (10). Reject
+        // AND/ANDS and the N=1 inverted forms BIC/ORN/EON/BICS.
+        if (((op >> 21) & 0x1u) != 0u) {
+            return false;
+        }
+        unsigned opc = (op >> 29) & 0x3u;
+        if (opc == 1u) {
+            mnem = "orr";
+        } else if (opc == 2u) {
+            mnem = "eor";
+        } else {
+            return false;
+        }
+    }
+
+    *out_sf = sf;
+    *out_rd = op & 0x1fu;
+    *out_rn = (op >> 5) & 0x1fu;
+    *out_rm = (op >> 16) & 0x1fu;
+    *out_shift_type = shift_type;
+    *out_shift_amt = imm6;
+    *out_mnem = mnem;
+    return true;
+}
+
+bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->fnl_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: is this a complementary shifted-register funnel consumer
+    //     of the pending shift?
+    if (state->fnl_active) {
+        unsigned c_sf, c_rd, c_rn, c_rm, c_stype, c_samt;
+        const char *c_mnem;
+        unsigned datasize = state->fnl_is_64bit ? 64u : 32u;
+        if (decode_funnel_consumer(op, &c_sf, &c_rd, &c_rn, &c_rm, &c_stype,
+                                   &c_samt, &c_mnem)
+                && c_sf == (state->fnl_is_64bit ? 1u : 0u)
+                // Rn is the shift result (the plain funnel operand); the
+                // consumer's Rd overwrites it, proving the intermediate is
+                // dead (same structural test as check_lsl_fold).
+                && c_rn == state->fnl_rd
+                && c_rd == state->fnl_rd
+                // The inline-shifted source must be a different register --
+                // the shift wrote fnl_rd, so if Rm were fnl_rd the funnel
+                // would read the shifted value instead of the original.
+                && c_rm != state->fnl_rd
+                && c_rm != 31u
+                // Opposite shift directions (one LSL, one LSR)...
+                && (state->fnl_is_lsr ? (c_stype == 0u) : (c_stype == 1u))
+                // ...with amounts summing to the register width.
+                && state->fnl_shift + c_samt == datasize) {
+            // The right-shifted (LSR) source is the funnel's low half, the
+            // left-shifted (LSL) source its high half; EXTR's lsb is the
+            // right-shift amount. Whichever operand the pending shift holds
+            // is decided by its direction.
+            unsigned left_reg, right_reg, lsb;
+            if (state->fnl_is_lsr) {
+                right_reg = state->fnl_rn;   // pending LSR: Ra is the low half
+                left_reg = c_rm;
+                lsb = state->fnl_shift;
+            } else {
+                left_reg = state->fnl_rn;    // pending LSL: Ra is the high half
+                right_reg = c_rm;
+                lsb = c_samt;
+            }
+            // Same source in both halves is a rotate -> ROR.
+            bool is_ror = (left_reg == right_reg);
+            char wx = state->fnl_is_64bit ? 'x' : 'w';
+            const char *sh0 = state->fnl_is_lsr ? "lsr" : "lsl";
+            const char *sh1 = shift_type_name[c_stype];
+
+            out->name = is_ror
+                ? "shift + shifted OR/EOR/ADD foldable into ROR"
+                : "shift + shifted OR/EOR/ADD foldable into EXTR";
+            out->start_offset = state->fnl_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            if (is_ror) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> ror %c%u, %c%u, #%u",
+                    wx, c_rd, wx, left_reg, lsb);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> extr %c%u, %c%u, %c%u, #%u",
+                    wx, c_rd, wx, left_reg, wx, right_reg, lsb);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s %c%u, %c%u, #%u",
+                sh0, wx, state->fnl_rd, wx, state->fnl_rn, state->fnl_shift);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %c%u, %c%u, %c%u, %s #%u",
+                c_mnem, wx, c_rd, wx, c_rn, wx, c_rm, sh1, c_samt);
+
+            produced = true;
+        }
+        // Strict adjacency: the pending shift expires after one instruction.
+        state->fnl_active = false;
+    }
+
+    // (2) Open: is this a plain immediate LSL or LSR into a real register?
+    unsigned sf, rd, rn, shift;
+    bool is_lsr = false;
+    bool opened = false;
+    if (decode_lsl_imm(op, &sf, &rd, &rn, &shift)) {
+        is_lsr = false;
+        opened = true;
+    } else if (decode_lsr_imm(op, &sf, &rd, &rn, &shift)) {
+        is_lsr = true;
+        opened = true;
+    }
+    // Skip degenerate shifts: writing XZR is pointless, and shifting XZR
+    // (Ra == 31) yields a zero field, not a meaningful funnel operand.
+    if (opened && rd != 31u && rn != 31u) {
+        state->fnl_active = true;
+        state->fnl_is_64bit = (sf != 0u);
+        state->fnl_is_lsr = is_lsr;
+        state->fnl_rd = rd;
+        state->fnl_rn = rn;
+        state->fnl_shift = shift;
+        state->fnl_offset = offset;
     }
 
     return produced;
@@ -6906,6 +7099,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_zero_to_xzr,
     check_movz_movk_bitmask,
     check_lsl_fold,
+    check_funnel_to_extr,
     check_cmp_zero_branch,
     check_tst_branch,
     check_redundant_zext,

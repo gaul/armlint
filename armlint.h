@@ -116,6 +116,22 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
 bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
 
+// Detect an immediate LSL/LSR shift immediately followed by an ORR/EOR/ADD
+// whose Rm carries the complementary shift (opposite direction, amounts
+// summing to the register width) and whose Rn is the shift's destination.
+// The pair is a funnel shift and folds to a single EXTR Rd, Rhi, Rlo, #lsb
+// (where the LSR'd source is the low half and the LSL'd source the high
+// half); when both funnel sources are the same register it is a rotate and
+// folds to ROR Rd, Rs, #lsb. Only ADD/ORR/EOR qualify -- the two shifted
+// fields are disjoint, so all three agree with EXTR bit-for-bit -- and the
+// consumer's shift must be logical (LSL/LSR), never ASR (its sign fill would
+// collide with the other field). Like check_lsl_fold, only flags when the
+// consumer overwrites the shift's destination, proving the intermediate is
+// dead; the inline-shifted source must be a different register so the shift
+// does not clobber it.
+bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect a zero test of Rn -- any of CMP Rn, #0 / CMP Rn, ZR /
 // CMN Rn, #0 / CMN Rn, ZR / TST Rn, Rn (all Rd=31 aliases that leave
 // Z = (Rn == 0)) -- immediately followed by B.EQ or B.NE; the pair is

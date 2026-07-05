@@ -1,0 +1,33 @@
+shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x0: -> extr x2, x3, x1, #56 (2 instructions)
+  lsr x2, x1, #56
+  orr x2, x2, x3, lsl #8
+
+shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x8: -> extr x2, x1, x3, #56 (2 instructions)
+  lsl x2, x1, #8
+  orr x2, x2, x3, lsr #56
+
+shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x10: -> extr x0, x5, x1, #40 (2 instructions)
+  lsr x0, x1, #40
+  eor x0, x0, x5, lsl #24
+
+shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x18: -> extr x0, x1, x5, #40 (2 instructions)
+  lsl x0, x1, #24
+  add x0, x0, x5, lsr #40
+
+shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x20: -> extr w2, w3, w1, #24 (2 instructions)
+  lsr w2, w1, #24
+  orr w2, w2, w3, lsl #8
+
+shift + shifted OR/EOR/ADD foldable into ROR at offset: 0x28: -> ror x0, x2, #8 (2 instructions)
+  lsr x0, x2, #8
+  orr x0, x0, x2, lsl #56
+
+shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x30: -> extr x0, x3, x0, #56 (2 instructions)
+  lsr x0, x0, #56
+  orr x0, x0, x3, lsl #8
+
+Optimization opportunities by type:
+       6  shift + shifted OR/EOR/ADD foldable into EXTR
+       1  shift + shifted OR/EOR/ADD foldable into ROR
+
+7 optimization opportunities in 32 instructions

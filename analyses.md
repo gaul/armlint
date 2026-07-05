@@ -75,6 +75,50 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   form cannot express, and a naive rewrite would read a stale pre-shift
   value for the second operand.
 
+## funnel shift foldable into EXTR or ROR
+
+* `lsr x2, x1, #56 ; orr x2, x2, x3, lsl #8` instead of
+  `extr x2, x3, x1, #56`. An immediate `LSL`/`LSR` feeding an `ORR`,
+  `EOR` or `ADD` whose `Rm` carries the complementary shift (opposite
+  direction, amounts summing to the register width) reassembles a funnel
+  shift: the `LSR`'d source supplies the low half, the `LSL`'d source the
+  high half, and a single `EXTR Rd, Rhi, Rlo, #lsb` (with `lsb` the
+  right-shift amount) produces the same bits. When both halves are the
+  same register the funnel is a rotate and folds to `ROR Rd, Rs, #lsb`
+  (the same-register `EXTR` alias) instead.
+* This is the inverse of the
+  [shift-fold check](#shift-foldable-into-shifted-register-form) above,
+  which absorbs a shift whose consumer has *no* shift of its own. Here the
+  consumer already carries a second, complementary shift, so the pair is a
+  two-register funnel that the shifted-register form cannot express but
+  `EXTR` can.
+* Only `ORR`, `EOR` and `ADD` qualify. With complementary amounts the two
+  shifted fields are bit-disjoint -- the high field occupies bits
+  `[hi, datasize-1]` and the low field `[0, hi-1]`, no overlap -- so OR,
+  XOR and ADD all agree bit-for-bit with `EXTR` (ADD carries nothing
+  across the gap). `SUB` (borrows), `AND`/`BIC` (disjoint fields AND to
+  zero) and the flag-setting `ADDS` (an `EXTR` drops `NZCV`) are not
+  funnels and are rejected.
+* The consumer's shift must be logical (`LSL`/`LSR`), never `ASR`: an
+  arithmetic right shift fills the vacated high bits with the sign, which
+  would collide with the other field instead of leaving the zeroes a
+  funnel needs. The pending producer is likewise only `LSL`/`LSR`.
+* Soundness: like the shift-fold check, armlint flags only when the
+  consumer overwrites the producer's destination (`Rd == Rt`), proving the
+  intermediate shift result is dead -- with no liveness pass, a consumer
+  that writes a fresh register (whose shift result might still be read
+  later) is conservatively skipped. The inline-shifted source must be a
+  different register than the shift destination, else the funnel would read
+  the shifted value rather than the original register. Shifting or writing
+  `XZR` is rejected as degenerate.
+* What it saves: one instruction (4 bytes, a decode/issue slot), and the
+  producer shift no longer runs as a separate dependent op on the critical
+  path -- the whole funnel is one `EXTR`. Compilers that recognize the
+  idiom emit this already (Go's SSA backend, for one, lowers
+  `(x >> (64-c)) | (y << c)` straight to `EXTR`), so on well-optimized
+  output the check is silent; it catches the residual cases from
+  hand-written assembly and weaker code generators.
+
 ## extend foldable into shifted/extended-register form
 
 * The extend counterpart of the shift fold: where that absorbs a shift,
