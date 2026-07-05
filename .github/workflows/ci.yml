@@ -46,7 +46,9 @@ jobs:
     container: fedora:44
     steps:
       - name: Install toolchain and Capstone
-        run: dnf install -y git gcc clang make capstone-devel pkgconf-pkg-config
+        # diffutils: the minimal base image lacks `diff`, which
+        # run_fixtures.sh uses to compare against the snapshots.
+        run: dnf install -y git gcc clang make diffutils capstone-devel pkgconf-pkg-config
 
       - uses: actions/checkout@v7
 
