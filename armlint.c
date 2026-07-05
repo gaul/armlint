@@ -2142,6 +2142,19 @@ static liveness_t classify_liveness(uint32_t op)
     if ((op & 0xFC000000u) == 0x14000000u) {
         return LIV_TERM_UNSAFE;
     }
+    // CBZ/CBNZ and TBZ/TBNZ: conditional branches that do not touch NZCV
+    // themselves, but whose taken edge leaves this straight-line run for a
+    // target the scan does not follow. The flags may still be live there
+    // (the branch does not overwrite them), so treat them as unsafe
+    // terminators rather than LIV_UNKNOWN -- otherwise a later overwrite on
+    // the fall-through could wrongly prove the flags dead while the taken
+    // target still observes them. (classify_reg_liveness stops here too.)
+    if ((op & 0x7E000000u) == 0x34000000u) {   // CBZ / CBNZ
+        return LIV_TERM_UNSAFE;
+    }
+    if ((op & 0x7E000000u) == 0x36000000u) {   // TBZ / TBNZ
+        return LIV_TERM_UNSAFE;
+    }
     // Unconditional branch (register): BR, BLR, RET, ERET, plus arm64e
     // PAC variants. opc at bits 24..21 distinguishes:
     //   0001 = BLR / 1001 = BLRA[A|B][Z]  -> safe (callee clobbers)

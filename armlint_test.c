@@ -914,6 +914,28 @@ static void b_(uint8_t out[4], int32_t byte_offset)
     write_le32(out, op);
 }
 
+// CBZ Wt with byte offset -- a conditional branch; LIV_TERM_UNSAFE.
+static void cbz_w(uint8_t out[4], unsigned rt, int32_t byte_offset)
+{
+    int32_t imm19 = byte_offset / 4;
+    uint32_t op = 0x34000000u
+        | (((uint32_t)imm19 & 0x7ffffu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// TBZ Wt, #bit with byte offset -- a conditional branch; LIV_TERM_UNSAFE.
+static void tbz_w(uint8_t out[4], unsigned rt, unsigned bit,
+                  int32_t byte_offset)
+{
+    int32_t imm14 = byte_offset / 4;
+    uint32_t op = 0x36000000u
+        | ((bit & 0x1Fu) << 19)
+        | (((uint32_t)imm14 & 0x3fffu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 // ADCS Wd, Wn, Wm -- reads C; LIV_READ.
 static void adcs_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
 {
@@ -1404,6 +1426,37 @@ static void test_cmp_zero_branch(void)
     b_cond(&code[4], 0, 8);
     b_(&code[8], 0x100);
     assert(run_helper_check(code, 12) == 0);
+
+    // cmp w0,#0 ; b.eq L ; cbz w1,M ; adds w2,w3,w4 ; ret -- an intervening
+    // CONDITIONAL branch is an unsafe terminator: its taken target may
+    // still observe the CMP's flags (CBZ does not overwrite NZCV), so the
+    // trailing ADDS on the fall-through must not prove them dead. Without
+    // treating CBZ as a terminator the fold would wrongly emit.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    cbz_w(&code[8], 1, 8);
+    adds_w(&code[12], 2, 3, 4);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // Same with TBZ (also a conditional branch / unsafe terminator).
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    tbz_w(&code[8], 1, 3, 8);
+    adds_w(&code[12], 2, 3, 4);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // Positive control: with a non-branch UNKNOWN instruction in place of
+    // the conditional branch, the trailing ADDS does prove the flags dead
+    // and the fold emits -- confirming the two cases above are suppressed
+    // by the branch, not by something incidental.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 8);
+    movz_w(&code[8], 1, 5);
+    adds_w(&code[12], 2, 3, 4);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
 
     // -- Negative: window expiry --
 

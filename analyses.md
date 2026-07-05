@@ -186,9 +186,10 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   overwrites NZCV without reading them (ADDS/SUBS/ANDS/BICS/FCMP)
   or a terminator that makes prior flags unobservable (RET, BL,
   BLR). The scan suppresses on any flag-reader, an unsafe
-  terminator (B unconditional, BR), or after a 16-instruction
-  window with no decision. The branch-target path is not scanned;
-  full soundness would require basic-block analysis.
+  terminator (B unconditional, BR, or a conditional CBZ/CBNZ/TBZ/TBNZ
+  whose taken target may still observe the flags), or after a
+  16-instruction window with no decision. The branch-target path is
+  not scanned; full soundness would require basic-block analysis.
 
 ## compare-zero signed-branch foldable into TBZ/TBNZ
 

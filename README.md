@@ -51,9 +51,11 @@ equivalent; the constraints below are the ones they share.
   fall-through path confirms that no later instruction reads N/C/V before
   they are overwritten. Every NZCV reader is recognized -- the integer
   conditionals (`B.cond`, `CSEL`/`CSINC`/..., `CCMP`/`CCMN`, `ADC`/`SBC`)
-  and the floating-point ones (`FCSEL`, `FCCMP`/`FCCMPE`) -- and an
-  unconditional branch on the path (whose destination the scan cannot
-  see) ends it conservatively. The scan does not follow the folded
+  and the floating-point ones (`FCSEL`, `FCCMP`/`FCCMPE`) -- and any
+  branch off the path whose destination the scan cannot see -- an
+  unconditional `B`, or a conditional `CBZ`/`CBNZ`/`TBZ`/`TBNZ` (which do
+  not themselves touch NZCV but whose taken target may still observe it)
+  -- ends it conservatively. The scan does not follow the folded
   branch's own taken edge, so these folds assume N/C/V is dead at every
   branch target. That holds for compiled code, where the flags are
   defined within a basic block, but not for hand-written assembly that
