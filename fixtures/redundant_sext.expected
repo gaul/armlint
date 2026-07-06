@@ -22,8 +22,17 @@ load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x28: -> ldrsb w10, 
   ldrb w10, [x11]
   sxtb w10, w10
 
-Optimization opportunities by type:
-       4  redundant sign-extension after sign-extending op
-       2  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+redundant sign-extension after sign-extending op at offset: 0x38: sxtb w15, w15 is a no-op (sign already extended from bit 7) (2 instructions)
+  sbfx w15, w16, #4, #8
+  sxtb w15, w15
 
-6 optimization opportunities in 15 instructions
+dead sign-extension masked by zero-extension at offset: 0x40: sbfx w17, w17, #0, #5 is dead -- and w17, w17, #0x1f clears bits >= 5 (S = 5) (2 instructions)
+  sbfx w17, w17, #0, #5
+  and w17, w17, #0x1f
+
+Optimization opportunities by type:
+       5  redundant sign-extension after sign-extending op
+       2  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+       1  dead sign-extension masked by zero-extension
+
+8 optimization opportunities in 21 instructions

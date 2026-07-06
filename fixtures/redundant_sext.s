@@ -42,4 +42,19 @@ _main:
     ldrsb   w12, [x13]
     sxtb    w12, w14
 
+    // Positive: general SBFX -- the extracted 8-bit field's sign is
+    // already replicated through bit 31 (S = 8).
+    sbfx    w15, w16, #4, #8
+    sxtb    w15, w15
+
+    // Positive: dead in-place sign-extension -- the AND keeps exactly
+    // the 5 bits the SBFX extended, so the SBFX can be dropped.
+    sbfx    w17, w17, #0, #5
+    and     w17, w17, #0x1f
+
+    // Negative: S = 12 > 8 -- bit 7 is field data, so the SXTB
+    // narrows the field and does real work.
+    sbfx    w20, w21, #4, #12
+    sxtb    w20, w20
+
     ret

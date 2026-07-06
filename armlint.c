@@ -146,7 +146,13 @@ struct armlint_state {
     // Producer of bits-above-N guaranteed zero, pending a redundant
     // zero-extension consumer that re-zeros those bits. wzx_zero_from
     // is the threshold P: the producer guarantees bits >= P are zero.
-    //   W-form ALU / LDR Wt / LDRSB/LDRSH Wt -> P=32
+    //   UBFM (W or X form)     -> P from the field geometry (see
+    //                             decode_zeroing_producer); covers
+    //                             LSR / UBFX / UXTB / UXTH producers
+    //   AND/ANDS imm (W or X)  -> P = top set bit of the mask + 1
+    //   MOVZ (W or X)          -> P = bit count of the known value
+    //   CSINC Rd, ZR, ZR (CSET)-> P = 1 (result is 0 or 1)
+    //   other W-form ALU / LDR Wt / LDRSB/LDRSH Wt -> P=32
     //   LDRH Wt -> P=16
     //   LDRB Wt -> P=8
     // A consumer that clears bits >= C is redundant iff P <= C.
@@ -160,13 +166,17 @@ struct armlint_state {
     // sign-extension consumer. Parallel to wzx_* but tracks two values:
     // sxt_signed_from = S, the lowest bit above which the sign of bit
     // S-1 is replicated; sxt_upper = W, the (exclusive) upper bound of
-    // that region (32 for W-form, 64 for X-form).
+    // that region (32 for W-form, 64 for X-form). Any SBFM is a
+    // producer, with S from the field geometry (see
+    // decode_sext_producer); the canonical shapes:
     //   LDRSB Wt / SXTB Wd, Wn         -> (S=8,  W=32)
     //   LDRSH Wt / SXTH Wd, Wn         -> (S=16, W=32)
     //   LDRSB Xt / SXTB Xd, Wn         -> (S=8,  W=64)
     //   LDRSH Xt / SXTH Xd, Wn         -> (S=16, W=64)
     //   LDRSW Xt / SXTW Xd, Wn         -> (S=32, W=64)
     //   ASR Rd, Rn, #k (W/X)           -> (S=datasize-k, W=datasize)
+    //   SBFX Rd, Rn, #lsb, #w          -> (S=w, W=datasize)
+    //   SBFIZ Rd, Rn, #lsb, #w         -> (S=lsb+w, W=datasize)
     // A consumer SXTB/SXTH/SXTW with thresholds (S_c, W_c) is
     // redundant iff S_p <= S_c AND W_p == W_c AND Rd == Rn ==
     // producer.Rd. W_p == W_c (not <=) is required because a W-form
@@ -180,8 +190,9 @@ struct armlint_state {
     char sxt_producer_disasm[ARMLINT_FINDING_LINE_LEN];
     // True when the producer can be dropped outright by the
     // dead-sign-extension path: it is an in-place register sign-extend
-    // (SXTB/SXTH/SXTW with Rn == Rd), whose only effect is to overwrite
-    // the high bits that a following zero-extension then clears -- so
+    // (an SBFM with immr == 0 -- SXTB/SXTH/SXTW or a general low-field
+    // SBFX #0 -- and Rn == Rd), whose only effect is to overwrite the
+    // high bits that a following zero-extension then clears -- so
     // removing it leaves the meaningful low bits (already sitting in Rd)
     // untouched.
     //
@@ -190,7 +201,8 @@ struct armlint_state {
     //   - sign-extending loads (LDRSB/LDRSH/LDRSW): the value comes from
     //     memory, so dropping the load loses it (and the memory access).
     //   - SXT with Rn != Rd: the value comes from Rn, not Rd's own bits.
-    //   - ASR: a data-relocating shift.
+    //   - ASR, SBFX with lsb > 0, SBFIZ (immr != 0): data-relocating
+    //     shapes -- the field the consumer keeps came from elsewhere.
     // The redundant-SXT path (which removes a following SXT rather than
     // the producer) stays sound for all of these and does not read this.
     bool sxt_dead_ok;
@@ -2750,22 +2762,19 @@ static bool decode_ubfm_zext(uint32_t op, unsigned *out_c,
     if (immr != 0) {
         return false;
     }
-    unsigned c;
-    switch (imms) {
-    case 7:  c = 8;  break;
-    case 15: c = 16; break;
-    case 31:
-        // sf=0 with imms=31 is "MOV Wd, Wn" (UBFM all-of-W) -- not
-        // really a zero-extension consumer in the sense we want.
-        if (sf == 0) {
-            return false;
-        }
-        c = 32;
-        break;
-    default:
+    // With immr = 0, UBFM keeps bits imms..0 in place and clears
+    // everything above: a zero-extension of width C = imms + 1. The
+    // canonical spellings are UXTB (C=8), UXTH (C=16), the X-form
+    // UBFX #0, #32 "UXTW" (C=32), and the general in-place
+    // UBFX Rd, Rn, #0, #C. The full-width copies (sf=0 imms=31 is
+    // "MOV Wd, Wn"; sf=1 imms=63 a literal no-op) clear nothing and
+    // are rejected, as are the UNDEFINED sf=0 encodings with
+    // imms >= 32.
+    unsigned datasize = sf ? 64u : 32u;
+    if (imms >= datasize - 1u) {
         return false;
     }
-    *out_c = c;
+    *out_c = imms + 1u;
     *out_rd = op & 0x1Fu;
     *out_rn = (op >> 5) & 0x1Fu;
     return true;
@@ -2836,17 +2845,119 @@ static bool decode_mov_w_self(uint32_t op, unsigned *out_c, unsigned *out_rd)
     return true;
 }
 
+// Number of significant bits in v: the index of the highest set bit
+// plus one, i.e. the smallest P with v < 2^P. Returns 0 for v == 0.
+static unsigned bits_used64(uint64_t v)
+{
+    unsigned n = 0;
+    while (v != 0) {
+        n++;
+        v >>= 1;
+    }
+    return n;
+}
+
 // True if `op` is an instruction whose Rd/Rt is at bits 4..0 and which
 // leaves bits 63..P of the corresponding X register zeroed for the
-// returned P. Conservative: matches W-form data-processing instructions
-// (P=32) and W-form integer loads (P=8 for LDRB, 16 for LDRH, 32 for
-// LDR / LDRSB / LDRSH).
-static bool decode_w_form_zext(uint32_t op, unsigned *out_rd,
-                               unsigned *out_zero_from)
+// returned P. Any W-form write gives P <= 32 for free; several
+// producers pin P tighter, or extend the guarantee to X-form ops whose
+// result is provably bounded:
+//
+//   UBFM (W or X)         P from the field geometry: an extraction
+//                         (imms >= immr -- the UBFX/LSR/UXTB/UXTH
+//                         shapes) leaves a field of imms-immr+1 low
+//                         bits; an insertion (imms < immr -- the
+//                         UBFIZ/LSL shapes) tops out at bit
+//                         datasize-immr+imms, so P is one above that.
+//   AND/ANDS imm (W or X) the result is a subset of the mask:
+//                         P = top set bit of the mask + 1. ORR/EOR
+//                         propagate Rn's high bits and get no sharp
+//                         threshold.
+//   MOVZ (W or X)         the value is fully known: P = its bit count
+//                         (0 for MOVZ #0).
+//   CSINC Rd, ZR, ZR      the CSET family: the result is 0 or 1
+//                         regardless of cond, so P = 1.
+//   other W-form DP       P = 32 (the W write zeros X[63:32]).
+//   W-form integer loads  P = 8 (LDRB) / 16 (LDRH) / 32 (LDR /
+//                         LDRSB / LDRSH Wt).
+//
+// An X-form producer whose computed P is 64 guarantees nothing and is
+// not matched.
+static bool decode_zeroing_producer(uint32_t op, unsigned *out_rd,
+                                    unsigned *out_zero_from)
 {
     unsigned rd = op & 0x1Fu;
     if (rd == 31) {
         return false;
+    }
+
+    unsigned sf = (op >> 31) & 1u;
+    unsigned datasize = sf ? 64u : 32u;
+
+    // UBFM: sf 10 100110 N(=sf) immr imms Rn Rd.
+    if ((op & 0xFFC00000u) == (sf ? 0xD3400000u : 0x53000000u)) {
+        unsigned immr = (op >> 16) & 0x3Fu;
+        unsigned imms = (op >> 10) & 0x3Fu;
+        if (!sf && (immr >= 32u || imms >= 32u)) {
+            return false;   // UNDEFINED encoding
+        }
+        unsigned p = (imms >= immr) ? (imms - immr + 1u)
+                                    : (datasize - immr + imms + 1u);
+        if (sf && p == 64u) {
+            return false;   // full-width result: nothing known zero
+        }
+        *out_rd = rd;
+        *out_zero_from = p;
+        return true;
+    }
+
+    // AND (opc=00) / ANDS (opc=11) immediate: decode the mask to its
+    // concrete value; the result can set no bit the mask does not.
+    if ((op & 0x1F800000u) == 0x12000000u) {
+        unsigned opc = (op >> 29) & 0x3u;
+        if (opc == 0u || opc == 3u) {
+            unsigned n_bit = (op >> 22) & 1u;
+            unsigned immr = (op >> 16) & 0x3Fu;
+            unsigned imms = (op >> 10) & 0x3Fu;
+            uint64_t mask;
+            if (!(!sf && n_bit)   // sf=0 with N=1 is UNDEFINED
+                    && decode_bitmask_imm_value(n_bit, immr, imms,
+                                                datasize, &mask)) {
+                unsigned p = bits_used64(mask);
+                if (!(sf && p == 64u)) {
+                    *out_rd = rd;
+                    *out_zero_from = p;
+                    return true;
+                }
+            }
+        }
+        // ORR/EOR (and undecodable masks) fall through: the W forms
+        // still qualify via the generic W-form table below.
+    }
+
+    // MOVZ: sf 10 100101 hw imm16 Rd.
+    if ((op & 0x7F800000u) == 0x52800000u) {
+        unsigned hw = (op >> 21) & 0x3u;
+        if (!sf && hw >= 2u) {
+            return false;   // UNDEFINED encoding
+        }
+        uint64_t value = (uint64_t)((op >> 5) & 0xFFFFu) << (16u * hw);
+        unsigned p = bits_used64(value);
+        if (sf && p == 64u) {
+            return false;
+        }
+        *out_rd = rd;
+        *out_zero_from = p;
+        return true;
+    }
+
+    // CSINC Rd, ZR, ZR, cond -- CSET and its inverted spellings.
+    if ((op & 0x7FE00C00u) == 0x1A800400u
+            && ((op >> 16) & 0x1Fu) == 31u
+            && ((op >> 5) & 0x1Fu) == 31u) {
+        *out_rd = rd;
+        *out_zero_from = 1u;
+        return true;
     }
 
     // W-form data processing (sf=0). See the table in the comment for
@@ -2927,7 +3038,7 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
                 && c_rd == state->wzx_rd
                 && c_rn == state->wzx_rd
                 && state->wzx_zero_from <= c) {
-            out->name = "redundant zero-extension after W-form op";
+            out->name = "redundant zero-extension after zeroing op";
             out->start_offset = state->wzx_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
@@ -2947,7 +3058,7 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
 
     // (2) Open: is this a producer that zeros some high-bit region?
     unsigned p_rd, p_zero_from;
-    if (decode_w_form_zext(op, &p_rd, &p_zero_from)) {
+    if (decode_zeroing_producer(op, &p_rd, &p_zero_from)) {
         state->wzx_active = true;
         state->wzx_rd = p_rd;
         state->wzx_zero_from = p_zero_from;
@@ -2999,19 +3110,20 @@ static bool decode_sbfm_sext(uint32_t op, unsigned *out_s, unsigned *out_w,
     return true;
 }
 
-// Detect a sign-extending producer for check_redundant_sext: the SBFM
-// SXT* aliases, the ASR (immediate) shift (which sign-extends the
-// source's top bit through bits [datasize-k, datasize)), and the
-// sign-extending integer loads LDRSB/LDRSH/LDRSW in any addressing
-// mode (the load mask leaves bit 24 free so unsigned-immediate,
-// unscaled, pre-/post-/register-offset forms all match). Producers
-// with Rd=31 are skipped (write goes to ZR).
+// Detect a sign-extending producer for check_redundant_sext: any SBFM
+// (which subsumes the SXT* aliases, ASR immediate, and the general
+// SBFX/SBFIZ shapes), and the sign-extending integer loads
+// LDRSB/LDRSH/LDRSW in any addressing mode (the load mask leaves bit
+// 24 free so unsigned-immediate, unscaled, pre-/post-/register-offset
+// forms all match). Producers with Rd=31 are skipped (write goes to
+// ZR).
 //
 // *out_dead_ok reports whether the dead-sign-extension path may drop
-// this producer outright: true only for an in-place register SXT
-// (Rn == Rd), false for loads (data from memory), Rn != Rd SXTs (data
-// from Rn), and ASR (a data-relocating shift). See the sxt_dead_ok
-// state comment.
+// this producer outright: true only for an in-place low-field SBFM
+// (immr == 0 and Rn == Rd -- the SXT* aliases and SBFX #0 shapes),
+// false for loads (data from memory), Rn != Rd extends (data from
+// Rn), and the data-relocating shapes (ASR, SBFX with lsb > 0,
+// SBFIZ). See the sxt_dead_ok state comment.
 static bool decode_sext_producer(uint32_t op, unsigned *out_s,
                                  unsigned *out_w, unsigned *out_rd,
                                  bool *out_dead_ok)
@@ -3021,32 +3133,40 @@ static bool decode_sext_producer(uint32_t op, unsigned *out_s,
         return false;
     }
 
-    unsigned s, w, rd, src_rn;
-    if (decode_sbfm_sext(op, &s, &w, &rd, &src_rn)) {
+    // SBFM: sf 00 100110 N(=sf) immr imms Rn Rd. An extraction shape
+    // (imms >= immr -- SXTB/SXTH/SXTW at immr=0, ASR at
+    // imms=datasize-1, general SBFX) leaves a field of imms-immr+1
+    // low bits and replicates its sign upward, so S is that width; an
+    // insertion (imms < immr -- SBFIZ) places the field with its top
+    // at bit datasize-immr+imms and replicates from there, so S is
+    // one above that. W = datasize (a W-form producer additionally
+    // zeros X[63:32], but that is the zext check's concern). S ==
+    // datasize -- the full-width copy, or an SBFIZ whose field
+    // reaches the top bit -- leaves no sign-replicated region and is
+    // not a producer.
+    unsigned sf = (op >> 31) & 1u;
+    if ((op & 0xFFC00000u) == (sf ? 0x93400000u : 0x13000000u)) {
+        unsigned immr = (op >> 16) & 0x3Fu;
+        unsigned imms = (op >> 10) & 0x3Fu;
+        unsigned datasize = sf ? 64u : 32u;
+        if (!sf && (immr >= 32u || imms >= 32u)) {
+            return false;   // UNDEFINED encoding
+        }
+        unsigned s = (imms >= immr) ? (imms - immr + 1u)
+                                    : (datasize - immr + imms + 1u);
+        if (s == datasize) {
+            return false;
+        }
         *out_s = s;
-        *out_w = w;
-        *out_rd = rd;
-        // Only an in-place SXT (Rn == Rd) is dead-removable: dropping it
-        // leaves Rd's own low bits in place. An Rn != Rd SXT copies fresh
-        // data from Rn, so the consumer would read a stale Rd if it were
-        // removed.
-        *out_dead_ok = (rd == src_rn);
-        return true;
-    }
-
-    // ASR (immediate): SBFM with imms = datasize-1 and immr = shift > 0.
-    // After ASR Rd, Rn, #k, bits [datasize-k, datasize) of Rd equal
-    // Rn[datasize-1] = Rd[datasize-k-1], so S = datasize-k, W = datasize
-    // (W-form additionally zeros X[63:32] but that's the zext check's
-    // concern; here we only track the sign-extended region). ASR moves
-    // the data bits down, so it is never dead-removable.
-    unsigned asr_sf, asr_rd, asr_rn, asr_shift;
-    if (decode_asr_imm(op, &asr_sf, &asr_rd, &asr_rn, &asr_shift)) {
-        unsigned datasize = asr_sf ? 64u : 32u;
-        *out_s = datasize - asr_shift;
         *out_w = datasize;
-        *out_rd = asr_rd;
-        *out_dead_ok = false;
+        *out_rd = rd_field;
+        // Dead-removable only when the data stays in place (immr == 0,
+        // so the consumer's kept low bits are the extend's own field)
+        // and it is Rd's own value being extended (Rn == Rd). A
+        // relocating shape or an Rn != Rd extend writes fresh data
+        // into the bits the consumer keeps.
+        *out_dead_ok = (immr == 0u
+                        && rd_field == ((op >> 5) & 0x1Fu));
         return true;
     }
 

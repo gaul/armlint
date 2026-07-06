@@ -177,18 +177,28 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
 bool check_tst_branch(armlint_state *state, const cs_insn *insn,
                       size_t offset, armlint_finding *out);
 
-// Detect a W-form ALU/move/bitfield instruction whose result Rd is
-// immediately consumed by UXTW Xd, Wd or AND Xd, Xd, #0xffffffff with
-// the same Rd. The X-form zero-extension is redundant because the
-// W-form write already zeroed bits 63..32 of the X register.
+// Detect a producer that provably zeros bits 63..P of its destination,
+// immediately followed by an in-place zero-extension consumer that
+// clears bits >= C with P <= C -- a no-op. Producers: any W-form
+// data-processing write (P=32) and the W-form integer loads (P=8/16/32
+// by access width), with sharper value-derived thresholds -- in both W
+// and X form -- for UBFM (P from the field geometry, covering
+// LSR/UBFX/UXTB/UXTH), AND/ANDS immediate (P = top set bit of the mask
+// + 1), MOVZ (P = bit count of the known value), and CSINC Rd, ZR, ZR
+// (CSET: P = 1). Consumers: an in-place UBFM with immr=0 of any width
+// (UXTB/UXTH/UXTW and general UBFX #0, #C), an AND with a contiguous
+// low mask (C = mask width), or MOV Wd, Wd (C = 32 via the W write).
 bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
-// Detect a sign-extending producer (LDRSB / LDRSH / LDRSW or SXTB /
-// SXTH / SXTW) immediately followed by an SXTB / SXTH / SXTW consumer
-// whose destination width matches the producer's and whose sign
-// threshold is at least the producer's. The consumer is redundant: the
-// producer already replicated the sign bit through the same upper bits.
+// Detect a sign-extending producer (LDRSB / LDRSH / LDRSW, or any
+// SBFM: the SXTB / SXTH / SXTW aliases, ASR immediate, and the
+// general SBFX / SBFIZ shapes, whose sign threshold follows from the
+// field geometry) immediately followed by an SXTB / SXTH / SXTW
+// consumer whose destination width matches the producer's and whose
+// sign threshold is at least the producer's. The consumer is
+// redundant: the producer already replicated the sign bit through the
+// same upper bits.
 bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 

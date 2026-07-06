@@ -318,26 +318,61 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * Generalises the previous "redundant UXTW after W-form ALU" rule
   to size-aware producer/consumer pairs. The check tracks the
-  threshold `P` at which the producer guarantees `Rt[63:P] == 0`:
-  32 for W-form data-processing or `LDR Wt` / `LDRSB Wt` / `LDRSH Wt`,
-  16 for `LDRH Wt`, 8 for `LDRB Wt`. A consumer that clears bits
-  above `C` is redundant when `P <= C`.
-* Recognised consumers: `UXTB / UXTH / UXTW` (W- or X-form UBFM
-  aliases with `immr=0`, `imms ∈ {7,15,31}`, `N=sf`), AND-imm
-  with mask `0xff` / `0xffff` / `0xffffffff` (both forms in W and
-  X register variants), and `MOV Wd, Wd` (`ORR Wd, WZR, Wd` with
-  `Rm = Rd`; the W-form register MOV writes back through the W
-  register and so clears X[63:32], giving `C = 32`).
-* Example flags: `add w0,w1,w2 ; uxtw x0,w0`, `ldrh w0,[x1] ; uxth
-  w0,w0`, `ldrb w8,[x9] ; and w8,w8,#0xff`. Counter-example (`P >
-  C`, not flagged): `ldr w0,[x1] ; uxth w0,w0` -- LDR W loads 32
-  valid bits, so UXTH would actually clear bits 31..16.
-* Currently requires `Rd == Rn == producer.Rd` so the consumer is
-  purely dead. Producer set covers all W-form DP classes (`ADD/SUB`
-  immediate/shifted/extended, logical immediate, `MOVZ/MOVN/MOVK`,
-  bitfield `SBFM/BFM/UBFM`, `EXTR`, logical shifted register,
-  `ADC/SBC`, conditional select, DP-3/2/1-source) plus integer
-  loads with `Wt` destination in any addressing mode.
+  threshold `P` at which the producer guarantees `Rt[63:P] == 0`;
+  a consumer that clears bits above `C` is redundant when `P <= C`.
+* Baseline thresholds: any W-form data-processing write gives
+  `P = 32` (the W write zeros `X[63:32]` -- the producer set covers
+  `ADD/SUB` immediate/shifted/extended, logical immediate,
+  `MOVZ/MOVN/MOVK`, bitfield `SBFM/BFM/UBFM`, `EXTR`, logical
+  shifted register, `ADC/SBC`, conditional select, DP-3/2/1-source),
+  and the W-form integer loads (any addressing mode) give their
+  access width: 8 for `LDRB Wt`, 16 for `LDRH Wt`, 32 for `LDR Wt` /
+  `LDRSB Wt` / `LDRSH Wt`.
+* Value-derived thresholds pin `P` tighter -- and, since they bound
+  the whole 64-bit result, qualify X-form producers too:
+  * `UBFM` (both forms), from the field geometry: an extraction
+    (`imms >= immr` -- the `UBFX`/`LSR`/`UXTB`/`UXTH` shapes) leaves
+    a field of `imms-immr+1` low bits, so `P` is that width
+    (`lsr w8, w9, #24` gives `P = 8`); an insertion (`imms < immr`
+    -- the `UBFIZ`/`LSL` shapes) tops out at
+    `P = datasize-immr+imms+1`, so an `LSL` gets no sharpening
+    (`P = datasize`).
+  * `AND`/`ANDS` immediate (both forms): the result is a subset of
+    the mask, so `P` = the mask's top set bit + 1
+    (`and x0, x1, #0xff` gives `P = 8`). `ORR`/`EOR` propagate
+    `Rn`'s high bits and keep only the generic W-form threshold.
+  * `MOVZ` (both forms): the value is fully known, so `P` = its bit
+    count (`movz w0, #0x12` gives `P = 5`).
+  * `CSINC Rd, ZR, ZR, cond` (the `CSET` family): the result is 0
+    or 1 regardless of the condition, so `P = 1`.
+  An X-form producer whose computed `P` is 64 guarantees nothing
+  and is skipped.
+* Recognised consumers, each requiring `Rd == Rn == producer.Rd` so
+  the consumer is purely dead:
+  * an in-place `UBFM` with `immr = 0` of any width `C = imms+1` --
+    the `UXTB`/`UXTH`/`UXTW` aliases and the general
+    `UBFX Rd, Rd, #0, #C`; the full-width copies (`MOV Wd, Wn`
+    at `imms = 31`, and the X-form no-op at `imms = 63`) clear
+    nothing and are excluded;
+  * an AND-imm whose mask is a contiguous run of `C` low bits (any
+    width, e.g. `#0x1f` for `C = 5`), in W or X register variants;
+  * `MOV Wd, Wd` (`ORR Wd, WZR, Wd` with `Rm = Rd`; the W-form
+    register MOV writes back through the W register and so clears
+    X[63:32], giving `C = 32`).
+* Example flags: `add w0,w1,w2 ; uxtw x0,w0`; `ldrb w8,[x9] ; and
+  w8,w8,#0xff`; `lsr w8,w9,#24 ; and w8,w8,#0xff` (`P = 8`);
+  `ubfx w8,w9,#3,#4 ; uxtb w8,w8` (`P = 4`); `and x0,x1,#0xff ;
+  uxtb w0,w0` (X-form producer); `cset w8,eq ; and w8,w8,#1`
+  (`P = 1`). Counter-examples (not flagged): `ldr w0,[x1] ; uxth
+  w0,w0` -- LDR W loads 32 valid bits, so UXTH would actually clear
+  bits 31..16; `orr w0,w1,#0xf ; uxtb w0,w0` -- ORR can propagate
+  high bits of `w1`.
+* A sharpened threshold can make this check and a bitfield fold
+  fire on the same pair: `lsr w8, w9, #24 ; and w8, w8, #0xff` is
+  also the [`LSR+AND -> UBFX`](#shift-and-mask-bitfield-extraction-foldable-into-ubfx)
+  shape with the width capped. The two findings offer equivalent
+  one-instruction outcomes -- drop the dead AND, or fuse the pair
+  -- and both are reported, like the CMP-drop/CBZ-fold overlap.
 
 ## `MOV Xd, Xd` is a literal no-op
 
@@ -357,18 +392,27 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   sign(Rd[S-1])`. A consumer `SXTB / SXTH / SXTW` with thresholds
   `(S_c, W_c)` is redundant iff `S_p <= S_c` AND `W_p == W_c` AND
   `Rd == Rn == producer.Rd`.
-* Recognised producers: `SXTB / SXTH / SXTW` (SBFM aliases with
-  `immr = 0`, `imms in {7, 15, 31}`); the sign-extending integer
-  loads `LDRSB / LDRSH / LDRSW` in any addressing mode; and `ASR
-  Rd, Rn, #k` (SBFM with `imms = datasize-1`, `immr = k > 0`), which
-  replicates `Rn[datasize-1]` through bits `[datasize-k, datasize)`
-  of `Rd`, so `S = datasize-k`. (S, W) maps for the canonical SXT*
-  pairs: `LDRSB Wt` / `SXTB Wd,Wn` -> (8, 32); `LDRSH Wt` /
-  `SXTH Wd,Wn` -> (16, 32); `LDRSB Xt` / `SXTB Xd,Wn` -> (8, 64);
-  `LDRSH Xt` / `SXTH Xd,Wn` -> (16, 64); `LDRSW Xt` /
-  `SXTW Xd,Wn` -> (32, 64). Example flagged ASR pair: `asr w0, w1,
-  #24 ; sxtb w0, w0` (S_p=8 = S_c=8); `asr x0, x1, #48 ; sxth x0,
-  w0`.
+* Recognised producers: the sign-extending integer loads
+  `LDRSB / LDRSH / LDRSW` in any addressing mode, and any `SBFM`,
+  with `S` from the field geometry: an extraction (`imms >= immr`)
+  leaves a field of `imms-immr+1` low bits and replicates its sign
+  upward, so `S` is that width -- this covers the `SXTB`/`SXTH`/
+  `SXTW` aliases (`immr = 0`, `S` = 8/16/32), `ASR Rd, Rn, #k`
+  (`imms = datasize-1`, so `S = datasize-k`), and the general
+  `SBFX Rd, Rn, #lsb, #w` (`S = w`); an insertion (`imms < immr`,
+  the `SBFIZ` shape) places the field with its top at bit
+  `datasize-immr+imms` and replicates from there, so `S` is one
+  above that (`sbfiz w0, w1, #8, #8` gives `S = 16`). `S ==
+  datasize` -- the full-width copy, or an `SBFIZ` whose field
+  reaches the top bit -- leaves no sign-replicated region and is
+  not a producer. `W = datasize` throughout. (S, W) maps for the
+  canonical SXT* pairs: `LDRSB Wt` / `SXTB Wd,Wn` -> (8, 32);
+  `LDRSH Wt` / `SXTH Wd,Wn` -> (16, 32); `LDRSB Xt` /
+  `SXTB Xd,Wn` -> (8, 64); `LDRSH Xt` / `SXTH Xd,Wn` -> (16, 64);
+  `LDRSW Xt` / `SXTW Xd,Wn` -> (32, 64). Example flagged pairs:
+  `asr w0, w1, #24 ; sxtb w0, w0` (S_p=8 = S_c=8); `asr x0, x1,
+  #48 ; sxth x0, w0`; `sbfx w0, w1, #4, #8 ; sxtb w0, w0` (the
+  extracted byte's sign is already replicated).
 * `W_p == W_c` (not `<=`) because a W-form consumer writes back
   through `Wd` and zeros `X[63:32]`, which differs from an X-form
   producer's sign-extended upper half. Example flagged: `ldrsb w0,
@@ -378,25 +422,32 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `X[63:32] = 0`, consumer would set those bits to sign of byte;
   not redundant.
 * Same producer state also feeds a "dead sign-extension" path: if
-  the next instruction is a zero-ext consumer (`UXTB`/`UXTH`/`UXTW`,
-  `AND` with low-mask, or `MOV Wd, Wd`) that clears bits `>= C_c`
-  with `C_c <= S_p`, the consumer overwrites every sign-extended
-  bit and the sign-extension is dead. No width-matching constraint
-  is needed -- when widths mismatch, the W-form auto-zero of
-  `X[63:32]` covers the upper half. Example flagged: `sxtb w0, w1 ;
-  uxtb w0, w0` (replace with `uxtb w0, w1`); `ldrsb w0, [x1] ;
-  uxtb w0, w0` (replace with `ldrb w0, [x1]`); `ldrsw x0, [x1] ;
-  uxtw x0, w0` (replace with `ldr w0, [x1]`).
-* The `ASR` producer is deliberately excluded from this dead path
-  (though it remains valid for the redundant-`SXT*` path above).
-  `ASR Rd, Rn, #k` is not a pure in-place sign-extension: it also
-  shifts the meaningful data down into `Rd[datasize-k-1 .. 0]`.
-  Masking off the replicated sign with a following zero-extension
-  does not make the `ASR` removable -- e.g. `asr w0, w1, #24 ;
-  uxtb w0, w0` keeps `w1[31:24]`, whereas dropping the `ASR` would
-  keep `w1[7:0]`. Only the in-place sign-extenders (`SXTB`/`SXTH`/
-  `SXTW`, `LDRSB`/`LDRSH`/`LDRSW`), whose data already occupies the
-  low bits, qualify as dead when masked.
+  the next instruction is a zero-ext consumer (`UXTB`/`UXTH`/`UXTW`
+  or general in-place `UBFX #0`, `AND` with low-mask, or
+  `MOV Wd, Wd`) that clears bits `>= C_c` with `C_c <= S_p`, the
+  consumer overwrites every sign-extended bit and the producer can
+  be deleted outright. No width-matching constraint is needed --
+  when widths mismatch, the W-form auto-zero of `X[63:32]` covers
+  the upper half. Example flagged: `sxtb w0, w0 ; uxtb w0, w0`
+  (drop the `sxtb`); `sbfx w0, w0, #0, #5 ; and w0, w0, #0x1f`
+  (drop the `sbfx`).
+* The dead path only fires for an *in-place* sign-extension -- an
+  `SBFM` with `immr = 0` (so the data stays in the low bits) and
+  `Rn == Rd` (so the low bits are `Rd`'s own). Every other producer
+  writes fresh data into the bits the consumer keeps, so deleting
+  it would change the result:
+  * `ASR`, `SBFX` with `lsb > 0`, and `SBFIZ` relocate the field --
+    e.g. `asr w0, w1, #24 ; uxtb w0, w0` keeps `w1[31:24]`, whereas
+    dropping the `ASR` would keep `w1[7:0]`.
+  * An extend with `Rn != Rd` copies from `Rn`: `sxtb w0, w1 ;
+    uxtb w0, w0` needs the re-sourcing rewrite `uxtb w0, w1`, not a
+    deletion.
+  * The sign-extending loads bring the value in from memory:
+    `ldrsb w0, [x1] ; uxtb w0, w0` would need `ldrb w0, [x1]` --
+    dropping the load loses the access.
+  The last two shapes have valid one-instruction rewrites that
+  re-source the consumer rather than delete the producer; armlint
+  conservatively reports neither, and stays silent on all of these.
 
 ## self-op identities (`AND/ORR/EOR/SUB/BIC/ORN/EON Rd, Rs, Rs`)
 

@@ -1951,6 +1951,74 @@ static void test_tst_branch(void)
     assert(run_helper_check(code, 16) == 1);
 }
 
+// UBFX Wd, Wn, #lsb, #w = UBFM Wd, Wn, #lsb, #(lsb+w-1) (sf=0, N=0).
+static void ubfx_w(uint8_t out[4], unsigned rd, unsigned rn,
+                   unsigned lsb, unsigned w)
+{
+    uint32_t op = 0x53000000u
+        | ((lsb & 0x3Fu) << 16)
+        | (((lsb + w - 1u) & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// UBFX Xd, Xn, #lsb, #w = UBFM Xd, Xn, #lsb, #(lsb+w-1) (sf=1, N=1).
+static void ubfx_x(uint8_t out[4], unsigned rd, unsigned rn,
+                   unsigned lsb, unsigned w)
+{
+    uint32_t op = 0xD3400000u
+        | ((lsb & 0x3Fu) << 16)
+        | (((lsb + w - 1u) & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// SBFX Wd, Wn, #lsb, #w = SBFM Wd, Wn, #lsb, #(lsb+w-1) (sf=0, N=0).
+static void sbfx_w(uint8_t out[4], unsigned rd, unsigned rn,
+                   unsigned lsb, unsigned w)
+{
+    uint32_t op = 0x13000000u
+        | ((lsb & 0x3Fu) << 16)
+        | (((lsb + w - 1u) & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// SBFIZ Wd, Wn, #lsb, #w = SBFM Wd, Wn, #((32-lsb) mod 32), #(w-1)
+// (sf=0, N=0).
+static void sbfiz_w(uint8_t out[4], unsigned rd, unsigned rn,
+                    unsigned lsb, unsigned w)
+{
+    uint32_t op = 0x13000000u
+        | ((((32u - lsb) % 32u) & 0x3Fu) << 16)
+        | (((w - 1u) & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// ORR Wd, Wn, #imm where imm = (1<<w) - 1 (sf=0, opc=01, N=0, immr=0,
+// imms=w-1) -- a logical-immediate op that is NOT value-bounded by its
+// mask (it propagates Rn's high bits).
+static void orr_w_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
+                          unsigned w)
+{
+    uint32_t op = 0x32000000u
+        | (((w - 1u) & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Defined after this test; declared here for use in it.
+static void and_w_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
+                          unsigned w);
+static void and_x_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
+                          unsigned w);
+
 static void test_redundant_zext(void)
 {
     uint8_t code[16];
@@ -2152,6 +2220,126 @@ static void test_redundant_zext(void)
 
     add_w(&code[0], 0, 1, 2);
     mov_w_reg(&code[4], 0, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Sharper producer thresholds: UBFM geometry. --
+
+    // lsr w0, w1, #24 ; uxtb w0, w0 -- the LSR leaves only bits 7..0
+    // (P = 32-24 = 8), so re-clearing bits >= 8 is a no-op.
+    lsr_w(&code[0], 0, 1, 24);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsr w0, w1, #24 ; and w0, w0, #0xff -- same threshold via the
+    // AND spelling. check_lsr_and_to_ubfx also fires on this pair
+    // (the width-capped `ubfx w0, w1, #24, #8` fold), so two findings
+    // offering equivalent rewrites.
+    lsr_w(&code[0], 0, 1, 24);
+    and_w_ff(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 2);
+
+    // lsr w0, w1, #16 ; uxtb w0, w0 -- P = 16 > C = 8: the UXTB
+    // clears bits 15..8, which may be set. NOT redundant.
+    lsr_w(&code[0], 0, 1, 16);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ubfx w0, w1, #3, #4 ; and w0, w0, #0xf -- the extracted field
+    // is 4 bits (P = 4 <= C = 4).
+    ubfx_w(&code[0], 0, 1, 3, 4);
+    and_w_lowmask(&code[4], 0, 0, 4);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ubfx w0, w1, #3, #4 ; uxtb w0, w0 -- P = 4 <= C = 8.
+    ubfx_w(&code[0], 0, 1, 3, 4);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ubfx x0, x1, #3, #40 ; and x0, x0, #0xffffffffff -- X-form UBFM
+    // producer (P = 40 <= C = 40); X-form ops previously never opened
+    // the producer state.
+    ubfx_x(&code[0], 0, 1, 3, 40);
+    and_x_lowmask(&code[4], 0, 0, 40);
+    assert(run_helper_check(code, 8) == 1);
+
+    // uxtb w0, w1 ; uxtb w0, w0 -- a UXTB producer pins P = 8, so the
+    // second UXTB is redundant.
+    uxtb_w(&code[0], 0, 1);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // lsl w0, w1, #3 ; uxth w0, w0 -- LSL (UBFIZ shape) tops out at
+    // bit 31 (P = 32 > 16): the shift can set bits 15..8. NOT
+    // redundant.
+    lsl_w(&code[0], 0, 1, 3);
+    uxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Sharper producer thresholds: AND-immediate masks. --
+
+    // and w0, w1, #0xf ; uxtb w0, w0 -- the result is bounded by the
+    // mask (P = 4 <= 8).
+    and_w_lowmask(&code[0], 0, 1, 4);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // and x0, x1, #0xff ; uxtb w0, w0 -- X-form AND producer (P = 8):
+    // bits 63..8 are provably zero, so the W-form UXTB (which also
+    // zeros X[63:32]) is a no-op.
+    and_x_lowmask(&code[0], 0, 1, 8);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // orr w0, w1, #0xf ; uxtb w0, w0 -- ORR propagates Rn's high
+    // bits: only the generic W-form threshold applies (P = 32 > 8).
+    // NOT redundant.
+    orr_w_lowmask(&code[0], 0, 1, 4);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Sharper producer thresholds: MOVZ values. --
+
+    // movz w0, #0x12 ; uxtb w0, w0 -- the value is known (P = 5 <= 8).
+    movz_w(&code[0], 0, 0x12);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // movz w0, #0x123 ; uxtb w0, w0 -- P = 9 > 8. NOT redundant.
+    movz_w(&code[0], 0, 0x123);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // movz x0, #0x12, lsl #16 ; and x0, x0, #0xffffffff -- X-form
+    // MOVZ producer, value 0x120000 (P = 21 <= 32).
+    movz_x(&code[0], 0, 0x12, 1);
+    and_x_ff32(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Sharper producer thresholds: CSET (CSINC Rd, ZR, ZR). --
+
+    // cset w0, eq ; and w0, w0, #1 -- the result is 0 or 1 (P = 1).
+    csinc_w(&code[0], 0, 31, 31, 0);
+    and_w_lowmask(&code[4], 0, 0, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // csinc w0, w1, w2, eq ; and w0, w0, #1 -- a real CSINC (not
+    // CSET): generic W-form threshold (P = 32 > 1). NOT redundant.
+    csinc_w(&code[0], 0, 1, 2, 0);
+    and_w_lowmask(&code[4], 0, 0, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Generalized UBFM consumer widths (beyond UXTB/UXTH/UXTW). --
+
+    // ldrb w0, [x1] ; ubfx w0, w0, #0, #12 -- an in-place low-field
+    // extract clears bits >= 12 (P = 8 <= C = 12).
+    ldrb_w(&code[0], 0, 1, 0);
+    ubfx_w(&code[4], 0, 0, 0, 12);
+    assert(run_helper_check(code, 8) == 1);
+
+    // ldrb w0, [x1] ; ubfx w0, w0, #1, #12 -- lsb != 0 shifts the
+    // field down: not a pure zero-extension consumer. NOT flagged.
+    ldrb_w(&code[0], 0, 1, 0);
+    ubfx_w(&code[4], 0, 0, 1, 12);
     assert(run_helper_check(code, 8) == 0);
 }
 
@@ -2415,10 +2603,12 @@ static void test_lsr_and_to_ubfx(void)
     //    The UBFX width is capped at datasize - shift.
 
     // lsr w0, w1, #28 ; and w0, w0, #0xffff (16) > 32-28=4.
-    // Suggested ubfx w0, w1, #28, #4.
+    // Suggested ubfx w0, w1, #28, #4. The redundant-zext check also
+    // fires (the LSR pins P = 4 <= C = 16, so the AND is a no-op),
+    // offering the equivalent "drop the AND" rewrite: two findings.
     lsr_w(&code[0], 0, 1, 28);
     and_w_lowmask(&code[4], 0, 0, 16);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_helper_check(code, 8) == 2);
 
     // -- Negative: non-contiguous-low mask (e.g., #0x6). --
 
@@ -3147,6 +3337,63 @@ static void test_redundant_sext(void)
     movz_w(&code[4], 5, 1);
     uxtb_w(&code[8], 0, 0);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- General SBFM producers (beyond the SXT* aliases and ASR). --
+
+    // sbfx w0, w1, #4, #8 ; sxtb w0, w0 -- the extracted 8-bit
+    // field's sign is already replicated through bit 31 (S_p = 8 <=
+    // S_c = 8, W matches).
+    sbfx_w(&code[0], 0, 1, 4, 8);
+    sxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sbfx w0, w1, #4, #8 ; sxth w0, w0 -- S_p = 8 <= S_c = 16: bit
+    // 15 is a sign copy, so re-extending from it changes nothing.
+    sbfx_w(&code[0], 0, 1, 4, 8);
+    sxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sbfx w0, w1, #4, #12 ; sxtb w0, w0 -- S_p = 12 > S_c = 8: bit 7
+    // is field data, the SXTB does real work. NOT redundant.
+    sbfx_w(&code[0], 0, 1, 4, 12);
+    sxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // sbfiz w0, w1, #8, #8 ; sxth w0, w0 -- insertion shape: the
+    // placed field tops out at bit 15, whose sign is replicated
+    // upward (S_p = 16 <= S_c = 16).
+    sbfiz_w(&code[0], 0, 1, 8, 8);
+    sxth_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sbfiz w0, w1, #24, #8 ; sxtb w0, w0 -- the placed field reaches
+    // bit 31: no sign-replicated region remains (S = datasize), so
+    // this is not a producer.
+    sbfiz_w(&code[0], 0, 1, 24, 8);
+    sxtb_w(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // sbfx w0, w1, #4, #8 ; sxtb x0, w0 -- width mismatch (W_p = 32,
+    // W_c = 64). NOT redundant.
+    sbfx_w(&code[0], 0, 1, 4, 8);
+    sxtb_x(&code[4], 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Dead path with a general in-place low-field SBFX. --
+
+    // sbfx w0, w0, #0, #5 ; and w0, w0, #0x1f -- in-place (immr = 0,
+    // Rn == Rd) sign-extension of the low 5 bits, then a mask keeping
+    // exactly those 5 bits: the sign-extension is dead.
+    sbfx_w(&code[0], 0, 0, 0, 5);
+    and_w_lowmask(&code[4], 0, 0, 5);
+    assert(run_helper_check(code, 8) == 1);
+
+    // sbfx w0, w1, #4, #5 ; and w0, w0, #0x1f -- the SBFX relocates
+    // data (lsb != 0), so masking its sign region does not make it
+    // removable. NOT flagged.
+    sbfx_w(&code[0], 0, 1, 4, 5);
+    and_w_lowmask(&code[4], 0, 0, 5);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 static void test_redundant_cmp_after_s_variant(void)
