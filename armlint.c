@@ -172,6 +172,16 @@ struct armlint_state {
     size_t pending_tb_target;     // branch-target offset
     armlint_finding pending_tb_finding;
 
+    // CSET producer (CSINC Rd, ZR, ZR, cond; cond not AL/NV) pending a
+    // consumer: CBZ/CBNZ of Rd (fold to B.cond), EOR Rd', Rd, #1 (fold
+    // to the inverted CSET) or NEG Rd', Rd (fold to CSETM). cset_cond
+    // is the logical CSET condition -- the raw CSINC field inverted.
+    bool cset_active;
+    unsigned cset_rd;
+    unsigned cset_cond;
+    size_t cset_offset;
+    char cset_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Producer of bits-above-N guaranteed zero, pending a redundant
     // zero-extension consumer that re-zeros those bits. wzx_zero_from
     // is the threshold P: the producer guarantees bits >= P are zero.
@@ -781,6 +791,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->tst_active = false;
     state->tbf_active = false;
     state->pending_tb_active = false;
+    state->cset_active = false;
     state->wzx_active = false;
     state->sxt_active = false;
     state->sv_active = false;
@@ -2402,9 +2413,10 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
 // later instruction overwrites `reg` before any read or control
 // transfer; armlint_advance_pending_mz runs that forward scan and emits
 // the stashed finding then. Returns false so the caller records nothing
-// now. Shared by the MOV #0 -> ZR fold and the MOV-constant strength
-// reductions (which delete the materializing MOV) and the BFXIL/BFI
-// synthesis (which drops the isolate's temp register).
+// now. Shared by every fold that deletes the producer of `reg`: the
+// MOV-chain folds (strength reductions, immediate/offset/FMOV folds,
+// MOV #0 -> ZR), the BFXIL/BFI synthesis (which drops the isolate's
+// temp register), and the CSET inversion folds (EOR #1 / NEG).
 static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
                            unsigned reg)
 {
@@ -2989,6 +3001,213 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
         state->tbf_bit = p_bit;
         state->tbf_offset = offset;
         snprintf(state->tbf_disasm, sizeof(state->tbf_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return false;
+}
+
+// CSET Rd, cond -- the alias of CSINC Rd, ZR, ZR, invert(cond):
+//   sf 0 0 11010100 Rm(11111) cond 0 1 Rn(11111) Rd
+// Rd = 1 exactly when the *inverted* raw field's condition holds, so
+// the returned cond is field^1 (the spelling the alias renders). Raw
+// fields AL/NV are excluded: ConditionHolds treats both as always-
+// true, making the "cset" a constant 0 -- not a conditional at all.
+// Rd == ZR (a discarded result) is excluded too.
+static bool decode_cset(uint32_t op, unsigned *out_rd, unsigned *out_cond)
+{
+    if ((op & 0x7FE00C00u) != 0x1A800400u
+            || ((op >> 16) & 0x1Fu) != 31u
+            || ((op >> 5) & 0x1Fu) != 31u) {
+        return false;
+    }
+    unsigned field = (op >> 12) & 0xFu;
+    if (field >= 14u) {
+        return false;
+    }
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31u) {
+        return false;
+    }
+    *out_rd = rd;
+    *out_cond = field ^ 1u;
+    return true;
+}
+
+// EOR (immediate) with value 1: sf 10 100100 N immr imms Rn Rd. The
+// mask leaves sf and the bitmask fields free; the caller-visible
+// constant is reconstructed and must equal 1. Rd = 31 here means SP
+// (logical immediates can target SP) and is rejected -- the CSET
+// rewrite has no SP destination.
+static bool decode_eor_imm_1(uint32_t op, unsigned *out_sf,
+                             unsigned *out_rd, unsigned *out_rn)
+{
+    if ((op & 0x7F800000u) != 0x52000000u) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 1u;
+    unsigned N = (op >> 22) & 1u;
+    if (!sf && N) {
+        return false;       // UNDEFINED encoding
+    }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    uint64_t value;
+    if (!decode_bitmask_imm_value(N, immr, imms, sf ? 64u : 32u, &value)
+            || value != 1u) {
+        return false;
+    }
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31u) {
+        return false;
+    }
+    *out_sf = sf;
+    *out_rd = rd;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// Decode NEG Rd, Rs (the SUB Rd, XZR, Rs alias) with shift_type = LSL,
+// imm6 = 0, S = 0. NEG (shifted-register, no shift) is the most common
+// form emitted by compilers; the shifted form (NEG Rd, Rs, LSL #n) is
+// not handled. Mask 0x7FE0FFE0 fixes:
+//   bits 30..21 = 1001011000 (SUB, non-S, shifted-register, LSL, bit 21=0)
+//   bits 15..10 = 0          (imm6 == 0)
+//   bits 9..5   = 11111      (Rn = 31 = XZR)
+// sf at bit 31 is left free; Rm (bits 20..16) and Rd (bits 4..0) are
+// the NEG's operands.
+static bool decode_neg(uint32_t op, unsigned *out_sf, unsigned *out_rd,
+                       unsigned *out_rs)
+{
+    if ((op & 0x7FE0FFE0u) != 0x4B0003E0u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rs = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+// A64 condition-code names, indexed by the 4-bit cond field. Capstone's
+// spellings (hs/lo rather than cs/cc).
+static const char *const a64_cond_names[16] = {
+    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
+    "hi", "ls", "ge", "lt", "gt", "le", "al", "nv",
+};
+
+bool check_cset_fold(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->cset_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a consumer of the pending CSET? The producer's value
+    // is 0 or 1 zero-extended to the full X register, so a consumer of
+    // either width observes the same truth value -- no width gate is
+    // needed on any of the three shapes.
+    if (state->cset_active) {
+        state->cset_active = false;     // strict adjacency
+        unsigned p_rd = state->cset_rd;
+        unsigned p_cond = state->cset_cond;
+
+        // (a) CBZ/CBNZ of the temp: CBNZ branches exactly when the
+        // condition held, CBZ when it did not -- B.cond with the same
+        // target, deleting the CSET. The temp must then be dead on
+        // BOTH edges; defer through the two-edge scan exactly as the
+        // single-bit fold does (fall-through proven by forward scan,
+        // taken edge by containment in [fall-through, kill]). Backward
+        // targets can never satisfy containment, so they drop now.
+        unsigned c_sf, rt;
+        bool is_cbnz;
+        int32_t imm19;
+        if (decode_cbz_cbnz(op, &c_sf, &is_cbnz, &imm19, &rt)
+                && rt == p_rd) {
+            // The B.cond replaces the producer, 4 bytes before the
+            // CBZ, so its displacement is imm19 + 1 units -- still a
+            // signed 19-bit quantity except at imm19's positive limit.
+            int64_t t_off = (int64_t)offset + (int64_t)imm19 * 4;
+            if (t_off >= (int64_t)(offset + 4u)
+                    && (int64_t)imm19 + 1 <= 262143) {
+                unsigned bcond = is_cbnz ? p_cond : (p_cond ^ 1u);
+                uint64_t target = insn->address
+                    + (uint64_t)((int64_t)imm19 * 4);
+                char c_wx = c_sf ? 'x' : 'w';
+                const char *cb_mnem = is_cbnz ? "cbnz" : "cbz";
+
+                armlint_finding *p = &state->pending_tb_finding;
+                p->name = "CSET + CBZ/CBNZ foldable into B.cond";
+                p->start_offset = state->cset_offset;
+                p->insn_count = 2;
+                clear_finding_strings(p);
+
+                snprintf(p->detail, sizeof(p->detail),
+                    "-> b.%s 0x%" PRIx64,
+                    a64_cond_names[bcond], target);
+                snprintf(p->lines[0], sizeof(p->lines[0]),
+                    "%s", state->cset_disasm);
+                snprintf(p->lines[1], sizeof(p->lines[1]),
+                    "%s %c%u, 0x%" PRIx64,
+                    cb_mnem, c_wx, rt, target);
+
+                state->pending_tb_active = true;
+                state->pending_tb_window = LIVENESS_WINDOW;
+                state->pending_tb_reg = (int)p_rd;
+                state->pending_tb_ft = offset + 4u;
+                state->pending_tb_target = (size_t)t_off;
+            }
+            return false;
+        }
+
+        // (b) EOR #1 of the temp inverts the boolean: the pair is the
+        // inverted CSET, at the consumer's width. (c) NEG of the temp
+        // maps 1 to all-ones: CSETM, condition unchanged. Either way
+        // the rewrite deletes the CSET, so the temp must die: a
+        // consumer overwriting the temp itself kills it on the spot
+        // (emit now); otherwise defer through the forward scan.
+        // (decode_eor_imm_1 already rejected Rd = 31 as SP; NEG's
+        // Rd = 31 is ZR, a discarded result not worth rewriting.)
+        unsigned e_sf, e_rd, e_rn;
+        bool is_eor = decode_eor_imm_1(op, &e_sf, &e_rd, &e_rn);
+        bool is_neg = !is_eor && decode_neg(op, &e_sf, &e_rd, &e_rn);
+        if ((is_eor || is_neg) && e_rn == p_rd && e_rd != 31u) {
+            const char *new_mnem = is_eor ? "cset" : "csetm";
+            unsigned new_cond = is_eor ? (p_cond ^ 1u) : p_cond;
+            char e_wx = e_sf ? 'x' : 'w';
+
+            out->name = is_eor
+                ? "CSET + EOR #1 foldable to inverted CSET"
+                : "CSET + NEG foldable to CSETM";
+            out->start_offset = state->cset_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, %s",
+                new_mnem, e_wx, e_rd, a64_cond_names[new_cond]);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->cset_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+
+            if (e_rd == p_rd) {
+                return true;
+            }
+            return defer_dead_mov(state, out, p_rd);
+        }
+    }
+
+    // (2) Open: a CSET?
+    unsigned p_rd, p_cond;
+    if (decode_cset(op, &p_rd, &p_cond)) {
+        state->cset_active = true;
+        state->cset_rd = p_rd;
+        state->cset_cond = p_cond;
+        state->cset_offset = offset;
+        snprintf(state->cset_disasm, sizeof(state->cset_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
@@ -4897,13 +5116,6 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
-// A64 condition-code names, indexed by the 4-bit cond field. Capstone's
-// spellings (hs/lo rather than cs/cc).
-static const char *const a64_cond_names[16] = {
-    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
-    "hi", "ls", "ge", "lt", "gt", "le", "al", "nv",
-};
-
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
 //   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
 // Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
@@ -5510,27 +5722,6 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
     }
 
     return produced;
-}
-
-// Decode NEG Rd, Rs (the SUB Rd, XZR, Rs alias) with shift_type = LSL,
-// imm6 = 0, S = 0. NEG (shifted-register, no shift) is the most common
-// form emitted by compilers; the shifted form (NEG Rd, Rs, LSL #n) is
-// not handled. Mask 0x7FE0FFE0 fixes:
-//   bits 30..21 = 1001011000 (SUB, non-S, shifted-register, LSL, bit 21=0)
-//   bits 15..10 = 0          (imm6 == 0)
-//   bits 9..5   = 11111      (Rn = 31 = XZR)
-// sf at bit 31 is left free; Rm (bits 20..16) and Rd (bits 4..0) are
-// the NEG's operands.
-static bool decode_neg(uint32_t op, unsigned *out_sf, unsigned *out_rd,
-                       unsigned *out_rs)
-{
-    if ((op & 0x7FE0FFE0u) != 0x4B0003E0u) {
-        return false;
-    }
-    *out_sf = (op >> 31) & 1u;
-    *out_rd = op & 0x1Fu;
-    *out_rs = (op >> 16) & 0x1Fu;
-    return true;
 }
 
 bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
@@ -8134,6 +8325,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cmp_zero_branch,
     check_tst_branch,
     check_single_bit_cbz,
+    check_cset_fold,
     check_redundant_zext,
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,

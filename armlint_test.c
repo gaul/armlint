@@ -2168,6 +2168,219 @@ static void test_single_bit_cbz(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+// CSET Rd, cond -- takes the logical CSET condition and encodes the
+// underlying CSINC Rd, ZR, ZR, cond^1. (Passing cond = 15 therefore
+// encodes raw field 14 = AL, the constant-0 non-alias form.)
+static void cset_(uint8_t out[4], unsigned sf, unsigned rd, unsigned cond)
+{
+    uint32_t op = 0x1A800400u
+        | ((uint32_t)(sf & 1u) << 31)
+        | (0x1Fu << 16)
+        | (((cond ^ 1u) & 0xFu) << 12)
+        | (0x1Fu << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// EOR (immediate) from raw bitmask fields:
+//   sf 10 100100 N immr imms Rn Rd
+// (N=0, immr=0, imms=0 encodes #1 at either width with sf-appropriate
+// N; immr=31 rotates the single bit up to #2.)
+static void eor_imm(uint8_t out[4], unsigned sf, unsigned rd, unsigned rn,
+                    unsigned n, unsigned immr, unsigned imms)
+{
+    uint32_t op = 0x52000000u
+        | ((uint32_t)(sf & 1u) << 31)
+        | ((n & 1u) << 22)
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// NEG Rd, Rm (SUB Rd, ZR, Rm, LSL #0); s = 1 gives the flag-setting
+// NEGS (SUBS).
+static void neg_(uint8_t out[4], unsigned sf, unsigned s, unsigned rd,
+                 unsigned rm)
+{
+    uint32_t op = 0x4B0003E0u
+        | ((uint32_t)(sf & 1u) << 31)
+        | ((s & 1u) << 29)
+        | ((rm & 0x1Fu) << 16)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_cset_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positive branch folds: the canonical skip-one shape; the
+    //    branch target is the mov that kills the flag temp, so both
+    //    edges provably kill it. --
+
+    // cset w8, eq ; cbnz w8, +8 ; add ; mov w8, #0 -> b.eq.
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // CBZ inverts the condition: cset w8, lt ; cbz w8 -> b.ge.
+    cset_(&code[0], 0, 8, 11);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // X-form cset + X-form cbnz.
+    cset_(&code[0], 1, 8, 8);
+    cbz_cbnz(&code[4], 1, 1, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_x(&code[12], 8, 0, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Width crossing folds both ways: the temp is 0/1 zero-extended
+    // across the full X register.
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 1, 0, 8, 2);      // W cset, X cbz
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    cset_(&code[0], 1, 8, 0);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);      // X cset, W cbnz
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Branch-to-next: target == fall-through == the kill.
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 0, 1, 8, 1);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive EOR #1 / NEG folds. --
+
+    // In-place inversion: cset w8, eq ; eor w8, w8, #1 -> cset w8, ne.
+    // The consumer overwrites the temp, so it emits immediately.
+    cset_(&code[0], 0, 8, 0);
+    eor_imm(&code[4], 0, 8, 8, 0, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // A different destination defers until the temp dies.
+    cset_(&code[0], 0, 8, 2);
+    eor_imm(&code[4], 0, 9, 8, 0, 0, 0);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // X-form EOR #1 (N=1).
+    cset_(&code[0], 1, 8, 0);
+    eor_imm(&code[4], 1, 8, 8, 1, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // NEG in place: cset w8, mi ; neg w8, w8 -> csetm w8, mi.
+    cset_(&code[0], 0, 8, 4);
+    neg_(&code[4], 0, 0, 8, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // NEG to a different register, temp killed after.
+    cset_(&code[0], 0, 8, 12);
+    neg_(&code[4], 0, 0, 9, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Width-crossing NEG: an X negation of the W cset temp.
+    cset_(&code[0], 0, 8, 0);
+    neg_(&code[4], 1, 0, 9, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: the temp is read again before dying. --
+
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
+    add_w(&code[8], 1, 8, 2);            // reads w8
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    cset_(&code[0], 0, 8, 0);
+    eor_imm(&code[4], 0, 9, 8, 0, 0, 0);
+    add_w(&code[8], 1, 8, 2);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: branch target beyond the kill -- the taken edge is
+    //    unproven. --
+
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 0, 0, 8, 4);      // target +16, kill at +8
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: backward target. --
+
+    movz_w(&code[0], 5, 1);
+    cset_(&code[4], 0, 8, 0);
+    cbz_cbnz(&code[8], 0, 0, 8, -2);     // target offset 0
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: a control transfer inside the span discards. --
+
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 0, 1, 8, 3);
+    ret_(&code[8]);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: the branch tests a different register. --
+
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 0, 1, 5, 1);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: an EOR immediate other than 1 is not an inversion. --
+
+    cset_(&code[0], 0, 8, 0);
+    eor_imm(&code[4], 0, 8, 8, 0, 31, 0);   // eor w8, w8, #2
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: flag-setting NEGS has no CSETM equivalent. --
+
+    cset_(&code[0], 0, 8, 0);
+    neg_(&code[4], 0, 1, 9, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: raw CSINC condition AL is a constant 0, not a
+    //    conditional (cond = 15 here encodes raw field 14 = AL). --
+
+    cset_(&code[0], 0, 8, 15);
+    cbz_cbnz(&code[4], 0, 1, 8, 1);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction breaks adjacency. --
+
+    cset_(&code[0], 0, 8, 0);
+    add_x(&code[4], 1, 2, 3);
+    cbz_cbnz(&code[8], 0, 1, 8, 1);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: no kill before end-of-region -- the pending is
+    //    discarded at flush. --
+
+    cset_(&code[0], 0, 8, 0);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // UBFX Wd, Wn, #lsb, #w = UBFM Wd, Wn, #lsb, #(lsb+w-1) (sf=0, N=0).
 static void ubfx_w(uint8_t out[4], unsigned rd, unsigned rn,
                    unsigned lsb, unsigned w)
@@ -8249,6 +8462,7 @@ int main(void)
     test_cmp_zero_branch();
     test_tst_branch();
     test_single_bit_cbz();
+    test_cset_fold();
     test_redundant_zext();
     test_lsl_lsr_to_ubfx();
     test_lsr_and_to_ubfx();

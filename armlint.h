@@ -208,6 +208,34 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
 bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect CSET Rd, cond (CSINC Rd, ZR, ZR, invert(cond)) immediately
+// followed by one of three consumers of Rd -- each expressible as a
+// single instruction reading the same still-live NZCV, making the
+// CSET deletable:
+//   cset w8, eq ; cbnz w8, L      -> b.eq L   (CBZ inverts: b.ne L)
+//   cset w8, eq ; eor w9, w8, #1  -> cset w9, ne
+//   cset w8, eq ; neg w9, w8      -> csetm w9, eq
+// The temp is 0 or 1 zero-extended across the full X register, so a
+// consumer of either width observes the same truth value and all
+// width combinations fold; the rewrite takes the consumer's width.
+// Raw CSINC condition fields AL/NV (a constant 0, not a conditional)
+// and ZR destinations are excluded, as are EOR immediates other than
+// 1, EOR writing SP (Rd = 31 in a logical immediate), shifted or
+// flag-setting NEG forms, and NEG/EOR discarding to ZR.
+//
+// Deleting the CSET requires the temp dead afterward. For the branch
+// consumer that means dead on BOTH edges: emission defers through the
+// two-edge scan (armlint_advance_pending_tb) built for the single-bit
+// fold -- the forward scan proves the fall-through path and the taken
+// edge is covered by containment in [fall-through, kill]; backward
+// targets are dropped at the consumer. B.cond's displacement (imm19 +
+// 1 units, replacing the producer) is range-checked at the positive
+// encoding limit. For EOR/NEG, a consumer overwriting the temp itself
+// kills it on the spot (emit immediately); otherwise emission defers
+// through the plain forward scan (defer_dead_mov).
+bool check_cset_fold(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out);
+
 // Detect a producer that provably zeros bits 63..P of its destination,
 // immediately followed by an in-place zero-extension consumer that
 // clears bits >= C with P <= C -- a no-op. Producers: any W-form

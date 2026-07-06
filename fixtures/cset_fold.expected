@@ -1,0 +1,30 @@
+CSET + CBZ/CBNZ foldable into B.cond at offset: 0x4: -> b.eq 0x10 (2 instructions)
+  cset w8, eq
+  cbnz w8, 0x10
+
+CSET + CBZ/CBNZ foldable into B.cond at offset: 0x18: -> b.ge 0x24 (2 instructions)
+  cset w9, lt
+  cbz w9, 0x24
+
+CSET + CBZ/CBNZ foldable into B.cond at offset: 0x2c: -> b.hi 0x38 (2 instructions)
+  cset x10, hi
+  cbnz x10, 0x38
+
+CSET + EOR #1 foldable to inverted CSET at offset: 0x40: -> cset w11, ne (2 instructions)
+  cset w11, eq
+  eor w11, w11, #1
+
+CSET + EOR #1 foldable to inverted CSET at offset: 0x4c: -> cset w13, lo (2 instructions)
+  cset w12, hs
+  eor w13, w12, #1
+
+CSET + NEG foldable to CSETM at offset: 0x5c: -> csetm w14, mi (2 instructions)
+  cset w14, mi
+  neg w14, w14
+
+Optimization opportunities by type:
+       3  CSET + CBZ/CBNZ foldable into B.cond
+       2  CSET + EOR #1 foldable to inverted CSET
+       1  CSET + NEG foldable to CSETM
+
+6 optimization opportunities in 36 instructions

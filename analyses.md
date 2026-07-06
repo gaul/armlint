@@ -267,6 +267,47 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Same win as the TST fold -- one fewer instruction -- plus the
   scratch register is freed.
 
+## CSET + CBZ/CBNZ foldable into B.cond
+
+* `cset w8, eq ; cbnz w8, L` instead of `b.eq L`. The CSET
+  materialises a condition the flags already hold and the branch
+  immediately re-tests it: `cbnz` branches exactly when the condition
+  held, `cbz` exactly when it did not, so the pair is a single
+  `b.<cond>` (`b.<inverse cond>` for `cbz`) with the same target --
+  NZCV is untouched between the adjacent pair, so the `b.cond` reads
+  the same flags the `cset` did. The temp is 0 or 1 zero-extended
+  across the full X register, so W and X producers and branches fold
+  in every combination. `cbz`/`cbnz`'s imm19 carries over into
+  `b.cond`'s identical imm19 (the displacement grows by the deleted
+  producer's slot, range-checked at the encoding's positive limit).
+* Two sibling consumers fold the same producer without any branch:
+  * `cset w8, eq ; eor w9, w8, #1` -> `cset w9, ne` -- EOR #1
+    inverts the boolean, which is the inverted-condition CSET.
+    Immediates other than 1 and `eor` writing SP (`Rd = 31` in a
+    logical immediate) are excluded.
+  * `cset w8, eq ; neg w9, w8` -> `csetm w9, eq` -- negation maps
+    1 to all-ones, exactly CSETM, condition unchanged. Shifted and
+    flag-setting (`negs`) forms are excluded.
+  Both rewrites take the consumer's width (sound at any combination,
+  by the same zero-extension argument).
+* The rewrite deletes the CSET, so its temp must be dead afterward.
+  For the branch consumer that means dead on BOTH edges, and emission
+  defers through the same two-edge scan as the single-bit fold: the
+  forward scan proves the fall-through path, containment in
+  `[fall-through, kill]` covers the taken edge, and backward targets
+  are dropped at the consumer. For EOR/NEG, a consumer that
+  overwrites the temp itself kills it on the spot and emits
+  immediately; otherwise emission defers through the plain forward
+  register-liveness scan.
+* Raw CSINC condition fields AL/NV are excluded when opening the
+  producer: `ConditionHolds` treats both as always-true, so the
+  "cset" is the constant 0, not a conditional. ZR destinations
+  (discarded results) are excluded on both sides.
+* The win is one instruction and a freed temp register, and the
+  `b.cond` spelling is what compilers emit for the shape -- the
+  `cset`+`cbnz` form appears when a boolean materialised for one
+  purpose is then only branched on.
+
 ## bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
 
 * `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the
