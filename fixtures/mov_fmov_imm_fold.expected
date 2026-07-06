@@ -1,0 +1,28 @@
+MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate at offset: 0x0: -> fmov s0, #1.0 (2 instructions)
+  movz w8, #0x3f80, lsl #16
+  fmov s0, w8
+
+MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate at offset: 0xc: -> fmov d1, #1.0 (2 instructions)
+  movz x9, #0x3ff0, lsl #48
+  fmov d1, x9
+
+MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate at offset: 0x18: -> fmov d2, #5.0 (2 instructions)
+  movz w10, #0x5
+  scvtf d2, w10
+
+MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate at offset: 0x24: -> fmov s3, #3.0 (2 instructions)
+  movz w11, #0x3
+  ucvtf s3, w11
+
+MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate at offset: 0x30: -> fmov s4, #-3.0 (2 instructions)
+  movn w12, #0x2
+  scvtf s4, w12
+
+MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate at offset: 0x3c: -> fmov d5, #7.0 (2 instructions)
+  movz w13, #0x7
+  scvtf d5, x13
+
+Optimization opportunities by type:
+       6  MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate
+
+6 optimization opportunities in 29 instructions

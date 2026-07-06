@@ -5016,6 +5016,238 @@ bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+// FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
+// imm8 = a:b:cd:efgh expands to
+//   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
+//   frac = efgh : Zeros(48 or 19)
+// i.e. the 256 values +/-(16..31)/16 * 2^n, n in [-3, 4]. Zero,
+// infinities, NaNs and denormals all fail the exponent shape; extra
+// fraction bits fail the low-zeros test. Pure bit inspection -- no
+// floating-point comparison. The caller passes the 32-bit pattern in
+// the low half for !is_double.
+static bool fp8_encodable(uint64_t bits, bool is_double)
+{
+    if (is_double) {
+        if ((bits & 0xFFFFFFFFFFFFull) != 0) {
+            return false;
+        }
+        unsigned exp = (unsigned)((bits >> 52) & 0x7FFu);
+        // NOT(b):Replicate(b,8):cd -> 0b0_11111111_cd or 0b1_00000000_cd.
+        return (exp >= 0x3FCu && exp <= 0x3FFu)
+            || (exp >= 0x400u && exp <= 0x403u);
+    }
+    if ((bits & 0x7FFFFu) != 0) {
+        return false;
+    }
+    unsigned exp = (unsigned)((bits >> 23) & 0xFFu);
+    // NOT(b):Replicate(b,5):cd -> 0b0_11111_cd or 0b1_00000_cd.
+    return (exp >= 0x7Cu && exp <= 0x7Fu)
+        || (exp >= 0x80u && exp <= 0x83u);
+}
+
+// Render an FMOV-encodable value in its assembler spelling: 1.0, -0.5,
+// 0.2421875. Encodable values are (16..31)/16 * 2^n with n in [-3, 4],
+// so nine significant digits always print exactly; a bare integer
+// gains ".0" so the operand reads as floating-point.
+static void format_fp8(char *buf, size_t bufsz, double v)
+{
+    int n = snprintf(buf, bufsz, "%.9g", v);
+    if (n > 0 && (size_t)n + 2 < bufsz && strchr(buf, '.') == NULL) {
+        buf[n] = '.';
+        buf[n + 1] = '0';
+        buf[n + 2] = '\0';
+    }
+}
+
+// FMOV (general), GPR -> FPR direction only:
+//   sf 0 0 11110 type 1 rmode(00) opcode(111) 000000 Rn Rd
+// Exactly two allocated forms move a whole GPR into a scalar
+// single/double register: fmov Sd, Wn (sf=0, type=00, 0x1E270000) and
+// fmov Dd, Xn (sf=1, type=01, 0x9E670000). The FPR -> GPR direction
+// (opcode 110), the upper-half form (rmode 01) and the half-precision
+// form (type 11, FEAT_FP16) fall outside the two exact matches.
+static bool decode_fmov_from_gpr(uint32_t op, bool *out_is_double,
+                                 unsigned *out_rn, unsigned *out_rd)
+{
+    uint32_t hi = op & 0xFFFFFC00u;
+    if (hi == 0x1E270000u) {
+        *out_is_double = false;
+    } else if (hi == 0x9E670000u) {
+        *out_is_double = true;
+    } else {
+        return false;
+    }
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rd = op & 0x1Fu;
+    return true;
+}
+
+// SCVTF/UCVTF (scalar, from GPR):
+//   sf 0 0 11110 type 1 rmode(00) opcode(01 u) 000000 Rn Rd
+// Mask 0x7FBEFC00 fixes everything but sf (source GPR width), type's
+// low bit (single/double destination; type's high bit stays 0, which
+// excludes the half-precision forms) and u (signed/unsigned). rmode
+// and the opcode high bits exclude the FCVT* round-to-int family.
+static bool decode_cvtf_from_gpr(uint32_t op, bool *out_src_64,
+                                 bool *out_is_double,
+                                 bool *out_is_unsigned,
+                                 unsigned *out_rn, unsigned *out_rd)
+{
+    if ((op & 0x7FBEFC00u) != 0x1E220000u) {
+        return false;
+    }
+    *out_src_64 = ((op >> 31) & 1u) != 0;
+    *out_is_double = ((op >> 22) & 1u) != 0;
+    *out_is_unsigned = ((op >> 16) & 1u) != 0;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rd = op & 0x1Fu;
+    return true;
+}
+
+bool check_mov_fmov_imm_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // Consumer: FMOV (general, GPR->FPR) or SCVTF/UCVTF from a GPR.
+    // src_64 is the GPR source's width, is_double the FP destination's.
+    bool is_fmov, is_double, is_unsigned = false, src_64;
+    unsigned rn, rd;
+    if (decode_fmov_from_gpr(op, &is_double, &rn, &rd)) {
+        is_fmov = true;
+        src_64 = is_double;     // fmov Sd, Wn / fmov Dd, Xn only
+    } else if (decode_cvtf_from_gpr(op, &src_64, &is_double,
+                                    &is_unsigned, &rn, &rd)) {
+        is_fmov = false;
+    } else {
+        return false;
+    }
+
+    if (rn != state->mov_rd) {
+        return false;
+    }
+
+    // Width admission mirrors the register-offset fold: a 64-bit
+    // source also accepts a W-form chain, whose W write zeroed
+    // X[63:32] and so pins the full 64-bit read. A W source requires
+    // a W chain -- reading the low half of an X-form constant is a
+    // pathological shape not worth matching.
+    if (!src_64 && state->mov_is_64bit) {
+        return false;
+    }
+
+    // The FP value the destination receives, as its exact bit pattern.
+    // For the conversions, soundness requires the conversion be exact:
+    // SCVTF/UCVTF round per the dynamic FPCR mode, and only exactness
+    // makes the result mode-independent (an exact conversion raises no
+    // FP exceptions either, preserving FPSR). Encodability already
+    // implies it -- an imm8 value's magnitude is at most 31.5, so the
+    // integer's is at most 31 -- but the round-trip check enforces it
+    // explicitly. Casting back is safe only after the encodability
+    // test bounds the value.
+    double value;
+    if (is_fmov) {
+        uint64_t bits = state->mov_value;
+        if (!fp8_encodable(bits, is_double)) {
+            return false;
+        }
+        if (is_double) {
+            memcpy(&value, &bits, sizeof(value));
+        } else {
+            uint32_t b32 = (uint32_t)bits;
+            float f;
+            memcpy(&f, &b32, sizeof(f));
+            value = (double)f;
+        }
+    } else {
+        // The source GPR's contents: an X read of a W chain sees the
+        // zero-extended (hence non-negative) stored value; a W read
+        // sign-extends the 32-bit pattern when the conversion is
+        // signed.
+        uint64_t uval = state->mov_value;
+        int64_t sval = src_64 ? (int64_t)state->mov_value
+            : (int64_t)(int32_t)(uint32_t)state->mov_value;
+        if (is_double) {
+            double d = is_unsigned ? (double)uval : (double)sval;
+            uint64_t b;
+            memcpy(&b, &d, sizeof(b));
+            if (!fp8_encodable(b, true)) {
+                return false;
+            }
+            if (is_unsigned ? (uint64_t)d != uval : (int64_t)d != sval) {
+                return false;
+            }
+            value = d;
+        } else {
+            float f = is_unsigned ? (float)uval : (float)sval;
+            uint32_t b32;
+            memcpy(&b32, &f, sizeof(b32));
+            if (!fp8_encodable(b32, false)) {
+                return false;
+            }
+            if (is_unsigned ? (uint64_t)f != uval : (int64_t)f != sval) {
+                return false;
+            }
+            value = (double)f;
+        }
+    }
+
+    char fp_c = is_double ? 'd' : 's';
+    char src_c = src_64 ? 'x' : 'w';
+    const char *mnem = is_fmov ? "fmov"
+        : (is_unsigned ? "ucvtf" : "scvtf");
+
+    char val_buf[32];
+    format_fp8(val_buf, sizeof(val_buf), value);
+
+    out->name = "MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "-> fmov %c%u, #%s", fp_c, rd, val_buf);
+
+    // Chain lines render in the chain's own width; the consumer line
+    // in the source width (they differ for a W chain read as X).
+    char w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %c%u, %c%u", mnem, fp_c, rd, src_c, rn);
+
+    // The rewrite deletes the MOV, and the consumer writes only an FP
+    // register -- it can never kill the constant GPR itself -- so the
+    // finding always defers until mov_rd is provably dead.
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -7893,6 +8125,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
     check_mov_ccmp_imm_fold,
+    check_mov_fmov_imm_fold,
     check_mov_zero_to_xzr,
     check_mov_reg_offset_fold,
     check_movz_movk_bitmask,

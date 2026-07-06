@@ -760,7 +760,8 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   at parity with `MOV+MUL` in count.
 * Dead-constant verification (shared by every MOV-chain fold --
   `MNEG`, `UDIV`, `MOV + ADD/SUB`, `MOV + AND/ORR/EOR`, `MOV + CCMP`,
-  `MOV #0 + use`, and the register-offset fold): the reported saving
+  `MOV + FMOV/SCVTF/UCVTF`, `MOV #0 + use`, and the register-offset
+  fold): the reported saving
   assumes the constant register was materialised solely to feed this
   one consumer, and armlint verifies that before reporting. When the
   consumer itself overwrites the constant register, the chain is dead
@@ -893,6 +894,45 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   sign-crossing rewrite for negative constants (`ccmp Rn, #-C` <->
   `ccmn Rn, #C`, whose NZCV agree exactly) is not attempted,
   consistent with the `MOV + ADD/SUB` fold's direct-form-only policy.
+
+## MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate
+
+* `mov w8, #0x3f800000 ; fmov s0, w8` instead of `fmov s0, #1.0`.
+  Materialising a floating-point constant through a general register
+  costs the extra MOV (two or more instructions for a wide double
+  pattern) plus a cross-register-file transfer, which runs several
+  cycles of latency on most cores; `FMOV (scalar, immediate)` produces
+  the value directly on the FP side. Conversions of pinned small
+  integers are the same pattern one step removed:
+  `mov w8, #5 ; scvtf d0, w8` -> `fmov d0, #5.0`, and `UCVTF`
+  likewise.
+* `FMOV`'s imm8 expands (`VFPExpandImm`) to `+/-(16..31)/16 x 2^n`
+  for `n` in `[-3, 4]` -- 256 values from a sign, a 4-bit fraction
+  and a 3-bit exponent. Every integer of magnitude 1..31 is included.
+  Zero is NOT expressible, so zero materialisations never match
+  (idiomatic FP zeroing is `MOVI`, a separate concern). NaNs,
+  infinities and denormals fail the exponent shape; extra fraction
+  bits fail outright. The test is an exact bit-pattern comparison --
+  no floating-point arithmetic is involved in the FMOV direction.
+* Consumers: `FMOV (general)` in the GPR->FPR direction only
+  (`fmov Sd, Wn` / `fmov Dd, Xn`) and the scalar integer conversions
+  `SCVTF`/`UCVTF` from either GPR width. A 64-bit source also accepts
+  a W-form chain -- the W write zeroed `X[63:32]`, pinning the full
+  64-bit read -- while a W source requires a W chain. Half-precision
+  destinations (FEAT_FP16) are not matched.
+* Folding a conversion is sound only when the conversion is exact:
+  `SCVTF`/`UCVTF` round per the dynamic FPCR mode, and only exactness
+  makes the result mode-independent (an exact conversion also raises
+  no FP exceptions, preserving FPSR). Encodability already implies
+  exactness -- an imm8 value's magnitude is at most 31.5, bounding the
+  integer's by 31 -- but the check verifies the round-trip explicitly
+  rather than lean on that argument. The write semantics agree too:
+  the transfer, the conversion and `FMOV #imm` all zero the vector
+  register above the written scalar lane.
+* The consumer writes only an FP register and can never kill the
+  constant GPR itself, so -- like the CCMP fold -- the finding always
+  defers through the forward register-liveness scan until the
+  constant register is provably dead.
 
 ## MOV #0 + use foldable to ZR
 

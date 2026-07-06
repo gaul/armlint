@@ -48,10 +48,10 @@ equivalent; the constraints below are the ones they share.
   block-locality assumption is made for it.
 * **MOV-chain folds verify the constant dies.** Folds that absorb a
   materialized constant -- `MUL`/`MNEG`/`UDIV` by a constant, `MOV` +
-  `ADD`/`AND`/`ORR`/`EOR`/`CCMP`, `MOV #0`, the register-offset fold --
-  report only once the consumer's own overwrite or the forward scan
-  proves the constant register dead. The consumer rewrite itself stays
-  valid regardless.
+  `ADD`/`AND`/`ORR`/`EOR`/`CCMP`/`FMOV`, `MOV #0`, the register-offset
+  fold -- report only once the consumer's own overwrite or the forward
+  scan proves the constant register dead. The consumer rewrite itself
+  stays valid regardless.
 * **Flag liveness uses a bounded forward scan.** The branch- and
   flag-folding checks drop a `CMP`/`TST` only after a bounded scan of the
   fall-through path confirms that no later instruction reads N/C/V before
@@ -109,6 +109,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`mov #C` + `add`/`sub`](analyses.md#mov--addsub-foldable-to-immediate-form) | `add`/`sub Rd, Rn, #C` |
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` |
+| [`mov #bits`/`#C` + `fmov`/`scvtf`/`ucvtf` from GPR](analyses.md#mov--fmovscvtfucvtf-foldable-to-fmov-immediate) | `fmov Sd`/`Dd, #imm` |
 | [`mov #0` + `str`/`add`/`and` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
 | [`mul` + `add`/`sub`](analyses.md#mul--addsub-foldable-to-maddmsub) | `madd`/`msub` (or `mneg`) |

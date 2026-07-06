@@ -153,6 +153,17 @@ static void movz_w(uint8_t out[4], unsigned rd, uint16_t imm16)
     write_le32(out, op);
 }
 
+// MOVZ Wd, #imm16, LSL #(hw*16)
+static void movz_w_hw(uint8_t out[4], unsigned rd, uint16_t imm16,
+                      unsigned hw)
+{
+    uint32_t op = 0x52800000u
+        | ((uint32_t)(hw & 0x3u) << 21)
+        | ((uint32_t)(imm16 & 0xffffu) << 5)
+        | (rd & 0x1fu);
+    write_le32(out, op);
+}
+
 // MOVK Wd, #imm16, LSL #(hw*16)
 // Encoding base: 0x72800000
 static void movk_w(uint8_t out[4], unsigned rd, uint16_t imm16, unsigned hw)
@@ -5861,6 +5872,206 @@ static void test_mov_ccmp_imm_fold(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+// FMOV (general), GPR -> FPR: fmov Sd, Wn / fmov Dd, Xn.
+static void fmov_s_from_w(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    write_le32(out, 0x1E270000u | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void fmov_d_from_x(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    write_le32(out, 0x9E670000u | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// SCVTF/UCVTF (scalar, from GPR) from raw fields:
+//   sf 0011110 0 type 1 00 01 u 000000 Rn Rd
+// sf is the source GPR width, dbl the destination precision.
+static void cvtf_gpr(uint8_t out[4], unsigned sf, unsigned dbl,
+                     unsigned is_unsigned, unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x1E220000u
+        | ((uint32_t)(sf & 1u) << 31)
+        | ((dbl & 1u) << 22)
+        | ((is_unsigned & 1u) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Independent transliteration of the ARM pseudocode VFPExpandImm,
+// used to cross-check the linter's reverse predicate over all 256
+// imm8 values. imm8 = a:b:cd:efgh.
+static uint64_t vfp_expand_imm8(unsigned imm8, bool is_double)
+{
+    uint64_t a = (imm8 >> 7) & 1u;
+    uint64_t b = (imm8 >> 6) & 1u;
+    uint64_t cd = (imm8 >> 4) & 3u;
+    uint64_t efgh = imm8 & 0xFu;
+    if (is_double) {
+        uint64_t exp = ((b ^ 1u) << 10) | ((b ? 0xFFu : 0x0u) << 2) | cd;
+        return (a << 63) | (exp << 52) | (efgh << 48);
+    }
+    uint64_t exp = ((b ^ 1u) << 7) | ((b ? 0x1Fu : 0x0u) << 2) | cd;
+    return (a << 31) | (exp << 23) | (efgh << 19);
+}
+
+static void test_mov_fmov_imm_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: 1.0f's bit pattern built in a GPR and transferred;
+    //    the trailing MOV overwrites w8, emitting the deferred
+    //    finding (-> fmov s0, #1.0).
+    movz_w_hw(&code[0], 8, 0x3f80, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 1);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Double via an X transfer: mov x8, #0x3ff0000000000000 ;
+    // fmov d0, x8 -> fmov d0, #1.0.
+    movz_x(&code[0], 8, 0x3ff0, 3);
+    fmov_d_from_x(&code[4], 0, 8);
+    movz_x(&code[8], 8, 0, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // SCVTF of a small constant: mov w8, #5 ; scvtf d0, w8
+    // -> fmov d0, #5.0.
+    movz_w(&code[0], 8, 5);
+    cvtf_gpr(&code[4], 0, 1, 0, 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // UCVTF: mov w8, #3 ; ucvtf s1, w8 -> fmov s1, #3.0.
+    movz_w(&code[0], 8, 3);
+    cvtf_gpr(&code[4], 0, 0, 1, 1, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Negative constant via MOVN: mov w8, #-3 ; scvtf s0, w8
+    // -> fmov s0, #-3.0.
+    movn_w(&code[0], 8, 2);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // W chain feeding a 64-bit source: the W write zeroed X8[63:32],
+    // so the X read is the constant. mov w8, #7 ; scvtf d0, x8.
+    movz_w(&code[0], 8, 7);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Conversion boundary: 31 is the largest foldable integer...
+    movz_w(&code[0], 8, 31);
+    cvtf_gpr(&code[4], 0, 1, 0, 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // ...and 32 exceeds the immediate's exponent range.
+    movz_w(&code[0], 8, 32);
+    cvtf_gpr(&code[4], 0, 1, 0, 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: bit patterns FMOV #imm8 cannot express. --
+
+    // 32.0f: exponent out of range.
+    movz_w_hw(&code[0], 8, 0x4200, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // +0.0f and -0.0f: FMOV's immediate cannot encode zero.
+    movz_w(&code[0], 8, 0);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    movz_w_hw(&code[0], 8, 0x8000, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Infinity and a quiet NaN.
+    movz_w_hw(&code[0], 8, 0x7f80, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    movz_w_hw(&code[0], 8, 0x7fc0, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // A fifth fraction bit: 1.03125f = 0x3f840000.
+    movz_w_hw(&code[0], 8, 0x3f84, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: width rules. --
+
+    // X chain feeding a W-source transfer.
+    movz_x(&code[0], 8, 0x3f80, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_x(&code[8], 8, 0, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // X chain feeding a W-source conversion.
+    movz_x(&code[0], 8, 5, 0);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 8);
+    movz_x(&code[8], 8, 0, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: chain register mismatch. --
+
+    movz_w_hw(&code[0], 9, 0x3f80, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: deferred finding discarded when the constant is
+    //    read, or on a control transfer, before dying. --
+
+    movz_w_hw(&code[0], 8, 0x3f80, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    add_w(&code[8], 2, 8, 3);      // reads w8
+    assert(run_helper_check(code, 12) == 0);
+
+    movz_w_hw(&code[0], 8, 0x3f80, 1);
+    fmov_s_from_w(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction closes the chain. --
+
+    movz_w_hw(&code[0], 8, 0x3f80, 1);
+    add_w(&code[4], 2, 1, 3);
+    fmov_s_from_w(&code[8], 0, 8);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Exhaustive: every one of the 256 imm8 values, expanded by an
+    //    independent VFPExpandImm transliteration, folds through the
+    //    check. All encodable doubles live in the top halfword and
+    //    all encodable singles in W's upper halfword, so each is a
+    //    single-MOVZ chain. --
+    for (unsigned imm8 = 0; imm8 < 256; imm8++) {
+        uint64_t dbits = vfp_expand_imm8(imm8, true);
+        assert((dbits & 0xFFFFFFFFFFFFull) == 0);
+        movz_x(&code[0], 8, (uint16_t)(dbits >> 48), 3);
+        fmov_d_from_x(&code[4], 0, 8);
+        movz_x(&code[8], 8, 0, 0);
+        assert(run_helper_check(code, 12) == 1);
+
+        uint64_t sbits = vfp_expand_imm8(imm8, false);
+        assert((sbits & 0xFFFFu) == 0);
+        movz_w_hw(&code[0], 8, (uint16_t)(sbits >> 16), 1);
+        fmov_s_from_w(&code[4], 0, 8);
+        movz_w(&code[8], 8, 0);
+        assert(run_helper_check(code, 12) == 1);
+    }
+}
+
 // Integer register-offset load/store from raw fields:
 //   size 111000 opc 1 Rm option S 10 Rn Rt
 // option 3 is LSL/UXTX (the plain [Rn, Rm{, lsl #s}] form); s=1 sets
@@ -8060,6 +8271,7 @@ int main(void)
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
+    test_mov_fmov_imm_fold();
     test_mov_reg_offset_fold();
     test_mul_add_sub_fold();
     test_widening_mul_add_sub_fold();

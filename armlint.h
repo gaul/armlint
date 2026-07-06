@@ -488,6 +488,38 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
+// Detect a MOV chain materialising an FP bit pattern or a small
+// integer, immediately followed by the GPR -> FP transfer or
+// conversion that consumes it, when FMOV (scalar, immediate) could
+// produce the value directly, making the MOV (and the cross-file
+// transfer's latency) avoidable:
+//   mov w8, #0x3f800000 ; fmov s0, w8  -> fmov s0, #1.0
+//   mov x8, #0x3ff0000000000000 ; fmov d0, x8 -> fmov d0, #1.0
+//   mov w8, #5 ; scvtf d0, w8          -> fmov d0, #5.0
+// Consumers: FMOV (general) in the GPR -> FPR direction (fmov Sd, Wn
+// / fmov Dd, Xn) and the scalar conversions SCVTF/UCVTF from either
+// GPR width. FMOV's imm8 expands to +/-(16..31)/16 * 2^n for n in
+// [-3, 4] (so every integer of magnitude 1..31); zero is NOT
+// expressible and never matches -- zeroing idioms are out of scope.
+// The encodability test is an exact bit-pattern match. Half-precision
+// destinations (FEAT_FP16) are not matched.
+//
+// A 64-bit source also accepts a W-form chain (the W write zeroed
+// X[63:32], pinning the full read); a W source requires a W chain.
+// Folding a conversion additionally requires the conversion be exact
+// -- SCVTF/UCVTF round per the dynamic FPCR mode, and exactness makes
+// the result mode-independent and exception-free. Encodability already
+// implies it (an imm8 magnitude is at most 31.5), but a round-trip
+// check enforces it explicitly.
+//
+// The consumer writes only an FP register and never kills the
+// constant GPR, so the finding always defers through the forward
+// register-liveness scan (defer_dead_mov) until mov_rd is provably
+// dead. Runs before check_movz_movk_bitmask so the chain state is
+// still active.
+bool check_mov_fmov_imm_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 // Detect a MOV chain that materialises the constant 0, immediately
 // followed by an instruction that reads that register. The read can
 // be replaced by XZR/WZR (the architectural zero register), making
