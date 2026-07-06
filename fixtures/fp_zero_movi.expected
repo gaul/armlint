@@ -1,0 +1,33 @@
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x0: -> movi d0, #0 (1 instructions)
+  fmov s0, wzr
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x4: -> movi d1, #0 (1 instructions)
+  fmov d1, xzr
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x8: -> movi d2, #0 (1 instructions)
+  scvtf d2, wzr
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0xc: -> movi d3, #0 (1 instructions)
+  ucvtf s3, wzr
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x10: -> movi v4.4s, #0 (1 instructions)
+  dup v4.4s, wzr
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x14: -> movi v5.2d, #0 (1 instructions)
+  dup v5.2d, xzr
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x18: -> movi v6.8b, #0 (1 instructions)
+  dup v6.8b, wzr
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x1c: -> movi d7, #0 (2 instructions)
+  movz w8, #0x0
+  fmov s7, w8
+
+FP/vector zeroing via GPR foldable to MOVI at offset: 0x28: -> movi v8.4s, #0 (2 instructions)
+  movz w9, #0x0
+  dup v8.4s, w9
+
+Optimization opportunities by type:
+       9  FP/vector zeroing via GPR foldable to MOVI
+
+9 optimization opportunities in 20 instructions

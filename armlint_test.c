@@ -6194,11 +6194,13 @@ static void test_mov_fmov_imm_fold(void)
     movz_w(&code[8], 8, 0);
     assert(run_helper_check(code, 12) == 0);
 
-    // +0.0f and -0.0f: FMOV's immediate cannot encode zero.
+    // +0.0f and -0.0f: FMOV's immediate cannot encode zero. The +0
+    // shape is exactly the zeroing idiom, so the one finding here is
+    // check_fp_zero_to_movi's (-> movi d0, #0), not this check's.
     movz_w(&code[0], 8, 0);
     fmov_s_from_w(&code[4], 0, 8);
     movz_w(&code[8], 8, 1);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_helper_check(code, 12) == 1);
 
     movz_w_hw(&code[0], 8, 0x8000, 1);
     fmov_s_from_w(&code[4], 0, 8);
@@ -6283,6 +6285,131 @@ static void test_mov_fmov_imm_fold(void)
         movz_w(&code[8], 8, 0);
         assert(run_helper_check(code, 12) == 1);
     }
+}
+
+// DUP (general): 0 Q 0 01110000 imm5 000011 Rn Rd. imm5's lowest set
+// bit picks the element size: 1 = B, 2 = H, 4 = S, 8 = D.
+static void dup_gpr(uint8_t out[4], unsigned q, unsigned imm5,
+                    unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x0E000C00u
+        | ((uint32_t)(q & 1u) << 30)
+        | ((imm5 & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_fp_zero_to_movi(void)
+{
+    uint8_t code[16];
+
+    // -- Positive, ZR source: one-for-one rewrites that emit
+    //    immediately. --
+
+    // fmov s0, wzr -> movi d0, #0.
+    fmov_s_from_w(&code[0], 0, 31);
+    assert(run_helper_check(code, 4) == 1);
+
+    // fmov d1, xzr.
+    fmov_d_from_x(&code[0], 1, 31);
+    assert(run_helper_check(code, 4) == 1);
+
+    // scvtf d2, wzr (integer zero -> +0.0).
+    cvtf_gpr(&code[0], 0, 1, 0, 2, 31);
+    assert(run_helper_check(code, 4) == 1);
+
+    // ucvtf s3, xzr.
+    cvtf_gpr(&code[0], 1, 0, 1, 3, 31);
+    assert(run_helper_check(code, 4) == 1);
+
+    // dup v4.4s, wzr -> movi v4.4s, #0.
+    dup_gpr(&code[0], 1, 4, 4, 31);
+    assert(run_helper_check(code, 4) == 1);
+
+    // Half-width and byte arrangements: dup v5.2s / v6.8b, wzr.
+    dup_gpr(&code[0], 0, 4, 5, 31);
+    assert(run_helper_check(code, 4) == 1);
+    dup_gpr(&code[0], 0, 1, 6, 31);
+    assert(run_helper_check(code, 4) == 1);
+
+    // dup v7.2d, xzr.
+    dup_gpr(&code[0], 1, 8, 7, 31);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Positive, chain source: mov #0 + transfer defers until the
+    //    constant register dies. --
+
+    // mov w8, #0 ; fmov s0, w8 ; mov w8, #1.
+    movz_w(&code[0], 8, 0);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_w(&code[8], 8, 1);
+    assert(run_helper_check(code, 12) == 1);
+
+    // X form: mov x8, #0 ; fmov d0, x8 ; mov x8, #1.
+    movz_x(&code[0], 8, 0, 0);
+    fmov_d_from_x(&code[4], 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // W chain feeding a 64-bit source: mov w8, #0 ; fmov d0, x8.
+    movz_w(&code[0], 8, 0);
+    fmov_d_from_x(&code[4], 0, 8);
+    movz_w(&code[8], 8, 1);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Conversion of the pinned zero: mov w8, #0 ; scvtf d0, w8.
+    movz_w(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 0, 1, 0, 0, 8);
+    movz_w(&code[8], 8, 1);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Broadcast of the pinned zero: mov w8, #0 ; dup v0.4s, w8.
+    movz_w(&code[0], 8, 0);
+    dup_gpr(&code[4], 1, 4, 0, 8);
+    movz_w(&code[8], 8, 1);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: a nonzero chain value is not a zeroing. --
+
+    movz_w(&code[0], 8, 5);
+    dup_gpr(&code[4], 1, 4, 0, 8);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: the constant register is read again before dying. --
+
+    movz_w(&code[0], 8, 0);
+    fmov_s_from_w(&code[4], 0, 8);
+    add_w(&code[8], 1, 8, 2);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a control transfer discards the deferral. --
+
+    movz_w(&code[0], 8, 0);
+    fmov_s_from_w(&code[4], 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: an X chain cannot feed a W source. --
+
+    movz_x(&code[0], 8, 0, 0);
+    fmov_s_from_w(&code[4], 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a non-ZR, non-chain source register. --
+
+    dup_gpr(&code[0], 1, 4, 0, 5);
+    assert(run_helper_check(code, 4) == 0);
+
+    // -- Negative: intervening instruction closes the chain. --
+
+    movz_w(&code[0], 8, 0);
+    add_x(&code[4], 1, 2, 3);
+    fmov_s_from_w(&code[8], 0, 8);
+    movz_w(&code[12], 8, 1);
+    assert(run_helper_check(code, 16) == 0);
 }
 
 // Integer register-offset load/store from raw fields:
@@ -8486,6 +8613,7 @@ int main(void)
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_fmov_imm_fold();
+    test_fp_zero_to_movi();
     test_mov_reg_offset_fold();
     test_mul_add_sub_fold();
     test_widening_mul_add_sub_fold();

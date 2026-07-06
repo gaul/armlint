@@ -801,8 +801,8 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   at parity with `MOV+MUL` in count.
 * Dead-constant verification (shared by every MOV-chain fold --
   `MNEG`, `UDIV`, `MOV + ADD/SUB`, `MOV + AND/ORR/EOR`, `MOV + CCMP`,
-  `MOV + FMOV/SCVTF/UCVTF`, `MOV #0 + use`, and the register-offset
-  fold): the reported saving
+  `MOV + FMOV/SCVTF/UCVTF`, `MOV #0 + use`, the register-offset fold,
+  and the MOVI zeroing fold's `MOV #0` form): the reported saving
   assumes the constant register was materialised solely to feed this
   one consumer, and armlint verifies that before reporting. When the
   consumer itself overwrites the constant register, the chain is dead
@@ -974,6 +974,39 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   constant GPR itself, so -- like the CCMP fold -- the finding always
   defers through the forward register-liveness scan until the
   constant register is provably dead.
+
+## FP/vector zeroing via GPR foldable to MOVI
+
+* `fmov s0, wzr` instead of `movi d0, #0`. FMOV's immediate cannot
+  encode zero, so zeroing an FP or vector register is MOVI's job --
+  and routing the zero through a general register instead costs a
+  cross-register-file transfer (several cycles of latency on most
+  cores) that MOVI performs on the FP side, where zero idioms are
+  often free at rename. Three consumer families:
+  * `FMOV (general)`, GPR->FPR: `fmov s0, wzr` / `fmov d0, xzr`.
+  * `SCVTF`/`UCVTF` of zero: integer zero converts to `+0.0` -- the
+    all-zeros pattern -- in every FPCR rounding mode (`FixedToFP`
+    returns `FPZero` for a zero input outright, raising no
+    exceptions), so `scvtf d0, wzr` is exactly `movi d0, #0`.
+  * `DUP (general)` broadcasting ZR: `dup v0.4s, wzr` ->
+    `movi v0.4s, #0`, keeping the arrangement.
+  All three zero the vector register above what they write, exactly
+  as MOVI does, so the final 128-bit state is bit-identical. Scalar
+  consumers render the canonical 64-bit zeroing `movi dN, #0` (the
+  whole register is zero regardless of the S/D destination width).
+* The ZR-source forms are one-for-one rewrites with no deleted write
+  and report immediately. The same consumers fed by a MOV-chain
+  register pinned to zero (`mov w8, #0 ; fmov s0, w8`) additionally
+  delete the MOV, and defer through the forward register-liveness
+  scan until the constant register provably dies -- width admission
+  as in the FMOV-immediate fold (a 64-bit source also accepts a
+  W-form chain). These consumers are deliberately not in the
+  [`MOV #0` fold](#mov-0--use-foldable-to-zr)'s set: substituting WZR
+  would keep the cross-file transfer that MOVI eliminates.
+* Nonzero DUP broadcasts that MOVI's expanded immediate could encode
+  (`mov w8, #5 ; dup v0.4s, w8` -> `movi v0.4s, #5`) are a natural
+  extension, deferred for now. Half-precision (FEAT_FP16) transfers
+  are not matched, consistent with the FMOV-immediate fold.
 
 ## MOV #0 + use foldable to ZR
 

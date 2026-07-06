@@ -5460,6 +5460,164 @@ bool check_mov_fmov_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+// Arrangement specifiers for DUP (general) and the MOVI rewrite,
+// indexed by element-size log2 and Q. The 64-bit element without Q
+// ("1d") is RESERVED and never decoded.
+static const char *const dup_arrangements[4][2] = {
+    { "8b", "16b" },
+    { "4h", "8h" },
+    { "2s", "4s" },
+    { NULL, "2d" },
+};
+
+// DUP (general) -- broadcast a GPR into every vector lane:
+//   0 Q 0 01110000 imm5 000011 Rn Rd
+// imm5's lowest set bit selects the element size (B/H/S read Wn, D
+// reads Xn). imm5 with none of the low four bits set is UNALLOCATED,
+// and the D element requires Q (there is no "1d" arrangement). Bits
+// 15..10 distinguish this from DUP (element) (000001) and the INS
+// forms, so partial-lane writes never match.
+static bool decode_dup_from_gpr(uint32_t op, unsigned *out_q,
+                                unsigned *out_esz, unsigned *out_rn,
+                                unsigned *out_rd)
+{
+    if ((op & 0xBFE0FC00u) != 0x0E000C00u) {
+        return false;
+    }
+    unsigned imm5 = (op >> 16) & 0x1Fu;
+    unsigned q = (op >> 30) & 1u;
+    unsigned esz;
+    if (imm5 & 1u) {
+        esz = 0;
+    } else if (imm5 & 2u) {
+        esz = 1;
+    } else if (imm5 & 4u) {
+        esz = 2;
+    } else if (imm5 & 8u) {
+        esz = 3;
+    } else {
+        return false;           // UNALLOCATED
+    }
+    if (esz == 3u && q == 0u) {
+        return false;           // RESERVED
+    }
+    *out_q = q;
+    *out_esz = esz;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rd = op & 0x1Fu;
+    return true;
+}
+
+bool check_fp_zero_to_movi(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // A GPR -> FP/vector consumer whose result, given a zero source,
+    // is an all-zeros register: FMOV (general, GPR->FPR), SCVTF/UCVTF
+    // (integer zero converts to +0.0 -- the all-zeros pattern -- in
+    // every FPCR rounding mode: FixedToFP returns FPZero for a zero
+    // input, signed or not, raising no exceptions), or DUP (general)
+    // broadcasting the zero into every lane. All three zero the
+    // vector register above what they write, exactly as MOVI #0 does,
+    // so the final register state is bit-identical.
+    bool is_dup = false;
+    bool is_double, is_unsigned, src_64;
+    unsigned rn, rd, q = 0, esz = 0;
+    if (decode_fmov_from_gpr(op, &is_double, &rn, &rd)) {
+        src_64 = is_double;
+    } else if (decode_cvtf_from_gpr(op, &src_64, &is_double,
+                                    &is_unsigned, &rn, &rd)) {
+        // (signedness is irrelevant for a zero source)
+    } else if (decode_dup_from_gpr(op, &q, &esz, &rn, &rd)) {
+        is_dup = true;
+        src_64 = (esz == 3u);
+    } else {
+        return false;
+    }
+    (void)is_double;
+    (void)is_unsigned;
+
+    // The zero source: the zero register itself, or a MOV-chain
+    // register whose pinned value is zero. Width admission matches
+    // the FMOV immediate fold: a 64-bit source also accepts a W-form
+    // chain (the W write zeroed X[63:32]); a W source requires a W
+    // chain.
+    bool from_zr = (rn == 31u);
+    if (!from_zr) {
+        if (!state->mov_active || rn != state->mov_rd
+                || state->mov_value != 0
+                || (!src_64 && state->mov_is_64bit)) {
+            return false;
+        }
+    }
+
+    // The rewrite: scalar consumers all become the canonical 64-bit
+    // scalar zeroing (the whole vector register ends up zero either
+    // way); DUP keeps its arrangement.
+    char movi_buf[24];
+    if (is_dup) {
+        snprintf(movi_buf, sizeof(movi_buf), "movi v%u.%s, #0",
+            rd, dup_arrangements[esz][q]);
+    } else {
+        snprintf(movi_buf, sizeof(movi_buf), "movi d%u, #0", rd);
+    }
+
+    out->name = "FP/vector zeroing via GPR foldable to MOVI";
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail), "-> %s", movi_buf);
+
+    // Reading ZR directly, the rewrite is one-for-one -- MOVI zeroes
+    // on the FP side instead of crossing the register files -- with
+    // no deleted write, so it emits immediately.
+    if (from_zr) {
+        out->start_offset = offset;
+        out->insn_count = 1;
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s %s", insn->mnemonic, insn->op_str);
+        return true;
+    }
+
+    // The chain form also deletes the MOV #0 (this consumer is
+    // deliberately not in the MOV #0 -> ZR check's set: substituting
+    // WZR would still leave the cross-file transfer that MOVI
+    // eliminates). The consumer writes only an FP register and never
+    // kills the constant GPR, so the finding always defers until it
+    // provably dies.
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+
+    char w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -8317,6 +8475,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_logic_imm_fold,
     check_mov_ccmp_imm_fold,
     check_mov_fmov_imm_fold,
+    check_fp_zero_to_movi,
     check_mov_zero_to_xzr,
     check_mov_reg_offset_fold,
     check_movz_movk_bitmask,

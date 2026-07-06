@@ -548,6 +548,33 @@ bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_fmov_imm_fold(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
+// Detect an FP or vector register being zeroed through a
+// general-purpose register, where MOVI #0 produces the identical
+// all-zeros state on the FP side without the cross-register-file
+// transfer:
+//   fmov s0, wzr      -> movi d0, #0     (one-for-one, lower latency)
+//   scvtf d0, wzr     -> movi d0, #0     (integer zero -> +0.0 in
+//                                         every rounding mode)
+//   dup v0.4s, wzr    -> movi v0.4s, #0
+//   mov w8, #0 ; fmov s0, w8 -> movi d0, #0 (also deletes the MOV)
+// Consumers: FMOV (general, GPR->FPR), SCVTF/UCVTF (scalar, from
+// GPR) and DUP (general), from ZR directly or from a MOV-chain
+// register pinned to zero (width admission as in the FMOV immediate
+// fold). All three write semantics zero the vector register above
+// the written portion, exactly as the suggested MOVI does, so the
+// final state is bit-identical. Scalar consumers render the
+// canonical 64-bit zeroing (movi dN, #0); DUP keeps its arrangement.
+//
+// The ZR forms delete no write and emit immediately. The chain form
+// deletes the MOV #0 (this consumer is intentionally not in the
+// MOV #0 -> ZR check's set -- WZR substitution would keep the
+// transfer) and defers through the forward register-liveness scan
+// until the constant register provably dies. Non-zero DUP broadcasts
+// that MOVI's expanded immediate could encode are out of scope. Runs
+// before check_movz_movk_bitmask so the chain state is still active.
+bool check_fp_zero_to_movi(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
+
 // Detect a MOV chain that materialises the constant 0, immediately
 // followed by an instruction that reads that register. The read can
 // be replaced by XZR/WZR (the architectural zero register), making
