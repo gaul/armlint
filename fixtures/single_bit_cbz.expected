@@ -1,0 +1,24 @@
+single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ at offset: 0x0: -> tbz w9, #4, 0xc (2 instructions)
+  and w8, w9, #0x10
+  cbz w8, 0xc
+
+single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ at offset: 0x10: -> tbnz w11, #0, 0x1c (2 instructions)
+  and w10, w11, #1
+  cbnz w10, 0x1c
+
+single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ at offset: 0x20: -> tbz w13, #4, 0x2c (2 instructions)
+  ubfx w12, w13, #4, #1
+  cbz w12, 0x2c
+
+single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ at offset: 0x30: -> tbnz w15, #31, 0x3c (2 instructions)
+  lsr w14, w15, #0x1f
+  cbnz w14, 0x3c
+
+single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ at offset: 0x40: -> tbz x17, #40, 0x4c (2 instructions)
+  and x16, x17, #0x10000000000
+  cbz x16, 0x4c
+
+Optimization opportunities by type:
+       5  single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ
+
+5 optimization opportunities in 29 instructions

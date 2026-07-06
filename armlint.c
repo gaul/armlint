@@ -143,6 +143,35 @@ struct armlint_state {
     unsigned tst_bit;       // bit position 0..63
     size_t tst_offset;
 
+    // Flag-free single-bit producer (AND-imm with a one-bit mask, or a
+    // one-bit UBFM/SBFM extract) pending a CBZ/CBNZ consumer for the
+    // TBZ/TBNZ fold. tbf_rd is the producer's destination (the branch
+    // tests it), tbf_rs its source (the TBZ reads it), tbf_bit the
+    // isolated bit.
+    bool tbf_active;
+    bool tbf_is_64bit;
+    unsigned tbf_rd;
+    unsigned tbf_rs;
+    unsigned tbf_bit;
+    size_t tbf_offset;
+    char tbf_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Deferred single-bit-test TBZ/TBNZ finding awaiting the two-edge
+    // register-liveness proof (see armlint_advance_pending_tb): the
+    // rewrite deletes the producer, so the masked temp must be dead on
+    // the fall-through path (overwritten before any read or control
+    // transfer -- the usual forward scan) AND on the taken path, which
+    // is covered by containment: emission requires the branch target
+    // to lie within [fall-through, kill], the span the scan just
+    // proved free of reads and control transfers, so the taken edge
+    // enters that clean span and reaches the same kill.
+    bool pending_tb_active;
+    unsigned pending_tb_window;
+    int pending_tb_reg;
+    size_t pending_tb_ft;         // fall-through offset (consumer + 4)
+    size_t pending_tb_target;     // branch-target offset
+    armlint_finding pending_tb_finding;
+
     // Producer of bits-above-N guaranteed zero, pending a redundant
     // zero-extension consumer that re-zeros those bits. wzx_zero_from
     // is the threshold P: the producer guarantees bits >= P are zero.
@@ -750,6 +779,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->aul_active = false;
     state->cmp_active = false;
     state->tst_active = false;
+    state->tbf_active = false;
+    state->pending_tb_active = false;
     state->wzx_active = false;
     state->sxt_active = false;
     state->sv_active = false;
@@ -2734,6 +2765,231 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
         state->tst_rn = rn;
         state->tst_bit = bit;
         state->tst_offset = offset;
+    }
+
+    return false;
+}
+
+// AND (immediate, non-flag-setting) whose mask is a single bit:
+//   sf | 00 | 100100 | N | immr(6) | imms(6) | Rn | Rd
+// imms = 0 (a run of one '1') with N == sf; bit = (datasize - immr)
+// mod datasize. Same field logic as decode_tst_single_bit, but for
+// the plain AND with a real destination. ANDS is deliberately not
+// matched: deleting it would lose the NZCV write (its Rd = ZR form is
+// the TST alias that check_tst_branch owns).
+static bool decode_and_single_bit(uint32_t op, unsigned *out_sf,
+                                  unsigned *out_rd, unsigned *out_rn,
+                                  unsigned *out_bit)
+{
+    if ((op & 0x7F800000u) != 0x12000000u) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 1u;
+    unsigned N = (op >> 22) & 1u;
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+
+    if (imms != 0) {
+        return false;
+    }
+    if (sf == 0) {
+        if (N != 0 || (immr & 0x20u)) {
+            return false;
+        }
+        *out_bit = (32u - immr) % 32u;
+    } else {
+        if (N != 1) {
+            return false;
+        }
+        *out_bit = (64u - immr) % 64u;
+    }
+    *out_sf = sf;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// UBFM or SBFM extracting a single bit: imms == immr == k places bit
+// k of the source in Rd[0], zero- or sign-extended, so Rd == 0 iff
+// Rs[k] == 0. Covers `ubfx/sbfx Rd, Rs, #k, #1` and the k =
+// datasize-1 aliases `lsr/asr Rd, Rs, #(datasize-1)`. BFM (opc = 01)
+// merges into Rd's old value and is not a pure bit test.
+static bool decode_bfm_single_bit(uint32_t op, unsigned *out_sf,
+                                  unsigned *out_rd, unsigned *out_rn,
+                                  unsigned *out_bit)
+{
+    unsigned sf = (op >> 31) & 1u;
+    uint32_t cls = op & 0xFFC00000u;
+    uint32_t ubfm = sf ? 0xD3400000u : 0x53000000u;
+    uint32_t sbfm = sf ? 0x93400000u : 0x13000000u;
+    if (cls != ubfm && cls != sbfm) {
+        return false;
+    }
+    unsigned immr = (op >> 16) & 0x3Fu;
+    unsigned imms = (op >> 10) & 0x3Fu;
+    if (imms != immr) {
+        return false;
+    }
+    if (!sf && imms >= 32u) {
+        return false;       // UNDEFINED encoding
+    }
+    *out_sf = sf;
+    *out_bit = immr;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    return true;
+}
+
+// CBZ (op = 0) / CBNZ (op = 1): sf 011010 op imm19 Rt.
+static bool decode_cbz_cbnz(uint32_t op, unsigned *out_sf,
+                            bool *out_is_cbnz, int32_t *out_imm19,
+                            unsigned *out_rt)
+{
+    if ((op & 0x7E000000u) != 0x34000000u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_is_cbnz = ((op >> 24) & 1u) != 0;
+    int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+    if (imm19 & 0x40000) {
+        imm19 -= 0x80000;   // sign-extend 19 bits
+    }
+    *out_imm19 = imm19;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    if (!state->pending_tb_active) {
+        return false;
+    }
+    if (insn->size != 4) {
+        state->pending_tb_active = false;
+        return false;
+    }
+    switch (classify_reg_liveness(insn, state->pending_tb_reg)) {
+    case LIV_OVERWRITE:
+        state->pending_tb_active = false;
+        // Fall-through path proven: [ft, here) held no read or
+        // control transfer and this instruction kills the register.
+        // The taken path shares the proof only when the branch target
+        // lies inside that clean span (inclusive of the kill itself):
+        // execution entering anywhere in it runs straight to the same
+        // kill. A target before the fall-through (backward) or beyond
+        // the kill leaves the taken path unproven -- discard.
+        if (state->pending_tb_target >= state->pending_tb_ft
+                && state->pending_tb_target <= offset) {
+            *out = state->pending_tb_finding;
+            return true;
+        }
+        return false;
+    case LIV_READ:
+    case LIV_TERM_SAFE:
+    case LIV_TERM_UNSAFE:
+        state->pending_tb_active = false;
+        return false;
+    case LIV_UNKNOWN:
+        if (state->pending_tb_window == 0
+                || --state->pending_tb_window == 0) {
+            state->pending_tb_active = false;
+        }
+        return false;
+    }
+    return false;
+}
+
+bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    (void)out;  // emission goes through armlint_advance_pending_tb
+
+    if (insn->size != 4) {
+        state->tbf_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a CBZ/CBNZ testing the producer's destination?
+    if (state->tbf_active) {
+        unsigned c_sf, rt;
+        bool is_cbnz;
+        int32_t imm19;
+        if (decode_cbz_cbnz(op, &c_sf, &is_cbnz, &imm19, &rt)
+                && rt == state->tbf_rd
+                // A W-form branch cannot observe a bit isolated at or
+                // above bit 32: the zero-extended field sits wholly in
+                // the discarded high half, making the branch constant
+                // -- degenerate, not this fold. (An SBFM producer's
+                // sign replication would make it visible, but that
+                // exotic shape is conservatively skipped too.)
+                && !(c_sf == 0 && state->tbf_bit >= 32u)) {
+            // Range: the TBZ replaces the producer, 4 bytes before the
+            // CBZ, so its displacement is imm19 + 1 instruction units,
+            // within TBZ's signed 14 bits. (The containment gate in
+            // the pending scan restricts the target far more tightly;
+            // this keeps the encoding constraint visible.) The target
+            // must also lie at or after the fall-through: a backward
+            // target can never satisfy the containment proof, so it is
+            // dropped now rather than deferred.
+            int64_t tbz_disp = (int64_t)imm19 + 1;
+            int64_t t_off = (int64_t)offset + (int64_t)imm19 * 4;
+            if (tbz_disp >= -8192 && tbz_disp <= 8191
+                    && t_off >= (int64_t)(offset + 4u)) {
+                uint64_t target = insn->address
+                    + (uint64_t)((int64_t)imm19 * 4);
+                // TBZ names a W source for bits 0..31 and an X source
+                // for bits 32..63, independent of the CBZ's width.
+                char s_wx = state->tbf_bit < 32u ? 'w' : 'x';
+                char c_wx = c_sf ? 'x' : 'w';
+                const char *tb_mnem = is_cbnz ? "tbnz" : "tbz";
+                const char *cb_mnem = is_cbnz ? "cbnz" : "cbz";
+
+                armlint_finding *p = &state->pending_tb_finding;
+                p->name =
+                    "single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ";
+                p->start_offset = state->tbf_offset;
+                p->insn_count = 2;
+                clear_finding_strings(p);
+
+                snprintf(p->detail, sizeof(p->detail),
+                    "-> %s %c%u, #%u, 0x%" PRIx64,
+                    tb_mnem, s_wx, state->tbf_rs, state->tbf_bit,
+                    target);
+                snprintf(p->lines[0], sizeof(p->lines[0]),
+                    "%s", state->tbf_disasm);
+                snprintf(p->lines[1], sizeof(p->lines[1]),
+                    "%s %c%u, 0x%" PRIx64,
+                    cb_mnem, c_wx, rt, target);
+
+                state->pending_tb_active = true;
+                state->pending_tb_window = LIVENESS_WINDOW;
+                state->pending_tb_reg = (int)state->tbf_rd;
+                state->pending_tb_ft = offset + 4u;
+                state->pending_tb_target = (size_t)t_off;
+            }
+        }
+        // Strict adjacency: any non-matching instruction expires.
+        state->tbf_active = false;
+    }
+
+    // (2) Open: a single-bit producer? The source must be a real
+    // register (ZR gives a constant zero -- a degenerate always/never
+    // branch) and the destination must not be discarded.
+    unsigned p_sf, p_rd, p_rs, p_bit;
+    if ((decode_and_single_bit(op, &p_sf, &p_rd, &p_rs, &p_bit)
+            || decode_bfm_single_bit(op, &p_sf, &p_rd, &p_rs, &p_bit))
+            && p_rd != 31 && p_rs != 31) {
+        state->tbf_active = true;
+        state->tbf_is_64bit = (p_sf != 0);
+        state->tbf_rd = p_rd;
+        state->tbf_rs = p_rs;
+        state->tbf_bit = p_bit;
+        state->tbf_offset = offset;
+        snprintf(state->tbf_disasm, sizeof(state->tbf_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
     }
 
     return false;
@@ -7630,6 +7886,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending,
     armlint_advance_pending_sv,
     armlint_advance_pending_mz,
+    armlint_advance_pending_tb,
     check_mul_strength_reduce,
     check_mneg_strength_reduce,
     check_udiv_strength_reduce,
@@ -7643,6 +7900,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_funnel_to_extr,
     check_cmp_zero_branch,
     check_tst_branch,
+    check_single_bit_cbz,
     check_redundant_zext,
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,

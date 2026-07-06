@@ -177,6 +177,37 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
 bool check_tst_branch(armlint_state *state, const cs_insn *insn,
                       size_t offset, armlint_finding *out);
 
+// Flag-free counterpart of check_tst_branch: a producer that isolates
+// a single bit k of Rs into Rd -- a non-flag-setting AND with a
+// one-bit mask, or a one-bit UBFM/SBFM extract (`ubfx/sbfx Rd, Rs,
+// #k, #1`, including the `lsr/asr Rd, Rs, #(datasize-1)` sign-bit
+// aliases) -- immediately followed by CBZ/CBNZ of Rd. Rd == 0 iff
+// Rs[k] == 0, so the pair folds to TBZ/TBNZ Rs, #k with the same
+// target. No NZCV is involved on either side.
+//
+// The rewrite deletes the producer, so the masked temp Rd must be
+// dead afterward -- on BOTH edges of the branch. Emission is deferred
+// (armlint_advance_pending_tb): the forward register-liveness scan
+// proves the fall-through path (Rd overwritten before any read or
+// control transfer), and the taken path is covered by containment --
+// the finding is emitted only when the branch target lies within
+// [fall-through, kill], the span the scan just proved free of reads
+// and control transfers, so the taken edge enters that clean span and
+// reaches the same kill. Backward targets and targets beyond the kill
+// are conservatively dropped. This is the canonical skip-a-small-
+// block shape; if/else diamonds whose kill precedes the join are left
+// unflagged.
+//
+// A W-form CBZ after a producer isolating bit >= 32 is rejected (the
+// branch cannot observe the bit -- degenerate). ANDS producers are
+// excluded (deleting one loses the NZCV write), as are ZR sources
+// (constant branches) and ZR destinations. The TBZ displacement
+// (imm19 + 1 units) is range-checked against the signed 14-bit
+// encoding, though the containment gate restricts it far more
+// tightly in practice.
+bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect a producer that provably zeros bits 63..P of its destination,
 // immediately followed by an in-place zero-extension consumer that
 // clears bits >= C with P <= C -- a no-op. Producers: any W-form
@@ -937,6 +968,17 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
 // offset parameter exists for compatibility with the shared armlint_check_fn
 // signature; it is unused.
 bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
+// Advance the deferred single-bit-test TBZ/TBNZ finding's two-edge
+// register-liveness scan by one instruction (see check_single_bit_cbz).
+// Emits the stashed finding when an instruction overwrites the masked
+// temp before any read or control transfer AND the folded branch's
+// target lies within the clean scanned span, so the taken edge shares
+// the proof. Unlike the other advancers this one uses its offset
+// parameter -- the containment gate compares the kill's offset against
+// the branch target's.
+bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
 // Close any open sequence at end-of-region. Returns true and fills *out

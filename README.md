@@ -36,16 +36,22 @@ equivalent; the constraints below are the ones they share.
 * **Strict adjacency.** A producer and its consumer must be consecutive;
   an unrelated instruction between them suppresses the finding. armlint
   does not reorder code or look through intervening instructions.
-* **Liveness is proved structurally, not analyzed.** A
-  producer-into-consumer fold fires only when the consumer overwrites the
+* **Liveness is proved structurally, or by a bounded forward scan.** A
+  producer-into-consumer fold fires when the consumer overwrites the
   producer's destination register, proving the intermediate value is
-  dead. There is no general-purpose register liveness pass.
-* **MOV-chain folds assume the constant is dead.** Folds that absorb a
+  dead. Folds whose saving is a deleted write with no such overwrite
+  defer instead: a bounded forward scan of the fall-through path must
+  see the register overwritten before any read or control transfer.
+  The single-bit branch fold additionally requires the folded branch's
+  taken edge to land inside that proven-clean span -- a general-purpose
+  register, unlike NZCV, is routinely live into a branch target, so no
+  block-locality assumption is made for it.
+* **MOV-chain folds verify the constant dies.** Folds that absorb a
   materialized constant -- `MUL`/`MNEG`/`UDIV` by a constant, `MOV` +
-  `ADD`/`AND`/`ORR`/`EOR`, `MOV #0` -- report a saving only if the
-  constant register feeds nothing else, which armlint cannot confirm
-  without a liveness pass. The consumer rewrite itself stays valid
-  regardless.
+  `ADD`/`AND`/`ORR`/`EOR`/`CCMP`, `MOV #0`, the register-offset fold --
+  report only once the consumer's own overwrite or the forward scan
+  proves the constant register dead. The consumer rewrite itself stays
+  valid regardless.
 * **Flag liveness uses a bounded forward scan.** The branch- and
   flag-folding checks drop a `CMP`/`TST` only after a bounded scan of the
   fall-through path confirms that no later instruction reads N/C/V before
@@ -80,6 +86,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`cmp`/`cmn`/`tst` zero-test + `b.eq`/`b.ne` (`b.hi`/`b.ls` after `cmp`)](analyses.md#compare-zero-branch-foldable-into-cbzcbnz) | `cbz`/`cbnz` |
 | [`cmp`/`cmn`/`tst` zero-test + `b.lt`/`b.ge`/`b.mi`/`b.pl`](analyses.md#compare-zero-signed-branch-foldable-into-tbztbnz) | `tbnz`/`tbz Rn, #(msb)` |
 | [`tst #(1<<k)` + `b.eq`/`b.ne`](analyses.md#tst-single-bit--beqne-foldable-into-tbztbnz) | `tbz`/`tbnz Rn, #k` |
+| [single-bit `and`/`ubfx`/`lsr #31` + `cbz`/`cbnz`](analyses.md#single-bit-test--cbzcbnz-foldable-into-tbztbnz) | `tbz`/`tbnz Rs, #k` |
 | [`lsl` + `lsr`/`asr`](analyses.md#bitfield-op-via-two-shifts-foldable-into-ubfxsbfx-or-ubfizsbfiz) | `ubfx`/`sbfx`/`ubfiz`/`sbfiz` |
 | [`lsr` + `and #mask`](analyses.md#shift-and-mask-bitfield-extraction-foldable-into-ubfx) | `ubfx` |
 | [`and #mask` + `lsr`](analyses.md#mask-and-shift-bitfield-extraction-foldable-into-ubfx) | `ubfx` |

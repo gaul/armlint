@@ -1951,6 +1951,212 @@ static void test_tst_branch(void)
     assert(run_helper_check(code, 16) == 1);
 }
 
+// CBZ (is_cbnz=0) / CBNZ (is_cbnz=1): sf 011010 op imm19 Rt.
+static void cbz_cbnz(uint8_t out[4], unsigned sf, unsigned is_cbnz,
+                     unsigned rt, int32_t imm19)
+{
+    uint32_t op = 0x34000000u
+        | ((sf & 1u) << 31)
+        | ((is_cbnz & 1u) << 24)
+        | (((uint32_t)imm19 & 0x7FFFFu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// AND Wd, Wn, #(1<<k) -- non-flag-setting single-bit mask. sf=0, N=0,
+// immr=(32-k)%32, imms=0.
+static void and_w_bit(uint8_t out[4], unsigned rd, unsigned rn,
+                      unsigned k)
+{
+    unsigned immr = (32u - k) % 32u;
+    uint32_t op = 0x12000000u
+        | ((immr & 0x3Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// AND Xd, Xn, #(1<<k). sf=1, N=1, immr=(64-k)%64, imms=0.
+static void and_x_bit(uint8_t out[4], unsigned rd, unsigned rn,
+                      unsigned k)
+{
+    unsigned immr = (64u - k) % 64u;
+    uint32_t op = 0x92400000u
+        | ((immr & 0x3Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Defined later in the file; declared here for use in this test.
+static void ubfx_w(uint8_t out[4], unsigned rd, unsigned rn,
+                   unsigned lsb, unsigned w);
+static void and_w_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
+                          unsigned w);
+
+static void test_single_bit_cbz(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: the canonical skip-one shape. Both edges reach the
+    //    movz that kills the masked temp: the fall-through scan proves
+    //    [+8, +12] free of reads and branches, and the target (+12)
+    //    lies inside that span. --
+
+    // and w8, w9, #0x10 ; cbz w8, +8 ; add x1, x2, x3 ; mov w8, #0.
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Branch-to-next: target == fall-through == the kill.
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 0, 1, 8, 1);      // cbnz w8, +4 -> tbnz
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Bool test of bit 0: and w8, w9, #1 ; cbnz w8 -> tbnz w9, #0.
+    and_w_bit(&code[0], 8, 9, 0);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // UBFX single-bit extract as the producer.
+    ubfx_w(&code[0], 8, 9, 4, 1);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Sign bit via LSR #31 (UBFM with imms == immr == 31).
+    lsr_w(&code[0], 8, 9, 31);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Sign bit via ASR #31 (SBFM: result 0 or -1, zero iff bit clear).
+    asr_w(&code[0], 8, 9, 31);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // X-form high bit -> tbz x9, #40.
+    and_x_bit(&code[0], 8, 9, 40);
+    cbz_cbnz(&code[4], 1, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_x(&code[12], 8, 0, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // In-place producer (Rs == Rd).
+    and_w_bit(&code[0], 8, 8, 4);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // W-form producer + X-form CBZ: the W write zeroed X8[63:32], so
+    // the X test sees exactly the masked bit.
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 1, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // -- Negative: the masked temp is read on the fall-through. --
+
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_w(&code[8], 1, 8, 2);            // reads w8
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: the target lies beyond the kill, so the taken
+    //    path's liveness is unproven. --
+
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 0, 0, 8, 4);      // target +16, kill at +8
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: backward target -- the taken path is behind the
+    //    scan and can never be proven. --
+
+    movz_w(&code[0], 5, 1);
+    and_w_bit(&code[4], 8, 9, 4);
+    cbz_cbnz(&code[8], 0, 0, 8, -2);     // target offset 0
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: a control transfer inside the span discards. --
+
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 0, 0, 8, 3);      // target +12
+    ret_(&code[8]);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: a W-form CBZ cannot observe bit 40. --
+
+    and_x_bit(&code[0], 8, 9, 40);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);      // cbz w8
+    add_x(&code[8], 1, 2, 3);
+    movz_x(&code[12], 8, 0, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: ANDS (flag-setting) is not a producer. --
+
+    write_le32(&code[0],
+        0x72000000u | (28u << 16) | (9u << 5) | 8u);  // ands w8, w9, #0x10
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: a multi-bit mask is not a single-bit test. --
+
+    and_w_lowmask(&code[0], 8, 9, 2);    // #0x3
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: the branch tests a different register. --
+
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 0, 0, 5, 2);
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: no kill before end-of-region -- the pending is
+    //    discarded at flush. --
+
+    and_w_bit(&code[0], 8, 9, 4);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    add_x(&code[8], 1, 2, 3);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction breaks adjacency. --
+
+    and_w_bit(&code[0], 8, 9, 4);
+    add_x(&code[4], 1, 2, 3);
+    cbz_cbnz(&code[8], 0, 0, 8, 1);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: a ZR source is a constant branch, not a bit test. --
+
+    and_w_bit(&code[0], 8, 31, 4);
+    cbz_cbnz(&code[4], 0, 0, 8, 1);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // UBFX Wd, Wn, #lsb, #w = UBFM Wd, Wn, #lsb, #(lsb+w-1) (sf=0, N=0).
 static void ubfx_w(uint8_t out[4], unsigned rd, unsigned rn,
                    unsigned lsb, unsigned w)
@@ -7831,6 +8037,7 @@ int main(void)
     test_funnel_to_extr();
     test_cmp_zero_branch();
     test_tst_branch();
+    test_single_bit_cbz();
     test_redundant_zext();
     test_lsl_lsr_to_ubfx();
     test_lsr_and_to_ubfx();

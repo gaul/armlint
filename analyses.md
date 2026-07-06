@@ -225,6 +225,48 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Same win as the CMP -> CBZ fold: one fewer instruction, and the
   branch no longer carries an NZCV dependency.
 
+## single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ
+
+* The flag-free spelling of the check above: a producer that isolates
+  one bit `k` of `Rs` into a scratch register, immediately followed by
+  `cbz`/`cbnz` of the scratch. The scratch is zero iff `Rs[k]` is
+  zero, so the pair is a single `tbz`/`tbnz Rs, #k` with the same
+  target -- `and w8, w9, #0x10 ; cbz w8, L` -> `tbz w9, #4, L`.
+  Recognised producers: a non-flag-setting AND with a one-bit mask,
+  and the one-bit UBFM/SBFM extracts (`imms == immr`) --
+  `ubfx/sbfx Rd, Rs, #k, #1` and the sign-bit aliases
+  `lsr/asr Rd, Rs, #(datasize-1)` (the SBFM forms yield 0 or -1,
+  still zero exactly when the bit is clear). No NZCV is involved on
+  either side, so no flag-liveness scan is needed.
+* What needs proving instead is register liveness: the rewrite
+  deletes the producer, so the masked scratch must be dead afterward
+  -- on BOTH edges of the branch. The forward register-liveness scan
+  proves the fall-through path (the scratch is overwritten before any
+  read or control transfer); the taken path is covered by
+  containment: the finding is emitted only when the branch target
+  lies within `[fall-through, kill]`, the span the scan just proved
+  free of reads and control transfers, so the taken edge enters that
+  clean span and runs to the same kill. This is the canonical
+  skip-a-small-block shape --
+  `and w8, w9, #0x10 ; cbz w8, 1f ; add x1, x2, x3 ; 1: mov w8, #0`
+  folds because both edges reach the `mov` that kills `w8`. Backward
+  targets and targets beyond the kill leave the taken edge unproven
+  and are conservatively dropped. Unlike the NZCV checks, which
+  assume flags are dead at branch targets (block-local by
+  convention), no such assumption is made here: a general-purpose
+  register is routinely live into a branch target.
+* A W-form `cbz` after a producer isolating bit >= 32 is rejected:
+  the zero-extended field sits wholly in the discarded high half,
+  making the branch constant -- dead-branch territory, not this
+  fold. `ANDS` producers are excluded (deleting one loses the NZCV
+  write; the `Rd = ZR` spelling belongs to the TST check), as are ZR
+  sources (constant branches) and ZR destinations. The TBZ
+  displacement is range-checked against the signed 14-bit encoding,
+  though the containment gate restricts it far more tightly in
+  practice.
+* Same win as the TST fold -- one fewer instruction -- plus the
+  scratch register is freed.
+
 ## bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
 
 * `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the
@@ -716,19 +758,19 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `SUB Xd, Xn, Xn, LSL #N` gives `x*(1 - 2^N)`, the negation, so
   the rewrite would be two instructions (`LSL+SUB` or `SUB+NEG`)
   at parity with `MOV+MUL` in count.
-* Dead-constant caveat (shared by every MOV-chain fold below --
-  `MNEG`, `UDIV`, `MOV + ADD/SUB`, `MOV + AND/ORR/EOR`, and
-  `MOV #0 + use`): the reported saving assumes the constant register
-  is dead after the consumer, i.e. it was materialised solely to feed
-  this one instruction. armlint does not verify that -- it has no
-  forward liveness scan for general-purpose registers. If the constant
-  register is read again before being overwritten, the MOV must stay
-  and the instruction-count saving does not materialise (the consumer
-  rewrite itself -- the `lsl`/`add #imm`/etc. -- remains valid either
-  way). This mirrors the `MOVZ/MOVK -> bitmask` check, which likewise
-  treats the chain as a unit whose only output is the final constant.
-  The case is rare in compiler output (a scratch constant feeding one
-  use is seldom reused) but can occur in hand-written assembly.
+* Dead-constant verification (shared by every MOV-chain fold --
+  `MNEG`, `UDIV`, `MOV + ADD/SUB`, `MOV + AND/ORR/EOR`, `MOV + CCMP`,
+  `MOV #0 + use`, and the register-offset fold): the reported saving
+  assumes the constant register was materialised solely to feed this
+  one consumer, and armlint verifies that before reporting. When the
+  consumer itself overwrites the constant register, the chain is dead
+  on the spot and the finding emits immediately; otherwise it is
+  deferred through a bounded forward register-liveness scan and
+  emitted only once a later instruction overwrites the register
+  before any read or control transfer. A read, branch, call, return,
+  or window expiry discards the finding -- the MOV must stay, so
+  there is nothing worth reporting (the consumer rewrite itself --
+  the `lsl`/`add #imm`/etc. -- would remain valid either way).
   One shape is suppressed outright across the family: the consumer's
   surviving operand being the constant register itself
   (`mul xd, xc, xc`, `udiv xd, xc, xc`, `add xd, xc, xc`, ...). There
