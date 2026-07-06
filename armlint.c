@@ -4641,6 +4641,125 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+// A64 condition-code names, indexed by the 4-bit cond field. Capstone's
+// spellings (hs/lo rather than cs/cc).
+static const char *const a64_cond_names[16] = {
+    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
+    "hi", "ls", "ge", "lt", "gt", "le", "al", "nv",
+};
+
+// Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
+//   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
+// Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
+// register-form selector (bit 11 = 0), o2 (bit 10) and o3 (bit 4),
+// leaving sf and op free. The immediate form differs only in
+// bit 11 = 1 and is deliberately not matched -- it is the rewrite.
+static bool decode_ccmp_ccmn_reg(uint32_t op, unsigned *out_sf,
+                                 bool *out_is_ccmp, unsigned *out_rn,
+                                 unsigned *out_rm, unsigned *out_nzcv,
+                                 unsigned *out_cond)
+{
+    if ((op & 0x3FE00C10u) != 0x3A400000u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_is_ccmp = ((op >> 30) & 1u) != 0;
+    *out_rm = (op >> 16) & 0x1Fu;
+    *out_cond = (op >> 12) & 0xFu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_nzcv = op & 0xFu;
+    return true;
+}
+
+bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    unsigned sf, rn, rm, nzcv, cond;
+    bool is_ccmp;
+    if (!decode_ccmp_ccmn_reg(op, &sf, &is_ccmp, &rn, &rm, &nzcv,
+                              &cond)) {
+        return false;
+    }
+
+    bool is_64bit = (sf != 0);
+    if (is_64bit != state->mov_is_64bit) {
+        return false;
+    }
+
+    // The conditional compare is not commutative: only Rm (the
+    // subtrahend/addend) has an immediate slot. Rn from the chain
+    // would need a reversed compare, which the immediate form cannot
+    // express.
+    if (rm != state->mov_rd) {
+        return false;
+    }
+
+    // The surviving operand must not be the constant register (the
+    // rewrite would still read it, so the MOV could never be deleted)
+    // nor ZR (a degenerate compare-against-zero idiom, consistent with
+    // the other MOV-chain folds' exclusion of ZR operands).
+    if (rn == state->mov_rd || rn == 31) {
+        return false;
+    }
+
+    // The immediate form's imm5 is a 5-bit unsigned value.
+    uint64_t c = state->mov_value;
+    if (c > 31) {
+        return false;
+    }
+
+    char w_or_x = is_64bit ? 'x' : 'w';
+    const char *mnem = is_ccmp ? "ccmp" : "ccmn";
+
+    out->name = "MOV + CCMP/CCMN foldable to immediate form";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "-> %s %c%u, #0x%" PRIx64 ", #0x%x, %s",
+        mnem, w_or_x, rn, c, nzcv, a64_cond_names[cond]);
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %c%u, %c%u, #0x%x, %s",
+        mnem, w_or_x, rn, w_or_x, rm, nzcv, a64_cond_names[cond]);
+
+    // The rewrite deletes the MOV, and a conditional compare writes
+    // only NZCV -- it can never kill the constant register itself --
+    // so the finding always defers until mov_rd is provably dead.
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -7516,6 +7635,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_udiv_strength_reduce,
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
+    check_mov_ccmp_imm_fold,
     check_mov_zero_to_xzr,
     check_mov_reg_offset_fold,
     check_movz_movk_bitmask,

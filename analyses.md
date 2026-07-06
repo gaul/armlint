@@ -826,6 +826,32 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the rewrite saves nothing. Those shapes are left to the
   self-op identity check.
 
+## MOV + CCMP/CCMN foldable to immediate form
+
+* `mov x8, #5 ; ccmp x0, x8, #0, ne` instead of
+  `ccmp x0, #5, #0, ne`. The conditional compares have a register and
+  an immediate form; a materialized constant in `[0, 31]` -- the
+  immediate form's unsigned `imm5` -- feeding the register form's `Rm`
+  is the immediate form spelled in two instructions. Same for `CCMN`;
+  the `#nzcv` literal and the condition carry over verbatim.
+* Reuses the MOVZ/MOVK chain state, but unlike the strength
+  reductions the consumer rewrite alone saves nothing (the register
+  and immediate conditional compares cost the same), so the finding
+  is emitted only after the same forward register-liveness scan as
+  the [`MOV #0` fold](#mov-0--use-foldable-to-zr) proves the constant
+  register dead. A conditional compare writes only NZCV -- it can
+  never kill the constant itself -- so the finding always defers.
+* Not commutative: only `Rm` (the subtrahend for `CCMP`, the addend
+  for `CCMN`) has an immediate slot, so a chain feeding `Rn` is not
+  folded -- the reversed compare has no encoding. The surviving `Rn`
+  must not be the constant register (the rewrite would still read it)
+  nor ZR (a degenerate compare-against-zero idiom). Width (W vs X) of
+  the chain must match the compare's.
+* `C` outside `[0, 31]` has no immediate form and is skipped. The
+  sign-crossing rewrite for negative constants (`ccmp Rn, #-C` <->
+  `ccmn Rn, #C`, whose NZCV agree exactly) is not attempted,
+  consistent with the `MOV + ADD/SUB` fold's direct-form-only policy.
+
 ## MOV #0 + use foldable to ZR
 
 * `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Three consumer

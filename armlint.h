@@ -433,6 +433,30 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// Detect a MOV chain materialising a constant C in [0, 31], immediately
+// followed by a register-form conditional compare whose Rm is the
+// constant. The compare folds to its immediate form, making the MOV
+// dead:
+//   mov x8, #5 ; ccmp x0, x8, #0, ne -> ccmp x0, #5, #0, ne
+// Same for CCMN; the nzcv literal and condition carry over verbatim.
+//
+// The conditional compare is not commutative: only Rm has an immediate
+// slot, so Rn from the chain is not folded (a reversed compare has no
+// encoding). The chain's width (W vs X) must match the compare's. The
+// surviving Rn must not be the constant register (the rewrite would
+// still read it) nor ZR (a degenerate compare-against-zero idiom).
+// imm5 is unsigned, so only C in [0, 31] folds; the ADDS/SUBS-crossing
+// rewrite for negative constants (ccmp #-C <-> ccmn #C) is not
+// attempted, consistent with check_mov_add_sub_imm_fold.
+//
+// A conditional compare writes only NZCV and never kills the constant
+// register, so the finding always defers through the forward
+// register-liveness scan (defer_dead_mov) until mov_rd is provably
+// dead. Runs before check_movz_movk_bitmask so the chain state is
+// still active.
+bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 // Detect a MOV chain that materialises the constant 0, immediately
 // followed by an instruction that reads that register. The read can
 // be replaced by XZR/WZR (the architectural zero register), making

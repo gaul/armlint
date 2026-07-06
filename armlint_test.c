@@ -5557,6 +5557,104 @@ static void test_mov_zero_to_xzr(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// Conditional compare, register form: CCMN (is_ccmp=0) / CCMP
+// (is_ccmp=1): sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv.
+static void ccmp_reg(uint8_t out[4], unsigned sf, unsigned is_ccmp,
+                     unsigned rn, unsigned rm, unsigned nzcv,
+                     unsigned cond)
+{
+    uint32_t op = 0x3A400000u
+        | ((sf & 1u) << 31)
+        | ((is_ccmp & 1u) << 30)
+        | ((rm & 0x1Fu) << 16)
+        | ((cond & 0xFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (nzcv & 0xFu);
+    write_le32(out, op);
+}
+
+static void test_mov_ccmp_imm_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: mov x8, #5 ; ccmp x0, x8, #0, ne ; mov x8, #1 --
+    //    the trailing MOV overwrites x8, emitting the deferred
+    //    finding (-> ccmp x0, #5, #0, ne).
+    movz_x(&code[0], 8, 5, 0);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 0, 1);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // W-form: mov w8, #31 ; ccmp w0, w8, #4, eq ; mov w8, #0 --
+    //    imm5's top boundary.
+    movz_w(&code[0], 8, 31);
+    ccmp_reg(&code[4], 0, 1, 0, 8, 4, 0);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // CCMN: mov x8, #12 ; ccmn x2, x8, #8, lt ; mov x8, #0.
+    movz_x(&code[0], 8, 12, 0);
+    ccmp_reg(&code[4], 1, 0, 2, 8, 8, 11);
+    movz_x(&code[8], 8, 0, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // C == 0: ccmp x0, #0 is the canonical spelling (this consumer is
+    // not in the MOV #0 -> ZR check's set, so exactly one finding).
+    movz_x(&code[0], 8, 0, 0);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 0, 1);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: constant exceeds the unsigned 5-bit immediate. --
+
+    movz_x(&code[0], 8, 32, 0);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 0, 1);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: width mismatch (W chain, X compare). --
+
+    movz_w(&code[0], 8, 5);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 0, 1);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: the constant is Rn (the compare's left operand);
+    //    only Rm has an immediate slot. --
+
+    movz_x(&code[0], 8, 5, 0);
+    ccmp_reg(&code[4], 1, 1, 8, 0, 0, 1);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: both operands are the constant register. --
+
+    movz_x(&code[0], 8, 5, 0);
+    ccmp_reg(&code[4], 1, 1, 8, 8, 0, 1);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: deferred finding discarded when the constant is
+    //    read, or on a control transfer, before dying. --
+
+    movz_x(&code[0], 8, 5, 0);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 0, 1);
+    add_x(&code[8], 2, 8, 3);      // reads x8
+    assert(run_helper_check(code, 12) == 0);
+
+    movz_x(&code[0], 8, 5, 0);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 0, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction closes the chain. --
+
+    movz_x(&code[0], 8, 5, 0);
+    add_x(&code[4], 2, 1, 3);
+    ccmp_reg(&code[8], 1, 1, 0, 8, 0, 1);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // Integer register-offset load/store from raw fields:
 //   size 111000 opc 1 Rm option S 10 Rn Rt
 // option 3 is LSL/UXTX (the plain [Rn, Rm{, lsl #s}] form); s=1 sets
@@ -7754,6 +7852,7 @@ int main(void)
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
+    test_mov_ccmp_imm_fold();
     test_mov_reg_offset_fold();
     test_mul_add_sub_fold();
     test_widening_mul_add_sub_fold();

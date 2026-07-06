@@ -1,0 +1,16 @@
+MOV + CCMP/CCMN foldable to immediate form at offset: 0x0: -> ccmp x0, #0x5, #0x0, ne (2 instructions)
+  movz x8, #0x5
+  ccmp x0, x8, #0x0, ne
+
+MOV + CCMP/CCMN foldable to immediate form at offset: 0xc: -> ccmp w1, #0x1f, #0x4, eq (2 instructions)
+  movz w9, #0x1f
+  ccmp w1, w9, #0x4, eq
+
+MOV + CCMP/CCMN foldable to immediate form at offset: 0x18: -> ccmn x2, #0xc, #0x8, lt (2 instructions)
+  movz x10, #0xc
+  ccmn x2, x10, #0x8, lt
+
+Optimization opportunities by type:
+       3  MOV + CCMP/CCMN foldable to immediate form
+
+3 optimization opportunities in 19 instructions
