@@ -1,0 +1,28 @@
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x0: -> ldr x8, [x1, #0x100] (2 instructions)
+  movz x8, #0x100
+  ldr x8, [x1, x8]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x8: -> ldr x9, [x2, #0x20] (2 instructions)
+  movz x9, #0x4
+  ldr x9, [x2, x9, lsl #3]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x10: -> ldur x10, [x3, #0x3] (2 instructions)
+  movz x10, #0x3
+  ldr x10, [x3, x10]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x18: -> ldur x11, [x4, #-0x8] (2 instructions)
+  movn x11, #0x7
+  ldr x11, [x4, x11]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x20: -> str x0, [x5, #0x10] (2 instructions)
+  movz x12, #0x10
+  str x0, [x5, x12]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x2c: -> str wzr, [x1, #0x4] (2 instructions)
+  movz x17, #0x4
+  str wzr, [x1, x17]
+
+Optimization opportunities by type:
+       6  MOV + register-offset LDR/STR foldable to immediate offset
+
+6 optimization opportunities in 24 instructions

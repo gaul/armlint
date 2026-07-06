@@ -102,6 +102,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`mov #C` + `add`/`sub`](analyses.md#mov--addsub-foldable-to-immediate-form) | `add`/`sub Rd, Rn, #C` |
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
 | [`mov #0` + `str`/`add`/`and` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
+| [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
 | [`mul` + `add`/`sub`](analyses.md#mul--addsub-foldable-to-maddmsub) | `madd`/`msub` (or `mneg`) |
 | [`smull`/`umull` + `add`/`sub`](analyses.md#smullumull--addsub-foldable-to-smaddlumaddl) | `smaddl`/`umaddl`/`smsubl`/`umsubl` |
 | [`neg` + `add`/`sub`](analyses.md#neg--addsub-foldable-to-subadd) | `sub`/`add` |

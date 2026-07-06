@@ -5557,6 +5557,165 @@ static void test_mov_zero_to_xzr(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// Integer register-offset load/store from raw fields:
+//   size 111000 opc 1 Rm option S 10 Rn Rt
+// option 3 is LSL/UXTX (the plain [Rn, Rm{, lsl #s}] form); s=1 sets
+// the scale bit (shift by log2 of the access size).
+static void ldst_regoff(uint8_t out[4], unsigned size, unsigned opc,
+                        unsigned rt, unsigned rn, unsigned rm,
+                        unsigned option, unsigned s)
+{
+    uint32_t op = 0x38200800u
+        | ((size & 0x3u) << 30)
+        | ((opc & 0x3u) << 22)
+        | ((rm & 0x1Fu) << 16)
+        | ((option & 0x7u) << 13)
+        | ((s & 0x1u) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_mov_reg_offset_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positive, immediate emission: the load's Rt IS the constant
+    //    register, so the consumer itself kills the constant. --
+
+    // mov x8, #256 ; ldr x8, [x1, x8] -> ldr x8, [x1, #0x100].
+    movz_x(&code[0], 8, 256, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // mov x8, #4 ; ldr x8, [x1, x8, lsl #3] -- scaled index, byte
+    // offset 32 -> ldr x8, [x1, #0x20].
+    movz_x(&code[0], 8, 4, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 3, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form chain: mov w8, #256 ; ldr w8, [x1, x8] -- the W write
+    // zeroed X8[63:32], so the 64-bit index equals the constant.
+    movz_w(&code[0], 8, 256);
+    ldst_regoff(&code[4], 2, 1, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Misaligned byte offset -> the unscaled form. mov x8, #3 ;
+    // ldr x8, [x1, x8] -> ldur x8, [x1, #3].
+    movz_x(&code[0], 8, 3, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative constant (MOVN chain) -> LDUR with a negative offset.
+    // mov x8, #-8 ; ldr x8, [x1, x8] -> ldur x8, [x1, #-8].
+    movn_x(&code[0], 8, 7, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Sign-extending load: mov x8, #2 ; ldrsh x8, [x1, x8]
+    // -> ldrsh x8, [x1, #2].
+    movz_x(&code[0], 8, 2, 0);
+    ldst_regoff(&code[4], 1, 2, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Zero constant folds to the plain [base] form: mov x8, #0 ;
+    // ldr x8, [x1, x8] -> ldr x8, [x1]. (Not a consumer of the
+    // MOV #0 -> ZR check, whose STR family is unsigned-offset only.)
+    movz_x(&code[0], 8, 0, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive, deferred: the constant register dies at a later
+    //    overwrite before any read. --
+
+    // mov x8, #16 ; ldr x0, [x1, x8] ; mov x8, #1.
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 1, 8, 3, 0);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Store consumer: mov x8, #16 ; str x0, [x1, x8] ; mov x8, #1.
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 0, 0, 1, 8, 3, 0);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Zero store: mov x8, #16 ; str wzr, [x1, x8] ; mov x8, #1 --
+    // Rt = 31 is WZR here (rendered as wzr, not w31), and a store
+    // never kills the constant, so it defers like any other.
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 2, 0, 31, 1, 8, 3, 0);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: deferred finding discarded when the constant is
+    //    read, or on a control transfer, before dying. --
+
+    // mov x8, #16 ; ldr x0, [x1, x8] ; add x2, x8, x3 -- x8 is read.
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 1, 8, 3, 0);
+    add_x(&code[8], 2, 8, 3);
+    assert(run_helper_check(code, 12) == 0);
+
+    // mov x8, #16 ; ldr x0, [x1, x8] ; ret.
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 1, 8, 3, 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: base is the constant register (the rewrite would
+    //    still read it). --
+
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 8, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: store data is the constant register. --
+
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 0, 8, 1, 8, 3, 0);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: extend index options are not matched. --
+
+    // UXTW option (010).
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SXTW option (110).
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 6, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: offset out of range for every encoding. --
+
+    // mov x8, #0x9000 ; ldr x8, [x1, x8] -- 36864 > 32760.
+    movz_x(&code[0], 8, 0x9000, 0);
+    ldst_regoff(&code[4], 3, 1, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // mov x8, #0x1001 ; ldrb w8, [x1, x8] -- 4097 exceeds LDRB's
+    // scaled imm12 (access size 1) and the unscaled range.
+    movz_x(&code[0], 8, 0x1001, 0);
+    ldst_regoff(&code[4], 0, 1, 8, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: PRFM (size=11, opc=10) -- Rt is a prefetch
+    //    operation, not a destination. --
+
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 2, 0, 1, 8, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: index register is not the constant. --
+
+    movz_x(&code[0], 8, 16, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 1, 9, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+}
+
 static void test_mul_add_sub_fold(void)
 {
     uint8_t code[16];
@@ -7595,6 +7754,7 @@ int main(void)
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
+    test_mov_reg_offset_fold();
     test_mul_add_sub_fold();
     test_widening_mul_add_sub_fold();
     test_neg_add_sub_fold();

@@ -6479,6 +6479,198 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Store counterpart of classify_int_load for the register-offset
+// consumer: opc == 00 is STRB/STRH/STR W/STR X by size. The data
+// register Rt is read, not written -- which matters to the caller's
+// dead-constant reasoning (a store never kills the constant).
+static bool classify_int_store(unsigned size, unsigned opc,
+                               const char **out_mnem, char *out_rt_wx)
+{
+    static const char *const store_mnem[4] = {
+        "strb", "strh", "str", "str"
+    };
+    if (opc != 0) {
+        return false;
+    }
+    *out_mnem = store_mnem[size];
+    *out_rt_wx = (size == 3u) ? 'x' : 'w';
+    return true;
+}
+
+// Map an accepted load/store mnemonic to its unscaled (LDUR/STUR
+// family) counterpart, used when the folded byte offset is negative or
+// misaligned and only the signed-9-bit unscaled form encodes it.
+static const char *unscaled_mnem(const char *mnem)
+{
+    static const struct {
+        const char *scaled;
+        const char *unscaled;
+    } map[] = {
+        { "ldr",   "ldur"   }, { "ldrb",  "ldurb"  },
+        { "ldrh",  "ldurh"  }, { "ldrsb", "ldursb" },
+        { "ldrsh", "ldursh" }, { "ldrsw", "ldursw" },
+        { "str",   "stur"   }, { "strb",  "sturb"  },
+        { "strh",  "sturh"  },
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (strcmp(mnem, map[i].scaled) == 0) {
+            return map[i].unscaled;
+        }
+    }
+    return mnem;
+}
+
+bool check_mov_reg_offset_fold(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    unsigned size, opc, rm, option, s, rn, rt;
+    if (!decode_ldr_reg_offset(op, &size, &opc, &rm, &option, &s,
+                               &rn, &rt)) {
+        return false;
+    }
+
+    // Only the LSL/UXTX index option (011): the index is the full X
+    // register, whose 64-bit value the MOV chain pins exactly. A
+    // W-form chain qualifies too -- its W write zeroed X[63:32], so
+    // the index equals the (non-negative) 32-bit constant. The extend
+    // options (UXTW/SXTW/SXTX) re-interpret the index register and
+    // are not matched.
+    if (option != 3u) {
+        return false;
+    }
+    if (rm != state->mov_rd) {
+        return false;
+    }
+
+    bool is_store;
+    const char *mnem;
+    char rt_wx;
+    if (classify_int_store(size, opc, &mnem, &rt_wx)) {
+        is_store = true;
+    } else if (classify_int_load(size, opc, &mnem, &rt_wx)) {
+        is_store = false;
+    } else {
+        return false;       // PRFM or unallocated (size, opc)
+    }
+
+    // The base must not be the constant register: the immediate
+    // rewrite would still read it, so the MOV could never be deleted.
+    // A store whose data register is the constant keeps it live the
+    // same way. (Rn = 31 in this form is SP and mov_rd is never 31,
+    // so the SP case sails through and renders as "sp".)
+    if (rn == state->mov_rd) {
+        return false;
+    }
+    if (is_store && rt == state->mov_rd) {
+        return false;
+    }
+
+    // Effective byte offset: the constant, scaled by log2(access
+    // size) when the S bit is set. Bound the raw constant first: the
+    // largest encodable byte offset is 4095*8 = 32760 (scaled X form)
+    // and the smallest is -256 (unscaled), so anything outside cannot
+    // fold at any shift, and the pre-bound keeps the multiply from
+    // overflowing. A W-form chain's value is stored zero-extended, so
+    // v is non-negative there; only an X-form MOVN chain reaches the
+    // negative (unscaled) encodings.
+    int64_t v = (int64_t)state->mov_value;
+    if (v < -256 || v > 32760) {
+        return false;
+    }
+    unsigned shift = s ? size : 0u;
+    int64_t byte_off = v * (int64_t)(1u << shift);
+
+    unsigned asize = 1u << size;
+    bool fits_scaled = byte_off >= 0
+        && (byte_off % (int64_t)asize) == 0
+        && (byte_off / (int64_t)asize) <= 4095;
+    bool fits_unscaled = byte_off >= -256 && byte_off <= 255;
+    if (!fits_scaled && !fits_unscaled) {
+        return false;
+    }
+    const char *new_mnem = fits_scaled ? mnem : unscaled_mnem(mnem);
+
+    char base_buf[8];
+    if (rn == 31) {
+        snprintf(base_buf, sizeof(base_buf), "sp");
+    } else {
+        snprintf(base_buf, sizeof(base_buf), "x%u", rn);
+    }
+    // Rt = 31 is the zero register here (a store of zero, or a load
+    // to the discard register), never SP.
+    char rt_buf[8];
+    format_reg(rt_buf, sizeof(rt_buf), rt_wx, rt);
+
+    out->name =
+        "MOV + register-offset LDR/STR foldable to immediate offset";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    if (byte_off == 0) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %s, [%s]", new_mnem, rt_buf, base_buf);
+    } else if (byte_off < 0) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %s, [%s, #-0x%" PRIx64 "]",
+            new_mnem, rt_buf, base_buf, (uint64_t)-byte_off);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %s, [%s, #0x%" PRIx64 "]",
+            new_mnem, rt_buf, base_buf, (uint64_t)byte_off);
+    }
+
+    char w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, mshift);
+        }
+    }
+    if (s == 0) {
+        snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+            "%s %s, [%s, x%u]", mnem, rt_buf, base_buf, rm);
+    } else {
+        snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+            "%s %s, [%s, x%u, lsl #%u]",
+            mnem, rt_buf, base_buf, rm, shift);
+    }
+
+    // The rewrite deletes the MOV. A load whose destination is the
+    // constant register overwrites it -- the constant dies at the
+    // consumer itself, so emit now. Otherwise defer until a later
+    // instruction proves mov_rd dead before any read (stores never
+    // kill it, so they always defer).
+    if (!is_store && rt == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out)
 {
@@ -7325,6 +7517,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
     check_mov_zero_to_xzr,
+    check_mov_reg_offset_fold,
     check_movz_movk_bitmask,
     check_lsl_fold,
     check_funnel_to_extr,

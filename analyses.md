@@ -846,6 +846,47 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   in addressing means SP, not ZR, so replacing the base would
   silently change semantics.
 
+## MOV + register-offset LDR/STR foldable to immediate offset
+
+* `mov x8, #256 ; ldr x0, [x1, x8]` instead of `ldr x0, [x1, #256]`.
+  A MOV chain materialises a constant whose only use is the index
+  register of a register-offset load or store; the access already has
+  an immediate-offset form, so the constant folds into it and the MOV
+  dies. The index's scale carries into the byte offset:
+  `mov x8, #4 ; ldr x0, [x1, x8, lsl #3]` -> `ldr x0, [x1, #32]`.
+* The rewrite is the scaled unsigned-offset form when the byte offset
+  is non-negative, a multiple of the access size, and at most
+  4095 x size; otherwise the unscaled `LDUR`/`STUR` form when it lies
+  in `[-256, 255]`: `mov x8, #3 ; ldr x0, [x1, x8]` ->
+  `ldur x0, [x1, #3]`, and an X-form MOVN chain reaches the negative
+  side, `mov x8, #-8 ; ldr x0, [x1, x8]` -> `ldur x0, [x1, #-8]`.
+  Constants outside every form are not flagged.
+* Consumers: the integer register-offset family -- the zero- and
+  sign-extending loads (`LDRB`/`LDRH`/`LDR`, `LDRSB`/`LDRSH`/`LDRSW`;
+  `PRFM` is excluded, its Rt being a prefetch operation) and the
+  `STRB`/`STRH`/`STR` stores. SIMD&FP accesses are not matched. Only
+  the `LSL`/`UXTX` index option (a full 64-bit index) qualifies: the
+  chain pins that index's value exactly -- a W-form chain also
+  qualifies, since its W write zeroed `X[63:32]` -- while the
+  `UXTW`/`SXTW`/`SXTX` extend options re-interpret the index register
+  and are left alone.
+* Soundness and the dead-constant question: the fold's saving is the
+  deleted MOV, so unlike the strength-reduction folds (whose consumer
+  rewrite pays for itself), the finding is deferred through the same
+  forward register-liveness scan as the
+  [`MOV #0` fold](#mov-0--use-foldable-to-zr) and emitted only once
+  the constant register is provably dead -- overwritten before any
+  read or control transfer. A load whose destination IS the constant
+  register kills it at the consumer itself and reports immediately.
+  The base register must not be the constant (the rewrite would still
+  read it), nor may a store's data register be. `Rn = 31` means SP in
+  both the register-offset and immediate-offset forms, so SP-based
+  accesses fold soundly.
+* What it saves: one instruction -- the materialising MOV -- and the
+  register that held the index. The access itself neither gains nor
+  loses: the register-offset and immediate-offset forms cost the same
+  on current cores.
+
 ## MUL + ADD/SUB foldable to MADD/MSUB
 
 * `mul xt, xa, xb ; add xd, xt, xc` -> `madd xd, xa, xb, xc`.

@@ -461,6 +461,38 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// Detect a MOV chain materialising a constant C, immediately followed
+// by an integer register-offset load or store whose index register Rm
+// is the constant. The access folds to the immediate-offset form,
+// making the MOV dead:
+//   mov x8, #256 ; ldr x0, [x1, x8]         -> ldr x0, [x1, #256]
+//   mov x8, #4   ; ldr x0, [x1, x8, lsl #3] -> ldr x0, [x1, #32]
+//   mov x8, #-8  ; ldr x0, [x1, x8]         -> ldur x0, [x1, #-8]
+// The effective byte offset is C shifted by the S bit's log2(access
+// size); the rewrite is the scaled unsigned-offset form when that
+// offset is non-negative, size-aligned, and within 12 bits, else the
+// unscaled LDUR/STUR form when within [-256, 255]. All integer sizes
+// fold, both the zero- and sign-extending loads (classify_int_load's
+// set; PRFM excluded) and the STRB/STRH/STR stores. SIMD&FP accesses
+// are not matched.
+//
+// Only the LSL/UXTX index option (011) is matched: the index is the
+// full X register, whose value the chain pins exactly -- a W-form
+// chain also qualifies because its W write zeroed X[63:32]. The
+// UXTW/SXTW/SXTX extend options re-interpret the index and are
+// excluded. The base Rn must not be the constant register (the
+// rewrite would still read it), nor may a store's data register be
+// (same reason); Rn = 31 means SP in both the register-offset and
+// immediate forms, so SP bases fold soundly.
+//
+// The saving is the deleted MOV, so like the MOV #0 fold the finding
+// is deferred via defer_dead_mov until the constant register is
+// provably dead -- except when the consumer is a load whose Rt IS the
+// constant register, which overwrites it at the consumer itself and
+// emits immediately.
+bool check_mov_reg_offset_fold(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out);
+
 // Detect MUL Rt, Ra, Rb immediately followed by an ADD/SUB
 // (shifted-register, LSL #0, non-S-variant) that consumes Rt. The
 // pair folds to a single MADD/MSUB:
