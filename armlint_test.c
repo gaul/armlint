@@ -219,21 +219,6 @@ static int run_helper_check(uint8_t *bytes, size_t len)
     return run_check(bytes, len);
 }
 
-// True iff the linked Capstone build disassembles `len` bytes into exactly
-// len/4 instructions. Encodings newer than the oldest supported Capstone --
-// e.g. the Armv8.8 BC.cond, unknown to the Capstone 4.x that ships on
-// Ubuntu 24.04 -- let their end-to-end tests skip cleanly instead of
-// tripping run_check's "incomplete disassembly" guard (which returns -1).
-static bool capstone_decodes(const uint8_t *bytes, size_t len)
-{
-    cs_insn *insns = NULL;
-    size_t n = cs_disasm(g_handle, bytes, len, 0, 0, &insns);
-    if (insns != NULL) {
-        cs_free(insns, n);
-    }
-    return n == len / 4;
-}
-
 // Append a movz Xreg, #1 overwrite so register `reg` is provably dead after the
 // fragment, satisfying the forward register-liveness scan that gates the folds
 // which delete a value-producing instruction: MOV #0 -> ZR, the MOV-constant
@@ -1438,18 +1423,14 @@ static void test_cmp_zero_branch(void)
 
     // cmp w0,#0 ; b.eq L ; bc.lt M ; adds w2,w3,w4 ; ret -- BC.cond (the
     // Armv8.8 consistent conditional branch) reads NZCV; suppress like a
-    // plain B.cond even though it sets bit 4. BC.cond is unknown to Capstone
-    // 4.x (Ubuntu 24.04), so skip the end-to-end check there rather than
-    // fail to disassemble; classify_liveness's handling of it is still
-    // covered portably by the bc.eq entry in test_liveness_matches_capstone.
+    // plain B.cond even though it sets bit 4. Every supported Capstone
+    // (5.0.1 and newer) decodes it.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     bc_cond(&code[8], 11 /* LT */, 8);
     adds_w(&code[12], 2, 3, 4);
     ret_(&code[16]);
-    if (capstone_decodes(&code[8], 4)) {
-        assert(run_helper_check(code, 20) == 0);
-    }
+    assert(run_helper_check(code, 20) == 0);
 
     // -- Negative: unsafe terminator --
 
@@ -5158,6 +5139,80 @@ static void mneg_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
     write_le32(out, op);
 }
 
+// The forward register-liveness scan must treat a read-modify-write of
+// the watched register as a READ (the deferred fold's register is still
+// live), never as a kill: MOVK preserves its destination's other
+// halfwords and BFI its uninvolved bits, so deleting the deferred
+// producer would change their results. Capstone's operand flags cannot
+// be taken at face value in either direction -- it marks the pure
+// overwrites of the bitfield class (UBFX/LSR/...) read+write exactly
+// like BFM proper, and reports NO flags at all on the atomics' register
+// operands -- so insn_reg_access arbitrates from the raw encoding.
+static void test_rmw_read_not_a_kill(void)
+{
+    uint8_t code[16];
+
+    // mov x0, #5 ; mul x2, x1, x0 ; movk x0, #1, lsl #16 -- the MOVK
+    // reads x0's other halfwords, so the deferred MUL strength
+    // reduction must be discarded, not emitted.
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 2, 1, 0);
+    movk_x(&code[8], 0, 1, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Same with BFI as the read-modify-write: bfi x0, x1, #8, #8.
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 2, 1, 0);
+    write_le32(&code[8], 0xB3781C20u);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Controls: genuine overwrites still emit the deferred finding --
+    // both a MOVZ and a bitfield-class pure overwrite (ubfx x0, x3,
+    // #1, #1), whose destination Capstone also marks read+write.
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 2, 1, 0);
+    movz_x(&code[8], 0, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 2, 1, 0);
+    write_le32(&code[8], 0xD3410460u);   // ubfx x0, x3, #1, #1
+    assert(run_helper_check(code, 12) == 1);
+
+    // Atomics carry no operand access flags; the raw-encoding fallback
+    // must stop the scan when one touches the watched register.
+
+    // swp x0, x9, [x2] stores x0 to memory -- a read.
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 2, 1, 0);
+    write_le32(&code[8], 0xF8208049u);
+    movz_x(&code[12], 0, 1, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // cas x0, x9, [x2] compares against x0 -- a read.
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 2, 1, 0);
+    write_le32(&code[8], 0xC8A07C49u);
+    movz_x(&code[12], 0, 1, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // casp x0, x1, x2, x3, [x4] reads the PAIR x0:x1; watching x1
+    // must also stop the scan.
+    movz_x(&code[0], 1, 5, 0);
+    mul_x(&code[4], 2, 3, 1);
+    write_le32(&code[8], 0x48207C82u);
+    movz_x(&code[12], 1, 1, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // Control: an atomic not touching the watched register does not
+    // stop the scan; the later overwrite emits.
+    movz_x(&code[0], 0, 5, 0);
+    mul_x(&code[4], 2, 1, 0);
+    write_le32(&code[8], 0xF8258049u);   // swp x5, x9, [x2]
+    movz_x(&code[12], 0, 1, 0);
+    assert(run_helper_check(code, 16) == 1);
+}
+
 // MSUB Xd, Xn, Xm, Xa with explicit Xa != XZR. Base 0x9B008000.
 static void msub_x(uint8_t out[4], unsigned rd, unsigned rn,
                    unsigned rm, unsigned ra)
@@ -8606,6 +8661,7 @@ int main(void)
     test_simd_cmp_zero();
     test_stp_wzr_to_str_xzr();
     test_mul_strength_reduce();
+    test_rmw_read_not_a_kill();
     test_mneg_strength_reduce();
     test_udiv_strength_reduce();
     test_mov_add_sub_imm_fold();

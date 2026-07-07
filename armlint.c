@@ -2264,6 +2264,25 @@ static int arm64_gpr_num(unsigned reg)
     return -1;
 }
 
+// True for the A64 GPR-writing instructions that also READ their
+// destination: MOVK (opc 11 of the move-wide class, inserting into the
+// untouched halfwords) and BFM proper (opc 01 of the bitfield class --
+// the BFI/BFXIL aliases, preserving bits of Rd). Every other member of
+// both classes (MOVZ/MOVN; SBFM/UBFM and all their shift, extract and
+// extend aliases) fully overwrites Rd. Capstone's operand access flags
+// cannot make this distinction -- it marks whole classes read+write --
+// so the raw encoding is the arbiter.
+static bool insn_reads_gpr_dest(uint32_t op)
+{
+    if ((op & 0x1F800000u) == 0x12800000u) {
+        return ((op >> 29) & 0x3u) == 3u;       // MOVK
+    }
+    if ((op & 0x1F800000u) == 0x13000000u) {
+        return ((op >> 29) & 0x3u) == 1u;       // BFM (BFI/BFXIL)
+    }
+    return false;
+}
+
 // Determine whether `insn` reads and/or writes GPR `reg` (a 0..30 encoding
 // number), from the Capstone detail: explicit operand access flags, memory
 // base/index registers (always reads), and the implicit register lists. With
@@ -2273,6 +2292,7 @@ static void insn_reg_access(const cs_insn *insn, int reg,
 {
     *reads = false;
     *writes = false;
+    uint32_t op = insn->size == 4 ? insn_word(insn) : 0;
     const cs_detail *detail = insn->detail;
     if (detail == NULL) {
         *reads = true;
@@ -2283,16 +2303,20 @@ static void insn_reg_access(const cs_insn *insn, int reg,
         const cs_arm64_op *o = &a->operands[i];
         if (o->type == ARM64_OP_REG) {
             if (arm64_gpr_num(o->reg) == reg) {
-                // A destination operand is write-only in the AArch64 model;
-                // Capstone 4.x spuriously marks move-immediate destinations as
-                // read+write. Honor the read flag only on operands that are not
-                // writes of `reg`, so a pure overwrite (e.g. MOVZ) is not
-                // misread as keeping the register live. A genuine read by a
-                // read-modify-write instruction surfaces as a separate source
-                // operand, the memory-base path below, or the implicit read
-                // list -- none of which this clause suppresses.
+                // Capstone marks entire encoding classes' destinations
+                // read+write: the genuine read-modify-writes (MOVK, BFM)
+                // but also the pure overwrites sharing their class (the
+                // UBFM/SBFM shift and extract aliases fully replace Rd).
+                // Honor the read flag on a written operand only when the
+                // raw encoding says the instruction really reads its
+                // destination, so an RMW keeps the register live -- a
+                // deleted producer would change its result -- while real
+                // kills stay kills.
                 if (o->access & CS_AC_WRITE) {
                     *writes = true;
+                    if (insn_reads_gpr_dest(op)) {
+                        *reads = true;
+                    }
                 } else if (o->access & CS_AC_READ) {
                     *reads = true;
                 }
@@ -2312,6 +2336,38 @@ static void insn_reg_access(const cs_insn *insn, int reg,
     for (uint8_t i = 0; i < detail->regs_write_count; i++) {
         if (arm64_gpr_num(detail->regs_write[i]) == reg) {
             *writes = true;
+        }
+    }
+
+    // Capstone reports NO access flags on the register operands of the
+    // atomic read-modify-write memory instructions, leaving them
+    // invisible to the loops above -- but an atomic touching the
+    // watched register must stop a liveness scan. Recover the
+    // registers from the raw encoding and claim conservative reads:
+    // Rs is genuinely read; Rt receives the loaded value, and claiming
+    // a read for it too merely stops the scan (it is never treated as
+    // a kill). ZR fields (the ST<op> aliases' Rt) never match a
+    // watched register, which is always 0..30.
+    if ((op & 0x3F200C00u) == 0x38200000u) {
+        // Atomic memory operations: LDADD..LDUMIN, SWP, LDAPR
+        //   size 111000 A R 1 Rs o3 opc 00 Rn Rt
+        if ((int)((op >> 16) & 0x1Fu) == reg
+                || (int)(op & 0x1Fu) == reg) {
+            *reads = true;
+        }
+    } else if ((op & 0x3FA07C00u) == 0x08A07C00u) {
+        // CAS[A][L][B/H]: size 001000 1 L 1 Rs o0 11111 Rn Rt.
+        if ((int)((op >> 16) & 0x1Fu) == reg
+                || (int)(op & 0x1Fu) == reg) {
+            *reads = true;
+        }
+    } else if ((op & 0xBFA07C00u) == 0x08207C00u) {
+        // CASP[A][L]: Rs and Rt each name an even/odd register pair.
+        unsigned rs = (op >> 16) & 0x1Fu;
+        unsigned rt = op & 0x1Fu;
+        if ((int)rs == reg || (int)(rs + 1u) == reg
+                || (int)rt == reg || (int)(rt + 1u) == reg) {
+            *reads = true;
         }
     }
 }
