@@ -1038,6 +1038,37 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   extension, deferred for now. Half-precision (FEAT_FP16) transfers
   are not matched, consistent with the FMOV-immediate fold.
 
+## widening extend + SCVTF/UCVTF foldable to W-form conversion
+
+* `sxtw x8, w0 ; scvtf d0, x8` instead of `scvtf d0, w0`. The
+  conversions have both W- and X-source forms, and the W-source form
+  performs the widening itself -- extending first through a scratch
+  register spends an instruction and a register on work the
+  conversion already does. Recognised extends: `SXTW Xd, Wn` (the
+  SBFM alias) and the zero-extending `MOV Wd, Wm` (any W write zeroes
+  the upper half; this ORR alias is the canonical uint32 -> 64
+  widening).
+* Signedness maps by value, not by spelling:
+  * `sxtw` + `scvtf Xn` -> `scvtf Wn` (the sign-extended value is
+    the signed 32-bit value).
+  * `mov w, w` + `ucvtf Xn` -> `ucvtf Wn`.
+  * `mov w, w` + `scvtf Xn` -> `ucvtf Wn` -- the zero-extended
+    64-bit value IS the unsigned 32-bit value, so even the signed
+    wide conversion becomes the unsigned narrow one.
+  * `sxtw` + `ucvtf Xn` does NOT fold: the unsigned reading of
+    `sext(negative)` is a huge value, not the 32-bit one.
+  Both sides convert the same mathematical value, so the identity is
+  exact in every FPCR rounding mode and raises identical exceptions
+  -- no exactness argument is needed. ZR operands are excluded as
+  degenerate (a constant-zero extend).
+* The rewrite reads the extend's own source, which the adjacent pair
+  leaves unchanged -- even in-place: `sxtw x0, w0` and `mov w0, w0`
+  keep the low 32 bits of their destination equal to the source.
+  Deleting the extend requires its destination dead; the conversion
+  writes only an FP register and never kills it, so the finding
+  always defers through the forward register-liveness scan until the
+  extended register provably dies.
+
 ## MOV #0 + use foldable to ZR
 
 * `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Three consumer

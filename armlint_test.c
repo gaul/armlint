@@ -394,6 +394,8 @@ static inline void adds_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
 static inline void sub_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x4b000000u, rd, rn, rm); }
 static inline void subs_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0x6b000000u, rd, rn, rm); }
 static inline void add_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x8b000000u, rd, rn, rm); }
+// MOV Xd, Xm (ORR Xd, XZR, Xm); the W form is mov_w_reg further down.
+static inline void mov_x_reg(uint8_t out[4], unsigned rd, unsigned rm) { encode_sr(out, 0xaa000000u, rd, 31, rm); }
 static inline void sub_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0xcb000000u, rd, rn, rm); }
 static inline void subs_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm) { encode_sr(out, 0xeb000000u, rd, rn, rm); }
 static inline void and_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x0a000000u, rd, rn, rm); }
@@ -6590,6 +6592,107 @@ static void test_fp_zero_to_movi(void)
     assert(run_helper_check(code, 16) == 0);
 }
 
+static void test_extend_cvtf_fold(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: sxtw x8, w0 ; scvtf d0, x8 ; mov x8, #1 -- the
+    //    trailing overwrite proves the extended register dead, so
+    //    the deferred finding emits (-> scvtf d0, w0).
+    sxtw_x(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Single-precision destination.
+    sxtw_x(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 0, 0, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Zero-extend + unsigned conversion: mov w8, w0 ; ucvtf d0, x8
+    // -> ucvtf d0, w0.
+    mov_w_reg(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 1, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Zero-extend + SIGNED conversion crosses signedness: the
+    // zero-extended value is the unsigned 32-bit value, so the
+    // rewrite is ucvtf d0, w0.
+    mov_w_reg(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // In-place zero-extend (mov w0, w0 is the canonical spelling).
+    mov_w_reg(&code[0], 0, 0);
+    cvtf_gpr(&code[4], 1, 1, 1, 5, 0);
+    movz_x(&code[8], 0, 1, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: a sign-extended source cannot feed the unsigned
+    //    conversion (sext of a negative reads as a huge value). --
+
+    sxtw_x(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 1, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a W-source conversion never matches (nothing to
+    //    narrow). --
+
+    sxtw_x(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 0, 1, 0, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: an X-form MOV is a plain copy, not a widening
+    //    extend. --
+
+    mov_x_reg(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 1, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: the conversion reads a different register. --
+
+    sxtw_x(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 9);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: the extended register is read again before
+    //    dying -- the extend must stay. --
+
+    sxtw_x(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 8);
+    add_x(&code[8], 1, 8, 2);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a control transfer discards the deferral. --
+
+    sxtw_x(&code[0], 8, 0);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 8);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction breaks adjacency. --
+
+    sxtw_x(&code[0], 8, 0);
+    add_x(&code[4], 1, 2, 3);
+    cvtf_gpr(&code[8], 1, 1, 0, 0, 8);
+    movz_x(&code[12], 8, 1, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: ZR-source extends are degenerate constants. --
+
+    sxtw_x(&code[0], 8, 31);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 8);
+    movz_x(&code[8], 8, 1, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // Integer register-offset load/store from raw fields:
 //   size 111000 opc 1 Rm option S 10 Rn Rt
 // option 3 is LSL/UXTX (the plain [Rn, Rm{, lsl #s}] form); s=1 sets
@@ -8794,6 +8897,7 @@ int main(void)
     test_mov_ccmp_imm_fold();
     test_mov_fmov_imm_fold();
     test_fp_zero_to_movi();
+    test_extend_cvtf_fold();
     test_mov_reg_offset_fold();
     test_mul_add_sub_fold();
     test_widening_mul_add_sub_fold();

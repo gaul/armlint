@@ -601,6 +601,30 @@ bool check_mov_fmov_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_fp_zero_to_movi(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// Detect a widening extend -- SXTW Xd, Wn, or the zero-extending
+// MOV Wd, Wm -- immediately followed by a 64-bit-source SCVTF/UCVTF
+// of the extended register. The W-source conversion form performs the
+// extension itself, so the pair folds to it and the extend dies:
+//   sxtw x8, w0 ; scvtf d0, x8 -> scvtf d0, w0
+//   mov w8, w0  ; ucvtf d0, x8 -> ucvtf d0, w0
+//   mov w8, w0  ; scvtf d0, x8 -> ucvtf d0, w0   (the zero-extended
+//     64-bit value IS the unsigned 32-bit value, so even the signed
+//     wide conversion becomes the unsigned narrow one)
+// A sign-extended source does NOT fold into UCVTF: the unsigned
+// reading of sext(negative) is a huge value, not the 32-bit one.
+// Both sides convert the same mathematical value, so the identity is
+// exact in every FPCR rounding mode -- no exactness argument needed.
+// ZR operands are excluded as degenerate (a constant-zero extend).
+//
+// The rewrite reads the extend's own source, which the adjacent pair
+// leaves unchanged (even in-place: SXTW and MOV Wd, Wm keep the low
+// 32 bits of their destination equal to the source). Deleting the
+// extend requires its destination dead: the conversion writes only an
+// FP register and never kills it, so the finding always defers
+// through the forward register-liveness scan (defer_dead_mov).
+bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // Detect a MOV chain that materialises the constant 0, immediately
 // followed by an instruction that reads that register. The read can
 // be replaced by XZR/WZR (the architectural zero register), making

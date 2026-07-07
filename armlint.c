@@ -182,6 +182,17 @@ struct armlint_state {
     size_t cset_offset;
     char cset_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Widening-extend producer (SXTW Xd, Wn, or the zero-extending
+    // MOV Wd, Wm) pending a 64-bit-source SCVTF/UCVTF consumer for
+    // the narrower-conversion fold. xtc_signed distinguishes the
+    // sign- from the zero-extension; xtc_rn is the extend's source.
+    bool xtc_active;
+    bool xtc_signed;
+    unsigned xtc_rd;
+    unsigned xtc_rn;
+    size_t xtc_offset;
+    char xtc_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Producer of bits-above-N guaranteed zero, pending a redundant
     // zero-extension consumer that re-zeros those bits. wzx_zero_from
     // is the threshold P: the producer guarantees bits >= P are zero.
@@ -792,6 +803,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->tbf_active = false;
     state->pending_tb_active = false;
     state->cset_active = false;
+    state->xtc_active = false;
     state->wzx_active = false;
     state->sxt_active = false;
     state->sv_active = false;
@@ -5797,6 +5809,95 @@ bool check_fp_zero_to_movi(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->xtc_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a 64-bit-source SCVTF/UCVTF reading the extended
+    //     register? The W-source form performs the extension itself,
+    //     so the pair converts the same mathematical value -- an
+    //     exact identity in every FPCR rounding mode.
+    if (state->xtc_active) {
+        state->xtc_active = false;      // strict adjacency
+        bool src_64, is_double, is_unsigned;
+        unsigned c_rn, c_rd;
+        if (decode_cvtf_from_gpr(op, &src_64, &is_double, &is_unsigned,
+                                 &c_rn, &c_rd)
+                && src_64
+                && c_rn == state->xtc_rd
+                // A sign-extended source folds only into the signed
+                // conversion: the unsigned reading of sext(negative)
+                // is a huge value, not the 32-bit one. A zero-extended
+                // source folds into either -- its 64-bit value IS the
+                // unsigned 32-bit value -- and both spell UCVTF of the
+                // W register.
+                && !(state->xtc_signed && is_unsigned)) {
+            const char *new_mnem =
+                state->xtc_signed ? "scvtf" : "ucvtf";
+            char fp_c = is_double ? 'd' : 's';
+
+            out->name = "widening extend + SCVTF/UCVTF foldable to "
+                        "W-form conversion";
+            out->start_offset = state->xtc_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, w%u",
+                new_mnem, fp_c, c_rd, state->xtc_rn);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->xtc_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+
+            // The rewrite deletes the extend and instead reads its
+            // source, which the adjacent pair leaves unchanged (even
+            // in-place: SXTW and MOV Wd, Wm keep the low 32 bits of
+            // their destination equal to the source). The conversion
+            // writes only an FP register and can never kill the
+            // extended GPR itself, so the finding always defers until
+            // it provably dies.
+            return defer_dead_mov(state, out, state->xtc_rd);
+        }
+    }
+
+    // (2) Open: SXTW Xd, Wn, or the zero-extending MOV Wd, Wm
+    //     (ORR Wd, WZR, Wm, LSL #0) -- the canonical uint32 -> 64
+    //     widening, whose W write zeroes the upper half. ZR operands
+    //     are degenerate (a constant-zero extend).
+    unsigned s_s, s_w, p_rd, p_rn;
+    if (decode_sbfm_sext(op, &s_s, &s_w, &p_rd, &p_rn)
+            && s_s == 32u && p_rd != 31 && p_rn != 31) {
+        state->xtc_active = true;
+        state->xtc_signed = true;
+        state->xtc_rd = p_rd;
+        state->xtc_rn = p_rn;
+        state->xtc_offset = offset;
+        snprintf(state->xtc_disasm, sizeof(state->xtc_disasm),
+            "sxtw x%u, w%u", p_rd, p_rn);
+    } else if ((op & 0xFFE0FFE0u) == 0x2A0003E0u) {
+        unsigned m_rd = op & 0x1Fu;
+        unsigned m_rm = (op >> 16) & 0x1Fu;
+        if (m_rd != 31 && m_rm != 31) {
+            state->xtc_active = true;
+            state->xtc_signed = false;
+            state->xtc_rd = m_rd;
+            state->xtc_rn = m_rm;
+            state->xtc_offset = offset;
+            snprintf(state->xtc_disasm, sizeof(state->xtc_disasm),
+                "mov w%u, w%u", m_rd, m_rm);
+        }
+    }
+
+    return false;
+}
+
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -8655,6 +8756,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_ccmp_imm_fold,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
+    check_extend_cvtf_fold,
     check_mov_zero_to_xzr,
     check_mov_reg_offset_fold,
     check_movz_movk_bitmask,

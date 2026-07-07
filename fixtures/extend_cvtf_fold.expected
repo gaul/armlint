@@ -1,0 +1,16 @@
+widening extend + SCVTF/UCVTF foldable to W-form conversion at offset: 0x0: -> scvtf d0, w0 (2 instructions)
+  sxtw x8, w0
+  scvtf d0, x8
+
+widening extend + SCVTF/UCVTF foldable to W-form conversion at offset: 0xc: -> ucvtf d1, w1 (2 instructions)
+  mov w9, w1
+  ucvtf d1, x9
+
+widening extend + SCVTF/UCVTF foldable to W-form conversion at offset: 0x18: -> ucvtf s2, w2 (2 instructions)
+  mov w10, w2
+  scvtf s2, x10
+
+Optimization opportunities by type:
+       3  widening extend + SCVTF/UCVTF foldable to W-form conversion
+
+3 optimization opportunities in 16 instructions
