@@ -2163,6 +2163,19 @@ static void cset_(uint8_t out[4], unsigned sf, unsigned rd, unsigned cond)
     write_le32(out, op);
 }
 
+// CSETM Rd, cond -- the CSINV Rd, ZR, ZR, cond^1 twin of cset_.
+static void csetm_(uint8_t out[4], unsigned sf, unsigned rd,
+                   unsigned cond)
+{
+    uint32_t op = 0x5A800000u
+        | ((uint32_t)(sf & 1u) << 31)
+        | (0x1Fu << 16)
+        | (((cond ^ 1u) & 0xFu) << 12)
+        | (0x1Fu << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
 // EOR (immediate) from raw bitmask fields:
 //   sf 10 100100 N immr imms Rn Rd
 // (N=0, immr=0, imms=0 encodes #1 at either width with sf-appropriate
@@ -2360,6 +2373,116 @@ static void test_cset_fold(void)
     cbz_cbnz(&code[4], 0, 1, 8, 2);
     add_x(&code[8], 1, 2, 3);
     assert(run_helper_check(code, 12) == 0);
+}
+
+static void test_tst_cset(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: tst w0, #0x10 ; cset w8, ne -> ubfx w8, w0, #4,
+    //    #1. The TST's flags die at the RET (safe terminator), so the
+    //    deferred finding emits.
+    tst_w_bit(&code[0], 0, 4);
+    cset_(&code[4], 0, 8, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // A flag overwrite works as the stopper too.
+    tst_w_bit(&code[0], 0, 4);
+    cset_(&code[4], 0, 8, 1);
+    cmp_w_imm(&code[8], 1, 7);
+    assert(run_helper_check(code, 12) == 1);
+
+    // X-form high bit -> ubfx x8, x0, #40, #1.
+    tst_x_bit(&code[0], 0, 40);
+    cset_(&code[4], 1, 8, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // W-form CSET after an X TST of a high bit: the 0/1 result
+    // zero-extends identically, so the extract renders X-form.
+    tst_x_bit(&code[0], 0, 40);
+    cset_(&code[4], 0, 8, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // MI is NE's synonym when the isolated bit is the sign bit.
+    tst_w_bit(&code[0], 0, 31);
+    cset_(&code[4], 0, 8, 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // CSETM -> sbfx w8, w0, #4, #1.
+    tst_w_bit(&code[0], 0, 4);
+    csetm_(&code[4], 0, 8, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // X-form CSETM after a W TST: bit 4 of Xn and Wn are the same
+    // bit, and the all-ones replicates at the CSETM's width.
+    tst_w_bit(&code[0], 0, 4);
+    csetm_(&code[4], 1, 8, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // In-place: the extract may overwrite its own source.
+    tst_w_bit(&code[0], 5, 4);
+    cset_(&code[4], 0, 5, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: EQ needs an inverted extract -- no single
+    //    instruction. --
+
+    tst_w_bit(&code[0], 0, 4);
+    cset_(&code[4], 0, 8, 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: MI of a non-sign bit is constant-false. --
+
+    tst_w_bit(&code[0], 0, 4);
+    cset_(&code[4], 0, 8, 4);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a W-form CSETM cannot replicate a high bit. --
+
+    tst_x_bit(&code[0], 0, 40);
+    csetm_(&code[4], 0, 8, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: the flags are read again before dying -- the TST
+    //    must stay. --
+
+    tst_w_bit(&code[0], 0, 4);
+    cset_(&code[4], 0, 8, 1);
+    b_cond(&code[8], 0, 8);          // b.eq reads Z
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: a multi-bit mask is not a single-bit test. --
+
+    tst_w_run(&code[0], 0, 1);       // tst w0, #0x3
+    cset_(&code[4], 0, 8, 1);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: intervening instruction breaks adjacency. --
+
+    tst_w_bit(&code[0], 0, 4);
+    add_x(&code[4], 1, 2, 3);
+    cset_(&code[8], 0, 8, 1);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: no stopper before end-of-region -- the pending is
+    //    discarded at flush. --
+
+    tst_w_bit(&code[0], 0, 4);
+    cset_(&code[4], 0, 8, 1);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // UBFX Wd, Wn, #lsb, #w = UBFM Wd, Wn, #lsb, #(lsb+w-1) (sf=0, N=0).
@@ -8645,6 +8768,7 @@ int main(void)
     test_tst_branch();
     test_single_bit_cbz();
     test_cset_fold();
+    test_tst_cset();
     test_redundant_zext();
     test_lsl_lsr_to_ubfx();
     test_lsr_and_to_ubfx();

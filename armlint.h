@@ -177,6 +177,32 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
 bool check_tst_branch(armlint_state *state, const cs_insn *insn,
                       size_t offset, armlint_finding *out);
 
+// Detect TST Rn, #(1<<k) immediately followed by CSET or CSETM of a
+// condition the masked bit fully determines; the pair is a flag-free
+// single-instruction bit extract:
+//   tst w0, #0x10 ; cset w8, ne  -> ubfx w8, w0, #4, #1
+//   tst w0, #0x10 ; csetm w8, ne -> sbfx w8, w0, #4, #1
+// NE folds directly (Z clear <=> the bit is set); MI is accepted as
+// its synonym when the isolated bit is the producer's sign bit (N is
+// that bit). EQ/PL would need an inverted extract (no single
+// instruction), and every other condition is constant after TST
+// (C = V = 0) -- all are skipped.
+//
+// CSET's 0/1 result zero-extends identically at either width, so any
+// W/X producer/consumer combination folds (the extract renders at the
+// consumer's width, bumped to X for bits above 31). CSETM's all-ones
+// must replicate at its own width, so a W-form CSETM after an X TST
+// of a high bit is skipped. Reads the tst_* pair state owned by
+// check_tst_branch (this check runs first in the registry and does
+// not expire it).
+//
+// The rewrite deletes the TST and writes no flags, so all four NZCV
+// flags disappear; emission defers through the forward flag-liveness
+// scan (armlint_advance_pending) until NZCV is provably dead, exactly
+// like the TBZ folds.
+bool check_tst_cset(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out);
+
 // Flag-free counterpart of check_tst_branch: a producer that isolates
 // a single bit k of Rs into Rd -- a non-flag-setting AND with a
 // one-bit mask, or a one-bit UBFM/SBFM extract (`ubfx/sbfx Rd, Rs,

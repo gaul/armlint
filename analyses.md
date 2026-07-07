@@ -225,6 +225,36 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Same win as the CMP -> CBZ fold: one fewer instruction, and the
   branch no longer carries an NZCV dependency.
 
+## TST single-bit + CSET/CSETM foldable into UBFX/SBFX
+
+* The materialising sibling of the check above: the bit feeds a bool
+  instead of a branch. `tst w0, #0x10 ; cset w8, ne` computes
+  `(w0 >> 4) & 1`, which is `ubfx w8, w0, #4, #1` -- one flag-free
+  instruction. `CSETM` (0 or all-ones) is the sign-extending extract,
+  `sbfx w8, w0, #4, #1`.
+* Conditions: `NE` folds directly (Z clear exactly when the masked
+  bit is set). `MI` is accepted as its synonym when the isolated bit
+  is the producer's sign bit -- N *is* that bit -- and is
+  constant-false for any lower bit. `EQ`/`PL` would need an inverted
+  extract, which has no single-instruction form (`ubfx` + `eor #1` is
+  back to two), and every other condition is constant after `TST`
+  (which clears C and V). Constant-condition shapes are left alone.
+* Widths: `CSET`'s 0/1 result zero-extends identically at either
+  width, so all W/X producer/consumer combinations fold; the extract
+  renders at the consumer's width, bumped to X when the bit lives in
+  the high half. `CSETM`'s all-ones must replicate at the CSETM's own
+  width, so a W-form `CSETM` of a bit above 31 has no
+  single-instruction form and is skipped. Cross-width register reads
+  are exact -- bit k < 32 of `Xn` and `Wn` are the same bit.
+* The rewrite deletes the `TST` and writes no flags, so all four
+  flags it set disappear; emission defers through the same forward
+  NZCV-liveness scan as the TBZ folds until the flags are provably
+  dead (overwritten, or a safe terminator, before any reader).
+* Win: two instructions to one, the scratch bool no longer rides on
+  an NZCV dependency, and the flags stay free for the surrounding
+  schedule. This shape is common in naive codegen materialising
+  `(flags & F) != 0` into a register.
+
 ## single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ
 
 * The flag-free spelling of the check above: a producer that isolates

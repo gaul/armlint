@@ -86,6 +86,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`cmp`/`cmn`/`tst` zero-test + `b.eq`/`b.ne` (`b.hi`/`b.ls` after `cmp`)](analyses.md#compare-zero-branch-foldable-into-cbzcbnz) | `cbz`/`cbnz` |
 | [`cmp`/`cmn`/`tst` zero-test + `b.lt`/`b.ge`/`b.mi`/`b.pl`](analyses.md#compare-zero-signed-branch-foldable-into-tbztbnz) | `tbnz`/`tbz Rn, #(msb)` |
 | [`tst #(1<<k)` + `b.eq`/`b.ne`](analyses.md#tst-single-bit--beqne-foldable-into-tbztbnz) | `tbz`/`tbnz Rn, #k` |
+| [`tst #(1<<k)` + `cset`/`csetm`](analyses.md#tst-single-bit--csetcsetm-foldable-into-ubfxsbfx) | `ubfx`/`sbfx Rd, Rn, #k, #1` |
 | [single-bit `and`/`ubfx`/`lsr #31` + `cbz`/`cbnz`](analyses.md#single-bit-test--cbzcbnz-foldable-into-tbztbnz) | `tbz`/`tbnz Rs, #k` |
 | [`cset` + `cbz`/`cbnz`](analyses.md#cset--cbzcbnz-foldable-into-bcond) | `b.<cond>` / `b.<inverse cond>` |
 | [`cset` + `eor #1`](analyses.md#cset--cbzcbnz-foldable-into-bcond) | `cset <inverse cond>` |

@@ -3090,6 +3090,32 @@ static bool decode_cset(uint32_t op, unsigned *out_rd, unsigned *out_cond)
     return true;
 }
 
+// CSETM Rd, cond -- the alias of CSINV Rd, ZR, ZR, invert(cond):
+//   sf 1 0 11010100 Rm(11111) cond 0 0 Rn(11111) Rd
+// The CSINV twin of decode_cset (bit 30 set, o2 = 0), producing 0 or
+// all-ones instead of 0 or 1, with the same AL/NV constant-result and
+// ZR-destination exclusions.
+static bool decode_csetm(uint32_t op, unsigned *out_rd,
+                         unsigned *out_cond)
+{
+    if ((op & 0x7FE00C00u) != 0x5A800000u
+            || ((op >> 16) & 0x1Fu) != 31u
+            || ((op >> 5) & 0x1Fu) != 31u) {
+        return false;
+    }
+    unsigned field = (op >> 12) & 0xFu;
+    if (field >= 14u) {
+        return false;
+    }
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31u) {
+        return false;
+    }
+    *out_rd = rd;
+    *out_cond = field ^ 1u;
+    return true;
+}
+
 // EOR (immediate) with value 1: sf 10 100100 N immr imms Rn Rd. The
 // mask leaves sf and the bitmask fields free; the caller-visible
 // constant is reconstructed and must equal 1. Rd = 31 here means SP
@@ -3267,6 +3293,103 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
+    return false;
+}
+
+bool check_tst_cset(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out)
+{
+    (void)out;      // emission goes through armlint_advance_pending
+    (void)offset;
+
+    if (insn->size != 4) {
+        return false;   // tst_active is check_tst_branch's to clear
+    }
+    if (!state->tst_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // Consumer: CSET (-> UBFX, 0 or 1) or CSETM (-> SBFX, 0 or
+    // all-ones) of the pending single-bit TST. The pair state belongs
+    // to check_tst_branch, which runs after this check and expires it
+    // on any non-branch; it is only read here.
+    unsigned rd, cond;
+    bool is_csetm = false;
+    if (decode_cset(op, &rd, &cond)) {
+        // 0/1 form
+    } else if (decode_csetm(op, &rd, &cond)) {
+        is_csetm = true;
+    } else {
+        return false;
+    }
+    unsigned c_sf = (op >> 31) & 1u;
+
+    unsigned bit = state->tst_bit;
+    unsigned p_datasize = state->tst_is_64bit ? 64u : 32u;
+
+    // Condition: NE (Z clear <=> the masked bit is set) folds
+    // directly, and MI is its synonym when the isolated bit is the
+    // producer's sign bit (N is that bit; any lower bit makes MI
+    // constant-false). EQ/PL would need an inverted extract, which
+    // has no single-instruction form, and every other condition is
+    // constant after TST (C = V = 0).
+    if (!(cond == 1u || (cond == 4u && bit == p_datasize - 1u))) {
+        return false;
+    }
+
+    // The rewrite's width. CSET's 0/1 zero-extends identically at
+    // either width, so the consumer's width serves, bumped to X when
+    // the bit lives in the high half (only reachable from an X-form
+    // TST). CSETM's all-ones must replicate at the CSETM's own width,
+    // and a W-form extract cannot reach bits 32..63 -- that shape has
+    // no single-instruction form and is skipped. Cross-width register
+    // reads are exact: bit k < 32 of Xn and Wn are the same bit.
+    unsigned r_sf;
+    if (is_csetm) {
+        if (c_sf == 0 && bit >= 32u) {
+            return false;
+        }
+        r_sf = c_sf;
+    } else {
+        r_sf = bit >= 32u ? 1u : c_sf;
+    }
+
+    char r_wx = r_sf ? 'x' : 'w';
+    char p_wx = state->tst_is_64bit ? 'x' : 'w';
+    const char *new_mnem = is_csetm ? "sbfx" : "ubfx";
+
+    armlint_finding *p = &state->pending_finding;
+    p->name = is_csetm
+        ? "TST single-bit + CSETM foldable into SBFX"
+        : "TST single-bit + CSET foldable into UBFX";
+    p->start_offset = state->tst_offset;
+    p->insn_count = 2;
+    clear_finding_strings(p);
+
+    snprintf(p->detail, sizeof(p->detail),
+        "-> %s %c%u, %c%u, #%u, #1",
+        new_mnem, r_wx, rd, r_wx, state->tst_rn, bit);
+
+    if (bit < 32) {
+        snprintf(p->lines[0], sizeof(p->lines[0]),
+            "tst %c%u, #0x%x", p_wx, state->tst_rn, 1u << bit);
+    } else {
+        snprintf(p->lines[0], sizeof(p->lines[0]),
+            "tst %c%u, #0x%" PRIx64,
+            p_wx, state->tst_rn, (uint64_t)1 << bit);
+    }
+    snprintf(p->lines[1], sizeof(p->lines[1]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // The rewrite deletes the TST, and neither UBFX nor SBFX writes
+    // flags: all four flags the TST set disappear, so emission defers
+    // until the forward scan proves NZCV dead (overwritten or a safe
+    // terminator before any reader) -- the same deferral as the
+    // TBZ/CBZ folds, whose rewrites also leave NZCV unwritten.
+    state->pending_active = true;
+    state->pending_window = LIVENESS_WINDOW;
     return false;
 }
 
@@ -8538,7 +8661,8 @@ const armlint_check_fn armlint_check_registry[] = {
     check_lsl_fold,
     check_funnel_to_extr,
     check_cmp_zero_branch,
-    check_tst_branch,
+    check_tst_cset,     // reads tst_* state; must precede its owner,
+    check_tst_branch,   // which expires the pair on any non-branch
     check_single_bit_cbz,
     check_cset_fold,
     check_redundant_zext,

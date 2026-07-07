@@ -1,0 +1,21 @@
+TST single-bit + CSET foldable into UBFX at offset: 0x0: -> ubfx w8, w0, #4, #1 (2 instructions)
+  tst w0, #0x10
+  cset w8, ne
+
+TST single-bit + CSET foldable into UBFX at offset: 0xc: -> ubfx x9, x1, #40, #1 (2 instructions)
+  tst x1, #0x10000000000
+  cset x9, ne
+
+TST single-bit + CSET foldable into UBFX at offset: 0x18: -> ubfx w10, w2, #31, #1 (2 instructions)
+  tst w2, #0x80000000
+  cset w10, mi
+
+TST single-bit + CSETM foldable into SBFX at offset: 0x24: -> sbfx w11, w3, #0, #1 (2 instructions)
+  tst w3, #0x1
+  csetm w11, ne
+
+Optimization opportunities by type:
+       3  TST single-bit + CSET foldable into UBFX
+       1  TST single-bit + CSETM foldable into SBFX
+
+4 optimization opportunities in 19 instructions
