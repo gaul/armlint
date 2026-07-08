@@ -22,7 +22,11 @@ MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x28: -> bic x0, x3, x1 (2 
   mvn x0, x1
   and x0, x3, x0
 
-Optimization opportunities by type:
-       6  MVN + AND/ORR/EOR foldable to BIC/ORN/EON
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x30: -> bic w5, w3, w1 (2 instructions)
+  mvn w0, w1
+  and w5, w3, w0
 
-6 optimization opportunities in 19 instructions
+Optimization opportunities by type:
+       7  MVN + AND/ORR/EOR foldable to BIC/ORN/EON
+
+7 optimization opportunities in 23 instructions

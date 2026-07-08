@@ -22,7 +22,9 @@ _main:
     lsl     x12, x13, #3
     add     x12, x15, x16
 
-    // Negative: consumer's Rd != LSL's Rd (LSL value would be alive).
+    // Negative: consumer writes a fresh register and x17 is never
+    // touched again -- the deferred finding's liveness scan expires
+    // without proving the shift result dead, so nothing is emitted.
     lsl     x17, x18, #3
     add     x19, x20, x17
 
@@ -68,5 +70,19 @@ _main:
     // rotate.
     extr    w0, w1, w2, #5
     orr     w0, w4, w0
+
+    // Positive (deferred): the consumer writes a fresh register, so
+    // emission waits for the forward register-liveness scan -- the
+    // trailing mov overwrites the shift result, proving it dead.
+    lsl     x25, x26, #4
+    and     x27, x28, x25           // -> and x27, x28, x26, lsl #4
+    mov     x25, #1
+
+    // Negative (deferred): the shift result is read again before
+    // dying; the deferred finding is discarded.
+    lsr     w8, w9, #2
+    add     w10, w11, w8
+    add     w12, w8, w13
+    mov     w8, #1
 
     ret

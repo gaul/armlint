@@ -26,8 +26,12 @@ MUL + NEG foldable to MNEG at offset: 0x30: -> mneg x3, x1, x2 (2 instructions)
   mul x3, x1, x2
   neg x3, x3
 
+MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x48: -> madd x5, x1, x2, x4 (2 instructions)
+  mul x3, x1, x2
+  add x5, x3, x4
+
 Optimization opportunities by type:
-       6  MUL + ADD/SUB foldable to MADD/MSUB
+       7  MUL + ADD/SUB foldable to MADD/MSUB
        1  MUL + NEG foldable to MNEG
 
-7 optimization opportunities in 28 instructions
+8 optimization opportunities in 32 instructions

@@ -37,8 +37,9 @@ _main:
     lsr     x0, x0, #56
     orr     x0, x0, x3, lsl #8
 
-    // Negative: consumer writes a fresh register, so the shift result may
-    // still be live -- not provably dead.
+    // Negative: consumer writes a fresh register, so emission defers
+    // on x1 -- which the next case reads before any kill, discarding
+    // the deferred finding.
     lsr     x1, x5, #56
     orr     x0, x1, x2, lsl #8
 
@@ -71,5 +72,12 @@ _main:
     lsr     x2, x1, #56
     nop
     orr     x2, x2, x3, lsl #8
+
+    // Positive (deferred): the consumer writes a fresh register, so
+    // emission waits for the forward register-liveness scan -- the
+    // trailing mov overwrites the shift result, proving it dead.
+    lsr     x6, x5, #56
+    orr     x7, x6, x8, lsl #8      // -> extr x7, x8, x5, #56
+    mov     x6, #1
 
     ret

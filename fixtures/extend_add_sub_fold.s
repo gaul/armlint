@@ -34,25 +34,35 @@ _main:
     uxtb    w0, w1
     add     x0, x3, x0             // -> add x0, x3, w1, uxtb
 
-    // Negatives:
-    // N1) Consumer's Rd != extend dest (the extended value stays live).
+    // P) Fresh destination: the ADD leaves the extended value in x0
+    // alive at the consumer, so emission defers through the forward
+    // register-liveness scan -- and the next case's sxtw overwrites
+    // x0, proving it dead, so the deferred finding emits.
     sxtw    x0, w1
-    add     x2, x3, x0
+    add     x2, x3, x0             // -> add x2, x3, w1, sxtw
 
-    // N2) SUB with the extend result in Rn (SUB does not commute).
+    // Negatives:
+    // N1) SUB with the extend result in Rn (SUB does not commute).
     sxtw    x0, w1
     sub     x0, x0, x3
 
-    // N3) Width mismatch: W-form SIGN-extend, X-form consumer. The
+    // N2) Width mismatch: W-form SIGN-extend, X-form consumer. The
     // sxtb zeroed X0's high half where the X-form sxtb option would
     // replicate the sign -- no zext-style relaxation for it.
     sxtb    w0, w1
     add     x0, x3, x0
 
-    // N4) Independent operand is register 31: the shifted-register
+    // N3) Independent operand is register 31: the shifted-register
     // consumer reads ZR there, but the extended-register rewrite
     // would read SP.
     uxtb    w0, w1
     add     w0, wzr, w0
+
+    // N4) Fresh destination, but the extended value is read again
+    // before dying: the deferred finding is discarded.
+    sxtw    x0, w1
+    add     x2, x3, x0
+    add     x4, x0, x5
+    mov     x0, #1
 
     ret

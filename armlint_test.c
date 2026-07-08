@@ -434,6 +434,7 @@ static void add_w_lsl1(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
 static void lsr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void asr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
+static void ret_(uint8_t out[4]);
 
 // EXTR Rd, Rn, Rm, #lsb. W base 0x13800000; X base 0x93C00000 (N = sf).
 static void extr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
@@ -559,8 +560,9 @@ static void test_lsl_fold(void)
 
     // -- Negative cases --
 
-    // Consumer overwrites a different register: v1 safety condition
-    // (Rd_consumer == Rd_lsl) does not hold. Don't flag.
+    // Consumer writes a fresh register with no later kill: the
+    // deferred finding's liveness scan never proves the shift result
+    // dead, so nothing is emitted.
     lsl_w(&code[0], 0, 1, 3);
     add_w(&code[4], 5, 2, 0);
     assert(run_helper_check(code, 8) == 0);
@@ -711,6 +713,44 @@ static void test_lsl_fold(void)
     lsl_w(&code[8], 3, 4, 2);
     sub_w(&code[12], 3, 5, 3);
     assert(run_helper_check(code, 16) == 2);
+
+    // -- Fresh-destination consumers (deferred): the consumer leaves
+    //    the shift result alive, so emission waits for the forward
+    //    register-liveness scan; run_reg_dead appends the kill. --
+
+    // lsl w0, w1, #3 ; add w5, w2, w0 ; (w0 dies)
+    //   -> add w5, w2, w1, lsl #3 (flag).
+    lsl_w(&code[0], 0, 1, 3);
+    add_w(&code[4], 5, 2, 0);
+    assert(run_reg_dead(code, 8, 0) == 1);
+
+    // X-form, logical consumer, Rn slot (commutative swap).
+    lsl_x(&code[0], 0, 1, 4);
+    and_x(&code[4], 5, 0, 2);
+    assert(run_reg_dead(code, 8, 0) == 1);
+
+    // The shift result is read again before dying: discarded.
+    lsl_w(&code[0], 0, 1, 3);
+    add_w(&code[4], 5, 2, 0);
+    orr_w(&code[8], 6, 7, 0);
+    assert(run_reg_dead(code, 12, 0) == 0);
+
+    // Rd = 31 consumer (dead write) is excluded even with a kill.
+    lsl_w(&code[0], 0, 1, 3);
+    add_w(&code[4], 31, 2, 0);
+    assert(run_reg_dead(code, 8, 0) == 0);
+
+    // XZR surviving operand is a degenerate consumer (a shifted
+    // register copy, not an op the shift rides into); excluded.
+    lsl_w(&code[0], 0, 1, 3);
+    add_w(&code[4], 5, 31, 0);
+    assert(run_reg_dead(code, 8, 0) == 0);
+
+    // A control transfer discards the deferral.
+    lsl_w(&code[0], 0, 1, 3);
+    add_w(&code[4], 5, 2, 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 }
 
 static void test_funnel_to_extr(void)
@@ -766,11 +806,30 @@ static void test_funnel_to_extr(void)
 
     // -- Negatives: must not fire. --
 
-    // Consumer writes a fresh register, so the shift result may still be
-    // live: lsr x1,x5,#56 ; orr x0,x1,x2,lsl#8. Not provably dead.
+    // Consumer writes a fresh register with no later kill: the
+    // deferred finding's liveness scan never proves the shift result
+    // dead, so nothing is emitted.
     lsr_x(&code[0], 1, 5, 56);
     orr_x_sh(&code[4], 0, 1, 2, 0, 8);
     assert(run_helper_check(code, 8) == 0);
+
+    // The same pair with a trailing kill of the shift result emits
+    // the deferred finding: -> extr x0, x2, x5, #56.
+    lsr_x(&code[0], 1, 5, 56);
+    orr_x_sh(&code[4], 0, 1, 2, 0, 8);
+    assert(run_reg_dead(code, 8, 1) == 1);
+
+    // Fresh destination, but the shift result is read again before
+    // dying: discarded.
+    lsr_x(&code[0], 1, 5, 56);
+    orr_x_sh(&code[4], 0, 1, 2, 0, 8);
+    add_x(&code[8], 6, 1, 7);
+    assert(run_reg_dead(code, 12, 1) == 0);
+
+    // Rd = 31 consumer (dead write) is excluded even with a kill.
+    lsr_x(&code[0], 1, 5, 56);
+    orr_x_sh(&code[4], 31, 1, 2, 0, 8);
+    assert(run_reg_dead(code, 8, 1) == 0);
 
     // Shift amounts do not sum to the register width (40 + 8 != 64).
     lsr_x(&code[0], 2, 1, 40);
@@ -6892,10 +6951,35 @@ static void test_mul_add_sub_fold(void)
     subs_x(&code[4], 3, 4, 3);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: Rd != Rt (the MUL result is alive after the ADD).
+    // Negative: fresh destination with no later kill -- the deferred
+    // finding's liveness scan never proves the product dead.
     mul_x(&code[0], 3, 1, 2);
     add_x(&code[4], 5, 3, 4);  // writes X5, not X3
     assert(run_helper_check(code, 8) == 0);
+
+    // The same pair with a trailing kill emits the deferred finding:
+    // -> madd x5, x1, x2, x4.
+    mul_x(&code[0], 3, 1, 2);
+    add_x(&code[4], 5, 3, 4);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Fresh destination, but the product is read again before dying:
+    // discarded.
+    mul_x(&code[0], 3, 1, 2);
+    add_x(&code[4], 5, 3, 4);
+    add_x(&code[8], 6, 3, 7);
+    assert(run_reg_dead(code, 12, 3) == 0);
+
+    // ADD whose other operand is XZR is MUL + register copy, not an
+    // accumulate; a ZR-accumulator MADD would just respell the MUL.
+    mul_x(&code[0], 3, 1, 2);
+    add_x(&code[4], 5, 3, 31);
+    assert(run_reg_dead(code, 8, 3) == 0);
+
+    // Rd = 31 consumer (dead write) is excluded even with a kill.
+    mul_x(&code[0], 3, 1, 2);
+    add_x(&code[4], 31, 3, 4);
+    assert(run_reg_dead(code, 8, 3) == 0);
 
     // Negative: accumulator == mul_rd (xc == xt aliasing).
     // mul x3, x1, x2 ; add x3, x3, x3.
@@ -6957,11 +7041,17 @@ static void test_mul_add_sub_fold(void)
     write_le32(&code[4], 0x4B0003E0u | (3u << 16) | 3u);  // neg w3, w3
     assert(run_helper_check(code, 8) == 1);
 
-    // Negative: NEG into a different register (Rd != Rt), so the MUL
-    // result is not overwritten/dead.
+    // Negative: NEG into a different register with no later kill --
+    // the deferred MNEG finding's scan never proves the product dead.
     mul_x(&code[0], 3, 1, 2);
     write_le32(&code[4], 0xCB0003E0u | (3u << 16) | 5u);  // neg x5, x3
     assert(run_helper_check(code, 8) == 0);
+
+    // The same pair with a trailing kill emits the deferred MNEG
+    // finding: -> mneg x5, x1, x2.
+    mul_x(&code[0], 3, 1, 2);
+    write_le32(&code[4], 0xCB0003E0u | (3u << 16) | 5u);  // neg x5, x3
+    assert(run_reg_dead(code, 8, 3) == 1);
 }
 
 static void test_widening_mul_add_sub_fold(void)
@@ -7029,10 +7119,30 @@ static void test_widening_mul_add_sub_fold(void)
     encode_sr(&code[4], 0xAB000000u, 8, 8, 2);  // ADDS X8, X8, X2
     assert(run_helper_check(code, 8) == 0);
 
-    // Rd != product (the product is alive after the ADD).
+    // Fresh destination with no later kill -- the deferred finding's
+    // liveness scan never proves the product dead.
     smull_x(&code[0], 8, 0, 1);
     add_x(&code[4], 9, 8, 2);   // writes X9, not X8
     assert(run_helper_check(code, 8) == 0);
+
+    // The same pair with a trailing kill emits the deferred finding:
+    // -> smaddl x9, w0, w1, x2.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 9, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Fresh destination, but the product is read again before dying:
+    // discarded.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 9, 8, 2);
+    add_x(&code[8], 10, 8, 3);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // ADD whose other operand is XZR is a multiply + register copy,
+    // not an accumulate; excluded.
+    smull_x(&code[0], 8, 0, 1);
+    add_x(&code[4], 9, 8, 31);
+    assert(run_reg_dead(code, 8, 8) == 0);
 
     // accumulator == product (xc == xt aliasing): add x8, x8, x8.
     smull_x(&code[0], 8, 0, 1);
@@ -7745,10 +7855,36 @@ static void test_neg_add_sub_fold(void)
     subs_x(&code[4], 3, 2, 3);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: ADD's Rd != Rt (NEG result is alive after the ADD).
+    // Negative: fresh destination with no later kill -- the deferred
+    // finding's liveness scan never proves the negation dead.
     neg_x(&code[0], 3, 1);
     add_x(&code[4], 5, 2, 3);
     assert(run_helper_check(code, 8) == 0);
+
+    // The same pair with a trailing kill emits the deferred finding:
+    // -> sub x5, x2, x1.
+    neg_x(&code[0], 3, 1);
+    add_x(&code[4], 5, 2, 3);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Fresh destination, but the negation is read again before dying:
+    // discarded.
+    neg_x(&code[0], 3, 1);
+    add_x(&code[4], 5, 2, 3);
+    add_x(&code[8], 6, 3, 7);
+    assert(run_reg_dead(code, 12, 3) == 0);
+
+    // XZR surviving operand is a double-negation shape (add xd, xzr,
+    // xt is a copy of the negation; its fold is NEG, not this one);
+    // excluded even with a kill.
+    neg_x(&code[0], 3, 1);
+    add_x(&code[4], 5, 31, 3);
+    assert(run_reg_dead(code, 8, 3) == 0);
+
+    // Rd = 31 consumer (dead write) is excluded even with a kill.
+    neg_x(&code[0], 3, 1);
+    add_x(&code[4], 31, 2, 3);
+    assert(run_reg_dead(code, 8, 3) == 0);
 
     // Negative: accumulator equals nt (xc == xt aliasing).
     //   neg x3, x1 ; add x3, x3, x3 (= -2*x1, not foldable as 1 insn).
@@ -7841,10 +7977,36 @@ static void test_mvn_logic_fold(void)
 
     // -- Negatives. --
 
-    // Rd != MVN dest (the ~Rs value would still be live).
+    // Fresh destination with no later kill -- the deferred finding's
+    // liveness scan never proves the complement dead.
     mvn_w(&code[0], 0, 1);
     and_w(&code[4], 5, 3, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // The same pair with a trailing kill emits the deferred finding:
+    // -> bic w5, w3, w1.
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 5, 3, 0);
+    assert(run_reg_dead(code, 8, 0) == 1);
+
+    // Fresh destination, but the complement is read again before
+    // dying: discarded.
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 5, 3, 0);
+    orr_w(&code[8], 6, 7, 0);
+    assert(run_reg_dead(code, 12, 0) == 0);
+
+    // XZR surviving operand: "orr rd, xzr, t" is the MOV alias (its
+    // fold is MVN itself) and the AND/EOR forms are constant shapes;
+    // excluded even with a kill.
+    mvn_w(&code[0], 0, 1);
+    orr_w(&code[4], 5, 31, 0);
+    assert(run_reg_dead(code, 8, 0) == 0);
+
+    // Rd = 31 consumer (dead write / TST alias) is excluded.
+    mvn_w(&code[0], 0, 1);
+    and_w(&code[4], 31, 3, 0);
+    assert(run_reg_dead(code, 8, 0) == 0);
 
     // Consumer does not read the MVN dest.
     mvn_w(&code[0], 0, 1);
@@ -7948,10 +8110,31 @@ static void test_extend_add_sub_fold(void)
 
     // -- Negatives. --
 
-    // Rd != extend dest (the extended value would still be live).
+    // Fresh destination with no later kill -- the deferred finding's
+    // liveness scan never proves the extended value dead.
     sxtw_x(&code[0], 0, 1);
     add_x(&code[4], 2, 3, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // The same pair with a trailing kill emits the deferred finding:
+    // -> add x2, x3, w1, sxtw.
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 2, 3, 0);
+    assert(run_x0_dead(code, 8) == 1);
+
+    // Fresh destination, but the extended value is read again before
+    // dying: discarded.
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 2, 3, 0);
+    add_x(&code[8], 4, 0, 5);
+    assert(run_x0_dead(code, 12) == 0);
+
+    // Rd = 31 consumer is excluded even with a kill: the shifted-
+    // register consumer's Rd = 31 is a discarded ZR write, but the
+    // extended-register rewrite's Rd = 31 would be SP.
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 31, 3, 0);
+    assert(run_x0_dead(code, 8) == 0);
 
     // Consumer does not read the extend dest.
     sxtw_x(&code[0], 0, 1);

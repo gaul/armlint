@@ -42,21 +42,31 @@ _main:
     mul     x3, x1, x2
     adds    x3, x3, x4
 
-    // N3) Rd != Rt (MUL result alive after).
+    // P) Fresh destination: the ADD leaves the product in x3 alive at
+    // the consumer, so emission defers through the forward register-
+    // liveness scan -- and the next case's mul overwrites x3, proving
+    // it dead, so the deferred finding emits.
     mul     x3, x1, x2
-    add     x5, x3, x4
+    add     x5, x3, x4              // -> madd x5, x1, x2, x4
 
-    // N4) Accumulator = Rt aliasing: add x3, x3, x3.
+    // N3) Accumulator = Rt aliasing: add x3, x3, x3.
     mul     x3, x1, x2
     add     x3, x3, x3
 
-    // N5) ADD with shift on Rm.
+    // N4) ADD with shift on Rm.
     mul     x3, x1, x2
     add     x3, x3, x4, lsl #1
 
-    // N6) Intervening instruction.
+    // N5) Intervening instruction.
     mul     x3, x1, x2
     add     x5, x5, x6              // unrelated
     add     x3, x3, x4
+
+    // N6) Fresh destination, but the product is read again before
+    // dying: the deferred finding is discarded.
+    mul     x3, x1, x2
+    add     x5, x3, x4
+    add     x6, x3, x7
+    mov     x3, #1
 
     ret

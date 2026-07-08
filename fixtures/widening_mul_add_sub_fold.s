@@ -50,21 +50,31 @@ _main:
     smull   x8, w0, w1
     adds    x8, x8, x2
 
-    // N4) Rd != Xt (product alive after the ADD).
+    // P) Fresh destination: the ADD leaves the product in x8 alive at
+    // the consumer, so emission defers through the forward register-
+    // liveness scan -- and the next case's smull overwrites x8,
+    // proving it dead, so the deferred finding emits.
     smull   x8, w0, w1
-    add     x9, x8, x2
+    add     x9, x8, x2             // -> smaddl x9, w0, w1, x2
 
-    // N5) Accumulator = Xt aliasing: add x8, x8, x8.
+    // N4) Accumulator = Xt aliasing: add x8, x8, x8.
     smull   x8, w0, w1
     add     x8, x8, x8
 
-    // N6) Intervening instruction.
+    // N5) Intervening instruction.
     smull   x8, w0, w1
     add     x5, x5, x6             // unrelated
     add     x8, x8, x2
 
-    // N7) Real SMADDL (Ra != XZR) is not the SMULL alias.
+    // N6) Real SMADDL (Ra != XZR) is not the SMULL alias.
     smaddl  x8, w0, w1, x3
     add     x8, x8, x2
+
+    // N7) Fresh destination, but the product is read again before
+    // dying: the deferred finding is discarded.
+    smull   x8, w0, w1
+    add     x9, x8, x2
+    add     x10, x8, x3
+    mov     x8, #1
 
     ret

@@ -44,7 +44,11 @@ equivalent; the constraints below are the ones they share.
   see the register overwritten before any read or control transfer.
   This is how the address folds admit stores and loads into a fresh
   register -- `add x8, sp, #32 ; str x0, [x8]` folds to
-  `str x0, [sp, #0x20]` only once `x8` provably dies.
+  `str x0, [sp, #0x20]` only once `x8` provably dies -- and how the
+  producer folds (shift, funnel, extend, `MUL`/`SMULL`, `NEG`, `MVN`)
+  admit consumers that write a register other than the producer's:
+  `lsl w8, w1, #3 ; add w9, w2, w8` folds to
+  `add w9, w2, w1, lsl #3` under the same proof.
   The single-bit and CSET branch folds additionally require the folded
   branch's taken edge to land inside that proven-clean span -- a
   general-purpose register, unlike NZCV, is routinely live into a

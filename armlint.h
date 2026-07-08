@@ -121,11 +121,18 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
 
 // Detect a shift (immediate) -- LSL/LSR/ASR, or ROR via the
 // same-register EXTR alias -- immediately followed by an arithmetic or
-// logical shifted-register op that consumes the shift's destination,
-// with the consumer overwriting that register. The pair can be
-// replaced by a single shifted-register form (the shift rides on the
-// consumer's Rm). ROR folds only into the logical consumers: the
-// arithmetic shifted-register encoding reserves shift type 11.
+// logical shifted-register op that consumes the shift's destination.
+// The pair can be replaced by a single shifted-register form (the
+// shift rides on the consumer's Rm). ROR folds only into the logical
+// consumers: the arithmetic shifted-register encoding reserves shift
+// type 11.
+//
+// The rewrite deletes the shift, so its destination must be dead
+// afterward: a consumer that overwrites it proves that on the spot,
+// and one writing a fresh register defers through the forward
+// register-liveness scan (see armlint_advance_pending_mz). Rd = 31
+// consumers are excluded -- the non-S forms are dead writes, the S
+// forms the CMP/CMN/TST aliases.
 //
 // The shift result may sit in the consumer's Rm slot (any consumer) or
 // its Rn slot (commutative consumers only -- ADD/ADDS/AND/ANDS/ORR/EOR
@@ -133,7 +140,9 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
 // value lands on Rm). The other ("independent") source operand must not
 // also be the shift destination: with both sources equal to it (e.g.
 // `lsl wt,ws,#k ; add wt,wt,wt`) the rewrite would read a stale
-// pre-shift value, so that case is rejected.
+// pre-shift value, so that case is rejected. An XZR independent
+// operand is likewise rejected -- such consumers are shifted register
+// copies or constants, not ops the shift rides into.
 bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
 
@@ -146,10 +155,12 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
 // folds to ROR Rd, Rs, #lsb. Only ADD/ORR/EOR qualify -- the two shifted
 // fields are disjoint, so all three agree with EXTR bit-for-bit -- and the
 // consumer's shift must be logical (LSL/LSR), never ASR (its sign fill would
-// collide with the other field). Like check_lsl_fold, only flags when the
-// consumer overwrites the shift's destination, proving the intermediate is
-// dead; the inline-shifted source must be a different register so the shift
-// does not clobber it.
+// collide with the other field). Like check_lsl_fold, the rewrite deletes
+// the shift, so its destination must be dead afterward: a consumer that
+// overwrites it proves that on the spot, and one writing a fresh register
+// defers through the forward register-liveness scan (Rd = 31 is a dead
+// write and excluded); the inline-shifted source must be a different
+// register so the shift does not clobber it.
 bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
@@ -696,19 +707,21 @@ bool check_mov_reg_offset_fold(armlint_state *state, const cs_insn *insn,
 // Ra - Rn*Rm, not Rn*Rm - Ra. S-variants (ADDS/SUBS) are skipped
 // because MADD/MSUB have no flag-setting form.
 //
-// Soundness (conservative):
-//   - Rd of the ADD/SUB must equal Rt, so the MUL's destination is
-//     overwritten by the ADD/SUB and its intermediate value is dead.
-//     This is the textbook array-indexing pattern: the MUL result
-//     fed once into the ADD/SUB and not reused.
-//   - The "accumulator" operand (the one that is not Rt) must NOT
-//     equal Rt -- otherwise the ADD/SUB reads the MUL's result
-//     twice while the MADD rewrite reads pre-MUL values, diverging.
-// Widths must match: both W or both X. MUL writing to ZR is excluded
-// (the pending slot is not opened for MUL Xd=XZR since the result
-// is discarded). The degenerate SUB case `sub xt, xzr, xt` (i.e.
-// NEG xt, xt) folds to the MSUB-with-ZR alias MNEG and is reported as
-// such ("MUL + NEG foldable to MNEG").
+// Soundness: the rewrite deletes the MUL, so the product register
+// must be dead afterward. An ADD/SUB that overwrites it (Rd == Rt,
+// the textbook array-indexing pattern) proves that on the spot and
+// reports immediately; one writing a fresh register defers through
+// the forward register-liveness scan (Rd = 31 is a dead write and
+// excluded). The "accumulator" operand (the one that is not Rt) must
+// NOT equal Rt -- otherwise the ADD/SUB reads the MUL's result twice
+// while the MADD rewrite reads pre-MUL values, diverging -- and an
+// ADD whose accumulator is XZR is a multiply + register copy, not an
+// accumulate (a ZR-accumulator MADD just respells the MUL); both are
+// rejected. Widths must match: both W or both X. MUL writing to ZR
+// is excluded (the pending slot is not opened for MUL Xd=XZR since
+// the result is discarded). The degenerate SUB case
+// `sub xd, xzr, xt` (i.e. NEG xd, xt) folds to the MSUB-with-ZR
+// alias MNEG and is reported as such ("MUL + NEG foldable to MNEG").
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
@@ -730,13 +743,16 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
 // UMULL -> UMADDL/UMSUBL). The multiply operands stay W-form in the
 // rewrite while the destination and accumulator are X-form.
 //
-// Soundness (conservative): identical to check_mul_add_sub_fold -- Rd
-// of the ADD/SUB must equal Xt (so the product is overwritten and
-// dead), and the accumulator operand must not equal Xt. S-variants
-// (ADDS/SUBS) are skipped because the long MAC has no flag-setting
-// form. SMULL/UMULL writing to ZR is excluded (result discarded). The
-// degenerate SUB case `sub xt, xzr, xt` (NEG) folds to the long
-// MSUB-with-ZR alias SMNEGL / UMNEGL and is reported as such.
+// Soundness: identical to check_mul_add_sub_fold -- an ADD/SUB that
+// overwrites Xt reports immediately, one writing a fresh register
+// defers through the forward register-liveness scan (Rd = 31
+// excluded), the accumulator operand must not equal Xt, and an
+// XZR-accumulator ADD (a multiply + register copy) is rejected.
+// S-variants (ADDS/SUBS) are skipped because the long MAC has no
+// flag-setting form. SMULL/UMULL writing to ZR is excluded (result
+// discarded). The degenerate SUB case `sub xd, xzr, xt` (NEG) folds
+// to the long MSUB-with-ZR alias SMNEGL / UMNEGL and is reported as
+// such.
 bool check_widening_mul_add_sub_fold(armlint_state *state,
                                      const cs_insn *insn,
                                      size_t offset, armlint_finding *out);
@@ -753,15 +769,18 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
 // are skipped because the fold changes the flag-set definition
 // (V/C in particular). NEGS is similarly excluded as a producer.
 //
-// Soundness (conservative):
-//   - Rd of the ADD/SUB must equal Rt, so the NEG's destination is
-//     overwritten and the intermediate -xs value is dead.
-//   - The "accumulator" operand (the one that is not Rt) must NOT
-//     equal Rt -- otherwise both ADD/SUB sources are -xs, computing
-//     -2*xs or 0 instead of the additive identity the fold assumes.
-// Widths must match: both W or both X. NEG writing to ZR is excluded
-// (the result is discarded), as is NEG of ZR (which computes 0 --
-// a different idiom, not strength reduction).
+// Soundness: the rewrite deletes the NEG, so its destination must be
+// dead afterward. An ADD/SUB that overwrites it proves that on the
+// spot and reports immediately; one writing a fresh register defers
+// through the forward register-liveness scan (Rd = 31 is a dead
+// write and excluded). The "accumulator" operand (the one that is
+// not Rt) must NOT equal Rt -- otherwise both ADD/SUB sources are
+// -xs, computing -2*xs or 0 instead of the additive identity the
+// fold assumes -- nor XZR, whose shapes are double negations (a copy
+// of the negation, or the negation of it), not accumulates. Widths
+// must match: both W or both X. NEG writing to ZR is excluded (the
+// result is discarded), as is NEG of ZR (which computes 0 -- a
+// different idiom, not strength reduction).
 bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
@@ -778,13 +797,17 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
 // fold puts the other ("independent") operand in Rn and Rs in the
 // negated Rm slot.
 //
-// Soundness (conservative, mirrors check_neg_add_sub_fold): Rd of the
-// consumer must equal Rt (so the MVN's destination is overwritten and
-// the ~Rs value is dead), and the independent operand must not also be
-// Rt (the both-equal case is a self-op, handled by check_self_op). The
-// shifted MVN form is not handled -- the consumer would shift the
-// complemented value, not Rs. MVN writing ZR, and MVN of ZR (the
-// all-ones constant), are excluded.
+// Soundness (mirrors check_neg_add_sub_fold): the rewrite deletes the
+// MVN, so its destination must be dead afterward -- a consumer that
+// overwrites it reports immediately, one writing a fresh register
+// defers through the forward register-liveness scan. Rd = 31
+// consumers are excluded (a dead write, or the TST alias for ANDS).
+// The independent operand must not also be Rt (the both-equal case
+// is a self-op, handled by check_self_op) nor XZR ("orr rd, xzr, t"
+// is the MOV alias, whose fold is MVN itself; the AND/EOR forms are
+// constants). The shifted MVN form is not handled -- the consumer
+// would shift the complemented value, not Rs. MVN writing ZR, and
+// MVN of ZR (the all-ones constant), are excluded.
 bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
@@ -799,11 +822,17 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
 // need it in Rm. The extended operand is always rendered as a W
 // register (these extends source 32 bits or fewer).
 //
-// Soundness (conservative, mirrors the shift fold): Rd of the consumer
-// must equal the extend's Rd (so the extended value is dead), and the
-// other source operand must not also be it -- nor register 31, which
+// Soundness (mirrors the shift fold): the rewrite deletes the extend,
+// so its destination must be dead afterward -- a consumer that
+// overwrites it reports immediately, one writing a fresh register
+// defers through the forward register-liveness scan. The other source
+// operand must not also be the extend's Rd -- nor register 31, which
 // the shifted-register consumer read as ZR but the extended-register
-// rewrite would read as SP. The producer form (W vs X) must match the
+// rewrite would read as SP. Rd = 31 consumers are excluded for the
+// same reason, and more sharply: the shifted-register consumer's
+// Rd = 31 is a discarded ZR write, but the extended-register
+// rewrite's Rd = 31 is SP -- the fold would turn dead code into a
+// stack-pointer update. The producer form (W vs X) must match the
 // consumer's, with one relaxation: a W-form zero-extend (UXTB/UXTH)
 // also folds into an X-form consumer, because the W write zeroed bits
 // 63..32 and that is exactly what the X-form extended-register
@@ -1135,11 +1164,12 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
 // deletes the producer of a register that no consumer overwrite proves
 // dead: the MOV-chain folds (MOV #0 -> ZR, the strength reductions,
 // the immediate/offset/FMOV folds), the BFXIL/BFI synthesis, the CSET
-// inversion folds, and the address folds' store and fresh-destination
-// load consumers. Parallel to armlint_advance_pending; call before
-// per-instruction checks each step. The offset parameter exists for
-// compatibility with the shared armlint_check_fn signature; it is
-// unused.
+// inversion folds, the address folds' store and fresh-destination
+// load consumers, and the producer folds' (shift, funnel, extend,
+// MUL/SMULL, NEG, MVN) fresh-destination consumers. Parallel to
+// armlint_advance_pending; call before per-instruction checks each
+// step. The offset parameter exists for compatibility with the shared
+// armlint_check_fn signature; it is unused.
 bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 

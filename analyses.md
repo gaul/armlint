@@ -48,9 +48,14 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   and a ROR -- the same-register `EXTR Rd, Rs, Rs, #n` alias -- folds
   into the logical consumers only, because the arithmetic
   shifted-register encoding reserves shift type 11. An EXTR with
-  distinct sources is a funnel shift and does not fold. Conservative:
-  only flags when the consumer overwrites the shift's destination,
-  guaranteeing the shifted value is dead.
+  distinct sources is a funnel shift and does not fold. The rewrite
+  deletes the shift, so its destination must be dead afterward: a
+  consumer that overwrites it proves that on the spot, and a consumer
+  writing a fresh register (`lsl w8, w1, #3 ; add w9, w2, w8`) defers
+  through the forward register-liveness scan and reports only once
+  `w8` is provably overwritten before any read or control transfer.
+  `Rd = 31` consumers are excluded -- the non-S forms are dead writes,
+  the S forms the `CMP`/`CMN`/`TST` aliases.
 * Why the fuse helps -- shared by the "producer into its consumer"
   folds (this one; the bitfield-`UBFX`/`UBFIZ` shift/mask pairs;
   `MUL`/`SMULL` + `ADD` -> `MADD`/`SMADDL`; `NEG` + `ADD`/`SUB`;
@@ -73,7 +78,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   equal to the shift destination -- is therefore not flagged: it doubles
   the shifted value (`ws << (k+1)`), which the single shifted-register
   form cannot express, and a naive rewrite would read a stale pre-shift
-  value for the second operand.
+  value for the second operand. An XZR independent operand is likewise
+  not flagged: such consumers are shifted register copies (`ORR` from
+  ZR is the `MOV` alias) or constants, not ops the shift rides into.
 
 ## funnel shift foldable into EXTR or ROR
 
@@ -103,14 +110,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   arithmetic right shift fills the vacated high bits with the sign, which
   would collide with the other field instead of leaving the zeroes a
   funnel needs. The pending producer is likewise only `LSL`/`LSR`.
-* Soundness: like the shift-fold check, armlint flags only when the
-  consumer overwrites the producer's destination (`Rd == Rt`), proving the
-  intermediate shift result is dead -- with no liveness pass, a consumer
-  that writes a fresh register (whose shift result might still be read
-  later) is conservatively skipped. The inline-shifted source must be a
-  different register than the shift destination, else the funnel would read
-  the shifted value rather than the original register. Shifting or writing
-  `XZR` is rejected as degenerate.
+* Soundness: like the shift-fold check, the rewrite deletes the
+  producer shift, so its destination must be dead afterward. A consumer
+  that overwrites it (`Rd == Rt`) proves that on the spot; a consumer
+  that writes a fresh register defers through the forward
+  register-liveness scan and reports only once the shift result is
+  provably overwritten before any read or control transfer (`Rd = 31`,
+  a dead write, is excluded). The inline-shifted source must be a
+  different register than the shift destination, else the funnel would
+  read the shifted value rather than the original register. Shifting or
+  writing `XZR` is rejected as degenerate.
 * What it saves: one instruction (4 bytes, a decode/issue slot), and the
   producer shift no longer runs as a separate dependent op on the critical
   path -- the whole funnel is one `EXTR`. Compilers that recognize the
@@ -142,11 +151,17 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * `ADD`/`ADDS` commute, so the extend result may be in the consumer's
   Rn or Rm slot (it is swapped to Rm); `SUB`/`SUBS` only fold when it
   is already Rm.
-* Conservative soundness (mirrors the shift fold): Rd of the consumer
-  must equal the extend's destination (so the extended value is dead),
-  and the other source operand must not also be it -- nor register 31,
+* Soundness (mirrors the shift fold): the rewrite deletes the extend,
+  so its destination must be dead afterward -- a consumer that
+  overwrites it reports immediately, and one writing a fresh register
+  defers through the forward register-liveness scan. The other source
+  operand must not be the extend's destination -- nor register 31,
   which the shifted-register consumer read as ZR but the
-  extended-register rewrite would read as SP. The producer form (W vs
+  extended-register rewrite would read as SP. `Rd = 31` consumers are
+  excluded for the same reason, and more sharply: the shifted-register
+  consumer's `Rd = 31` is a discarded ZR write, but the
+  extended-register rewrite's `Rd = 31` is SP -- the fold would turn
+  dead code into a stack-pointer update. The producer form (W vs
   X) must match the consumer's, with one relaxation: a W-form
   zero-extend (`UXTB`/`UXTH`) also folds into an X-form consumer
   (`uxtb w0, w1 ; add x0, x2, x0` -> `add x0, x2, w1, uxtb`), because
@@ -1142,11 +1157,15 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * `mul xt, xa, xb ; neg xt, xt` (the `sub xt, xzr, xt` form, so the
   accumulator is XZR) folds to `mneg xt, xa, xb` -- the `MSUB`-with-ZR
   alias -- and is reported separately as "MUL + NEG foldable to MNEG".
-* Conservative soundness: Rd of the ADD/SUB must equal Rt (so the
-  MUL's destination is overwritten and its post-MUL value is
-  dead), and the accumulator operand must not equal Rt (otherwise
-  the ADD reads the MUL's result twice while the MADD rewrite
-  reads pre-MUL values, diverging).
+* Soundness: the rewrite deletes the MUL, so the product register
+  must be dead afterward -- an ADD/SUB that overwrites it (`Rd == Rt`)
+  reports immediately, and one writing a fresh register defers
+  through the forward register-liveness scan (`Rd = 31`, a dead
+  write, is excluded). The accumulator operand must not equal Rt
+  (otherwise the ADD reads the MUL's result twice while the MADD
+  rewrite reads pre-MUL values, diverging), and an ADD whose
+  accumulator is XZR is a multiply + register copy, not an
+  accumulate -- a ZR-accumulator MADD would just respell the MUL.
 * S-variants (ADDS/SUBS) skipped: MADD/MSUB have no flag-setting
   form. Widths must match (both W or both X).
 * Fuse win (a "producer into consumer" fold, see the shift fold):
@@ -1173,13 +1192,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * `smull xt, wa, wb ; neg xt, xt` folds to `smnegl xt, wa, wb` (and the
   `UMULL` form to `umnegl`) -- the long `MSUB`-with-ZR alias -- reported
   as "SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL".
-* Conservative soundness (identical to MUL+ADD): Rd of the ADD/SUB
-  must equal Xt (so the 64-bit product is overwritten and dead), and
-  the accumulator operand must not equal Xt. Signedness must match
-  the producer (`SMULL` pairs only with `SMADDL`/`SMSUBL`, `UMULL`
-  only with `UMADDL`/`UMSUBL`). S-variants (ADDS/SUBS) are skipped
-  (no flag-setting long MAC); `SMULL`/`UMULL` writing to ZR is
-  excluded.
+* Soundness (identical to MUL+ADD): the rewrite deletes the multiply,
+  so the 64-bit product must be dead afterward -- an ADD/SUB that
+  overwrites Xt reports immediately, one writing a fresh register
+  defers through the forward register-liveness scan (`Rd = 31`
+  excluded), the accumulator operand must not equal Xt, and an
+  XZR-accumulator ADD (a multiply + register copy) is rejected.
+  Signedness must match the producer (`SMULL` pairs only with
+  `SMADDL`/`SMSUBL`, `UMULL` only with `UMADDL`/`UMSUBL`). S-variants
+  (ADDS/SUBS) are skipped (no flag-setting long MAC); `SMULL`/`UMULL`
+  writing to ZR is excluded.
 * Fuse win: same as `MUL + ADD -> MADD` above -- `SMADDL`/`UMADDL` has
   the latency of the widening multiply, so the dependent add is removed
   essentially for free, plus one instruction.
@@ -1192,11 +1214,15 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `neg xt, xs ; sub xd, xc, xt` -> `add xd, xc, xs`.
 * `sub xd, xt, xc` is NOT foldable: computes `-xs - xc`, which
   has no single-instruction AArch64 form.
-* Conservative soundness: Rd of the ADD/SUB must equal Rt (so the
-  NEG's destination is overwritten and `-xs` is dead), and the
-  accumulator operand must not equal Rt -- otherwise both ADD/SUB
-  sources are `-xs`, computing `-2*xs` or `0` instead of the
-  additive identity the fold assumes.
+* Soundness: the rewrite deletes the NEG, so its destination must be
+  dead afterward -- an ADD/SUB that overwrites it (`Rd == Rt`)
+  reports immediately, and one writing a fresh register defers
+  through the forward register-liveness scan (`Rd = 31`, a dead
+  write, is excluded). The accumulator operand must not equal Rt --
+  otherwise both ADD/SUB sources are `-xs`, computing `-2*xs` or `0`
+  instead of the additive identity the fold assumes -- nor XZR,
+  whose shapes are double negations (a copy of the negation, or the
+  negation of it), not accumulates.
 * S-variants (ADDS/SUBS, NEGS) are skipped: flag definitions
   differ between the original and the rewrite. Widths must match
   (both W or both X). NEG of XZR (computes 0) is excluded.
@@ -1217,11 +1243,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the consumer's Rn or Rm slot; the fold puts the other operand in Rn
   and `ws` in the negated Rm slot. (`ANDS` -> `BICS` is sound because
   both set N/Z from the same result with C = V = 0.)
-* Conservative soundness (mirrors the NEG fold): Rd of the consumer
-  must equal `wt` (so the `mvn` destination is overwritten and `~ws`
-  is dead), and the independent operand must not also be `wt` -- the
+* Soundness (mirrors the NEG fold): the rewrite deletes the `mvn`, so
+  its destination must be dead afterward -- a consumer that
+  overwrites it (`Rd == wt`) reports immediately, and one writing a
+  fresh register defers through the forward register-liveness scan
+  (`Rd = 31` -- a dead write, or the `TST` alias for `ANDS` -- is
+  excluded). The independent operand must not also be `wt` -- the
   `mvn wt, ws ; and wt, wt, wt` degenerate is a self-op, reported by
-  the self-op check instead. The shifted `MVN` form is not handled
+  the self-op check instead -- nor XZR (`orr wd, wzr, wt` is the
+  `MOV` alias, whose fold is `MVN` itself; the `AND`/`EOR` forms are
+  constants). The shifted `MVN` form is not handled
   (the consumer would shift the complemented value, not `ws`). `MVN`
   to ZR, and `MVN` of ZR (the all-ones `mov wd, #-1` idiom), are
   excluded.

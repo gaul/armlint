@@ -29,17 +29,27 @@ _main:
     mvn     x0, x1
     and     x0, x3, x0             // -> bic x0, x3, x1
 
-    // Negatives:
-    // N1) Consumer's Rd != MVN dest (the ~Rs value would stay live).
+    // P) Fresh destination: the AND leaves ~w1 in w0 alive at the
+    // consumer, so emission defers through the forward register-
+    // liveness scan -- and the next case's mvn overwrites w0, proving
+    // it dead, so the deferred finding emits.
     mvn     w0, w1
-    and     w5, w3, w0
+    and     w5, w3, w0             // -> bic w5, w3, w1
 
-    // N2) Consumer is already a negated form (BIC, N=1): not matched.
+    // Negatives:
+    // N1) Consumer is already a negated form (BIC, N=1): not matched.
     mvn     w0, w1
     bic     w0, w3, w0
 
-    // N3) Consumer does not read the MVN dest.
+    // N2) Consumer does not read the MVN dest.
     mvn     w0, w1
     and     w2, w3, w4
+
+    // N3) Fresh destination, but the complement is read again before
+    // dying: the deferred finding is discarded.
+    mvn     w0, w1
+    and     w5, w3, w0
+    orr     w6, w7, w0
+    mov     w0, #1
 
     ret

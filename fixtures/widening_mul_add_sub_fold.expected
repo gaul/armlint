@@ -30,8 +30,12 @@ SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL at offset: 0x38: -> umnegl x8, w0, w
   umull x8, w0, w1
   neg x8, x8
 
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x58: -> smaddl x9, w0, w1, x2 (2 instructions)
+  smull x8, w0, w1
+  add x9, x8, x2
+
 Optimization opportunities by type:
-       6  SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
+       7  SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
        2  SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL
 
-8 optimization opportunities in 32 instructions
+9 optimization opportunities in 36 instructions

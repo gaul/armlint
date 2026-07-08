@@ -964,6 +964,8 @@ static bool decode_lsr_imm(uint32_t op, unsigned *out_sf,
 static bool decode_asr_imm(uint32_t op, unsigned *out_sf,
                            unsigned *out_rd, unsigned *out_rn,
                            unsigned *out_shift);
+static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
+                           unsigned reg);
 
 // Shift-type names indexed by the shifted-register encoding's
 // shift-type field (bits 23..22).
@@ -1088,7 +1090,13 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
 
     // (1) Try to close: is this instruction a shifted-register consumer
-    //     of the pending shift?
+    //     of the pending shift? The rewrite deletes the shift, so its
+    //     destination must be dead afterward: a consumer that
+    //     overwrites it proves that on the spot, and one writing a
+    //     fresh register defers through the forward register-liveness
+    //     scan. Rd = 31 consumers are excluded -- the non-S forms are
+    //     dead writes, and the S forms are the CMP/CMN/TST aliases,
+    //     whose rendering is a separate concern.
     if (state->shf_active) {
         unsigned c_sf, c_rd, c_rn, c_rm;
         const char *c_mnem;
@@ -1097,8 +1105,7 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                                              &c_mnem, &c_commutes,
                                              &c_is_arith)
                 && c_sf == (state->shf_is_64bit ? 1u : 0u)
-                && c_rd == state->shf_rd
-                && state->shf_rd != 31
+                && c_rd != 31
                 // Arithmetic shifted-register reserves type 11 (ROR):
                 // a rotate can ride only on a logical consumer.
                 && !(c_is_arith && state->shf_type == 3u)) {
@@ -1118,6 +1125,13 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                        && c_commutes) {
                 indep = c_rm;
                 foldable = true;
+            }
+            // An XZR surviving operand is a degenerate consumer -- a
+            // register copy (ORR from ZR is the MOV alias) or a
+            // constant shape, not an op the shift rides into -- and
+            // the rewrite would render register 31 as an operand.
+            if (foldable && indep == 31) {
+                foldable = false;
             }
 
             if (foldable) {
@@ -1151,7 +1165,11 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, c_rn,
                     w_or_x, c_rm);
 
-                produced = true;
+                if (c_rd == state->shf_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, state->shf_rd);
+                }
             }
         }
         // Strict adjacency: any non-matching instruction expires the
@@ -1272,7 +1290,11 @@ bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
 
     // (1) Close: is this a complementary shifted-register funnel consumer
-    //     of the pending shift?
+    //     of the pending shift? The rewrite deletes the shift, so its
+    //     destination must be dead afterward: a consumer that
+    //     overwrites it proves that on the spot, and one writing a
+    //     fresh register defers through the forward register-liveness
+    //     scan (Rd = 31 is a dead write and excluded).
     if (state->fnl_active) {
         unsigned c_sf, c_rd, c_rn, c_rm, c_stype, c_samt;
         const char *c_mnem;
@@ -1280,11 +1302,9 @@ bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
         if (decode_funnel_consumer(op, &c_sf, &c_rd, &c_rn, &c_rm, &c_stype,
                                    &c_samt, &c_mnem)
                 && c_sf == (state->fnl_is_64bit ? 1u : 0u)
-                // Rn is the shift result (the plain funnel operand); the
-                // consumer's Rd overwrites it, proving the intermediate is
-                // dead (same structural test as check_lsl_fold).
+                // Rn is the shift result (the plain funnel operand).
                 && c_rn == state->fnl_rd
-                && c_rd == state->fnl_rd
+                && c_rd != 31u
                 // The inline-shifted source must be a different register --
                 // the shift wrote fnl_rd, so if Rm were fnl_rd the funnel
                 // would read the shifted value instead of the original.
@@ -1337,7 +1357,11 @@ bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
                 "%s %c%u, %c%u, %c%u, %s #%u",
                 c_mnem, wx, c_rd, wx, c_rn, wx, c_rm, sh1, c_samt);
 
-            produced = true;
+            if (c_rd == state->fnl_rd) {
+                produced = true;
+            } else {
+                defer_dead_mov(state, out, state->fnl_rd);
+            }
         }
         // Strict adjacency: the pending shift expires after one instruction.
         state->fnl_active = false;
@@ -2484,11 +2508,13 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
 // now. Shared by every fold that deletes the producer of `reg`: the
 // MOV-chain folds (strength reductions, immediate/offset/FMOV folds,
 // MOV #0 -> ZR), the BFXIL/BFI synthesis (which drops the isolate's
-// temp register), the CSET inversion folds (EOR #1 / NEG), and the
+// temp register), the CSET inversion folds (EOR #1 / NEG), the
 // ADD/SXTW address folds' store and fresh-destination load consumers
-// (which drop the address computation). One slot: a second deferral
-// arriving while one is pending replaces it, silently dropping the
-// earlier finding -- a sound (false-negative-only) simplification.
+// (which drop the address computation), and the producer folds'
+// (shift, funnel, extend, MUL/SMULL, NEG, MVN) fresh-destination
+// consumers. One slot: a second deferral arriving while one is
+// pending replaces it, silently dropping the earlier finding -- a
+// sound (false-negative-only) simplification.
 static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
                            unsigned reg)
 {
@@ -5915,6 +5941,11 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
     bool produced = false;
 
     // (1) Try to close: is this an ADD/SUB consuming the pending MUL?
+    //     The rewrite deletes the MUL, so the product register must be
+    //     dead afterward: a consumer that overwrites it proves that on
+    //     the spot, and one writing a fresh register defers through
+    //     the forward register-liveness scan (Rd = 31 is a dead write
+    //     and excluded).
     if (state->mul_pending) {
         unsigned sf, rd, rn, rm;
         bool is_sub, is_s;
@@ -5925,7 +5956,7 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
             unsigned t = state->mul_pending_rd;
             bool valid = false;
             unsigned xc = 0;
-            if (rd == t) {
+            if (rd != 31) {
                 if (is_sub) {
                     // Only "sub xd, xc, xt" folds (Rm == t, Rn != t).
                     if (rm == t && rn != t) {
@@ -5943,6 +5974,13 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                         xc = rm;
                     }
                 }
+            }
+            // An ADD whose other operand is XZR adds nothing -- the
+            // pair is MUL + register copy, not an accumulate; a MADD
+            // with a ZR accumulator would just respell the MUL. (The
+            // SUB form with xc == 31 is NEG, the MNEG fold below.)
+            if (valid && !is_sub && xc == 31) {
+                valid = false;
             }
 
             if (valid) {
@@ -5991,6 +6029,9 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                         w_or_x, rm);
 
                     produced = true;
+                }
+                if (produced && rd != t) {
+                    produced = defer_dead_mov(state, out, t);
                 }
             }
         }
@@ -6059,7 +6100,11 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
     // (1) Try to close: is this an X-form ADD/SUB consuming the pending
     //     widening MUL? The 32x32->64 product is 64-bit, so a W-form
     //     consumer (sf == 0) would operate on only the low half and is
-    //     rejected.
+    //     rejected. The rewrite deletes the multiply, so the product
+    //     register must be dead afterward: a consumer that overwrites
+    //     it proves that on the spot, and one writing a fresh register
+    //     defers through the forward register-liveness scan (Rd = 31
+    //     is a dead write and excluded).
     if (state->wmul_pending) {
         unsigned sf, rd, rn, rm;
         bool is_sub, is_s;
@@ -6070,7 +6115,7 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
             unsigned t = state->wmul_pending_rd;
             bool valid = false;
             unsigned xc = 0;
-            if (rd == t) {
+            if (rd != 31) {
                 if (is_sub) {
                     // Only "sub xd, xc, xt" folds (Rm == t, Rn != t):
                     // SMSUBL/UMSUBL compute Xa - Wn*Wm.
@@ -6089,6 +6134,13 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
                         xc = rm;
                     }
                 }
+            }
+            // An ADD whose other operand is XZR adds nothing -- the
+            // pair is a multiply + register copy, not an accumulate.
+            // (The SUB form with xc == 31 is NEG, the SMNEGL/UMNEGL
+            // fold below.)
+            if (valid && !is_sub && xc == 31) {
+                valid = false;
             }
 
             if (valid) {
@@ -6138,6 +6190,9 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
 
                     produced = true;
                 }
+                if (produced && rd != t) {
+                    produced = defer_dead_mov(state, out, t);
+                }
             }
         }
         // Strict adjacency: clear regardless of match.
@@ -6179,6 +6234,16 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
     bool produced = false;
 
     // (1) Try to close: is this an ADD/SUB consuming the pending NEG?
+    //     The rewrite deletes the NEG, so its destination must be dead
+    //     afterward: a consumer that overwrites it proves that on the
+    //     spot, and one writing a fresh register defers through the
+    //     forward register-liveness scan (Rd = 31 is a dead write and
+    //     excluded). The surviving operand must not be XZR either:
+    //     "add xd, xzr, xt" is a register copy of the negation (its
+    //     fold is NEG, not this rewrite) and "sub xd, xzr, xt" is
+    //     NEG of the negation (a plain copy) -- both are double-
+    //     negation shapes, not accumulates, and the rewrite would
+    //     render register 31 as an operand.
     if (state->neg_pending) {
         unsigned sf, rd, rn, rm;
         bool is_sub, is_s;
@@ -6189,7 +6254,7 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
             unsigned t = state->neg_pending_rd;
             bool valid = false;
             unsigned xc = 0;
-            if (rd == t) {
+            if (rd != 31) {
                 if (is_sub) {
                     // Only "sub xd, xc, xt" folds (Rm == t, Rn != t):
                     // xd = xc - (-xs) = xc + xs -> add xd, xc, xs.
@@ -6210,7 +6275,7 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
                 }
             }
 
-            if (valid && xc != t) {
+            if (valid && xc != t && xc != 31) {
                 char w_or_x = state->neg_pending_is_64bit ? 'x' : 'w';
                 const char *fold_mnem = is_sub ? "add" : "sub";
                 const char *cons_mnem = is_sub ? "sub" : "add";
@@ -6236,7 +6301,11 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, rn,
                     w_or_x, rm);
 
-                produced = true;
+                if (rd == t) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, t);
+                }
             }
         }
         // Strict adjacency: clear regardless of match.
@@ -6299,6 +6368,14 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
     // (1) Try to close: is this an AND/ORR/EOR/ANDS consuming the MVN?
     // Direct (N = 0) forms only: the N = 1 forms already invert Rm,
     // so folding the MVN in would need the un-inverted op instead.
+    // The rewrite deletes the MVN, so its destination must be dead
+    // afterward: a consumer that overwrites it proves that on the
+    // spot, and one writing a fresh register defers through the
+    // forward register-liveness scan. Rd = 31 consumers are excluded
+    // (a dead write, or the TST alias for ANDS), as is an XZR
+    // surviving operand -- "orr rd, xzr, t" is the MOV alias, whose
+    // fold is MVN itself, and the AND/EOR forms are constant
+    // materialisations; none are this rewrite.
     if (state->mvn_pending) {
         unsigned sf, opc, n_bit, rd, rn, rm;
         if (decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn, &rm)
@@ -6311,7 +6388,7 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
             // Rn or Rm (but not both -- that is a self-op, handled by
             // check_self_op). The other source becomes the new Rn and
             // must not also be the MVN destination.
-            if (rd == t) {
+            if (rd != 31) {
                 if (rm == t && rn != t) {
                     valid = true;
                     indep = rn;
@@ -6321,7 +6398,7 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                 }
             }
 
-            if (valid) {
+            if (valid && indep != 31) {
                 char w_or_x = state->mvn_pending_is_64bit ? 'x' : 'w';
                 // opc: 0=AND, 1=ORR, 2=EOR, 3=ANDS -> the negated forms.
                 static const char *cons_names[4] = {
@@ -6354,7 +6431,11 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, rn,
                     w_or_x, rm);
 
-                produced = true;
+                if (rd == t) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, t);
+                }
             }
         }
         // Strict adjacency: clear regardless of match.
@@ -6463,8 +6544,16 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
             // The independent operand must not be register 31: the
             // shifted-register consumer read it as ZR, but Rn = 31 in
             // the extended-register rewrite means SP, so the fold
-            // would change the operand.
-            if (rd == t && t != 31) {
+            // would change the operand. Rd = 31 is excluded for the
+            // same reason, and more sharply: the shifted-register
+            // consumer's Rd = 31 is a discarded ZR write, but the
+            // extended-register rewrite's Rd = 31 is SP -- the fold
+            // would turn dead code into a stack-pointer update.
+            // The rewrite deletes the extend, so its destination must
+            // be dead afterward: a consumer that overwrites it proves
+            // that on the spot, and one writing a fresh register
+            // defers through the forward register-liveness scan.
+            if (rd != 31) {
                 if (rm == t && rn != t && rn != 31) {
                     valid = true;
                     indep = rn;
@@ -6502,7 +6591,11 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     "%s %c%u, %c%u, %c%u",
                     mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
 
-                produced = true;
+                if (rd == t) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, t);
+                }
             }
         }
         // Strict adjacency: clear regardless of match.

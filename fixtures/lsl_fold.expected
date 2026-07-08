@@ -26,7 +26,11 @@ shift foldable into shifted-register form at offset: 0x5c: -> orr w0, w4, w1, ro
   ror w0, w1, #5
   orr w0, w4, w0
 
-Optimization opportunities by type:
-       7  shift foldable into shifted-register form
+shift foldable into shifted-register form at offset: 0x74: -> and x27, x28, x26, lsl #4 (2 instructions)
+  lsl x25, x26, #4
+  and x27, x28, x25
 
-7 optimization opportunities in 30 instructions
+Optimization opportunities by type:
+       8  shift foldable into shifted-register form
+
+8 optimization opportunities in 37 instructions
