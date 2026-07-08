@@ -890,12 +890,23 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   folds). `Rd = 31` producers are excluded: SP for the immediate and
   extended forms -- `SUBS`'s `Rd = 31` is ZR, so the fold would drop
   an observable SP update -- and a dead ZR write for the shifted
-  form. The S-variant spelling is the `SUB`'s mnemonic plus "s"
-  (`NEGS` for the `NEG` alias). A `CMP` that closes a SUB-first pair
-  still opens a CMP-first pending, so `sub ; cmp ; sub` chains
-  report both folds.
-* The `ADD` + `CMN` analogue (`CMN` is `ADDS ZR`) folds by the same
-  argument and is a natural extension, not yet implemented.
+  form. An immediate of 0 is excluded across the family: the pair is
+  degenerate (the ADD/SUB #0 check's shapes), and the `ADD` side's
+  MOV-from-SP alias spelling must not gain an "s". The S-variant
+  spelling is the ALU's mnemonic plus "s" (`NEGS` for the `NEG`
+  alias). A compare that closes an ALU-first pair still opens a
+  compare-first pending, so `sub ; cmp ; sub` chains report both
+  folds.
+* The `ADD` + `CMN` family folds by the identical argument -- `CMN
+  Rn, Rm` is `ADDS ZR, Rn, Rm`, the same addition -- and is reported
+  as "ADD + CMN of identical operands foldable to ADDS":
+  `add x0, x1, x2 ; cmn x1, x2` -> `adds x0, x1, x2`, either order.
+  The word match pairs families automatically (an `ADD`'s compare
+  spelling is `CMN`, a `SUB`'s is `CMP`; `ADD` + `CMP` never
+  matches). One conservative gap: `ADD` commutes, so
+  `add x0, x1, x2 ; cmn x2, x1` with *swapped* compare operands is
+  flag-identical for the unshifted register form, but it falls
+  outside the encoding-equality match and is not folded.
 * What it saves: one instruction -- the compare -- with zero flag
   risk. The shape appears when code computes a difference and
   separately compares the same operands: hand-written bounds checks

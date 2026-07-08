@@ -26,7 +26,20 @@ SUB + CMP of identical operands foldable to SUBS at offset: 0x30: -> subs x1, x1
   cmp x1, x2
   sub x1, x1, x2
 
+ADD + CMN of identical operands foldable to ADDS at offset: 0x58: -> adds x0, x1, x2 (drop cmn x1, x2) (2 instructions)
+  add x0, x1, x2
+  cmn x1, x2
+
+ADD + CMN of identical operands foldable to ADDS at offset: 0x60: -> adds w0, w3, w4 (drop cmn w3, w4) (2 instructions)
+  cmn w3, w4
+  add w0, w3, w4
+
+ADD + CMN of identical operands foldable to ADDS at offset: 0x68: -> adds x0, x1, #0x10 (drop cmn x1, #0x10) (2 instructions)
+  add x0, x1, #0x10
+  cmn x1, #0x10
+
 Optimization opportunities by type:
        7  SUB + CMP of identical operands foldable to SUBS
+       3  ADD + CMN of identical operands foldable to ADDS
 
-7 optimization opportunities in 23 instructions
+10 optimization opportunities in 33 instructions

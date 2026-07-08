@@ -1230,35 +1230,44 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
                                  size_t offset,
                                  armlint_finding *out);
 
-// Detect a non-S SUB and a CMP of the same two operands adjacent in
-// either order; the pair folds to a single SUBS:
+// Detect a non-S ADD/SUB and its compare twin of the same two
+// operands adjacent in either order; the pair folds to a single
+// S-variant:
 //   sub wd, wn, wm ; cmp wn, wm -> subs wd, wn, wm
 //   cmp wn, wm ; sub wd, wn, wm -> subs wd, wn, wm
-// CMP Rn, Rm is SUBS ZR, Rn, Rm -- the identical subtraction -- and
-// NZCV is a function of the operands only, never Rd, so the folded
-// SUBS's flags are bit-identical to the CMP's in all four bits. No
-// flag-liveness scan is needed: downstream may read any condition.
-// This is the rare fully flag-exact rewrite, unlike the zero-CMP
-// fold above, whose C/V diverge.
+//   add wd, wn, wm ; cmn wn, wm -> adds wd, wn, wm
+// CMP Rn, Rm is SUBS ZR, Rn, Rm and CMN Rn, Rm is ADDS ZR, Rn, Rm --
+// the identical computation -- and NZCV is a function of the
+// operands only, never Rd, so the folded S-variant's flags are
+// bit-identical to the compare's in all four bits. No flag-liveness
+// scan is needed: downstream may read any condition. This is the
+// rare fully flag-exact rewrite, unlike the zero-CMP fold above,
+// whose C/V diverge.
 //
-// The operand match is by encoding: the CMP must be exactly the
-// SUB's word with the S bit set and Rd = 31, which covers the
-// immediate, shifted-register and extended-register forms and
-// forces equal widths, shift types/amounts and extend options in one
-// comparison. The reversed compare (cmp wm, wn) never matches --
-// subtraction is not symmetric.
+// The operand match is by encoding: the compare must be exactly the
+// ALU's word with the S bit set and Rd = 31, which covers the
+// immediate, shifted-register and extended-register forms, forces
+// equal widths, shift types/amounts and extend options, and pairs
+// the families automatically (an ADD's compare spelling is CMN, a
+// SUB's is CMP; ADD + CMP never matches). The reversed compare
+// (cmp wm, wn) never matches subtraction; for ADD the swapped CMN is
+// flag-identical in the unshifted register form but falls outside
+// the encoding match and is conservatively not folded.
 //
-// In the SUB-first order the CMP runs after the SUB wrote Rd, so
-// Rd must not be one of the compared registers (the CMP read the
-// difference there, and the folded SUBS would compare pre-SUB
-// values); the CMP-first order writes nothing before the SUB and
-// needs no such restriction. Rd = 31 producers are excluded: SP for
-// the immediate and extended forms -- SUBS's Rd = 31 is ZR, so the
-// fold would drop an observable SP update -- and a dead ZR write
-// for the shifted form. The S-variant spelling is the SUB's
-// mnemonic plus "s" (NEGS for the NEG alias). Reported as "SUB +
-// CMP of identical operands foldable to SUBS"; the shape appears
-// when code computes a difference and separately compares the same
+// In the ALU-first order the compare runs after the ALU wrote Rd, so
+// Rd must not be one of the compared registers (the compare read the
+// result there, and the folded S-variant would use pre-ALU values);
+// the compare-first order writes nothing before the ALU and needs no
+// such restriction. Rd = 31 producers are excluded: SP for the
+// immediate and extended forms -- the S-variant's Rd = 31 is ZR, so
+// the fold would drop an observable SP update -- and a dead ZR write
+// for the shifted form. An immediate of 0 is excluded across the
+// family (degenerate pairs; the ADD side's MOV-from-SP alias
+// spelling must not gain an "s"). The S spelling is the ALU's
+// mnemonic plus "s" (NEGS for the NEG alias). Reported per family as
+// "SUB + CMP of identical operands foldable to SUBS" / "ADD + CMN of
+// identical operands foldable to ADDS"; the shape appears when code
+// computes a sum or difference and separately compares the same
 // operands (hand-written bounds checks, naive codegen).
 bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);

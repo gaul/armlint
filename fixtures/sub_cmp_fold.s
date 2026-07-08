@@ -55,4 +55,30 @@ _main:
     subs    x0, x1, x2
     cmp     x1, x2
 
+    // ADD + CMN family: CMN is ADDS ZR of the same operands, so the
+    // identical bit-exact-flags argument applies.
+
+    // P) ADD-first order.
+    add     x0, x1, x2
+    cmn     x1, x2                  // -> adds x0, x1, x2
+
+    // P) CMN-first order, W-form.
+    cmn     w3, w4
+    add     w0, w3, w4              // -> adds w0, w3, w4
+
+    // P) Immediate form.
+    add     x0, x1, #16
+    cmn     x1, #16                 // -> adds x0, x1, #16
+
+    // N5) Swapped commutative operands: flag-identical for the
+    //     unshifted form, but outside the encoding-equality match;
+    //     conservatively not folded.
+    add     x0, x5, x6
+    cmn     x6, x5
+
+    // N6) Cross-family: ADD + CMP of the same operands compares a
+    //     difference, not the sum; never folds.
+    add     x0, x5, x6
+    cmp     x5, x6
+
     ret

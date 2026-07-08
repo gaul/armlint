@@ -2973,33 +2973,40 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
     return false;
 }
 
-// Classify a non-S SUB in any of the three forms that CMP shares --
-// immediate, shifted-register, extended-register -- writing a real
-// register. Rd = 31 is rejected: it means SP for the immediate and
-// extended forms (SUBS cannot write SP -- its Rd = 31 is ZR, so the
-// fold would drop an observable SP update) and a dead ZR write for
-// the shifted form. out_has_rm distinguishes the register forms
-// (whose Rm field is a read) from the immediate form (whose bits
-// 20..16 are immediate payload), for the sub-first order's aliasing
-// check.
-static bool decode_sub_non_s_any(uint32_t op, unsigned *out_rd,
-                                 unsigned *out_rn, unsigned *out_rm,
-                                 bool *out_has_rm)
+// Classify a non-S ADD or SUB in any of the three forms that CMN/CMP
+// share -- immediate, shifted-register, extended-register -- writing
+// a real register. Rd = 31 is rejected: it means SP for the
+// immediate and extended forms (the S-variant's Rd = 31 is ZR, so
+// the fold would drop an observable SP update) and a dead ZR write
+// for the shifted form. An immediate of 0 is rejected too: the pair
+// is degenerate (check_add_sub_zero's redundant-op shapes), and the
+// ADD side's MOV-from-SP alias spelling must not gain an "s".
+// out_has_rm distinguishes the register forms (whose Rm field is a
+// read) from the immediate form (whose bits 20..16 are immediate
+// payload), for the ALU-first order's aliasing check; out_is_sub
+// selects the SUB/CMP vs ADD/CMN family for reporting.
+static bool decode_add_sub_non_s_any(uint32_t op, unsigned *out_rd,
+                                     unsigned *out_rn, unsigned *out_rm,
+                                     bool *out_has_rm, bool *out_is_sub)
 {
     unsigned rd = op & 0x1Fu;
     if (rd == 31) {
         return false;
     }
 
-    // SUB immediate: bit 30 = op = 1, bit 29 = S = 0, 100010.
-    if ((op & 0x7F800000u) == 0x51000000u) {
+    // ADD/SUB immediate: bit 29 = S = 0, bits 28..23 = 100010
+    // (bit 30 selects ADD/SUB and stays free).
+    if ((op & 0x3F800000u) == 0x11000000u) {
+        if (((op >> 10) & 0xFFFu) == 0) {
+            return false;
+        }
         *out_has_rm = false;
-    // SUB shifted-register: bits 30..29 = 10, bits 28..24 = 01011,
+    // ADD/SUB shifted-register: bit 29 = 0, bits 28..24 = 01011,
     // bit 21 = 0.
-    } else if ((op & 0x7F200000u) == 0x4B000000u) {
+    } else if ((op & 0x3F200000u) == 0x0B000000u) {
         *out_has_rm = true;
-    // SUB extended-register: same class with bit 21 = 1.
-    } else if ((op & 0x7F200000u) == 0x4B200000u) {
+    // ADD/SUB extended-register: same class with bit 21 = 1.
+    } else if ((op & 0x3F200000u) == 0x0B200000u) {
         *out_has_rm = true;
     } else {
         return false;
@@ -3007,25 +3014,28 @@ static bool decode_sub_non_s_any(uint32_t op, unsigned *out_rd,
     *out_rd = rd;
     *out_rn = (op >> 5) & 0x1Fu;
     *out_rm = (op >> 16) & 0x1Fu;
+    *out_is_sub = ((op >> 30) & 1u) != 0;
     return true;
 }
 
-// The CMP spelling of a SUB's exact computation: the same word with
-// the S bit (29) set and Rd = 31.
-static uint32_t sub_to_cmp_word(uint32_t sub_op)
+// The compare spelling of an ADD/SUB's exact computation -- CMN for
+// ADD, CMP for SUB -- is the same word with the S bit (29) set and
+// Rd = 31.
+static uint32_t alu_to_cmp_word(uint32_t alu_op)
 {
-    return (sub_op & ~0x1Fu) | 0x20000000u | 0x1Fu;
+    return (alu_op & ~0x1Fu) | 0x20000000u | 0x1Fu;
 }
 
-// True for a CMP in any of the three forms (SUBS with Rd = 31).
-static bool is_cmp_any_form(uint32_t op)
+// True for a CMP or CMN in any of the three forms (SUBS/ADDS with
+// Rd = 31; bit 30 stays free).
+static bool is_cmp_cmn_any_form(uint32_t op)
 {
     if ((op & 0x1Fu) != 0x1Fu) {
         return false;
     }
-    return (op & 0x7F800000u) == 0x71000000u        // CMP immediate
-        || (op & 0x7F200000u) == 0x6B000000u        // CMP shifted
-        || (op & 0x7F200000u) == 0x6B200000u;       // CMP extended
+    return (op & 0x3F800000u) == 0x31000000u        // immediate
+        || (op & 0x3F200000u) == 0x2B000000u        // shifted
+        || (op & 0x3F200000u) == 0x2B200000u;       // extended
 }
 
 bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
@@ -3041,22 +3051,25 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
 
     bool produced = false;
 
-    // (1) Close, SUB-first order: is this a CMP of the pending SUB's
-    //     exact operands? The CMP runs after the SUB wrote Rd, so Rd
-    //     must not be one of the compared registers -- the CMP read
-    //     the difference there, not the original operand, and the
-    //     folded SUBS would compare pre-SUB values. (Rn = 31 is
-    //     SP/ZR depending on form and never collides: Rd != 31 by
-    //     construction.)
+    // (1) Close, ALU-first order: is this the compare of the pending
+    //     ADD/SUB's exact operands (CMN for ADD, CMP for SUB)? The
+    //     compare runs after the ALU wrote Rd, so Rd must not be one
+    //     of the compared registers -- the compare read the result
+    //     there, not the original operand, and the folded S-variant
+    //     would use pre-ALU values. (Rn = 31 is SP/ZR depending on
+    //     form and never collides: Rd != 31 by construction.)
     if (state->scp_sub_active) {
         unsigned s_rd, s_rn, s_rm;
-        bool s_has_rm;
-        if (op == sub_to_cmp_word(state->scp_sub_op)
-                && decode_sub_non_s_any(state->scp_sub_op, &s_rd,
-                                        &s_rn, &s_rm, &s_has_rm)
+        bool s_has_rm, s_is_sub;
+        if (op == alu_to_cmp_word(state->scp_sub_op)
+                && decode_add_sub_non_s_any(state->scp_sub_op, &s_rd,
+                                            &s_rn, &s_rm, &s_has_rm,
+                                            &s_is_sub)
                 && s_rd != s_rn
                 && (!s_has_rm || s_rd != s_rm)) {
-            out->name = "SUB + CMP of identical operands foldable to SUBS";
+            out->name = s_is_sub
+                ? "SUB + CMP of identical operands foldable to SUBS"
+                : "ADD + CMN of identical operands foldable to ADDS";
             out->start_offset = state->scp_sub_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
@@ -3072,16 +3085,21 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
         state->scp_sub_active = false;
     }
 
-    // (2) Close, CMP-first order: is this a non-S SUB of the pending
-    //     CMP's exact operands? The CMP wrote nothing, so the SUB
-    //     reads the same values regardless of Rd -- no aliasing
-    //     restriction beyond Rd != 31 (in the decoder).
+    // (2) Close, compare-first order: is this a non-S ADD/SUB of the
+    //     pending compare's exact operands? The compare wrote
+    //     nothing, so the ALU reads the same values regardless of Rd
+    //     -- no aliasing restriction beyond Rd != 31 (in the
+    //     decoder). The word match pairs families automatically: an
+    //     ADD's compare spelling is CMN, a SUB's is CMP.
     if (state->scp_cmp_active) {
         unsigned s_rd, s_rn, s_rm;
-        bool s_has_rm;
-        if (decode_sub_non_s_any(op, &s_rd, &s_rn, &s_rm, &s_has_rm)
-                && sub_to_cmp_word(op) == state->scp_cmp_op) {
-            out->name = "SUB + CMP of identical operands foldable to SUBS";
+        bool s_has_rm, s_is_sub;
+        if (decode_add_sub_non_s_any(op, &s_rd, &s_rn, &s_rm,
+                                     &s_has_rm, &s_is_sub)
+                && alu_to_cmp_word(op) == state->scp_cmp_op) {
+            out->name = s_is_sub
+                ? "SUB + CMP of identical operands foldable to SUBS"
+                : "ADD + CMN of identical operands foldable to ADDS";
             out->start_offset = state->scp_cmp_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
@@ -3097,14 +3115,15 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
         state->scp_cmp_active = false;
     }
 
-    // (3) Open. A CMP that just closed the SUB-first order still
-    //     opens, so cmp-sharing chains (sub ; cmp ; sub) report both
-    //     folds. The S-variant spelling is the SUB's mnemonic plus
-    //     "s", NEGS for the NEG alias -- same rendering rule as
+    // (3) Open. A compare that just closed the ALU-first order still
+    //     opens, so compare-sharing chains (sub ; cmp ; sub) report
+    //     both folds. The S-variant spelling is the ALU's mnemonic
+    //     plus "s", NEGS for the NEG alias -- same rendering rule as
     //     check_zero_cmp_to_s_variant.
     unsigned o_rd, o_rn, o_rm;
-    bool o_has_rm;
-    if (decode_sub_non_s_any(op, &o_rd, &o_rn, &o_rm, &o_has_rm)) {
+    bool o_has_rm, o_is_sub;
+    if (decode_add_sub_non_s_any(op, &o_rd, &o_rn, &o_rm, &o_has_rm,
+                                 &o_is_sub)) {
         state->scp_sub_active = true;
         state->scp_sub_op = op;
         state->scp_sub_offset = offset;
@@ -3112,7 +3131,7 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
             "%s %s", insn->mnemonic, insn->op_str);
         snprintf(state->scp_sub_sdisasm, sizeof(state->scp_sub_sdisasm),
             "%ss %s", insn->mnemonic, insn->op_str);
-    } else if (is_cmp_any_form(op)) {
+    } else if (is_cmp_cmn_any_form(op)) {
         state->scp_cmp_active = true;
         state->scp_cmp_op = op;
         state->scp_cmp_offset = offset;

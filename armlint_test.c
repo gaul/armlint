@@ -4373,16 +4373,61 @@ static void test_sub_cmp_fold(void)
     cmp_x_reg(&code[4], 1, 2);
     assert(run_helper_check(code, 8) == 0);
 
-    // ADD + CMN is the unimplemented sibling; must not fire here.
-    add_x(&code[0], 0, 1, 2);
-    write_le32(&code[4], 0xAB00001Fu | (2u << 16) | (1u << 5));
-    assert(run_helper_check(code, 8) == 0);
-
     // Intervening instruction breaks adjacency.
     sub_x(&code[0], 0, 1, 2);
     movz_x(&code[4], 5, 1, 0);
     cmp_x_reg(&code[8], 1, 2);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- ADD + CMN family: CMN Rn, Rm is ADDS ZR, Rn, Rm, the
+    //    identical addition, so the same bit-identical-flags
+    //    argument applies. --
+
+    // ADD-first: add x0, x1, x2 ; cmn x1, x2 -> adds x0, x1, x2.
+    add_x(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xAB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMN-first: cmn x1, x2 ; add x0, x1, x2 -> adds x0, x1, x2.
+    write_le32(&code[0], 0xAB00001Fu | (2u << 16) | (1u << 5));
+    add_x(&code[4], 0, 1, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Immediate form: add x0, x1, #16 ; cmn x1, #16
+    //   -> adds x0, x1, #16.
+    add_x_imm(&code[0], 0, 1, 16);
+    write_le32(&code[4], 0xB100001Fu | (16u << 10) | (1u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // Swapped commutative operands (cmn x2, x1 after add x0, x1, x2)
+    // are flag-identical for the unshifted form but do not match the
+    // encoding-equality test; conservatively not folded.
+    add_x(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xAB00001Fu | (1u << 16) | (2u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // Cross-family: ADD + CMP of the same operands is a different
+    // computation (the compare subtracts); never folds.
+    add_x(&code[0], 0, 1, 2);
+    cmp_x_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB + CMN likewise.
+    sub_x(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xAB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADD-first aliasing: the CMN read the sum, not the operand.
+    add_x(&code[0], 1, 1, 2);
+    write_le32(&code[4], 0xAB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // Immediate 0 is excluded across the family: the pair is
+    // degenerate and the ADD side's MOV-from-SP alias must not gain
+    // an "s" (add x0, sp, #0 renders as mov x0, sp).
+    write_le32(&code[0], 0x91000000u | (31u << 5) | 0u);
+    write_le32(&code[4], 0xB100001Fu | (31u << 5));
+    assert(run_helper_check(code, 8) == 0);
 }
 
 static void test_add_sub_zero(void)
