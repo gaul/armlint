@@ -981,6 +981,43 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `ccmn Rn, #C`, whose NZCV agree exactly) is not attempted,
   consistent with the `MOV + ADD/SUB` fold's direct-form-only policy.
 
+## MOV #1 + CSEL foldable to CSINC/CSET
+
+* `mov w8, #1 ; csel wd, w8, wn, cc` instead of
+  `csinc wd, wn, wzr, !cc`. `CSINC`'s else-branch is `Rm + 1`, so a
+  materialised 1 in either `CSEL` operand is reproduced by
+  incrementing ZR:
+  * `mov w8, #1 ; csel wd, w8, wn, cc` -> `csinc wd, wn, wzr, !cc`
+    (constant in the then slot: the condition inverts, since the 1
+    moves to the incrementing else branch).
+  * `mov w8, #1 ; csel wd, wn, w8, cc` -> `csinc wd, wn, wzr, cc`
+    (constant in the else slot: the condition carries over).
+  When the surviving operand is ZR the select is a boolean
+  materialisation and the rewrite is the `CSET` alias
+  (`cset wd, cc` / `cset wd, !cc` -- the condition under which the
+  result is 1). That shape -- a bool built through a constant
+  register instead of from the flags -- is the flagship catch.
+* Only `CSEL` proper (op2 = 00) matches; `CSINC`/`CSINV`/`CSNEG` have
+  different else-branches. The rewrite reads the same NZCV the `CSEL`
+  did (the MOV writes no flags), so no flag-liveness scan is needed.
+  Reuses the MOVZ/MOVK chain state; the chain's value must be exactly
+  1 and its width (W vs X) must match the select's, consistent with
+  the other integer MOV-chain folds.
+* `AL`/`NV` conditions are excluded (`ConditionHolds` treats both as
+  always-true, so the select is a plain `MOV` and the then-slot
+  inversion, `AL` <-> `NV`, would still be always-taken), as are
+  `Rd = 31` (a discarded select) and a `CSEL` reading the constant in
+  both slots (the same-operand identity, which the CSEL identity
+  check owns).
+* The rewrite deletes the MOV. A select whose destination IS the
+  constant register overwrites it at the consumer itself and reports
+  immediately; otherwise the finding defers through the forward
+  register-liveness scan until the constant register is provably
+  dead (shares the MUL check's dead-constant caveat).
+* What it saves: the materialising MOV (one instruction and the
+  register that held the 1); the select itself neither gains nor
+  loses -- `CSEL` and `CSINC` cost the same on current cores.
+
 ## MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate
 
 * `mov w8, #0x3f800000 ; fmov s0, w8` instead of `fmov s0, #1.0`.

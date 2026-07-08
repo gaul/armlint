@@ -1,0 +1,28 @@
+MOV #1 + CSEL foldable to CSINC/CSET at offset: 0x0: -> csinc x3, x2, xzr, ge (2 instructions)
+  movz x8, #0x1
+  csel x3, x8, x2, lt
+
+MOV #1 + CSEL foldable to CSINC/CSET at offset: 0xc: -> csinc x3, x2, xzr, lt (2 instructions)
+  movz x8, #0x1
+  csel x3, x2, x8, lt
+
+MOV #1 + CSEL foldable to CSINC/CSET at offset: 0x18: -> cset x3, lt (2 instructions)
+  movz x8, #0x1
+  csel x3, x8, xzr, lt
+
+MOV #1 + CSEL foldable to CSINC/CSET at offset: 0x24: -> cset x3, ge (2 instructions)
+  movz x8, #0x1
+  csel x3, xzr, x8, lt
+
+MOV #1 + CSEL foldable to CSINC/CSET at offset: 0x30: -> csinc w3, w2, wzr, ls (2 instructions)
+  movz w8, #0x1
+  csel w3, w8, w2, hi
+
+MOV #1 + CSEL foldable to CSINC/CSET at offset: 0x3c: -> csinc x8, x2, xzr, ge (2 instructions)
+  movz x8, #0x1
+  csel x8, x8, x2, lt
+
+Optimization opportunities by type:
+       6  MOV #1 + CSEL foldable to CSINC/CSET
+
+6 optimization opportunities in 26 instructions

@@ -553,6 +553,37 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
+// Detect a MOV chain materialising exactly 1, immediately followed by
+// a CSEL with the constant in either operand slot. CSINC's else-branch
+// is Rm + 1, so the 1 is reproduced by incrementing ZR:
+//   mov w8, #1 ; csel wd, w8, wn, cc -> csinc wd, wn, wzr, !cc
+//   mov w8, #1 ; csel wd, wn, w8, cc -> csinc wd, wn, wzr, cc
+// The then-slot form inverts the condition (the 1 moves to the else
+// branch); the else-slot form keeps it. When the surviving operand is
+// ZR the rewrite is the CSET alias (cset wd, cc / cset wd, !cc
+// respectively -- the condition under which the result is 1), the
+// common bool-materialisation shape spelled through a constant
+// register.
+//
+// Only CSEL proper (op2 = 00) matches; CSINC/CSINV/CSNEG have
+// different else-branches. AL/NV conditions are excluded
+// (ConditionHolds treats both as always-true, so the select is a
+// plain MOV and the then-slot inversion would still be taken), as are
+// Rd = 31 (a discarded select) and a CSEL reading the constant in
+// both slots (the same-operand identity, check_csel_self's shape).
+// Widths must match (both W or both X), consistent with the other
+// integer MOV-chain folds.
+//
+// The rewrite deletes the MOV. A select whose destination IS the
+// constant register overwrites it at the consumer itself and reports
+// immediately; otherwise the finding defers through the forward
+// register-liveness scan (defer_dead_mov) until the constant register
+// is provably dead. Runs before check_movz_movk_bitmask so the chain
+// state is still active. Reported as "MOV #1 + CSEL foldable to
+// CSINC/CSET".
+bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
 // conversion that consumes it, when FMOV (scalar, immediate) could

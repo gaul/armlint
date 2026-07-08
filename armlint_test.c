@@ -6324,6 +6324,92 @@ static void test_mov_ccmp_imm_fold(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+static void test_mov_csel_fold(void)
+{
+    uint8_t code[16];
+
+    // Then slot: mov x8, #1 ; csel x3, x8, x2, lt ; (x8 dies)
+    //   -> csinc x3, x2, xzr, ge (flag; condition inverts -- the 1
+    //   moves to CSINC's incrementing else branch).
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 8, 2, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Else slot: mov x8, #1 ; csel x3, x2, x8, lt ; (x8 dies)
+    //   -> csinc x3, x2, xzr, lt (flag; condition carries over).
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 2, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // CSET shape: mov x8, #1 ; csel x3, x8, xzr, lt ; (x8 dies)
+    //   -> cset x3, lt (flag; ZR surviving operand).
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 8, 31, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // CSET, else slot: csel x3, xzr, x8, lt -> cset x3, ge.
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 31, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // W-form.
+    movz_w(&code[0], 8, 1);
+    csel_w(&code[4], 3, 8, 2, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Structural kill: the select overwrites the constant register
+    // itself, so the finding emits with no appended kill.
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 8, 8, 2, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Fresh destination without a kill: nothing is emitted.
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 8, 2, 11);
+    assert(run_helper_check(code, 8) == 0);
+
+    // The constant is read again before dying: discarded.
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 8, 2, 11);
+    add_x(&code[8], 5, 8, 6);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Constant other than 1 has no CSINC spelling.
+    movz_x(&code[0], 8, 2, 0);
+    csel_x(&code[4], 3, 8, 2, 11);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Width mismatch (W chain, X select).
+    movz_w(&code[0], 8, 1);
+    csel_x(&code[4], 3, 8, 2, 11);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // AL and NV conditions are excluded.
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 8, 2, 14);
+    assert(run_reg_dead(code, 8, 8) == 0);
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 8, 2, 15);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Rd = 31 (select discarded).
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 31, 8, 2, 11);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Both CSEL operands are the constant: check_csel_self's
+    // same-operand identity (the 1 finding here is its, not ours).
+    movz_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 8, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // CSINC consumer (op2 = 01) is not CSEL.
+    movz_x(&code[0], 8, 1, 0);
+    write_le32(&code[4], 0x9A800400u | (8u << 16) | (11u << 12)
+        | (2u << 5) | 3u);      // csinc x3, x2, x8, lt
+    assert(run_reg_dead(code, 8, 8) == 0);
+}
+
 // FMOV (general), GPR -> FPR: fmov Sd, Wn / fmov Dd, Xn.
 static void fmov_s_from_w(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -9330,6 +9416,7 @@ int main(void)
     test_mov_logic_imm_fold();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
+    test_mov_csel_fold();
     test_mov_fmov_imm_fold();
     test_fp_zero_to_movi();
     test_extend_cvtf_fold();

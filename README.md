@@ -120,6 +120,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`mov #C` + `add`/`sub`](analyses.md#mov--addsub-foldable-to-immediate-form) | `add`/`sub Rd, Rn, #C` |
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` |
+| [`mov #1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinc Rd, Rn, wzr, cc` (`cset` when the other operand is ZR) |
 | [`mov #bits`/`#C` + `fmov`/`scvtf`/`ucvtf` from GPR](analyses.md#mov--fmovscvtfucvtf-foldable-to-fmov-immediate) | `fmov Sd`/`Dd, #imm` |
 | [`fmov`/`scvtf`/`dup` of `wzr`/`xzr` (or `mov #0` + transfer)](analyses.md#fpvector-zeroing-via-gpr-foldable-to-movi) | `movi dN, #0` / `movi vN.T, #0` |
 | [`sxtw`/`mov w, w` + `scvtf`/`ucvtf Xn`](analyses.md#widening-extend--scvtfucvtf-foldable-to-w-form-conversion) | `scvtf`/`ucvtf` of `Wn` |

@@ -5450,6 +5450,128 @@ bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // CSEL proper only (op2 = 00): CSINC/CSINV/CSNEG have different
+    // else-branches.
+    if ((op & 0x7FE00C00u) != 0x1A800000u) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 1u;
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned cond = (op >> 12) & 0xFu;
+
+    if ((sf != 0) != state->mov_is_64bit) {
+        return false;
+    }
+    // Only a materialised 1 folds: CSINC's else-branch is Rm + 1, so
+    // the constant is reproduced by incrementing ZR.
+    if (state->mov_value != 1) {
+        return false;
+    }
+    // AL/NV are excluded: ConditionHolds treats both as always-true,
+    // so the select is a plain MOV (of the constant or of the other
+    // operand) and the then-slot inversion (AL <-> NV) would still be
+    // always-taken. Rd = 31 discards the select.
+    if (cond >= 14u || rd == 31) {
+        return false;
+    }
+
+    // Exactly one CSEL operand is the constant; both-equal is the
+    // same-operand identity (check_csel_self's shape). The surviving
+    // operand becomes the CSINC's Rn -- ZR included, which is the
+    // CSET alias -- with the condition inverted when the constant sat
+    // in the then slot (the 1 must move to the else branch, where
+    // CSINC's increment produces it):
+    //   mov w8, #1 ; csel wd, w8, wn, cc -> csinc wd, wn, wzr, !cc
+    //   mov w8, #1 ; csel wd, wn, w8, cc -> csinc wd, wn, wzr, cc
+    unsigned t = state->mov_rd;
+    unsigned surviving;
+    bool invert;
+    if (rn == t && rm != t) {
+        surviving = rm;
+        invert = true;              // then slot: cc ? 1 : rm
+    } else if (rm == t && rn != t) {
+        surviving = rn;
+        invert = false;             // else slot: cc ? rn : 1
+    } else {
+        return false;
+    }
+
+    unsigned csinc_cond = invert ? (cond ^ 1u) : cond;
+    char w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    char rn_buf[8], rm_buf[8], surv_buf[8];
+    format_reg(rn_buf, sizeof(rn_buf), w_or_x, rn);
+    format_reg(rm_buf, sizeof(rm_buf), w_or_x, rm);
+    format_reg(surv_buf, sizeof(surv_buf), w_or_x, surviving);
+
+    out->name = "MOV #1 + CSEL foldable to CSINC/CSET";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    // A ZR surviving operand is the boolean materialisation itself:
+    // CSET Rd, cc is the alias of CSINC Rd, ZR, ZR, !cc, so the CSET
+    // condition is the CSINC field inverted -- the condition under
+    // which the result is 1.
+    if (surviving == 31) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> cset %c%u, %s",
+            w_or_x, rd, a64_cond_names[csinc_cond ^ 1u]);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> csinc %c%u, %s, %czr, %s",
+            w_or_x, rd, surv_buf, w_or_x,
+            a64_cond_names[csinc_cond]);
+    }
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "csel %c%u, %s, %s, %s",
+        w_or_x, rd, rn_buf, rm_buf, a64_cond_names[cond]);
+
+    // The rewrite deletes the MOV. A select whose destination IS the
+    // constant register overwrites it at the consumer itself and
+    // reports immediately; otherwise emission defers until the
+    // constant register is provably dead.
+    if (rd == t) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -9002,6 +9124,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
     check_mov_ccmp_imm_fold,
+    check_mov_csel_fold,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,
