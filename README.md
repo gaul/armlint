@@ -115,6 +115,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`add`/`sub Rd, Rn, #0`](analyses.md#addsub-0-is-redundant) | `mov Rd, Rn`, or remove |
 | [`adds`/`subs`/`ands` + `cmp #0` + `b.eq`/`b.ne`](analyses.md#redundant-zero-cmptst-after-a-flag-setting-alu) | drop the redundant `cmp`/`tst` |
 | [`add`/`sub`/`and`/`bic` + `cmp #0` + `b.eq`/`b.ne`](analyses.md#addsubandbic--zero-cmp-foldable-to-s-variant) | `adds`/`subs`/`ands`/`bics` (drop the `cmp`/`tst`) |
+| [`sub` + `cmp` of the same operands (either order)](analyses.md#sub--cmp-of-identical-operands-foldable-to-subs) | `subs` (flag-exact; drop the `cmp`) |
 | [`mov #2^N` + `mul`](analyses.md#mul-by-constant-foldable-to-shiftadd) | `lsl`, or `add Rd, Ra, Ra, lsl #N` |
 | [`mov #C` + `mneg`](analyses.md#mneg-by-constant-foldable-to-negsub) | `neg`, or shifted `neg`/`sub` |
 | [`mov #2^N` + `udiv`](analyses.md#udiv-by-constant-foldable-to-shift) | `lsr` |

@@ -1230,6 +1230,39 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
                                  size_t offset,
                                  armlint_finding *out);
 
+// Detect a non-S SUB and a CMP of the same two operands adjacent in
+// either order; the pair folds to a single SUBS:
+//   sub wd, wn, wm ; cmp wn, wm -> subs wd, wn, wm
+//   cmp wn, wm ; sub wd, wn, wm -> subs wd, wn, wm
+// CMP Rn, Rm is SUBS ZR, Rn, Rm -- the identical subtraction -- and
+// NZCV is a function of the operands only, never Rd, so the folded
+// SUBS's flags are bit-identical to the CMP's in all four bits. No
+// flag-liveness scan is needed: downstream may read any condition.
+// This is the rare fully flag-exact rewrite, unlike the zero-CMP
+// fold above, whose C/V diverge.
+//
+// The operand match is by encoding: the CMP must be exactly the
+// SUB's word with the S bit set and Rd = 31, which covers the
+// immediate, shifted-register and extended-register forms and
+// forces equal widths, shift types/amounts and extend options in one
+// comparison. The reversed compare (cmp wm, wn) never matches --
+// subtraction is not symmetric.
+//
+// In the SUB-first order the CMP runs after the SUB wrote Rd, so
+// Rd must not be one of the compared registers (the CMP read the
+// difference there, and the folded SUBS would compare pre-SUB
+// values); the CMP-first order writes nothing before the SUB and
+// needs no such restriction. Rd = 31 producers are excluded: SP for
+// the immediate and extended forms -- SUBS's Rd = 31 is ZR, so the
+// fold would drop an observable SP update -- and a dead ZR write
+// for the shifted form. The S-variant spelling is the SUB's
+// mnemonic plus "s" (NEGS for the NEG alias). Reported as "SUB +
+// CMP of identical operands foldable to SUBS"; the shape appears
+// when code computes a difference and separately compares the same
+// operands (hand-written bounds checks, naive codegen).
+bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out);
+
 // Advance the deferred "redundant CMP after S-variant" finding's
 // flag-liveness scan by one instruction. Parallel to
 // armlint_advance_pending; call before per-instruction checks each

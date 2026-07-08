@@ -4262,6 +4262,129 @@ static void test_zero_cmp_to_s_variant(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+// CMP Rn, Rm, LSL #amt (X-form): SUBS ZR with a non-zero inline
+// shift, for the shift-match tests. The plain forms reuse the
+// existing cmp_x_reg / cmp_w_reg encoders.
+static void cmp_x_reg_lsl(uint8_t out[4], unsigned rn, unsigned rm,
+                          unsigned amt)
+{
+    write_le32(out, 0xEB00001Fu | ((rm & 0x1Fu) << 16)
+        | ((amt & 0x3Fu) << 10) | ((rn & 0x1Fu) << 5));
+}
+
+static void test_sub_cmp_fold(void)
+{
+    uint8_t code[16];
+
+    // SUB-first order: sub x0, x1, x2 ; cmp x1, x2
+    //   -> subs x0, x1, x2 (flag; NZCV is bit-identical, so no
+    //   liveness gating -- the finding emits at the pair).
+    sub_x(&code[0], 0, 1, 2);
+    cmp_x_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // CMP-first order: cmp x1, x2 ; sub x0, x1, x2 -> subs x0, x1, x2.
+    cmp_x_reg(&code[0], 1, 2);
+    sub_x(&code[4], 0, 1, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form.
+    sub_w(&code[0], 0, 1, 2);
+    cmp_w_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Shifted operands must match exactly: sub x0, x1, x2, lsl #3 ;
+    // cmp x1, x2, lsl #3 -> subs x0, x1, x2, lsl #3.
+    write_le32(&code[0], 0xCB000000u | (2u << 16) | (3u << 10)
+        | (1u << 5) | 0u);
+    cmp_x_reg_lsl(&code[4], 1, 2, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Immediate form: sub x0, x1, #16 ; cmp x1, #16
+    //   -> subs x0, x1, #16.
+    sub_x_imm(&code[0], 0, 1, 16);
+    cmp_x_imm(&code[4], 1, 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Extended-register form: sub x0, x1, w2, uxtw ;
+    // cmp x1, w2, uxtw -> subs x0, x1, w2, uxtw.
+    write_le32(&code[0], 0xCB200000u | (2u << 16) | (2u << 13)
+        | (1u << 5) | 0u);
+    write_le32(&code[4], 0xEB20001Fu | (2u << 16) | (2u << 13)
+        | (1u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // NEG alias: neg x0, x2 (sub x0, xzr, x2) ; cmp xzr, x2
+    //   -> negs x0, x2.
+    sub_x(&code[0], 0, 31, 2);
+    cmp_x_reg(&code[4], 31, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Chain sharing the CMP: sub ; cmp ; sub -- the CMP closes the
+    // SUB-first pair and still opens for the CMP-first pair; both
+    // folds report.
+    sub_x(&code[0], 0, 1, 2);
+    cmp_x_reg(&code[4], 1, 2);
+    sub_x(&code[8], 5, 1, 2);
+    assert(run_helper_check(code, 12) == 2);
+
+    // -- Negatives. --
+
+    // SUB-first with Rd == Rn: the CMP read the difference, not the
+    // original operand.
+    sub_x(&code[0], 1, 1, 2);
+    cmp_x_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUB-first with Rd == Rm.
+    sub_x(&code[0], 2, 1, 2);
+    cmp_x_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // CMP-first with Rd == Rn is fine: the CMP wrote nothing.
+    cmp_x_reg(&code[0], 1, 2);
+    sub_x(&code[4], 1, 1, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Reversed compare operands: subtraction is not symmetric.
+    sub_x(&code[0], 0, 1, 2);
+    cmp_x_reg(&code[4], 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Shift amount mismatch.
+    sub_x(&code[0], 0, 1, 2);
+    cmp_x_reg_lsl(&code[4], 1, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Immediate mismatch.
+    sub_x_imm(&code[0], 0, 1, 16);
+    cmp_x_imm(&code[4], 1, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch.
+    sub_w(&code[0], 0, 1, 2);
+    cmp_x_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SUBS producer: the flags are already set; not this fold's
+    // shape (a redundant identical-operand CMP after SUBS is a
+    // separate, unimplemented finding).
+    write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
+    cmp_x_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADD + CMN is the unimplemented sibling; must not fire here.
+    add_x(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xAB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction breaks adjacency.
+    sub_x(&code[0], 0, 1, 2);
+    movz_x(&code[4], 5, 1, 0);
+    cmp_x_reg(&code[8], 1, 2);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 static void test_add_sub_zero(void)
 {
     uint8_t code[12];
@@ -9517,6 +9640,7 @@ int main(void)
     test_redundant_sext();
     test_redundant_cmp_after_s_variant();
     test_zero_cmp_to_s_variant();
+    test_sub_cmp_fold();
     test_add_sub_zero();
     test_self_op();
     test_csel_self();

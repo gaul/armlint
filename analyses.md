@@ -866,6 +866,41 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   shape is common in hand-written assembly and naive codegen, which
   compute a value and then test it in two steps.
 
+## SUB + CMP of identical operands foldable to SUBS
+
+* `sub wd, wn, wm ; cmp wn, wm` -> `subs wd, wn, wm`, and the same
+  with the pair in the other order (`cmp wn, wm ; sub wd, wn, wm`).
+  `CMP Rn, Rm` is `SUBS ZR, Rn, Rm` -- the identical subtraction --
+  and NZCV is a function of the operands only, never Rd, so the
+  folded `SUBS`'s flags are bit-identical to the `CMP`'s in all four
+  bits. Unlike the zero-CMP fold above, whose C/V diverge, no
+  flag-liveness scan is needed: downstream may read any condition,
+  and the finding emits at the pair.
+* The operand match is by encoding: the `CMP` must be exactly the
+  `SUB`'s word with the S bit set and `Rd = 31`. One comparison
+  therefore covers the immediate, shifted-register and
+  extended-register forms and enforces equal widths, shift
+  types/amounts and extend options; the reversed compare
+  (`cmp wm, wn`) never matches, since subtraction is not symmetric.
+* In the SUB-first order the `CMP` runs after the `SUB` wrote `Rd`,
+  so `Rd` must not be one of the compared registers -- there the
+  `CMP` read the difference, and the folded `SUBS` would compare
+  pre-`SUB` values. The CMP-first order writes nothing before the
+  `SUB` and needs no such restriction (`cmp x1, x2 ; sub x1, x1, x2`
+  folds). `Rd = 31` producers are excluded: SP for the immediate and
+  extended forms -- `SUBS`'s `Rd = 31` is ZR, so the fold would drop
+  an observable SP update -- and a dead ZR write for the shifted
+  form. The S-variant spelling is the `SUB`'s mnemonic plus "s"
+  (`NEGS` for the `NEG` alias). A `CMP` that closes a SUB-first pair
+  still opens a CMP-first pending, so `sub ; cmp ; sub` chains
+  report both folds.
+* The `ADD` + `CMN` analogue (`CMN` is `ADDS ZR`) folds by the same
+  argument and is a natural extension, not yet implemented.
+* What it saves: one instruction -- the compare -- with zero flag
+  risk. The shape appears when code computes a difference and
+  separately compares the same operands: hand-written bounds checks
+  and naive codegen; optimizing compilers emit the `SUBS` directly.
+
 ## MUL by constant foldable to shift/add
 
 * `mov xc, #(1<<N) ; mul xd, xa, xc` instead of `lsl xd, xa, #N`

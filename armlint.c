@@ -317,6 +317,26 @@ struct armlint_state {
     unsigned pending_zs_window;
     armlint_finding pending_zs_finding;
 
+    // Pending halves of the SUB + identical-operand CMP pair (either
+    // order): a non-S SUB awaiting the CMP, and a CMP awaiting the
+    // SUB. CMP Rn, Rm is SUBS ZR, Rn, Rm, so a CMP of the SUB's exact
+    // operands is the SUB's own encoding with the S bit set and
+    // Rd = 31 -- scp_sub_op / scp_cmp_op hold the raw words for that
+    // modulo-Rd/S-bit match, which covers the immediate, shifted-
+    // register and extended-register forms (and forces equal widths,
+    // shifts and extends) in one comparison. NZCV is a function of
+    // the operands only, never Rd, so the folded SUBS's flags are
+    // bit-identical to the CMP's: no liveness scan is needed.
+    bool scp_sub_active;
+    uint32_t scp_sub_op;
+    size_t scp_sub_offset;
+    char scp_sub_disasm[ARMLINT_FINDING_LINE_LEN];
+    char scp_sub_sdisasm[ARMLINT_FINDING_LINE_LEN];
+    bool scp_cmp_active;
+    uint32_t scp_cmp_op;
+    size_t scp_cmp_offset;
+    char scp_cmp_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Deferred "MOV #0 + use foldable to ZR" finding awaiting forward
     // register-liveness verification. Dropping the MOV only saves an
     // instruction when the materialized zero register is dead after the
@@ -836,6 +856,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->sv_cmp_active = false;
     state->zs_active = false;
     state->zs_cmp_active = false;
+    state->scp_sub_active = false;
+    state->scp_cmp_active = false;
     state->pending_active = false;
     state->pending_sv_active = false;
     state->pending_zs_active = false;
@@ -2949,6 +2971,156 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
     }
 
     return false;
+}
+
+// Classify a non-S SUB in any of the three forms that CMP shares --
+// immediate, shifted-register, extended-register -- writing a real
+// register. Rd = 31 is rejected: it means SP for the immediate and
+// extended forms (SUBS cannot write SP -- its Rd = 31 is ZR, so the
+// fold would drop an observable SP update) and a dead ZR write for
+// the shifted form. out_has_rm distinguishes the register forms
+// (whose Rm field is a read) from the immediate form (whose bits
+// 20..16 are immediate payload), for the sub-first order's aliasing
+// check.
+static bool decode_sub_non_s_any(uint32_t op, unsigned *out_rd,
+                                 unsigned *out_rn, unsigned *out_rm,
+                                 bool *out_has_rm)
+{
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31) {
+        return false;
+    }
+
+    // SUB immediate: bit 30 = op = 1, bit 29 = S = 0, 100010.
+    if ((op & 0x7F800000u) == 0x51000000u) {
+        *out_has_rm = false;
+    // SUB shifted-register: bits 30..29 = 10, bits 28..24 = 01011,
+    // bit 21 = 0.
+    } else if ((op & 0x7F200000u) == 0x4B000000u) {
+        *out_has_rm = true;
+    // SUB extended-register: same class with bit 21 = 1.
+    } else if ((op & 0x7F200000u) == 0x4B200000u) {
+        *out_has_rm = true;
+    } else {
+        return false;
+    }
+    *out_rd = rd;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+// The CMP spelling of a SUB's exact computation: the same word with
+// the S bit (29) set and Rd = 31.
+static uint32_t sub_to_cmp_word(uint32_t sub_op)
+{
+    return (sub_op & ~0x1Fu) | 0x20000000u | 0x1Fu;
+}
+
+// True for a CMP in any of the three forms (SUBS with Rd = 31).
+static bool is_cmp_any_form(uint32_t op)
+{
+    if ((op & 0x1Fu) != 0x1Fu) {
+        return false;
+    }
+    return (op & 0x7F800000u) == 0x71000000u        // CMP immediate
+        || (op & 0x7F200000u) == 0x6B000000u        // CMP shifted
+        || (op & 0x7F200000u) == 0x6B200000u;       // CMP extended
+}
+
+bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->scp_sub_active = false;
+        state->scp_cmp_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    bool produced = false;
+
+    // (1) Close, SUB-first order: is this a CMP of the pending SUB's
+    //     exact operands? The CMP runs after the SUB wrote Rd, so Rd
+    //     must not be one of the compared registers -- the CMP read
+    //     the difference there, not the original operand, and the
+    //     folded SUBS would compare pre-SUB values. (Rn = 31 is
+    //     SP/ZR depending on form and never collides: Rd != 31 by
+    //     construction.)
+    if (state->scp_sub_active) {
+        unsigned s_rd, s_rn, s_rm;
+        bool s_has_rm;
+        if (op == sub_to_cmp_word(state->scp_sub_op)
+                && decode_sub_non_s_any(state->scp_sub_op, &s_rd,
+                                        &s_rn, &s_rm, &s_has_rm)
+                && s_rd != s_rn
+                && (!s_has_rm || s_rd != s_rm)) {
+            out->name = "SUB + CMP of identical operands foldable to SUBS";
+            out->start_offset = state->scp_sub_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s (drop %s %s)",
+                state->scp_sub_sdisasm, insn->mnemonic, insn->op_str);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->scp_sub_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            produced = true;
+        }
+        state->scp_sub_active = false;
+    }
+
+    // (2) Close, CMP-first order: is this a non-S SUB of the pending
+    //     CMP's exact operands? The CMP wrote nothing, so the SUB
+    //     reads the same values regardless of Rd -- no aliasing
+    //     restriction beyond Rd != 31 (in the decoder).
+    if (state->scp_cmp_active) {
+        unsigned s_rd, s_rn, s_rm;
+        bool s_has_rm;
+        if (decode_sub_non_s_any(op, &s_rd, &s_rn, &s_rm, &s_has_rm)
+                && sub_to_cmp_word(op) == state->scp_cmp_op) {
+            out->name = "SUB + CMP of identical operands foldable to SUBS";
+            out->start_offset = state->scp_cmp_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %ss %s (drop %s)",
+                insn->mnemonic, insn->op_str, state->scp_cmp_disasm);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->scp_cmp_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            produced = true;
+        }
+        state->scp_cmp_active = false;
+    }
+
+    // (3) Open. A CMP that just closed the SUB-first order still
+    //     opens, so cmp-sharing chains (sub ; cmp ; sub) report both
+    //     folds. The S-variant spelling is the SUB's mnemonic plus
+    //     "s", NEGS for the NEG alias -- same rendering rule as
+    //     check_zero_cmp_to_s_variant.
+    unsigned o_rd, o_rn, o_rm;
+    bool o_has_rm;
+    if (decode_sub_non_s_any(op, &o_rd, &o_rn, &o_rm, &o_has_rm)) {
+        state->scp_sub_active = true;
+        state->scp_sub_op = op;
+        state->scp_sub_offset = offset;
+        snprintf(state->scp_sub_disasm, sizeof(state->scp_sub_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+        snprintf(state->scp_sub_sdisasm, sizeof(state->scp_sub_sdisasm),
+            "%ss %s", insn->mnemonic, insn->op_str);
+    } else if (is_cmp_any_form(op)) {
+        state->scp_cmp_active = true;
+        state->scp_cmp_op = op;
+        state->scp_cmp_offset = offset;
+        snprintf(state->scp_cmp_disasm, sizeof(state->scp_cmp_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
 }
 
 // TST Rn, #(1<<k) = ANDS XZR, Rn, #imm where the logical immediate
@@ -9340,6 +9512,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_stp_wzr_to_str_xzr,
     check_redundant_cmp_after_s_variant,
     check_zero_cmp_to_s_variant,
+    check_sub_cmp_fold,
     check_mul_add_sub_fold,
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,
