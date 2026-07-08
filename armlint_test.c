@@ -4056,14 +4056,17 @@ static void test_redundant_cmp_after_s_variant(void)
     ret_(&code[12]);
     assert(run_helper_check(code, 16) == 2);
 
-    // -- Negative: non-S-variant ADD; only existing check fires. --
+    // -- Negative for THIS check: non-S-variant ADD. The redundant-CMP
+    //    finding needs an S-variant producer, but the pattern is now
+    //    check_zero_cmp_to_s_variant's positive (-> adds + drop the
+    //    cmp), so the 2 here are its finding plus the CBZ fold. --
 
     // add w0, w1, w2 (no flag set) ; cmp w0, #0 ; b.eq ; ret.
     add_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_helper_check(code, 16) == 2);
 
     // -- Negative: CMP of a different register. --
 
@@ -4142,6 +4145,118 @@ static void test_redundant_cmp_after_s_variant(void)
     // adds w0, w1, w2 ; cmp w0, #0 ; ret -- CMP not followed by
     // B.EQ/B.NE; sv_cmp_active expires; neither check fires.
     adds_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
+}
+
+static void test_zero_cmp_to_s_variant(void)
+{
+    uint8_t code[24];
+
+    // -- Positives: each fires BOTH the S-variant finding AND the
+    //    existing CMP/TST + B.cond -> CBZ finding, so expect 2. The
+    //    W shifted-register ADD case lives in the sibling's tests. --
+
+    // sub x0, x1, x2 ; cmp x0, #0 ; b.ne +8 ; ret -> subs x0, x1, x2.
+    sub_x(&code[0], 0, 1, 2);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 1, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // Immediate form: add x0, x1, #16 ; cmp x0, #0 ; b.eq ; ret
+    //   -> adds x0, x1, #16.
+    add_x_imm(&code[0], 0, 1, 16);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // Extended-register form: add x0, x1, w2, uxtw ; cmp x0, #0 ;
+    // b.eq ; ret -> adds x0, x1, w2, uxtw.
+    write_le32(&code[0], 0x8B200000u | (2u << 16) | (2u << 13)
+        | (1u << 5) | 0u);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // AND + TST consumer: and w0, w1, w2 ; tst w0, w0 ; b.eq ; ret
+    //   -> ands w0, w1, w2 (flag-exact: both TST and ANDS pin
+    //   C = V = 0).
+    and_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0x6A00001Fu | (0u << 16) | (0u << 5));
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // BIC: bic w0, w1, w2 ; cmp w0, #0 ; b.ne ; ret -> bics w0, w1, w2.
+    bic_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 1, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // NEG alias: sub x0, xzr, x1 ; cmp x0, #0 ; b.eq ; ret
+    //   -> negs x0, x1 (the flag-setting NEG spelling).
+    sub_x(&code[0], 0, 31, 1);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // -- Negatives: only the CBZ fold (or nothing) fires. --
+
+    // CMP of a different register (mine needs Rn == the ALU's Rd).
+    add_x(&code[0], 0, 1, 2);
+    cmp_x_imm(&code[4], 5, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Width mismatch (W ALU, X CMP).
+    add_w(&code[0], 0, 1, 2);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // ADD #0 is check_add_sub_zero's shape, not a fold candidate; the
+    // 2 here are its finding plus the CBZ fold.
+    add_x_imm(&code[0], 0, 1, 0);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // B.LT consumer: mine needs B.EQ/B.NE (the 1 is the sign-bit
+    // TBZ/TBNZ fold's).
+    add_x(&code[0], 0, 1, 2);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 11, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Downstream NZCV reader (adcs after the branch): both scans
+    // suppress; nothing fires.
+    add_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 8);
+    adcs_w(&code[12], 5, 6, 7);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // Intervening instruction between the ALU and the CMP.
+    add_w(&code[0], 0, 1, 2);
+    movz_w(&code[4], 5, 1);
+    cmp_w_imm(&code[8], 0, 0);
+    b_cond(&code[12], 0, 8);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
+
+    // CMP with no branch: nothing fires.
+    add_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     ret_(&code[8]);
     assert(run_helper_check(code, 12) == 0);
@@ -9401,6 +9516,7 @@ int main(void)
     test_mov_reg_self();
     test_redundant_sext();
     test_redundant_cmp_after_s_variant();
+    test_zero_cmp_to_s_variant();
     test_add_sub_zero();
     test_self_op();
     test_csel_self();

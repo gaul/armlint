@@ -291,6 +291,32 @@ struct armlint_state {
     unsigned pending_sv_window;
     armlint_finding pending_sv_finding;
 
+    // Mirror of sv_* one S bit over: a non-flag-setting ALU whose
+    // S-variant twin exists (ADD/SUB/AND/BIC) pending a CMP/TST-zero
+    // of its Rd. Converting the ALU to the S-variant reproduces the
+    // zero-test's N and Z exactly, making the CMP/TST droppable once
+    // the same NZCV scan proves C/V (which the S-variant sets
+    // differently) unobserved. zs_sdisasm holds the pre-rendered
+    // S-variant spelling (the producer's mnemonic + "s").
+    bool zs_active;
+    bool zs_is_64bit;
+    unsigned zs_rd;
+    size_t zs_offset;
+    char zs_disasm[ARMLINT_FINDING_LINE_LEN];
+    char zs_sdisasm[ARMLINT_FINDING_LINE_LEN];
+
+    // CMP/TST-zero of zs_rd observed adjacent to the ALU, awaiting a
+    // B.EQ/B.NE consumer.
+    bool zs_cmp_active;
+    char zs_cmp_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Deferred "ALU + zero-CMP -> S-variant" finding, parallel to
+    // pending_sv_*. Advanced by armlint_advance_pending_zs. A
+    // dedicated slot so an overlapping sv deferral cannot clobber it.
+    bool pending_zs_active;
+    unsigned pending_zs_window;
+    armlint_finding pending_zs_finding;
+
     // Deferred "MOV #0 + use foldable to ZR" finding awaiting forward
     // register-liveness verification. Dropping the MOV only saves an
     // instruction when the materialized zero register is dead after the
@@ -808,8 +834,11 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->sxt_active = false;
     state->sv_active = false;
     state->sv_cmp_active = false;
+    state->zs_active = false;
+    state->zs_cmp_active = false;
     state->pending_active = false;
     state->pending_sv_active = false;
+    state->pending_zs_active = false;
     state->pending_mz_active = false;
     state->adr_recent = false;
     state->bfx_clear_seen = false;
@@ -2465,6 +2494,20 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
                                &state->pending_sv_finding, out);
 }
 
+bool armlint_advance_pending_zs(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        state->pending_zs_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    return advance_one_pending(op, &state->pending_zs_active,
+                               &state->pending_zs_window,
+                               &state->pending_zs_finding, out);
+}
+
 // Forward register-liveness scan for a deferred MOV #0 + use finding. Emits the
 // stashed finding only once a later instruction provably overwrites the zero
 // register before any read or control transfer; a read or branch/call/return
@@ -2761,6 +2804,148 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
         state->sv_offset = offset;
         snprintf(state->sv_disasm, sizeof(state->sv_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return false;
+}
+
+// Mirror of decode_s_variant_alu one S bit over: the non-flag-setting
+// ALU forms whose S-variant twin exists -- ADD/SUB (immediate,
+// shifted-register, extended-register) and AND/BIC (immediate for
+// AND, shifted-register for both). Rd = 31 is rejected: it means SP
+// for the immediate and extended forms (an observable write the
+// S-variant would redirect to ZR) and ZR for the shifted forms (a
+// dead write). ADD/SUB immediate with imm == 0 is rejected -- that is
+// check_add_sub_zero's redundant-ADD shape, and its MOV-from-SP alias
+// spelling must not gain an "s" suffix. ADC/SBC also have S twins but
+// read the carry the surrounding code is testing; they are left out
+// of this fold's v1.
+static bool decode_non_s_alu(uint32_t op, unsigned *out_sf,
+                             unsigned *out_rd)
+{
+    unsigned rd = op & 0x1Fu;
+    if (rd == 31) {
+        return false;
+    }
+
+    // ADD/SUB immediate: bit 29 = S = 0, bits 28..23 = 100010.
+    if ((op & 0x3F800000u) == 0x11000000u) {
+        if (((op >> 10) & 0xFFFu) == 0) {
+            return false;
+        }
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+    // ADD/SUB shifted-register and extended-register: bit 29 = 0,
+    // bits 28..24 = 01011.
+    if ((op & 0x3F000000u) == 0x0B000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+    // AND immediate: bits 30..29 = opc = 00, bits 28..23 = 100100.
+    if ((op & 0x7F800000u) == 0x12000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+    // AND (N=0) / BIC (N=1) shifted-register: bits 30..29 = opc = 00,
+    // bits 28..24 = 01010.
+    if ((op & 0x7F000000u) == 0x0A000000u) {
+        *out_sf = (op >> 31) & 1u;
+        *out_rd = rd;
+        return true;
+    }
+
+    return false;
+}
+
+bool check_zero_cmp_to_s_variant(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset,
+                                 armlint_finding *out)
+{
+    (void)out;  // emission goes through armlint_advance_pending_zs
+
+    if (insn->size != 4) {
+        state->zs_active = false;
+        state->zs_cmp_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Stage 3: B.EQ/B.NE consuming the alu+cmp chain? The branch
+    //     reads only Z, which the S-variant sets identically to the
+    //     zero-test (Z = Rd == 0); N agrees too (the sign of Rd under
+    //     every zero-test spelling). C and V differ -- CMP pins C = 1,
+    //     V = 0 and CMN/TST pin C = 0, V = 0, while the arithmetic
+    //     S-variants compute real carry/overflow -- so emission defers
+    //     through the same NZCV scan as the sibling check until they
+    //     are provably unobserved. (The logical S-forms pin C = V = 0,
+    //     making ANDS/BICS after TST exact; the scan is a uniform
+    //     conservative superset.)
+    if (state->zs_cmp_active) {
+        bool is_eq;
+        int32_t imm19;
+        if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
+            uint64_t target = insn->address
+                + (uint64_t)((int64_t)imm19 * 4);
+            const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
+
+            armlint_finding *p = &state->pending_zs_finding;
+            p->name = "ADD/SUB/AND/BIC + zero-CMP foldable to S-variant";
+            p->start_offset = state->zs_offset;
+            p->insn_count = 3;
+            clear_finding_strings(p);
+
+            snprintf(p->detail, sizeof(p->detail),
+                "-> %s (drop %s)",
+                state->zs_sdisasm, state->zs_cmp_disasm);
+            snprintf(p->lines[0], sizeof(p->lines[0]),
+                "%s", state->zs_disasm);
+            snprintf(p->lines[1], sizeof(p->lines[1]),
+                "%s", state->zs_cmp_disasm);
+            snprintf(p->lines[2], sizeof(p->lines[2]),
+                "%s 0x%" PRIx64, bcond_mnem, target);
+
+            state->pending_zs_active = true;
+            state->pending_zs_window = LIVENESS_WINDOW;
+        }
+        state->zs_cmp_active = false;
+    }
+
+    // (2) Stage 2: CMP/TST-zero of zs_rd consuming zs_active?
+    if (state->zs_active) {
+        unsigned cmp_sf, cmp_rn;
+        bool cmp_is_subs;   // unused: only the shared N/Z matter here
+        if (decode_zero_test(op, &cmp_sf, &cmp_rn, &cmp_is_subs)
+                && cmp_rn == state->zs_rd
+                && cmp_sf == (state->zs_is_64bit ? 1u : 0u)) {
+            state->zs_cmp_active = true;
+            snprintf(state->zs_cmp_disasm,
+                sizeof(state->zs_cmp_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+        state->zs_active = false;
+    }
+
+    // (3) Stage 1: open non-S ALU pending state. The S-variant
+    //     spelling is the mnemonic plus "s" for every member --
+    //     add/sub/and/bic and the NEG alias (SUB from ZR), whose
+    //     flag-setting twin is spelled NEGS -- so it is pre-rendered
+    //     here from Capstone's disassembly.
+    unsigned sf, rd;
+    if (decode_non_s_alu(op, &sf, &rd)) {
+        state->zs_active = true;
+        state->zs_is_64bit = (sf != 0);
+        state->zs_rd = rd;
+        state->zs_offset = offset;
+        snprintf(state->zs_disasm, sizeof(state->zs_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+        snprintf(state->zs_sdisasm, sizeof(state->zs_sdisasm),
+            "%ss %s", insn->mnemonic, insn->op_str);
     }
 
     return false;
@@ -9116,6 +9301,7 @@ static void report_finding(const armlint_finding *finding, bool verbose)
 const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending,
     armlint_advance_pending_sv,
+    armlint_advance_pending_zs,
     armlint_advance_pending_mz,
     armlint_advance_pending_tb,
     check_mul_strength_reduce,
@@ -9153,6 +9339,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_simd_cmp_zero,
     check_stp_wzr_to_str_xzr,
     check_redundant_cmp_after_s_variant,
+    check_zero_cmp_to_s_variant,
     check_mul_add_sub_fold,
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,

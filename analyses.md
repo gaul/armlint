@@ -824,6 +824,48 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `CMP`+`B.cond` pair into a `CBZ`/`CBNZ`. Both rewrites have
   identical downstream behaviour.
 
+## ADD/SUB/AND/BIC + zero-CMP foldable to S-variant
+
+* The mirror of the check above, one S bit over: when the producer
+  does NOT set flags but has a flag-setting twin, converting it makes
+  the zero test droppable --
+  `add w0, w1, w2 ; cmp w0, #0 ; b.eq L` ->
+  `adds w0, w1, w2 ; b.eq L`. Producers: `ADD`/`SUB` (immediate,
+  shifted-register, extended-register) and `AND`/`BIC` (immediate for
+  `AND`, shifted-register for both) -- every form spells its
+  S-variant as the mnemonic plus "s", including the `NEG` alias
+  (`SUB` from ZR), whose twin is `NEGS`. `ORR`/`EOR` have no S-forms
+  and never match.
+* Flag argument: `Z` is bit-identical (`Rd == 0` computed either
+  way), and so is `N` (the sign of `Rd` under every zero-test
+  spelling). `C` and `V` differ -- `CMP Rd, #0` pins `C = 1`,
+  `V = 0`, the `CMN`/`TST` spellings pin `C = 0`, `V = 0`, while the
+  arithmetic S-variants compute the operation's real carry and
+  overflow. The `B.EQ`/`B.NE` itself reads only `Z`; emission defers
+  through the same forward NZCV-liveness scan as the sibling check
+  (in a dedicated pending slot) until any later N/C/V read is ruled
+  out -- conservative for `N`, which actually agrees. The logical
+  S-forms pin `C = V = 0` exactly like `TST`, so `ANDS`/`BICS` after
+  a `TST` consumer is flag-exact; the scan is applied uniformly
+  anyway.
+* Exclusions: `Rd = 31` producers (SP for the immediate and extended
+  forms -- an observable write the S-variant would redirect to ZR --
+  and a dead ZR write for the shifted ones); `ADD`/`SUB` immediate
+  with `imm == 0` (the redundant-ADD/`MOV`-from-SP shapes owned by
+  the ADD/SUB #0 check, whose `mov` alias spelling must not gain an
+  "s"); and `ADC`/`SBC`, whose S twins exist but which read the very
+  carry the surrounding code is testing -- left to a future
+  extension. Width (W vs X) of the zero test must match the
+  producer's.
+* Same three-instruction window as the sibling, and the same
+  interplay: the CMP+B.cond -> CBZ/CBNZ fold also fires on the
+  matching pair, so the user chooses between converting the ALU (and
+  dropping the `CMP`) or folding `CMP`+`B.cond` into a `CBZ`/`CBNZ`.
+* What it saves: one instruction -- the zero test -- and its NZCV
+  def-use disappears into the ALU op the code already executes. The
+  shape is common in hand-written assembly and naive codegen, which
+  compute a value and then test it in two steps.
+
 ## MUL by constant foldable to shift/add
 
 * `mov xc, #(1<<N) ; mul xd, xa, xc` instead of `lsl xd, xa, #N`

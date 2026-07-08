@@ -1197,12 +1197,54 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
                                          size_t offset,
                                          armlint_finding *out);
 
+// Mirror of check_redundant_cmp_after_s_variant one S bit over: a
+// NON-flag-setting ALU whose S-variant twin exists -- ADD/SUB
+// (immediate, shifted-register, extended-register) or AND/BIC --
+// writing Rd, followed immediately by a CMP/CMN/TST zero test of Rd,
+// followed immediately by B.EQ/B.NE. Converting the ALU to its
+// S-variant makes the zero test droppable:
+//   add w0, w1, w2 ; cmp w0, #0 ; b.eq L -> adds w0, w1, w2 ; b.eq L
+// Z is bit-identical (Rd == 0 either way) and so is N (the sign of
+// Rd under every zero-test spelling), but C and V differ: CMP pins
+// C = 1, V = 0 and CMN/TST pin C = 0, V = 0, while the arithmetic
+// S-variants compute the operation's real carry and overflow. The
+// B.EQ/B.NE itself reads only Z; emission defers through a dedicated
+// NZCV-liveness scan slot (armlint_advance_pending_zs) until any
+// later N/C/V read is ruled out -- conservative for N, which
+// actually agrees. (The logical S-forms pin C = V = 0, so ANDS/BICS
+// after TST is flag-exact; the scan is a uniform superset.)
+//
+// The S-variant spelling is the producer's mnemonic plus "s" for
+// every member, including the NEG alias (SUB from ZR), whose twin is
+// NEGS. Rd = 31 producers are excluded (SP for the immediate and
+// extended forms, a dead ZR write for the shifted ones), as is
+// ADD/SUB immediate with imm == 0 (check_add_sub_zero's shape, whose
+// MOV-from-SP alias must not gain an "s"). ADC/SBC are left out of
+// v1. Combines with the CMP+B.cond -> CBZ check: both fire,
+// presenting alternative rewrites. Reported as "ADD/SUB/AND/BIC +
+// zero-CMP foldable to S-variant"; the shape is common in
+// hand-written assembly and naive codegen, which compute a value and
+// then test it in two steps.
+bool check_zero_cmp_to_s_variant(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset,
+                                 armlint_finding *out);
+
 // Advance the deferred "redundant CMP after S-variant" finding's
 // flag-liveness scan by one instruction. Parallel to
 // armlint_advance_pending; call before per-instruction checks each
 // step. The offset parameter exists for compatibility with the shared
 // armlint_check_fn signature; it is unused.
 bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
+// Advance the deferred "ALU + zero-CMP -> S-variant" finding's
+// flag-liveness scan by one instruction (see
+// check_zero_cmp_to_s_variant). Parallel to armlint_advance_pending;
+// call before per-instruction checks each step. The offset parameter
+// exists for compatibility with the shared armlint_check_fn
+// signature; it is unused.
+bool armlint_advance_pending_zs(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
 // Advance the shared dead-register deferral's forward register-liveness

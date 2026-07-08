@@ -28,8 +28,11 @@ _main:
     cmp     x12, #0
     b.eq    1f
 
-    // Negative: non-S ALU + CMP -- the ADD does not set flags, so
-    // the CMP is necessary.
+    // Negative for THIS check: non-S ALU + CMP -- the ADD does not
+    // set flags, so the CMP is not redundant. It is instead
+    // check_zero_cmp_to_s_variant's positive: converting the ADD to
+    // ADDS makes the CMP droppable (that check's finding appears
+    // here alongside the CBZ fold's).
     add     x13, x14, x15
     cmp     x13, #0
     b.eq    1f

@@ -1,0 +1,89 @@
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x4: -> cbz x0, 0x94 (2 instructions)
+  cmp x0, #0
+  b.eq 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x0: -> adds x0, x1, x2 (drop cmp x0, #0) (3 instructions)
+  add x0, x1, x2
+  cmp x0, #0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x10: -> cbnz x0, 0x94 (2 instructions)
+  cmp x0, #0
+  b.ne 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0xc: -> subs x0, x1, x2 (drop cmp x0, #0) (3 instructions)
+  sub x0, x1, x2
+  cmp x0, #0
+  b.ne 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x1c: -> cbz w0, 0x94 (2 instructions)
+  cmp w0, #0
+  b.eq 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x18: -> adds w0, w1, #0x10 (drop cmp w0, #0) (3 instructions)
+  add w0, w1, #0x10
+  cmp w0, #0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x28: -> cbz x0, 0x94 (2 instructions)
+  cmp x0, #0
+  b.eq 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x24: -> adds x0, x1, w2, uxtw (drop cmp x0, #0) (3 instructions)
+  add x0, x1, w2, uxtw
+  cmp x0, #0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x34: -> cbz w0, 0x94 (2 instructions)
+  tst w0, w0
+  b.eq 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x30: -> ands w0, w1, w2 (drop tst w0, w0) (3 instructions)
+  and w0, w1, w2
+  tst w0, w0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x40: -> cbnz x0, 0x94 (2 instructions)
+  cmp x0, #0
+  b.ne 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x3c: -> ands x0, x1, #0xff (drop cmp x0, #0) (3 instructions)
+  and x0, x1, #0xff
+  cmp x0, #0
+  b.ne 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x4c: -> cbz w0, 0x94 (2 instructions)
+  cmp w0, #0
+  b.eq 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x48: -> bics w0, w1, w2 (drop cmp w0, #0) (3 instructions)
+  bic w0, w1, w2
+  cmp w0, #0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x58: -> cbz x0, 0x94 (2 instructions)
+  cmp x0, #0
+  b.eq 0x94
+
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x54: -> negs x0, x1 (drop cmp x0, #0) (3 instructions)
+  neg x0, x1
+  cmp x0, #0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x64: -> cbz x5, 0x94 (2 instructions)
+  cmp x5, #0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x70: -> cbz x0, 0x94 (2 instructions)
+  cmp x0, #0
+  b.eq 0x94
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x7c: -> cbz x0, 0x94 (2 instructions)
+  cmp x0, #0
+  b.eq 0x94
+
+Optimization opportunities by type:
+      11  compare-zero branch foldable into CBZ/CBNZ
+       8  ADD/SUB/AND/BIC + zero-CMP foldable to S-variant
+
+19 optimization opportunities in 38 instructions
