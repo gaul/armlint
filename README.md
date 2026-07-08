@@ -33,9 +33,18 @@ toward false negatives -- a missed opportunity is cheaper than a wrong
 one. Each check documents the exact conditions under which its rewrite is
 equivalent; the constraints below are the ones they share.
 
-* **Strict adjacency.** A producer and its consumer must be consecutive;
-  an unrelated instruction between them suppresses the finding. armlint
-  does not reorder code or look through intervening instructions.
+* **Strict adjacency for matching; bounded lookahead for proof.** The
+  instructions of a matched pattern must be consecutive -- an
+  unrelated instruction between a producer and its consumer
+  suppresses the finding -- and armlint does not reorder code or
+  match through intervening instructions. Emission, though, is not
+  confined to the pattern window: as the following bullets describe,
+  many findings are held back while a bounded forward scan (16
+  instructions) walks the fall-through path past the consumer to
+  prove a register or the flags dead, so an instruction well after
+  the pair can also suppress a finding. The scan only gates emission
+  -- it never widens a match, so every reported rewrite still
+  replaces only the adjacent instructions shown.
 * **Liveness is proved structurally, or by a bounded forward scan.** A
   producer-into-consumer fold fires when the consumer overwrites the
   producer's destination register, proving the intermediate value is
