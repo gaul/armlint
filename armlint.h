@@ -816,34 +816,43 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                                size_t offset, armlint_finding *out);
 
 // Detect an X-form ADD (shifted-register, LSL #s, non-S-variant)
-// immediately followed by an unsigned-offset LDR with imm12 = 0
-// whose base register and destination register both equal Rd of the
-// ADD. The pair folds to a single register-offset LDR:
+// immediately followed by an unsigned-offset LDR or STR with
+// imm12 = 0 whose base register equals Rd of the ADD. The pair folds
+// to a single register-offset access:
 //   add xt, xn, xm           ; ldr xt, [xt]   -> ldr xt, [xn, xm]
 //   add xt, xn, xm, lsl #s   ; ldr xt, [xt]   -> ldr xt, [xn, xm, lsl #s]
-// The LDR's destination width may be W or X (same register number
+//   add xt, xn, xm           ; str x0, [xt]   -> str x0, [xn, xm]
+// The load's destination width may be W or X (same register number
 // as Xt): writing Wt zeros bits 63..32 of Xt, overwriting the
 // address regardless of size.
 //
 // The sign-extending loads (LDRSB/LDRSH, Wt or Xt; LDRSW) fold
 // identically -- they too overwrite the full X register named by Rt
-// and have register-offset forms. PRFM, which shares the encoding
-// family but whose Rt is a prefetch operation, is excluded.
+// and have register-offset forms -- as do the STRB/STRH/STR stores.
+// PRFM, which shares the encoding family but whose Rt is a prefetch
+// operation, is excluded: the address register can never be proven
+// dead through it structurally, and prefetch-driving code keeps it
+// live.
 //
-// Shift constraint: LDR (register, unsigned-offset variant) accepts
-// only LSL #0 or LSL #log2(access_size). access_size in bytes:
-// 1 for LDRB/LDRSB, 2 for LDRH/LDRSH, 4 for LDR W/LDRSW, 8 for LDR X.
+// Shift constraint: the register-offset forms accept only LSL #0 or
+// LSL #log2(access_size). access_size in bytes: 1 for B, 2 for H,
+// 4 for W/LDRSW, 8 for X.
 //
-// Soundness (conservative): Rd of the ADD must equal Rt of the LDR
-// (the loaded register). The LDR's write to Wt/Xt destroys the
-// pre-LDR address value of Xt, so Xt is dead immediately after the
-// LDR -- the ADD's only consumer was the LDR's base, which is now
-// folded into the LDR's addressing mode. STR is not flagged here
-// because there is no analogous Rd == Rt overwrite to prove Xt dead.
+// Soundness: the rewrite deletes the ADD, so its Rd must be dead
+// afterward. A load whose Rt equals the ADD's Rd proves that
+// structurally (the write to Wt/Xt destroys the address value) and
+// reports immediately. Every other consumer -- a store, or a load
+// into a different register -- defers through the forward
+// register-liveness scan and reports only once a later instruction
+// overwrites the address register before any read or control
+// transfer. A store whose data register is the ADD's Rd never folds:
+// the rewritten store would read the deleted sum. Store findings are
+// reported under the separate name "ADD + STR foldable to
+// register-offset STR".
 //
 // The ADD's Rn = 31 case is excluded because Rn = 31 in
-// shifted-register ADD means XZR, but Rn = 31 in the LDR
-// register-offset form means SP -- the semantic mismatch would make
+// shifted-register ADD means XZR, but Rn = 31 in the register-offset
+// addressing form means SP -- the semantic mismatch would make
 // the rewrite incorrect. Rm = 31 (XZR) in the ADD makes the ADD a
 // MOV-and-rename, an unusual pattern excluded for cleanliness.
 bool check_add_ldr_register_offset(armlint_state *state,
@@ -851,25 +860,34 @@ bool check_add_ldr_register_offset(armlint_state *state,
                                    size_t offset, armlint_finding *out);
 
 // Detect SXTW Xt, Ws immediately followed by a register-offset LDR
-// whose index register and destination both equal Xt. The pair folds
-// the sign-extension into the load's addressing mode:
+// or STR whose index register equals Xt. The pair folds the
+// sign-extension into the access's addressing mode:
 //   sxtw xt, ws ; ldr xt, [xn, xt]          -> ldr xt, [xn, ws, sxtw]
 //   sxtw xt, ws ; ldr xt, [xn, xt, lsl #s]  -> ldr xt, [xn, ws, sxtw #s]
+//   sxtw xt, ws ; str x0, [xn, xt]          -> str x0, [xn, ws, sxtw]
 // This is the array-indexing idiom (a 32-bit signed index into a 64-bit
-// base). All four zero-extending sizes (LDRB/LDRH/LDR W/LDR X) and the
-// sign-extending loads (LDRSB/LDRSH, Wt or Xt; LDRSW) are handled; the
-// scale bit carries over unchanged.
+// base). All four zero-extending sizes (LDRB/LDRH/LDR W/LDR X), the
+// sign-extending loads (LDRSB/LDRSH, Wt or Xt; LDRSW), and the
+// STRB/STRH/STR stores are handled; the scale bit carries over
+// unchanged.
 //
-// Soundness (conservative, mirrors check_add_ldr_register_offset): the
-// consumer must be an integer load (not STR, which has no Rt overwrite,
-// nor PRFM, whose Rt is a prefetch operation, not a destination) using
-// the LSL/UXTX index option (a full 64-bit
-// register offset, equivalent to the SXTW's result), with Rt == Rm == Xt
-// so the load overwrites the index and the extended value is dead. The
-// base Rn must NOT be Xt: with the SXTW folded away the base would read
-// its pre-SXTW value, changing the address. SXTW into ZR is excluded.
-// Only SXTW is matched (the load index extend is word-width; a standalone
-// 32->64 zero-extend is normally a W-register MOV, not a literal UXTW).
+// Soundness (mirrors check_add_ldr_register_offset): the consumer
+// must use the LSL/UXTX index option (a full 64-bit register offset,
+// equivalent to the SXTW's result) with Rm == Xt. The rewrite
+// deletes the SXTW, so Xt must be dead afterward: a load whose
+// Rt == Xt proves that structurally and reports immediately; a
+// store, or a load into a different register, defers through the
+// forward register-liveness scan and reports only once Xt is
+// provably overwritten before any read or control transfer. A store
+// whose data register is Xt never folds (the rewritten store would
+// read the deleted extend), and PRFM is excluded (its Rt is a
+// prefetch operation, not a destination). The base Rn must NOT be
+// Xt: with the SXTW folded away the base would read its pre-SXTW
+// value, changing the address. SXTW into ZR is excluded. Only SXTW
+// is matched (the load index extend is word-width; a standalone
+// 32->64 zero-extend is normally a W-register MOV, not a literal
+// UXTW). Store findings are reported under the separate name "SXTW +
+// register-offset STR foldable into the store".
 bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
 
@@ -913,29 +931,37 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
 
 // Detect an X-form ADD-immediate (non-S-variant) immediately followed
-// by an unsigned-offset LDR whose base register and destination
-// register both equal Rd of the ADD. The pair folds to a single
-// immediate-offset LDR, summing the two displacements:
+// by an unsigned-offset LDR or STR whose base register equals Rd of
+// the ADD. The pair folds to a single immediate-offset access,
+// summing the two displacements:
 //   add xt, xn, #a  ; ldr xt, [xt]      -> ldr xt, [xn, #a]
 //   add xt, sp, #a  ; ldr xt, [xt]      -> ldr xt, [sp, #a]
 //   add xt, xn, #a  ; ldr xt, [xt, #b]  -> ldr xt, [xn, #(a+b)]
-// The LDR's destination width may be W or X (same register number as
+//   add xt, sp, #a  ; str x0, [xt]      -> str x0, [sp, #a]
+// The load's destination width may be W or X (same register number as
 // Xt): writing Wt zeros bits 63..32 of Xt, overwriting the address
-// regardless of size. LDRB/LDRH and the sign-extending
-// LDRSB/LDRSH/LDRSW consumers fold the same way (PRFM is excluded:
-// its Rt is a prefetch operation, not a destination).
+// regardless of size. LDRB/LDRH, the sign-extending
+// LDRSB/LDRSH/LDRSW, and the STRB/STRH/STR store consumers fold the
+// same way (PRFM is excluded: its Rt is a prefetch operation, not a
+// destination).
 //
 // Encoding constraint: the combined byte offset must be a multiple of
-// the LDR's access size and its scaled value must fit in 12 bits. The
-// LDR's own imm12 is already a multiple of access_size, so alignment
-// is determined solely by the ADD's byte immediate. The ADD's sh=1
-// form (imm12 << 12) is supported.
+// the access size and its scaled value must fit in 12 bits. The
+// access's own imm12 is already a multiple of access_size, so
+// alignment is determined solely by the ADD's byte immediate. The
+// ADD's sh=1 form (imm12 << 12) is supported.
 //
-// Soundness (conservative): Rd of the ADD must equal Rt of the LDR
-// (the loaded register), so the LDR's write to Wt/Xt destroys the
-// pre-LDR address value of Xt and the ADD's only consumer was the
-// LDR's base. STR is not flagged here because there is no analogous
-// Rd == Rt overwrite to prove Xt dead.
+// Soundness: the rewrite deletes the ADD, so its Rd must be dead
+// afterward. A load whose Rt equals the ADD's Rd proves that
+// structurally (the write to Wt/Xt destroys the address value) and
+// reports immediately. Every other consumer -- a store, or a load
+// into a different register -- defers through the forward
+// register-liveness scan and reports only once a later instruction
+// overwrites the address register before any read or control
+// transfer. A store whose data register is the ADD's Rd never folds:
+// the rewritten store would read the deleted sum. Store findings are
+// reported under the separate name "ADD + STR foldable to
+// immediate-offset STR".
 //
 // Rn = 31 in the ADD-immediate form means SP (not XZR), and Rn = 31
 // in the LDR unsigned-offset form also means SP -- so this is the
@@ -1016,19 +1042,24 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
 // admitted up to the largest pair writeback (1008/1024) and the
 // consumer's actual range is re-checked at close.
 //
-// Soundness: distinct from check_add_ldr_imm_offset, which catches
-// the related pattern where the LDR's Rt also equals the ADD's Rd
-// (folding to the unsigned-offset form with no writeback). When
-// Rt == Rd, that earlier check fires and pre-index is rejected here
-// because Rt == Rn writeback is UNPREDICTABLE (CONSTRAINED for
-// stores); for pairs that applies to either data register, and a
-// load pair with Rt == Rt2 (CONSTRAINED UNPREDICTABLE on its own) is
-// never folded. The Rn == 31 case is allowed: Rn means SP and Rt
-// means XZR, so the two encode distinct registers. The access's
-// offset must be 0; a non-zero offset combined with a base bump has
-// no pre-index expression that preserves both the access address and
-// the final base value. Same code-size/decode-slot win as
-// post-index; no backend throughput change on most OoO cores.
+// Soundness: overlaps check_add_ldr_imm_offset, which catches the
+// same ADD + access shape and folds to the unsigned-offset form with
+// no writeback. When Rt == Rd, only that check fires -- pre-index is
+// rejected here because Rt == Rn writeback is UNPREDICTABLE
+// (CONSTRAINED for stores); for pairs that applies to either data
+// register, and a load pair with Rt == Rt2 (CONSTRAINED
+// UNPREDICTABLE on its own) is never folded. When Rt != Rd both can
+// fire: pre-index reports immediately, and the immediate-offset fold
+// additionally reports once the forward scan proves the updated base
+// dead -- there the writeback is pointless and its no-writeback
+// rewrite is strictly better, so the two findings offer alternative
+// outcomes, like the CMP-drop/CBZ-fold overlap. The Rn == 31 case is
+// allowed: Rn means SP and Rt means XZR, so the two encode distinct
+// registers. The access's offset must be 0; a non-zero offset
+// combined with a base bump has no pre-index expression that
+// preserves both the access address and the final base value. Same
+// code-size/decode-slot win as post-index; no backend throughput
+// change on most OoO cores.
 bool check_add_ldr_str_pre_indexed(armlint_state *state,
                                    const cs_insn *insn,
                                    size_t offset, armlint_finding *out);
@@ -1099,11 +1130,16 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
-// Advance the deferred "MOV #0 + use foldable to ZR" finding's forward
-// register-liveness scan by one instruction. Parallel to
-// armlint_advance_pending; call before per-instruction checks each step. The
-// offset parameter exists for compatibility with the shared armlint_check_fn
-// signature; it is unused.
+// Advance the shared dead-register deferral's forward register-liveness
+// scan by one instruction. This slot gates every fold whose rewrite
+// deletes the producer of a register that no consumer overwrite proves
+// dead: the MOV-chain folds (MOV #0 -> ZR, the strength reductions,
+// the immediate/offset/FMOV folds), the BFXIL/BFI synthesis, the CSET
+// inversion folds, and the address folds' store and fresh-destination
+// load consumers. Parallel to armlint_advance_pending; call before
+// per-instruction checks each step. The offset parameter exists for
+// compatibility with the shared armlint_check_fn signature; it is
+// unused.
 bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 

@@ -18,11 +18,24 @@ SXTW + register-offset LDR foldable into the load at offset: 0x20: -> ldr x0, [s
   sxtw x0, w1
   ldr x0, [sp, x0]
 
+SXTW + register-offset LDR foldable into the load at offset: 0x28: -> ldr x2, [x3, w1, sxtw] (2 instructions)
+  sxtw x0, w1
+  ldr x2, [x3, x0]
+
 SXTW + register-offset LDR foldable into the load at offset: 0x40: -> ldrsw x0, [x3, w1, sxtw #2] (2 instructions)
   sxtw x0, w1
   ldrsw x0, [x3, x0, lsl #2]
 
-Optimization opportunities by type:
-       6  SXTW + register-offset LDR foldable into the load
+SXTW + register-offset STR foldable into the store at offset: 0x50: -> str x5, [x3, w1, sxtw] (2 instructions)
+  sxtw x0, w1
+  str x5, [x3, x0]
 
-6 optimization opportunities in 21 instructions
+SXTW + register-offset STR foldable into the store at offset: 0x5c: -> str w5, [x3, w1, sxtw #2] (2 instructions)
+  sxtw x0, w1
+  str w5, [x3, x0, lsl #2]
+
+Optimization opportunities by type:
+       7  SXTW + register-offset LDR foldable into the load
+       2  SXTW + register-offset STR foldable into the store
+
+9 optimization opportunities in 31 instructions

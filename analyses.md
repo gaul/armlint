@@ -1238,18 +1238,25 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Shift constraint: AArch64's LDR (register) accepts only LSL #0
   or LSL #log2(access\_size) -- 0 or 1 for LDRH, 0 or 2 for LDR W,
   0 or 3 for LDR X. The check filters to those amounts.
-* Conservative soundness: Rd of the ADD must equal Rt of the LDR
-  (the loaded register). The LDR's write to Wt/Xt destroys the
-  pre-LDR address value of Xt, so Xt's only consumer was the
-  LDR itself.
+* Soundness: the rewrite deletes the ADD, so its destination must be
+  dead afterward. A load whose `Rt` equals the ADD's Rd proves that
+  structurally -- the write to Wt/Xt destroys the pre-LDR address
+  value -- and reports immediately.
 * The sign-extending loads (`LDRSB`/`LDRSH`, Wt or Xt; `LDRSW`) fold
   identically: they too overwrite the full X register named by `Rt`
   (a W-form write zeros the upper half) and have register-offset
   forms with the same shift rule. `PRFM`, which shares the encoding
   family, is excluded -- its `Rt` field is a prefetch operation, not
   a destination, so the address register stays live.
-* STR is intentionally not flagged: there is no analogous
-  Rd-overwrite to prove Xt is dead after the store.
+* Stores and fresh-destination loads fold too, through the deferred
+  tier: `add xt, xn, xm ; str x0, [xt]` -> `str x0, [xn, xm]` (same
+  for `STRB`/`STRH`, reported as "ADD + STR foldable to
+  register-offset STR"), and `add xt, xn, xm ; ldr xq, [xt]` with
+  `xq != xt`. Neither consumer overwrites `xt`, so emission defers
+  through the forward register-liveness scan and reports only once a
+  later instruction overwrites `xt` before any read or control
+  transfer. A store whose data register is `xt` never folds -- the
+  rewritten store would read the deleted sum.
 * Rn = XZR in the ADD is excluded because Rn = 31 in the LDR's
   register-offset form means SP, a semantic mismatch. Rm = XZR
   (degenerate ADD) is skipped for cleanliness.
@@ -1262,22 +1269,28 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   * `sxtw x0, w1 ; ldr x0, [x3, x0]` -> `ldr x0, [x3, w1, sxtw]`
   * `sxtw x0, w1 ; ldr x0, [x3, x0, lsl #3]`
     -> `ldr x0, [x3, w1, sxtw #3]`
-  All four zero-extending sizes (LDRB/LDRH/LDR W/LDR X) and the
-  sign-extending loads (`LDRSB`/`LDRSH`, Wt or Xt; `LDRSW`) are
-  handled, and the scale bit carries over.
+  All four zero-extending sizes (LDRB/LDRH/LDR W/LDR X), the
+  sign-extending loads (`LDRSB`/`LDRSH`, Wt or Xt; `LDRSW`), and the
+  `STRB`/`STRH`/`STR` stores are handled, and the scale bit carries
+  over.
 * Why it helps: one fewer instruction, and the sign-extend leaves the
   critical path -- the load's address-generation unit does it for free
   rather than a separate dependent op feeding the load. (Same profile
   as the LSL/extend folds; this is the load-addressing form of it.)
-* Soundness (conservative, mirrors the `ADD + LDR` register-offset
-  check): the consumer must be an integer load (not `STR` -- no `Rt`
-  overwrite to prove the index dead -- nor `PRFM`, whose `Rt` is a
-  prefetch operation rather than a destination) using
-  the LSL/UXTX index option (a full 64-bit register offset, identical
-  to the `SXTW` result), with `Rt == Rm == Xt` so the load overwrites
-  the index. The base `Rn` must NOT be `Xt`: with the `SXTW` folded
-  away the base would read its pre-`SXTW` value, changing the address.
-  `SXTW` into ZR is excluded.
+* Soundness (mirrors the `ADD + LDR` register-offset check): the
+  consumer must use the LSL/UXTX index option (a full 64-bit register
+  offset, identical to the `SXTW` result) with `Rm == Xt`. The rewrite
+  deletes the `SXTW`, so `Xt` must be dead afterward: a load with
+  `Rt == Xt` proves that structurally and reports immediately; a store
+  (reported as "SXTW + register-offset STR foldable into the store"),
+  or a load into a different register, defers through the forward
+  register-liveness scan until `Xt` is provably overwritten before any
+  read or control transfer. A store whose data register is `Xt` never
+  folds (the rewritten store would read the deleted extend's result),
+  and `PRFM` is excluded (its `Rt` is a prefetch operation rather than
+  a destination). The base `Rn` must NOT be `Xt`: with the `SXTW`
+  folded away the base would read its pre-`SXTW` value, changing the
+  address. `SXTW` into ZR is excluded.
 * Only `SXTW` is matched: the load-index extend is word-width, and a
   standalone 32->64 zero-extend is normally a `W`-register `MOV`, not a
   literal `UXTW` instruction.
@@ -1334,14 +1347,26 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * `add xt, xn, #a ; ldr xt, [xt, #b]` -> `ldr xt, [xn, #(a+b)]`,
   with `b == 0` the most common case. The immediate-form
-  complement of the register-offset fold: same Rd-overwrite
+  complement of the register-offset fold: same deadness
   soundness argument, but the ADD's constant offset (plus the
-  LDR's, if any) moves into the LDR's unsigned immediate slot.
+  access's, if any) moves into the unsigned immediate slot.
   The sign-extending loads (`LDRSB`/`LDRSH`, Wt or Xt; `LDRSW`)
   fold the same way -- they too overwrite the full X register named
   by `Rt` and have unsigned-offset forms; `PRFM` is excluded (its
   `Rt` is a prefetch operation, so the address register stays
   live).
+* Stores and fresh-destination loads fold through the deferred tier
+  (mirroring the register-offset check): `add xt, xn, #a ;
+  str x0, [xt, #b]` -> `str x0, [xn, #(a+b)]` (same for
+  `STRB`/`STRH`, reported as "ADD + STR foldable to immediate-offset
+  STR"), and `add xt, xn, #a ; ldr xq, [xt]` with `xq != xt`.
+  Neither consumer overwrites `xt`, so emission defers through the
+  forward register-liveness scan and reports only once `xt` is
+  provably overwritten before any read or control transfer. A store
+  whose data register is `xt` never folds (the rewritten store would
+  read the deleted sum). The canonical stack-spill-through-a-temp --
+  `add x8, sp, #32 ; str x0, [x8]` -> `str x0, [sp, #0x20]` -- is
+  the flagship store shape.
 * Encoding constraint: the combined byte offset must be a multiple
   of the LDR's access size and its scaled value must fit in 12
   bits. The LDR's own imm12 is already a multiple of access_size,
@@ -1465,6 +1490,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   to the unsigned-offset form (no writeback) -- but only for `ADD`,
   since the unsigned-offset form has no negative immediate, so a
   `SUB` with Rt == Rn yields no finding at all. When Rt != Rn but
-  rn == ADD's/SUB's Rd, only this check fires. So the checks together
-  cover the full ADD/SUB + LDR/STR space without double-firing on the
-  same pair.
+  rn == ADD's Rd, both can fire: this check reports the pre-indexed
+  form immediately, and the immediate-offset fold additionally
+  reports once its forward scan proves the updated base dead -- the
+  writeback is pointless for a dead base, so its no-writeback rewrite
+  is strictly better there. The two findings offer alternative
+  outcomes, like the CMP-drop/CBZ-fold overlap.

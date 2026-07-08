@@ -7333,6 +7333,67 @@ static void test_add_ldr_register_offset(void)
     add_x_lsl(&code[0], 3, 1, 2, 0);
     encode_ldr_imm(&code[4], 0xF9800000u, 3, 3, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Store consumers and fresh-destination loads: no Rt overwrite
+    //    proves the address register dead, so emission defers through
+    //    the forward register-liveness scan; run_reg_dead appends the
+    //    kill that lets the deferred finding emit. --
+
+    // add x3, x1, x2 ; str x0, [x3] ; (x3 dies)
+    //   -> str x0, [x1, x2] (flag).
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    str_x_uimm(&code[4], 0, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Without the kill the address register is never proven dead;
+    // the deferred finding is (correctly) not emitted.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    str_x_uimm(&code[4], 0, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Scaled store: add x3, x1, x2, lsl #3 ; str x0, [x3] ; (x3 dies)
+    //   -> str x0, [x1, x2, lsl #3] (flag).
+    add_x_lsl(&code[0], 3, 1, 2, 3);
+    str_x_uimm(&code[4], 0, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Shift/scale mismatch stays excluded for stores (LSL #2 with an
+    // X-size store needs #0 or #3).
+    add_x_lsl(&code[0], 3, 1, 2, 2);
+    str_x_uimm(&code[4], 0, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 0);
+
+    // Zero store through the computed address: str xzr, [x3] renders
+    // the Rt as xzr and folds the same way.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    str_x_uimm(&code[4], 31, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Store data == the address register (str x3, [x3]): the rewrite
+    // would read the deleted sum; never folds, kill or no kill.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    str_x_uimm(&code[4], 3, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 0);
+
+    // Fresh-destination load: add x3, x1, x2 ; ldr x7, [x3] ; (x3
+    // dies) -> ldr x7, [x1, x2] (flag). The bare pair without the
+    // kill is the "Rt != ADD's Rd" negative above.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    ldr_x_uimm0(&code[4], 7, 3);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // A read of the address register before the kill keeps it live;
+    // the deferred finding is discarded.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    str_x_uimm(&code[4], 0, 3, 0);
+    add_x(&code[8], 5, 3, 6);
+    assert(run_reg_dead(code, 12, 3) == 0);
+
+    // A control transfer discards the deferral.
+    add_x_lsl(&code[0], 3, 1, 2, 0);
+    str_x_uimm(&code[4], 0, 3, 0);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 0);
 }
 
 // Register-offset LDR/STR: size 111 0 00 opc 1 Rm option S 10 Rn Rt.
@@ -7389,7 +7450,8 @@ static void test_sxtw_ldr_fold(void)
 
     // -- Negatives. --
 
-    // Rt != index (the SXTW result would still be live).
+    // Rt != index with no later kill: the SXTW result is never proven
+    // dead, so the deferred finding is (correctly) not emitted.
     sxtw_x(&code[0], 0, 1);
     ldr_ro(&code[4], 3, 1, 0, 3, 0, 3, 2);   // ldr x2, [x3, x0]
     assert(run_helper_check(code, 8) == 0);
@@ -7405,10 +7467,12 @@ static void test_sxtw_ldr_fold(void)
     ldr_ro(&code[4], 3, 1, 0, 6, 0, 3, 0);
     assert(run_helper_check(code, 8) == 0);
 
-    // Store (opc=0): no Rt overwrite to prove the index dead.
+    // Store whose data register IS the index (str x0, [x3, x0]): the
+    // rewrite would read the deleted extend's result; never folds,
+    // kill or no kill.
     sxtw_x(&code[0], 0, 1);
     ldr_ro(&code[4], 3, 0, 0, 3, 0, 3, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_x0_dead(code, 8) == 0);
 
     // SXTB producer is not a 32->64 index extend.
     sxtb_x(&code[0], 0, 1);
@@ -7452,6 +7516,40 @@ static void test_sxtw_ldr_fold(void)
     sxtw_x(&code[0], 0, 1);
     ldr_ro(&code[4], 3, 2, 0, 3, 0, 3, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Store consumers and fresh-destination loads: no Rt overwrite
+    //    proves the index dead, so emission defers through the forward
+    //    register-liveness scan until the appended kill. --
+
+    // sxtw x0, w1 ; str x5, [x3, x0] ; (x0 dies)
+    //   -> str x5, [x3, w1, sxtw] (flag).
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 0, 0, 3, 0, 3, 5);
+    assert(run_x0_dead(code, 8) == 1);
+
+    // Scaled W store: sxtw x0, w1 ; str w5, [x3, x0, lsl #2] ;
+    // (x0 dies) -> str w5, [x3, w1, sxtw #2] (flag).
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 2, 0, 0, 3, 1, 3, 5);
+    assert(run_x0_dead(code, 8) == 1);
+
+    // Without the kill the index is never proven dead; no finding.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 0, 0, 3, 0, 3, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Fresh-destination load: sxtw x0, w1 ; ldr x2, [x3, x0] ;
+    // (x0 dies) -> ldr x2, [x3, w1, sxtw] (flag). The bare pair is
+    // the no-kill negative above.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 1, 0, 3, 0, 3, 2);
+    assert(run_x0_dead(code, 8) == 1);
+
+    // A read of the index before the kill keeps it live.
+    sxtw_x(&code[0], 0, 1);
+    ldr_ro(&code[4], 3, 0, 0, 3, 0, 3, 5);
+    add_x(&code[8], 6, 0, 7);
+    assert(run_x0_dead(code, 12) == 0);
 }
 
 static void test_ldr_sext_fold(void)
@@ -8176,6 +8274,77 @@ static void test_add_ldr_imm_offset(void)
     add_x_imm(&code[0], 3, 1, 16);
     ldrsh_x(&code[4], 3, 3, 0);
     assert(run_helper_check(code, 8) == 1);
+
+    // -- Store consumers and fresh-destination loads: no Rt overwrite
+    //    proves the address register dead, so emission defers through
+    //    the forward register-liveness scan; run_reg_dead appends the
+    //    kill that lets the deferred finding emit. --
+
+    // add x8, x1, #16 ; str x0, [x8] ; (x8 dies)
+    //   -> str x0, [x1, #0x10] (flag).
+    add_x_imm(&code[0], 8, 1, 16);
+    str_x_uimm(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Without the kill the address register is never proven dead;
+    // no finding.
+    add_x_imm(&code[0], 8, 1, 16);
+    str_x_uimm(&code[4], 0, 8, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Stack spill through a temp: add x8, sp, #32 ; str x0, [x8] ;
+    // (x8 dies) -> str x0, [sp, #0x20] (flag).
+    add_x_imm(&code[0], 8, 31, 32);
+    str_x_uimm(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // MOV-from-SP alias: mov x8, sp ; str x0, [x8] ; (x8 dies)
+    //   -> str x0, [sp] (flag).
+    add_x_imm(&code[0], 8, 31, 0);
+    str_x_uimm(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // The store's own offset combines: add x8, x1, #16 ;
+    // str x0, [x8, #8] ; (x8 dies) -> str x0, [x1, #0x18] (flag).
+    add_x_imm(&code[0], 8, 1, 16);
+    str_x_uimm(&code[4], 0, 8, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Zero store: str xzr, [x8] renders the Rt as xzr and folds.
+    add_x_imm(&code[0], 8, 1, 16);
+    str_x_uimm(&code[4], 31, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Misaligned ADD immediate for the store's access size never
+    // folds (4 is not a multiple of 8).
+    add_x_imm(&code[0], 8, 1, 4);
+    str_x_uimm(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Store data == the address register (str x8, [x8]): the rewrite
+    // would read the deleted sum; never folds, kill or no kill.
+    add_x_imm(&code[0], 8, 1, 16);
+    str_x_uimm(&code[4], 8, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Fresh-destination load: add x8, x1, #16 ; ldr x0, [x8] ;
+    // (x8 dies) -> ldr x0, [x1, #0x10] (flag). This is the earlier
+    // "Rt != ADD's Rd" negative plus the kill.
+    add_x_imm(&code[0], 8, 1, 16);
+    ldr_x_uimm0(&code[4], 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // MOV-from-SP feeding a load of another register, with the kill:
+    // mov x8, sp ; ldr x0, [x8] ; (x8 dies) -> ldr x0, [sp] (flag).
+    add_x_imm(&code[0], 8, 31, 0);
+    ldr_x_uimm0(&code[4], 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A read of the address register before the kill keeps it live.
+    add_x_imm(&code[0], 8, 1, 16);
+    str_x_uimm(&code[4], 0, 8, 0);
+    add_x(&code[8], 5, 8, 6);
+    assert(run_reg_dead(code, 12, 8) == 0);
 }
 
 static void test_ldr_str_add_post_indexed(void)

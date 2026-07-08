@@ -54,9 +54,12 @@ _main:
     add     x3, x1, #16
     ldr     x3, [x5]
 
-    // N5) LDR Rt != ADD's Rd (would leave x3 live).
+    // P) Fresh-destination load: ldr x7 leaves x3 live at the
+    // consumer, so emission defers through the forward register-
+    // liveness scan -- and the next line's add overwrites x3,
+    // proving it dead, so the deferred finding emits.
     add     x3, x1, #16
-    ldr     x7, [x3]
+    ldr     x7, [x3]                // -> ldr x7, [x1, #16]
 
     // N6) Combined offset out of X-form range: 0x7000 + 0x1000 = 0x8000,
     //     0x8000/8 = 4096 > 4095.
@@ -86,10 +89,48 @@ _main:
     mov     x8, sp
     ldr     x8, [x8, #16]           // -> ldr x8, [sp, #16]
 
-    // N9) MOV-from-SP feeding a load of another register: Rt != Rd
-    //     leaves the copy alive (outside the structural-deadness
-    //     tier).
+    // P) MOV-from-SP feeding a load of another register: defers on
+    //    x8, and the next block's add overwrites it, so the deferred
+    //    finding emits.
     mov     x8, sp
-    ldr     x0, [x8]
+    ldr     x0, [x8]                // -> ldr x0, [sp]
+
+    // Store consumers (deferred): a store never overwrites the
+    // address register, so emission waits until the forward scan
+    // sees it die.
+
+    // P) Field store through a temp; x8 dies at the trailing mov.
+    add     x8, x1, #16
+    str     x0, [x8]                // -> str x0, [x1, #16]
+    mov     x8, #1
+
+    // P) Stack spill through a temp.
+    add     x8, sp, #32
+    str     x0, [x8]                // -> str x0, [sp, #32]
+    mov     x8, #2
+
+    // P) MOV-from-SP + zero store, with the store's own offset.
+    mov     x8, sp
+    str     xzr, [x8, #8]           // -> str xzr, [sp, #8]
+    mov     x8, #3
+
+    // N10) Store data == address register: the rewrite would read
+    //      the deleted sum; never folds.
+    add     x8, x1, #16
+    str     x8, [x8]
+    mov     x8, #4
+
+    // N11) The address register is read again before dying: the
+    //      deferred finding is discarded (the ADD must stay).
+    add     x8, x1, #16
+    str     x0, [x8]
+    add     x5, x8, #1
+    mov     x8, #5
+
+    // N12) A deferral cut short by an unsafe terminator: the RET ends
+    //      the scan before x9 is ever proven dead, so nothing is
+    //      emitted.
+    add     x9, x1, #16
+    str     x0, [x9]
 
     ret

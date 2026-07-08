@@ -46,9 +46,12 @@ _main:
     add     x3, x1, x2
     ldr     x3, [x5]
 
-    // N4) LDR Rt != ADD's Rd (Xt would be alive after).
+    // P) Fresh-destination load: ldr x7 leaves x3 live at the
+    // consumer, so emission defers through the forward register-
+    // liveness scan -- and the next line's add overwrites x3,
+    // proving it dead, so the deferred finding emits.
     add     x3, x1, x2
-    ldr     x7, [x3]
+    ldr     x7, [x3]                // -> ldr x7, [x1, x2]
 
     // N5) LDR with non-zero immediate.
     add     x3, x1, x2
@@ -73,5 +76,30 @@ _main:
     // operation, not a destination; the address register stays live.
     add     x3, x1, x2
     prfm    pldl1keep, [x3]
+
+    // Store consumers (deferred): a store never overwrites the
+    // address register, so emission waits until the forward scan
+    // sees it die.
+
+    // P) X store; x3 dies at the trailing mov.
+    add     x3, x1, x2
+    str     x0, [x3]                // -> str x0, [x1, x2]
+    mov     x3, #1
+
+    // P) Scaled store.
+    add     x3, x1, x2, lsl #3
+    str     x0, [x3]                // -> str x0, [x1, x2, lsl #3]
+    mov     x3, #2
+
+    // P) Zero store renders wzr/xzr.
+    add     x3, x1, x2
+    str     xzr, [x3]               // -> str xzr, [x1, x2]
+    mov     x3, #3
+
+    // N9) Store data == address register: the rewrite would read the
+    // deleted sum; never folds.
+    add     x3, x1, x2
+    str     x3, [x3]
+    mov     x3, #4
 
     ret

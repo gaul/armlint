@@ -2484,7 +2484,11 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
 // now. Shared by every fold that deletes the producer of `reg`: the
 // MOV-chain folds (strength reductions, immediate/offset/FMOV folds,
 // MOV #0 -> ZR), the BFXIL/BFI synthesis (which drops the isolate's
-// temp register), and the CSET inversion folds (EOR #1 / NEG).
+// temp register), the CSET inversion folds (EOR #1 / NEG), and the
+// ADD/SXTW address folds' store and fresh-destination load consumers
+// (which drop the address computation). One slot: a second deferral
+// arriving while one is pending replaces it, silently dropping the
+// earlier finding -- a sound (false-negative-only) simplification.
 static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
                            unsigned reg)
 {
@@ -7467,6 +7471,24 @@ static bool decode_int_load_uimm(uint32_t op, unsigned *out_size,
     return true;
 }
 
+// Store counterpart of classify_int_load: opc == 00 is
+// STRB/STRH/STR W/STR X by size. The data register Rt is read, not
+// written -- which matters to the callers' deadness reasoning (a
+// store never kills the constant or address register it consumes).
+static bool classify_int_store(unsigned size, unsigned opc,
+                               const char **out_mnem, char *out_rt_wx)
+{
+    static const char *const store_mnem[4] = {
+        "strb", "strh", "str", "str"
+    };
+    if (opc != 0) {
+        return false;
+    }
+    *out_mnem = store_mnem[size];
+    *out_rt_wx = (size == 3u) ? 'x' : 'w';
+    return true;
+}
+
 // Decode X-form ADD (immediate), non-S-variant. ADD-imm uses
 // sf 0 0 100010 sh imm12 Rn Rd; sf=1, op=0, S=0 -> base 0x91000000,
 // mask 0xFF800000 (bits 31..23). sh (bit 22) is a free field: when
@@ -7527,48 +7549,74 @@ bool check_add_ldr_register_offset(armlint_state *state,
 
     bool produced = false;
 
-    // (1) Try to close: is this an integer load (zero- or
-    //     sign-extending; see classify_int_load) consuming the pending
-    //     ADD? A sign-extending consumer folds identically: it too
+    // (1) Try to close: is this an unsigned-offset, zero-imm12 integer
+    //     load or store consuming the pending ADD as its base? A
+    //     sign-extending load folds identically to a plain one: it too
     //     overwrites the full X register named by Rt, and the
-    //     register-offset LDRS* forms exist for every accepted pair.
+    //     register-offset LDRS*/STR* forms exist for every accepted
+    //     pair. The rewrite deletes the ADD, so the address register
+    //     must be dead afterward: a load whose Rt IS the address
+    //     register proves that on the spot, and every other consumer
+    //     -- a store, or a load into a different register -- defers
+    //     through the forward register-liveness scan until the address
+    //     register is provably overwritten before any read.
     if (state->add_pending) {
-        unsigned size, imm12, ldr_rn, ldr_rt;
-        const char *ldr_mnem;
+        unsigned size, imm12, ls_rn, ls_rt;
+        const char *ls_mnem;
         char rt_wx;
-        if (decode_int_load_uimm(op, &size, &ldr_mnem, &rt_wx,
-                                 &imm12, &ldr_rn, &ldr_rt)
-                && imm12 == 0
-                && ldr_rn == state->add_pending_rd
-                && ldr_rt == state->add_pending_rd) {
-            // The load's register-offset form accepts only two shift
+        bool is_store = false;
+        bool matched = decode_int_load_uimm(op, &size, &ls_mnem, &rt_wx,
+                                            &imm12, &ls_rn, &ls_rt);
+        if (!matched
+                && decode_str_uimm_any_size(op, &size, &imm12,
+                                            &ls_rn, &ls_rt)
+                && classify_int_store(size, 0u, &ls_mnem, &rt_wx)) {
+            matched = true;
+            is_store = true;
+        }
+        // A store whose data register is the ADD's Rd cannot fold:
+        // the rewritten store would read the deleted sum.
+        if (matched && imm12 == 0
+                && ls_rn == state->add_pending_rd
+                && !(is_store && ls_rt == state->add_pending_rd)) {
+            // The register-offset form accepts only two shift
             // amounts: 0 or log2(access_size). size encodes log2
             // directly: 0=B, 1=H, 2=W, 3=X.
             unsigned s = state->add_pending_shift;
             if (s == 0 || s == size) {
-                out->name = "ADD + LDR foldable to register-offset LDR";
+                // Rt = 31 is WZR/XZR here (a zero store, or a load to
+                // the discard register), never SP.
+                char rt_buf[8];
+                format_reg(rt_buf, sizeof(rt_buf), rt_wx, ls_rt);
+                out->name = is_store
+                    ? "ADD + STR foldable to register-offset STR"
+                    : "ADD + LDR foldable to register-offset LDR";
                 out->start_offset = state->add_pending_offset;
                 out->insn_count = 2;
                 clear_finding_strings(out);
 
                 if (s == 0) {
                     snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, [x%u, x%u]",
-                        ldr_mnem, rt_wx, ldr_rt,
+                        "-> %s %s, [x%u, x%u]",
+                        ls_mnem, rt_buf,
                         state->add_pending_rn, state->add_pending_rm);
                 } else {
                     snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, [x%u, x%u, lsl #%u]",
-                        ldr_mnem, rt_wx, ldr_rt,
+                        "-> %s %s, [x%u, x%u, lsl #%u]",
+                        ls_mnem, rt_buf,
                         state->add_pending_rn, state->add_pending_rm,
                         s);
                 }
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->add_pending_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %c%u, [x%u]",
-                    ldr_mnem, rt_wx, ldr_rt, ldr_rn);
-                produced = true;
+                    "%s %s, [x%u]",
+                    ls_mnem, rt_buf, ls_rn);
+                if (!is_store && ls_rt == state->add_pending_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, state->add_pending_rd);
+                }
             }
         }
         // Strict adjacency: clear regardless of match.
@@ -7642,24 +7690,39 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
 
     bool produced = false;
 
-    // (1) Try to close: a register-offset LDR that uses the SXTW result
-    //     as a plain X-register index and loads back into it?
+    // (1) Try to close: a register-offset load or store that uses the
+    //     SXTW result as a plain X-register index? The rewrite deletes
+    //     the SXTW, so the extended index must be dead afterward: a
+    //     load whose Rt IS the index proves that on the spot (it
+    //     overwrites the full X register), and every other consumer --
+    //     a store, or a load into a different register -- defers
+    //     through the forward register-liveness scan until the index
+    //     is provably overwritten before any read.
     if (state->sxl_pending) {
         unsigned size, opc, rm, option, s, rn, rt;
-        const char *ldr_mnem;
+        const char *ls_mnem;
         char rt_wx;
+        bool is_store = false;
+        bool classified = false;
         if (decode_ldr_reg_offset(op, &size, &opc, &rm, &option, &s,
-                                  &rn, &rt)
-                // Any integer load, zero- or sign-extending (not STR,
-                // whose Rt is read, nor PRFM, whose Rt is a prefetch
-                // op). Every accepted load overwrites the full X
-                // register named by Rt, so the index-deadness proof is
-                // the same for the LDRS* forms.
-                && classify_int_load(size, opc, &ldr_mnem, &rt_wx)
+                                  &rn, &rt)) {
+            // Any integer load, zero- or sign-extending, or STRB/STRH/
+            // STR (not PRFM, whose Rt is a prefetch op, so the index
+            // register can never be proven dead through it).
+            classified = classify_int_load(size, opc, &ls_mnem, &rt_wx);
+            if (!classified
+                    && classify_int_store(size, opc, &ls_mnem, &rt_wx)) {
+                classified = true;
+                is_store = true;
+            }
+        }
+        // A store whose data register is the index cannot fold: the
+        // rewritten store would read the deleted extend's result.
+        if (classified
                 && option == 3u         // LSL/UXTX: a full 64-bit offset
                 && rm == state->sxl_rd  // index is the SXTW result
-                && rt == state->sxl_rd  // the load overwrites it (dead)
-                && rn != state->sxl_rd) {
+                && rn != state->sxl_rd
+                && !(is_store && rt == state->sxl_rd)) {
             // Rn == index would make the fold read the base's pre-SXTW
             // value (the SXTW is removed), changing the address; excluded
             // above. The scale bit S carries over unchanged: it scales
@@ -7670,30 +7733,40 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
             } else {
                 snprintf(base_buf, sizeof(base_buf), "x%u", rn);
             }
+            // Rt = 31 is WZR/XZR here (a zero store, or a load to the
+            // discard register), never SP.
+            char rt_buf[8];
+            format_reg(rt_buf, sizeof(rt_buf), rt_wx, rt);
 
-            out->name = "SXTW + register-offset LDR foldable into the load";
+            out->name = is_store
+                ? "SXTW + register-offset STR foldable into the store"
+                : "SXTW + register-offset LDR foldable into the load";
             out->start_offset = state->sxl_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
 
             if (s == 0) {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %c%u, [%s, w%u, sxtw]",
-                    ldr_mnem, rt_wx, rt, base_buf, state->sxl_rs);
+                    "-> %s %s, [%s, w%u, sxtw]",
+                    ls_mnem, rt_buf, base_buf, state->sxl_rs);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %c%u, [%s, x%u]",
-                    ldr_mnem, rt_wx, rt, base_buf, rm);
+                    "%s %s, [%s, x%u]",
+                    ls_mnem, rt_buf, base_buf, rm);
             } else {
                 snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %c%u, [%s, w%u, sxtw #%u]",
-                    ldr_mnem, rt_wx, rt, base_buf, state->sxl_rs, size);
+                    "-> %s %s, [%s, w%u, sxtw #%u]",
+                    ls_mnem, rt_buf, base_buf, state->sxl_rs, size);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %c%u, [%s, x%u, lsl #%u]",
-                    ldr_mnem, rt_wx, rt, base_buf, rm, size);
+                    "%s %s, [%s, x%u, lsl #%u]",
+                    ls_mnem, rt_buf, base_buf, rm, size);
             }
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->sxl_disasm);
-            produced = true;
+            if (!is_store && rt == state->sxl_rd) {
+                produced = true;
+            } else {
+                defer_dead_mov(state, out, state->sxl_rd);
+            }
         }
         // Strict adjacency: clear regardless of match.
         state->sxl_pending = false;
@@ -7713,24 +7786,6 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
     }
 
     return produced;
-}
-
-// Store counterpart of classify_int_load for the register-offset
-// consumer: opc == 00 is STRB/STRH/STR W/STR X by size. The data
-// register Rt is read, not written -- which matters to the caller's
-// dead-constant reasoning (a store never kills the constant).
-static bool classify_int_store(unsigned size, unsigned opc,
-                               const char **out_mnem, char *out_rt_wx)
-{
-    static const char *const store_mnem[4] = {
-        "strb", "strh", "str", "str"
-    };
-    if (opc != 0) {
-        return false;
-    }
-    *out_mnem = store_mnem[size];
-    *out_rt_wx = (size == 3u) ? 'x' : 'w';
-    return true;
 }
 
 // Map an accepted load/store mnemonic to its unscaled (LDUR/STUR
@@ -8026,65 +8081,92 @@ bool check_add_ldr_imm_offset(armlint_state *state,
 
     bool produced = false;
 
-    // (1) Try to close: is this an integer load (zero- or
-    //     sign-extending; see classify_int_load) consuming the pending
-    //     ADD? Sign-extending consumers overwrite the full X register
-    //     named by Rt just like plain LDR, and every accepted pair has
-    //     an unsigned-offset LDRS* form, so the fold carries over.
+    // (1) Try to close: is this an unsigned-offset integer load or
+    //     store consuming the pending ADD as its base? Sign-extending
+    //     loads overwrite the full X register named by Rt just like
+    //     plain LDR, and every accepted pair has an unsigned-offset
+    //     LDRS*/STR* form, so the fold carries over. The rewrite
+    //     deletes the ADD, so the address register must be dead
+    //     afterward: a load whose Rt IS the address register proves
+    //     that on the spot, and every other consumer -- a store, or a
+    //     load into a different register -- defers through the forward
+    //     register-liveness scan until the address register is
+    //     provably overwritten before any read.
     if (state->addi_pending) {
-        unsigned size, imm12, ldr_rn, ldr_rt;
-        const char *ldr_mnem;
+        unsigned size, imm12, ls_rn, ls_rt;
+        const char *ls_mnem;
         char rt_wx;
-        if (decode_int_load_uimm(op, &size, &ldr_mnem, &rt_wx,
-                                 &imm12, &ldr_rn, &ldr_rt)
-                && ldr_rn == state->addi_pending_rd
-                && ldr_rt == state->addi_pending_rd) {
-            // The LDR's own byte offset is imm12 * access_size, already
-            // a multiple of access_size by construction. So the combined
-            // offset's alignment depends only on the ADD's imm, and the
-            // scaled total must fit in 12 bits. ldr_byte_imm + add_imm
-            // cannot overflow uint32_t: add_imm <= 0xFFF000 (24 bits)
-            // and ldr_byte_imm <= 4095 * 8 = 0x7FF8 (15 bits).
+        bool is_store = false;
+        bool matched = decode_int_load_uimm(op, &size, &ls_mnem, &rt_wx,
+                                            &imm12, &ls_rn, &ls_rt);
+        if (!matched
+                && decode_str_uimm_any_size(op, &size, &imm12,
+                                            &ls_rn, &ls_rt)
+                && classify_int_store(size, 0u, &ls_mnem, &rt_wx)) {
+            matched = true;
+            is_store = true;
+        }
+        // A store whose data register is the ADD's Rd cannot fold:
+        // the rewritten store would read the deleted sum.
+        if (matched
+                && ls_rn == state->addi_pending_rd
+                && !(is_store && ls_rt == state->addi_pending_rd)) {
+            // The access's own byte offset is imm12 * access_size,
+            // already a multiple of access_size by construction. So the
+            // combined offset's alignment depends only on the ADD's imm,
+            // and the scaled total must fit in 12 bits. ls_byte_imm +
+            // add_imm cannot overflow uint32_t: add_imm <= 0xFFF000 (24
+            // bits) and ls_byte_imm <= 4095 * 8 = 0x7FF8 (15 bits).
             unsigned access_size = 1u << size;
             uint32_t add_imm = state->addi_pending_imm;
-            uint32_t ldr_byte_imm = (uint32_t)imm12 * access_size;
-            uint32_t combined = add_imm + ldr_byte_imm;
+            uint32_t ls_byte_imm = (uint32_t)imm12 * access_size;
+            uint32_t combined = add_imm + ls_byte_imm;
             if ((add_imm & (access_size - 1u)) == 0
                     && (combined >> size) <= 0xFFFu) {
-                out->name = "ADD + LDR foldable to immediate-offset LDR";
+                // Rt = 31 is WZR/XZR here (a zero store, or a load to
+                // the discard register), never SP.
+                char rt_buf[8];
+                format_reg(rt_buf, sizeof(rt_buf), rt_wx, ls_rt);
+                out->name = is_store
+                    ? "ADD + STR foldable to immediate-offset STR"
+                    : "ADD + LDR foldable to immediate-offset LDR";
                 out->start_offset = state->addi_pending_offset;
                 out->insn_count = 2;
                 clear_finding_strings(out);
 
                 // combined == 0 is reachable only via the MOV-from-SP
                 // alias (imm == 0 requires Rn = SP) with a zero-offset
-                // load; render the bare [sp] form.
+                // access; render the bare [sp] form.
                 if (combined == 0) {
                     snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, [sp]",
-                        ldr_mnem, rt_wx, ldr_rt);
+                        "-> %s %s, [sp]",
+                        ls_mnem, rt_buf);
                 } else if (state->addi_pending_rn == 31) {
                     snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, [sp, #0x%x]",
-                        ldr_mnem, rt_wx, ldr_rt, combined);
+                        "-> %s %s, [sp, #0x%x]",
+                        ls_mnem, rt_buf, combined);
                 } else {
                     snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, [x%u, #0x%x]",
-                        ldr_mnem, rt_wx, ldr_rt,
+                        "-> %s %s, [x%u, #0x%x]",
+                        ls_mnem, rt_buf,
                         state->addi_pending_rn, combined);
                 }
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->addi_pending_disasm);
-                if (ldr_byte_imm == 0) {
+                if (ls_byte_imm == 0) {
                     snprintf(out->lines[1], sizeof(out->lines[1]),
-                        "%s %c%u, [x%u]",
-                        ldr_mnem, rt_wx, ldr_rt, ldr_rn);
+                        "%s %s, [x%u]",
+                        ls_mnem, rt_buf, ls_rn);
                 } else {
                     snprintf(out->lines[1], sizeof(out->lines[1]),
-                        "%s %c%u, [x%u, #0x%x]",
-                        ldr_mnem, rt_wx, ldr_rt, ldr_rn, ldr_byte_imm);
+                        "%s %s, [x%u, #0x%x]",
+                        ls_mnem, rt_buf, ls_rn, ls_byte_imm);
                 }
-                produced = true;
+                if (!is_store && ls_rt == state->addi_pending_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, state->addi_pending_rd);
+                }
             }
         }
         // Strict adjacency: clear regardless of match.

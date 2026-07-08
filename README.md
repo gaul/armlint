@@ -42,6 +42,9 @@ equivalent; the constraints below are the ones they share.
   dead. Folds whose saving is a deleted write with no such overwrite
   defer instead: a bounded forward scan of the fall-through path must
   see the register overwritten before any read or control transfer.
+  This is how the address folds admit stores and loads into a fresh
+  register -- `add x8, sp, #32 ; str x0, [x8]` folds to
+  `str x0, [sp, #0x20]` only once `x8` provably dies.
   The single-bit and CSET branch folds additionally require the folded
   branch's taken edge to land inside that proven-clean span -- a
   general-purpose register, unlike NZCV, is routinely live into a
@@ -122,10 +125,10 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`smull`/`umull` + `add`/`sub`](analyses.md#smullumull--addsub-foldable-to-smaddlumaddl) | `smaddl`/`umaddl`/`smsubl`/`umsubl` |
 | [`neg` + `add`/`sub`](analyses.md#neg--addsub-foldable-to-subadd) | `sub`/`add` |
 | [`mvn` + `and`/`orr`/`eor`/`ands`](analyses.md#mvn--andorreor-foldable-to-bicorneon) | `bic`/`orn`/`eon`/`bics` |
-| [`add` + `ldr [xt]`](analyses.md#add--ldr-foldable-to-register-offset-ldr) | `ldr [xn, xm{, lsl #s}]` |
-| [`sxtw` + `ldr [xn, xt]`](analyses.md#sxtw--register-offset-ldr-foldable-into-the-load) | `ldr [xn, ws, sxtw {#s}]` |
+| [`add` + `ldr`/`str [xt]`](analyses.md#add--ldr-foldable-to-register-offset-ldr) | `ldr`/`str [xn, xm{, lsl #s}]` |
+| [`sxtw` + `ldr`/`str [xn, xt]`](analyses.md#sxtw--register-offset-ldr-foldable-into-the-load) | `ldr`/`str [xn, ws, sxtw {#s}]` |
 | [`ldrb`/`ldrh`/`ldr` (or `ldrsb`/`ldrsh Wt`) + `sxtb`/`sxth`/`sxtw`](analyses.md#load--sign-extend-foldable-to-ldrsbldrshldrsw) | `ldrsb`/`ldrsh`/`ldrsw` (`Xt` for the re-widened sign loads) |
-| [`add #a` + `ldr [xt]` (incl. `mov xt, sp`)](analyses.md#add--ldr-foldable-to-immediate-offset-ldr) | `ldr [xn, #a]` / `ldr [sp]` |
+| [`add #a` + `ldr`/`str [xt]` (incl. `mov xt, sp`)](analyses.md#add--ldr-foldable-to-immediate-offset-ldr) | `ldr`/`str [xn, #a]` / `ldr [sp]` |
 | [`ldr`/`ldp [xn]` + `add`/`sub xn`](analyses.md#ldrstr-or-ldpstp--addsub-foldable-to-post-indexed-form) | `ldr [xn], #±imm` / `ldp [sp], #imm` (post-index) |
 | [`add`/`sub xn` + `ldr`/`stp [xn]`](analyses.md#addsub--ldrstr-or-ldpstp-foldable-to-pre-indexed-form) | `ldr [xn, #±imm]!` / `stp [sp, #-imm]!` (pre-index) |
 

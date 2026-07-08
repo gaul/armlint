@@ -86,6 +86,10 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x70: -> ldr x4, [x4, #0x1
   add x4, x4, #0x10
   ldr x4, [x4]
 
+ADD + LDR foldable to immediate-offset LDR at offset: 0x68: -> ldr x3, [x1, #0x1000] (2 instructions)
+  add x1, x1, #0x1000
+  ldr x3, [x1]
+
 LDR + SUB foldable to post-indexed LDR at offset: 0x84: -> ldr x3, [x1], #-0x10 (2 instructions)
   ldr x3, [x1]
   sub x1, x1, #0x10
@@ -136,10 +140,10 @@ Optimization opportunities by type:
        5  ADD + STR foldable to pre-indexed STR
        4  ADD + LDP foldable to pre-indexed LDP
        3  STR + ADD foldable to post-indexed STR
+       2  ADD + LDR foldable to immediate-offset LDR
        2  SUB + STP foldable to pre-indexed STP
-       1  ADD + LDR foldable to immediate-offset LDR
        1  LDR + SUB foldable to post-indexed LDR
        1  SUB + LDR foldable to pre-indexed LDR
        1  SUB + STR foldable to pre-indexed STR
 
-33 optimization opportunities in 68 instructions
+34 optimization opportunities in 68 instructions
