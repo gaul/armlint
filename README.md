@@ -237,8 +237,10 @@ can gate a compiler test suite.
 
 ## References
 
-* [Arm Architecture Reference Manual](https://developer.arm.com/documentation/ddi0487/latest/) - A64 instruction set
+* [Arm A-profile A64 Instruction Set Architecture](https://developer.arm.com/documentation/ddi0602/latest/) - per-instruction reference, including alias conditions
 * [Arm Cortex-A optimization guides](https://developer.arm.com/documentation) - per-microarchitecture tuning notes
+* [Apple Silicon CPU Optimization Guide](https://developer.apple.com/documentation/apple-silicon/cpu-optimization-guide) - Apple M-series tuning notes
+* [Encoding of immediate values on AArch64](https://dinfuehr.com/blog/encoding-of-immediate-values-on-aarch64/) - the bitmask-immediate scheme explained
 * [Capstone disassembly framework](https://www.capstone-engine.org/) - library to parse instructions
 * [x86lint](https://github.com/gaul/x86lint) - x86-64 equivalent of armlint
 
