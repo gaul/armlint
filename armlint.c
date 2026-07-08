@@ -966,6 +966,7 @@ static bool decode_asr_imm(uint32_t op, unsigned *out_sf,
                            unsigned *out_shift);
 static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
                            unsigned reg);
+static void format_reg(char *buf, size_t bufsz, char w_or_x, unsigned reg);
 
 // Shift-type names indexed by the shifted-register encoding's
 // shift-type field (bits 23..22).
@@ -6302,6 +6303,78 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, rm);
 
                 if (rd == t) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, t);
+                }
+            }
+        }
+
+        // CSEL consumer: CSNEG's else-branch is a negation
+        // (Rd = cond ? Rn : -Rm), so a NEG feeding either CSEL operand
+        // folds into it. With the negation in the else slot (Rm) the
+        // condition carries over; in the then slot (Rn) the rewrite
+        // swaps the operands and inverts the condition:
+        //   neg wt, ws ; csel wd, wn, wt, cc -> csneg wd, wn, ws, cc
+        //   neg wt, ws ; csel wd, wt, wm, cc -> csneg wd, wm, ws, !cc
+        // The rewrite reads the same NZCV the CSEL did (a NEG writes
+        // no flags) and reads ws, which the adjacent pair leaves
+        // unchanged even for the in-place neg wt, wt. AL/NV are
+        // excluded: ConditionHolds treats both as always-true, so
+        // such a CSEL is a plain MOV and the then-slot inversion
+        // (AL <-> NV) would still be always-taken. Rd = 31 discards
+        // the select; a CSEL reading wt in BOTH slots is the
+        // same-operand identity, check_csel_self's shape. Reported
+        // as "NEG + CSEL foldable to CSNEG"; op2 = 00 fixes CSEL
+        // proper (CSINC/CSINV/CSNEG have different else-branches).
+        if ((op & 0x7FE00C00u) == 0x1A800000u) {
+            unsigned c_sf = (op >> 31) & 1u;
+            unsigned c_rd = op & 0x1Fu;
+            unsigned c_rn = (op >> 5) & 0x1Fu;
+            unsigned c_rm = (op >> 16) & 0x1Fu;
+            unsigned cond = (op >> 12) & 0xFu;
+            unsigned t = state->neg_pending_rd;
+            bool then_slot = false;
+            bool valid = false;
+            unsigned surviving = 0;
+            if ((c_sf != 0) == state->neg_pending_is_64bit
+                    && c_rd != 31 && cond < 14u) {
+                if (c_rm == t && c_rn != t) {
+                    valid = true;
+                    surviving = c_rn;   // else slot: condition unchanged
+                } else if (c_rn == t && c_rm != t) {
+                    valid = true;
+                    surviving = c_rm;   // then slot: swap and invert
+                    then_slot = true;
+                }
+            }
+
+            if (valid) {
+                char w_or_x = state->neg_pending_is_64bit ? 'x' : 'w';
+                unsigned new_cond = then_slot ? (cond ^ 1u) : cond;
+                char surv_buf[8], rn_buf[8], rm_buf[8];
+                format_reg(surv_buf, sizeof(surv_buf), w_or_x, surviving);
+                format_reg(rn_buf, sizeof(rn_buf), w_or_x, c_rn);
+                format_reg(rm_buf, sizeof(rm_buf), w_or_x, c_rm);
+
+                out->name = "NEG + CSEL foldable to CSNEG";
+                out->start_offset = state->neg_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> csneg %c%u, %s, %c%u, %s",
+                    w_or_x, c_rd, surv_buf,
+                    w_or_x, state->neg_pending_rs,
+                    a64_cond_names[new_cond]);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->neg_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "csel %c%u, %s, %s, %s",
+                    w_or_x, c_rd, rn_buf, rm_buf,
+                    a64_cond_names[cond]);
+
+                if (c_rd == t) {
                     produced = true;
                 } else {
                     defer_dead_mov(state, out, t);

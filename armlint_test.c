@@ -7886,6 +7886,89 @@ static void test_neg_add_sub_fold(void)
     add_x(&code[4], 31, 2, 3);
     assert(run_reg_dead(code, 8, 3) == 0);
 
+    // -- CSEL consumers: CSNEG's else-branch is a negation. --
+
+    // Else slot: neg x3, x1 ; csel x3, x2, x3, lt
+    //   -> csneg x3, x2, x1, lt (flag; condition carries over).
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Then slot: neg x3, x1 ; csel x3, x3, x2, lt
+    //   -> csneg x3, x2, x1, ge (flag; operands swap, condition
+    //   inverts).
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 3, 2, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form, else slot.
+    neg_w(&code[0], 3, 1);
+    csel_w(&code[4], 3, 2, 3, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Fresh destination: the select leaves the negation alive, so
+    // emission defers; the appended kill lets it emit
+    // (-> csneg x5, x2, x1, eq).
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 5, 2, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Fresh destination without a kill: nothing is emitted.
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 5, 2, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Fresh destination, but the negation is read again before dying:
+    // discarded.
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 5, 2, 3, 0);
+    add_x(&code[8], 6, 3, 7);
+    assert(run_reg_dead(code, 12, 3) == 0);
+
+    // XZR surviving operand folds and renders as xzr:
+    // csel x3, xzr, x3, lt -> csneg x3, xzr, x1, lt.
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 31, 3, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Both CSEL operands are the negation: check_csel_self's
+    // same-operand identity, not this fold (the 1 finding here is
+    // csel_self's; ours matching too would make it 2).
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 5, 3, 3, 11);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // AL and NV conditions are excluded: the select is unconditional,
+    // and the then-slot inversion (AL <-> NV) would still be taken.
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 2, 3, 14);
+    assert(run_helper_check(code, 8) == 0);
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 2, 3, 15);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Rd = 31 (select discarded) is excluded even with a kill.
+    neg_x(&code[0], 3, 1);
+    csel_x(&code[4], 31, 2, 3, 11);
+    assert(run_reg_dead(code, 8, 3) == 0);
+
+    // Width mismatch (X-form NEG, W-form CSEL).
+    neg_x(&code[0], 3, 1);
+    csel_w(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 0);
+
+    // CSINC (op2 = 01) is not CSEL: its else-branch is Rm+1, not a
+    // negation.
+    neg_x(&code[0], 3, 1);
+    write_le32(&code[4], 0x9A800400u | (3u << 16) | (11u << 12)
+        | (2u << 5) | 3u);      // csinc x3, x2, x3, lt
+    assert(run_helper_check(code, 8) == 0);
+
+    // NEGS producer (flag-setting) does not open the pending state.
+    write_le32(&code[0], 0xEB0103E3u);  // negs x3, x1
+    csel_x(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 0);
+
     // Negative: accumulator equals nt (xc == xt aliasing).
     //   neg x3, x1 ; add x3, x3, x3 (= -2*x1, not foldable as 1 insn).
     neg_x(&code[0], 3, 1);

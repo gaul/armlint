@@ -18,7 +18,28 @@ NEG + ADD/SUB foldable to SUB/ADD at offset: 0x30: -> sub x5, x2, x1 (2 instruct
   neg x3, x1
   add x5, x2, x3
 
+NEG + CSEL foldable to CSNEG at offset: 0x6c: -> csneg x3, x2, x1, lt (2 instructions)
+  neg x3, x1
+  csel x3, x2, x3, lt
+
+NEG + CSEL foldable to CSNEG at offset: 0x74: -> csneg x3, x2, x1, ge (2 instructions)
+  neg x3, x1
+  csel x3, x3, x2, lt
+
+NEG + CSEL foldable to CSNEG at offset: 0x7c: -> csneg w3, w2, w1, hi (2 instructions)
+  neg w3, w1
+  csel w3, w2, w3, hi
+
+NEG + CSEL foldable to CSNEG at offset: 0x84: -> csneg x5, x2, x1, ne (2 instructions)
+  neg x3, x1
+  csel x5, x2, x3, ne
+
+CSEL same-operand identity at offset: 0xa0: csel x5, x3, x3, lt -> mov x5, x3 (cond irrelevant: both branches = x3) (1 instructions)
+  csel x5, x3, x3, lt
+
 Optimization opportunities by type:
        5  NEG + ADD/SUB foldable to SUB/ADD
+       4  NEG + CSEL foldable to CSNEG
+       1  CSEL same-operand identity
 
-5 optimization opportunities in 28 instructions
+10 optimization opportunities in 43 instructions

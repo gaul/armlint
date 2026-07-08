@@ -759,26 +759,41 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
 
 // Detect NEG Rt, Rs (the SUB Rt, XZR, Rs alias, no shift, non-S)
 // immediately followed by an ADD/SUB (shifted-register, LSL #0,
-// non-S-variant) that consumes Rt. The pair folds to a single
-// instruction by absorbing the negation into the consumer's sign:
+// non-S-variant) or a CSEL that consumes Rt. The pair folds to a
+// single instruction by absorbing the negation into the consumer:
 //   neg xt, xs ; add xd, xt, xc -> sub xd, xc, xs  (ADD commutative)
 //   neg xt, xs ; add xd, xc, xt -> sub xd, xc, xs
 //   neg xt, xs ; sub xd, xc, xt -> add xd, xc, xs
+//   neg xt, xs ; csel xd, xn, xt, cc -> csneg xd, xn, xs, cc
+//   neg xt, xs ; csel xd, xt, xm, cc -> csneg xd, xm, xs, !cc
 // The form `sub xd, xt, xc` is NOT foldable: there is no single
 // AArch64 instruction computing `-xs - xc`. S-variants (ADDS/SUBS)
 // are skipped because the fold changes the flag-set definition
 // (V/C in particular). NEGS is similarly excluded as a producer.
 //
+// The CSEL consumer (op2 = 00 only; CSINC/CSINV/CSNEG have different
+// else-branches) folds because CSNEG's else-branch is a negation:
+// Rd = cond ? Rn : -Rm. A NEG consumed in the else slot keeps the
+// condition; one in the then slot swaps the operands and inverts it.
+// The rewrite reads the same NZCV the CSEL did (a NEG writes no
+// flags). AL/NV conditions are excluded -- ConditionHolds treats
+// both as always-true, so the select is a plain MOV and the inverted
+// spelling would still be taken -- as is a CSEL reading Rt in both
+// slots (the same-operand identity, check_csel_self's shape).
+// Reported as "NEG + CSEL foldable to CSNEG".
+//
 // Soundness: the rewrite deletes the NEG, so its destination must be
-// dead afterward. An ADD/SUB that overwrites it proves that on the
+// dead afterward. A consumer that overwrites it proves that on the
 // spot and reports immediately; one writing a fresh register defers
-// through the forward register-liveness scan (Rd = 31 is a dead
-// write and excluded). The "accumulator" operand (the one that is
-// not Rt) must NOT equal Rt -- otherwise both ADD/SUB sources are
-// -xs, computing -2*xs or 0 instead of the additive identity the
-// fold assumes -- nor XZR, whose shapes are double negations (a copy
-// of the negation, or the negation of it), not accumulates. Widths
-// must match: both W or both X. NEG writing to ZR is excluded (the
+// through the forward register-liveness scan (Rd = 31 -- a dead
+// write, or a discarded select -- is excluded). The ADD/SUB
+// "accumulator" operand (the one that is not Rt) must NOT equal Rt
+// -- otherwise both ADD/SUB sources are -xs, computing -2*xs or 0
+// instead of the additive identity the fold assumes -- nor XZR,
+// whose shapes are double negations (a copy of the negation, or the
+// negation of it), not accumulates; a CSEL's surviving operand may
+// be XZR (csneg xd, xzr, xs, cc has no shorter form). Widths must
+// match: both W or both X. NEG writing to ZR is excluded (the
 // result is discarded), as is NEG of ZR (which computes 0 -- a
 // different idiom, not strength reduction).
 bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,

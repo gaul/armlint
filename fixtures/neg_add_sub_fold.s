@@ -61,4 +61,39 @@ _main:
     add     x6, x3, x7
     mov     x3, #1
 
+    // CSEL consumers: CSNEG's else-branch is a negation
+    // (Rd = cond ? Rn : -Rm), so the NEG folds into the select.
+
+    // P) Negation in the else slot: the condition carries over.
+    neg     x3, x1
+    csel    x3, x2, x3, lt          // -> csneg x3, x2, x1, lt
+
+    // P) Negation in the then slot: the rewrite swaps the operands
+    //    and inverts the condition.
+    neg     x3, x1
+    csel    x3, x3, x2, lt          // -> csneg x3, x2, x1, ge
+
+    // P) W-form.
+    neg     w3, w1
+    csel    w3, w2, w3, hi          // -> csneg w3, w2, w1, hi
+
+    // P) Fresh destination, deferred: x3 dies at the trailing mov.
+    neg     x3, x1
+    csel    x5, x2, x3, ne          // -> csneg x5, x2, x1, ne
+    mov     x3, #1
+
+    // N9) AL condition: the select is unconditional (a plain MOV of
+    //     Rn), and the then-slot inversion (AL <-> NV) would still be
+    //     always-taken.
+    neg     x3, x1
+    csel    x5, x2, x3, al
+    mov     x3, #1
+
+    // N10) Both CSEL operands are the negation: the same-operand
+    //      identity belongs to the CSEL identity check (whose finding
+    //      is the one reported here), not this fold.
+    neg     x3, x1
+    csel    x5, x3, x3, lt
+    mov     x3, #1
+
     ret

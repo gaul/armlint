@@ -1214,15 +1214,38 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `neg xt, xs ; sub xd, xc, xt` -> `add xd, xc, xs`.
 * `sub xd, xt, xc` is NOT foldable: computes `-xs - xc`, which
   has no single-instruction AArch64 form.
+* A `CSEL` consumer folds too, because `CSNEG`'s else-branch is a
+  negation (`Rd = cond ? Rn : -Rm`):
+  * `neg xt, xs ; csel xd, xn, xt, cc` -> `csneg xd, xn, xs, cc`
+    (negation in the else slot; the condition carries over).
+  * `neg xt, xs ; csel xd, xt, xm, cc` -> `csneg xd, xm, xs, !cc`
+    (negation in the then slot; the rewrite swaps the operands and
+    inverts the condition).
+  Only `CSEL` proper (op2 = 00) matches -- `CSINC`/`CSINV`/`CSNEG`
+  have different else-branches. The rewrite reads the same NZCV the
+  `CSEL` did (a `NEG` writes no flags), so no flag-liveness scan is
+  needed, and it reads `xs`, which the adjacent pair leaves unchanged
+  even for the in-place `neg xt, xt`. `AL`/`NV` conditions are
+  excluded: `ConditionHolds` treats both as always-true, so such a
+  select is a plain `MOV` and the then-slot inversion (`AL` <-> `NV`)
+  would still be always-taken. A `CSEL` reading `xt` in both slots is
+  the same-operand identity, which the CSEL identity check owns.
+  Unlike the `ADD`/`SUB` consumers, the surviving operand may be
+  `XZR` (`csneg xd, xzr, xs, cc` -- `cond ? 0 : -xs` -- has no
+  shorter form). Reported as "NEG + CSEL foldable to CSNEG"; the
+  shape appears when codegen materialises a negation and then
+  selects between the original and negated value (`abs`/`nabs`-style
+  branchless idioms).
 * Soundness: the rewrite deletes the NEG, so its destination must be
-  dead afterward -- an ADD/SUB that overwrites it (`Rd == Rt`)
+  dead afterward -- a consumer that overwrites it (`Rd == Rt`)
   reports immediately, and one writing a fresh register defers
-  through the forward register-liveness scan (`Rd = 31`, a dead
-  write, is excluded). The accumulator operand must not equal Rt --
-  otherwise both ADD/SUB sources are `-xs`, computing `-2*xs` or `0`
-  instead of the additive identity the fold assumes -- nor XZR,
-  whose shapes are double negations (a copy of the negation, or the
-  negation of it), not accumulates.
+  through the forward register-liveness scan (`Rd = 31` -- a dead
+  write, or a discarded select -- is excluded). The ADD/SUB
+  accumulator operand must not equal Rt -- otherwise both ADD/SUB
+  sources are `-xs`, computing `-2*xs` or `0` instead of the
+  additive identity the fold assumes -- nor XZR, whose shapes are
+  double negations (a copy of the negation, or the negation of it),
+  not accumulates.
 * S-variants (ADDS/SUBS, NEGS) are skipped: flag definitions
   differ between the original and the rewrite. Widths must match
   (both W or both X). NEG of XZR (computes 0) is excluded.
