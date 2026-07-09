@@ -64,6 +64,14 @@ armlint_state *armlint_state_create(void);
 void armlint_state_destroy(armlint_state *state);
 void armlint_state_reset(armlint_state *state);
 
+// Give binary-aware checks access to the full scanned buffer (the
+// bytes the driver is disassembling, offset 0 = the first byte).
+// Checks that chase PC-relative data -- literal pools -- read from
+// it; without a buffer those checks stay silent. The pointer must
+// outlive the scan.
+void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
+                              size_t len);
+
 // Findings reported by check functions. start_offset is the offset of
 // the first instruction of the suboptimal run; insn_count is its length.
 // detail is a short summary (e.g. the constructed constant, or the
@@ -767,6 +775,31 @@ bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
 // + convert".
 bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
+
+// Detect a PC-relative literal load (LDR Wt/Xt/St/Dt, <label>) whose
+// pooled value has a single-instruction immediate materialisation:
+//   ldr w0, <literal holding 0x2a>       -> mov w0, #0x2a
+//   ldr d0, <literal holding 1.5>        -> fmov d0, #1.5
+// GPR values fold when MOVZ/MOVN/bitmask-immediate encodable (the
+// forms the assembler accepts for mov Rd, #imm); FP values when
+// FMOV-imm8 encodable (VFPExpandImm in reverse, via fp8_encodable).
+// LDRSW re-widths the value, PRFM is not a load, and a 128-bit Q
+// constant has no single-instruction materialisation; none fold.
+//
+// The first binary-aware check: the literal is PC-relative, so the
+// check reads the pooled bytes out of the scanned buffer itself
+// (armlint_state_set_buffer). A target outside the buffer -- an
+// out-of-section pool -- is silently skipped, as is everything when
+// no buffer was provided.
+//
+// A one-for-one rewrite: same destination register, no other
+// register or flag touched, and the loaded value is reproduced
+// exactly, so the finding emits immediately with no liveness proof.
+// What it saves: the memory access -- load-use latency and a cache
+// line -- plus the pool slot when nothing else references it.
+// Reported as "LDR literal foldable to MOV/FMOV immediate".
+bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
 
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or

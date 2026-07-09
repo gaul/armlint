@@ -624,6 +624,13 @@ struct armlint_state {
     unsigned rem_lines;
     armlint_finding rem_finding;
 
+    // The full scanned buffer, for binary-aware checks that read data
+    // out of it (literal-pool chasing). Set by the driver via
+    // armlint_state_set_buffer; NULL when unavailable, which disables
+    // those checks.
+    const uint8_t *buf;
+    size_t buf_len;
+
     // Pending scalar FMUL (S or D) awaiting an adjacent in-place FNEG
     // of its destination -- the pair is FNMUL, whose pseudocode
     // applies FPNeg to the already-rounded FPMul product, exactly
@@ -657,6 +664,13 @@ armlint_state *armlint_state_create(void)
 {
     armlint_state *s = calloc(1, sizeof(*s));
     return s;
+}
+
+void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
+                              size_t len)
+{
+    state->buf = buf;
+    state->buf_len = len;
 }
 
 void armlint_state_destroy(armlint_state *state)
@@ -1090,6 +1104,8 @@ static bool decode_cvtf_from_gpr(uint32_t op, bool *out_src_64,
 static bool decode_ldr_uimm_any_size(uint32_t op, unsigned *out_size,
                                      unsigned *out_imm12,
                                      unsigned *out_rn, unsigned *out_rt);
+static bool fp8_encodable(uint64_t bits, bool is_double);
+static void format_fp8(char *buf, size_t bufsz, double v);
 
 // Shift-type names indexed by the shifted-register encoding's
 // shift-type field (bits 23..22).
@@ -6747,6 +6763,112 @@ bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
     return false;
 }
 
+// Single-instruction "MOV Rd, #imm" encodability: MOVZ (one non-zero
+// halfword), MOVN (all-but-one halfwords all-ones at width), or a
+// logical bitmask immediate (the ORR-ZR alias) -- exactly the forms
+// the assembler accepts for the mov-immediate pseudo-instruction.
+static bool mov_imm_encodable(uint64_t v, bool is_64)
+{
+    uint64_t mask = is_64 ? ~0ull : 0xFFFFFFFFull;
+    v &= mask;
+    unsigned hws = is_64 ? 4u : 2u;
+    for (unsigned i = 0; i < hws; i++) {
+        uint64_t hw = 0xFFFFull << (16u * i);
+        if ((v & ~hw) == 0) {
+            return true;                    // MOVZ
+        }
+        if (((v ^ mask) & ~hw) == 0) {
+            return true;                    // MOVN
+        }
+    }
+    return is_bitmask_immediate(v, is_64 ? 64u : 32u);
+}
+
+bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || state->buf == NULL) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // LDR (literal): opc(31:30) 011 V 00 imm19 Rt. GPR (V = 0):
+    // opc 00 = W, 01 = X (10 = LDRSW, 11 = PRFM); SIMD&FP (V = 1):
+    // opc 00 = S, 01 = D (10 = Q). Only the W/X/S/D forms fold:
+    // LDRSW re-widths the value, PRFM is not a load, and a 128-bit Q
+    // constant has no single-instruction materialisation.
+    if ((op & 0x3B000000u) != 0x18000000u) {
+        return false;
+    }
+    unsigned opc = (op >> 30) & 0x3u;
+    if (opc > 1u) {
+        return false;
+    }
+    bool is_fp = ((op >> 26) & 1u) != 0;
+    bool is_64 = opc == 1u;
+    unsigned rt = op & 0x1Fu;
+    if (!is_fp && rt == 31) {
+        return false;   // literal load to ZR: a discarded load
+    }
+
+    // The pool must land inside the scanned buffer: the target is
+    // PC-relative, so an out-of-section pool (or a truncated read at
+    // the buffer edge) is silently skipped.
+    int64_t rel = ((int64_t)(int32_t)(op << 8) >> 13) * 4;
+    int64_t target = (int64_t)offset + rel;
+    unsigned nbytes = is_64 ? 8u : 4u;
+    if (target < 0 || (uint64_t)target + nbytes > state->buf_len) {
+        return false;
+    }
+
+    uint64_t bits = 0;
+    for (unsigned i = 0; i < nbytes; i++) {
+        bits |= (uint64_t)state->buf[(size_t)target + i] << (8u * i);
+    }
+
+    char detail[ARMLINT_FINDING_LINE_LEN];
+    if (is_fp) {
+        if (!fp8_encodable(bits, is_64)) {
+            return false;
+        }
+        double dval;
+        if (is_64) {
+            memcpy(&dval, &bits, sizeof(dval));
+        } else {
+            float fval;
+            uint32_t b32 = (uint32_t)bits;
+            memcpy(&fval, &b32, sizeof(fval));
+            dval = (double)fval;
+        }
+        char val_buf[32];
+        format_fp8(val_buf, sizeof(val_buf), dval);
+        snprintf(detail, sizeof(detail), "-> fmov %c%u, #%s",
+            is_64 ? 'd' : 's', rt, val_buf);
+    } else {
+        if (!mov_imm_encodable(bits, is_64)) {
+            return false;
+        }
+        snprintf(detail, sizeof(detail), "-> mov %c%u, #0x%" PRIx64,
+            is_64 ? 'x' : 'w', rt, bits);
+    }
+
+    // A one-for-one rewrite: same destination, no other register or
+    // flag touched, and the loaded value is reproduced exactly, so
+    // the finding emits immediately -- no liveness proof needed. The
+    // win is the removed memory access (load-use latency and a cache
+    // line); the pool slot itself is only reclaimed if nothing else
+    // references it.
+    out->name = "LDR literal foldable to MOV/FMOV immediate";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail), "%s", detail);
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -10582,6 +10704,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_udiv_msub_remainder,
     check_fmul_fneg_fold,
     check_ldr_cvtf_fold,
+    check_ldr_literal_const,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,
@@ -10644,6 +10767,7 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     if (state == NULL) {
         return -1;
     }
+    armlint_state_set_buffer(state, inst, len);
     cs_insn *insn = cs_malloc(handle);
     if (insn == NULL) {
         armlint_state_destroy(state);

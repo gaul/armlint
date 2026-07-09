@@ -1420,6 +1420,28 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   forward register-liveness scan. v1 matches the unsigned-offset
   addressing form only, like the other load-rewriting folds.
 
+## LDR literal foldable to MOV/FMOV immediate
+
+* `ldr w0, <literal>` where the pooled word is `0x2a` instead of
+  `mov w0, #0x2a`; `ldr d0, <literal>` holding 1.5 instead of
+  `fmov d0, #1.5`. GPR values fold when they are MOVZ / MOVN /
+  bitmask-immediate encodable (exactly the assembler's `mov Rd, #imm`
+  forms); FP values when FMOV-imm8 encodable (VFPExpandImm in
+  reverse). `LDRSW` re-widths the value, `PRFM` is not a load, and a
+  128-bit Q constant has no single-instruction materialisation; none
+  fold.
+* The first binary-aware check: the literal is PC-relative, so the
+  check reads the pooled bytes out of the scanned buffer itself. A
+  target outside the buffer (an out-of-section pool) is silently
+  skipped. Inline pools are hand-written-assembly and JIT territory
+  -- compilers on AArch64 place constants in data sections reached
+  via `ADRP` -- which is precisely where a reviewer wants the hint.
+* A one-for-one rewrite: same destination register, no other register
+  or flag touched, and the loaded value is reproduced exactly, so the
+  finding emits immediately with no liveness proof. What it saves:
+  the memory access -- load-use latency and a cache line -- plus the
+  pool slot when nothing else references it.
+
 ## FMUL + FNEG foldable to FNMUL
 
 * `fmul d0, d1, d2 ; fneg d0, d0` instead of `fnmul d0, d1, d2`.

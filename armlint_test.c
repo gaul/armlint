@@ -61,6 +61,51 @@ static int run_check(const uint8_t *code, size_t code_size)
     return findings;
 }
 
+// Like run_check, but mirrors the real driver: iterates with
+// cs_disasm_iter (skipping undecodable data-in-text words) and hands
+// the checks the full buffer for binary-aware literal chasing.
+static int run_buffer_check(const uint8_t *code, size_t code_size)
+{
+    cs_insn *insn = cs_malloc(g_handle);
+    assert(insn != NULL);
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+    armlint_state_set_buffer(state, code, code_size);
+
+    int findings = 0;
+    const uint8_t *p = code;
+    size_t size = code_size;
+    uint64_t address = 0;
+    while (size >= 4) {
+        uint64_t insn_addr = address;
+        if (cs_disasm_iter(g_handle, &p, &size, &address, insn)) {
+            for (size_t k = 0; k < armlint_check_registry_count; k++) {
+                armlint_finding f;
+                if (armlint_check_registry[k](state, insn,
+                                              (size_t)insn_addr, &f)) {
+                    findings++;
+                }
+            }
+        } else {
+            armlint_finding f;
+            if (armlint_flush(state, &f)) {
+                findings++;
+            }
+            p += 4;
+            size -= 4;
+            address += 4;
+        }
+    }
+    armlint_finding f;
+    if (armlint_flush(state, &f)) {
+        findings++;
+    }
+
+    armlint_state_destroy(state);
+    cs_free(insn, 1);
+    return findings;
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -9337,6 +9382,90 @@ static void test_mvn_logic_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// LDR (literal): opc(2) 011 V 00 imm19 Rt. imm19 in words, signed.
+static void ldr_lit(uint8_t out[4], unsigned opc, unsigned v,
+                    int imm19, unsigned rt)
+{
+    write_le32(out, 0x18000000u | ((opc & 3u) << 30) | ((v & 1u) << 26)
+        | (((uint32_t)imm19 & 0x7FFFFu) << 5) | (rt & 0x1Fu));
+}
+
+static void test_ldr_literal_const(void)
+{
+    uint8_t code[16];
+
+    // ldr w0, <literal 0x2a> -> mov w0, #0x2a. The pool word itself
+    // does not decode as an instruction; the driver skips it as
+    // data-in-text.
+    ldr_lit(&code[0], 0, 0, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x2Au);
+    assert(run_buffer_check(code, 12) == 1);
+
+    // X-form, bitmask-immediate value.
+    ldr_lit(&code[0], 1, 0, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0xAAAAAAAAu);
+    write_le32(&code[12], 0xAAAAAAAAu);
+    assert(run_buffer_check(code, 16) == 1);
+
+    // X-form, MOVN-encodable value (all-ones but one halfword).
+    ldr_lit(&code[0], 1, 0, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0xFFFF1234u);
+    write_le32(&code[12], 0xFFFFFFFFu);
+    assert(run_buffer_check(code, 16) == 1);
+
+    // FP single: 1.0f is FMOV-imm8 encodable -> fmov s0, #1.0.
+    ldr_lit(&code[0], 0, 1, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x3F800000u);
+    assert(run_buffer_check(code, 12) == 1);
+
+    // FP double: 1.5 -> fmov d0, #1.5.
+    ldr_lit(&code[0], 1, 1, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0u);
+    write_le32(&code[12], 0x3FF80000u);
+    assert(run_buffer_check(code, 16) == 1);
+
+    // A negative literal offset reaches a pool before the load.
+    write_le32(&code[0], 0x2Au);
+    ldr_lit(&code[4], 0, 0, -1, 0);
+    ret_(&code[8]);
+    assert(run_buffer_check(code, 12) == 1);
+
+    // Unencodable GPR value: two independent halfwords, no bitmask.
+    ldr_lit(&code[0], 0, 0, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x12345678u);
+    assert(run_buffer_check(code, 12) == 0);
+
+    // Unencodable FP value (extra fraction bits).
+    ldr_lit(&code[0], 0, 1, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x3F800001u);
+    assert(run_buffer_check(code, 12) == 0);
+
+    // Target outside the scanned buffer: silently skipped.
+    ldr_lit(&code[0], 0, 0, 4, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x2Au);
+    assert(run_buffer_check(code, 12) == 0);
+
+    // LDRSW literal re-widths the value; not this fold.
+    ldr_lit(&code[0], 2, 0, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x2Au);
+    assert(run_buffer_check(code, 12) == 0);
+
+    // A literal load to ZR is a discarded load.
+    ldr_lit(&code[0], 0, 0, 2, 31);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x2Au);
+    assert(run_buffer_check(code, 12) == 0);
+}
+
 static void test_add_one_csel_fold(void)
 {
     uint8_t code[12];
@@ -10611,6 +10740,7 @@ int main(void)
     test_neg_add_sub_fold();
     test_mvn_logic_fold();
     test_add_one_csel_fold();
+    test_ldr_literal_const();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();
