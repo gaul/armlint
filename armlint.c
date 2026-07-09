@@ -589,6 +589,21 @@ struct armlint_state {
     unsigned simd_zero_reg;
     size_t simd_zero_offset;
     char simd_zero_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Power-of-two remainder pending: a MOV chain materialising 2^N
+    // consumed as a UDIV's divisor, awaiting the adjacent MSUB that
+    // computes dividend - quotient*2^N -- the unsigned remainder,
+    // which a single AND with 2^N - 1 produces. rem_finding carries
+    // the chain and UDIV lines pre-rendered (the chain state is gone
+    // by the time the MSUB arrives); rem_lines is the next free line.
+    bool rem_active;
+    bool rem_is_64bit;
+    unsigned rem_xq;        // quotient register
+    unsigned rem_x8;        // constant (divisor) register
+    unsigned rem_xn;        // dividend register
+    unsigned rem_n;         // log2 of the divisor
+    unsigned rem_lines;
+    armlint_finding rem_finding;
 };
 
 #define LIVENESS_WINDOW 16
@@ -878,6 +893,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lspi_pending = false;
     state->lspr_pending = false;
     state->simd_zero_active = false;
+    state->rem_active = false;
     return mov_close(state, out);
 }
 
@@ -6211,6 +6227,139 @@ bool check_mov_madd_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+bool check_udiv_msub_remainder(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        state->rem_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: is this the MSUB computing dividend - quotient*2^N?
+    //     The unsigned remainder by a power of two is a single AND
+    //     with 2^N - 1 (UDIV truncates, which for unsigned values is
+    //     the flooring the mod identity needs). The rewrite deletes
+    //     all three instructions, leaving TWO temporaries to prove
+    //     dead -- the quotient and the constant. The MSUB's own
+    //     destination kills one structurally; the forward scan gates
+    //     the other. A fresh destination would need two liveness
+    //     proofs at once, which the single deferral slot cannot
+    //     express, and is conservatively skipped.
+    if (state->rem_active) {
+        if ((op & 0x7FE08000u) == 0x1B008000u) {
+            unsigned sf = (op >> 31) & 1u;
+            unsigned rd = op & 0x1Fu;
+            unsigned rn = (op >> 5) & 0x1Fu;
+            unsigned ra = (op >> 10) & 0x1Fu;
+            unsigned rm = (op >> 16) & 0x1Fu;
+            // The multiply commutes: quotient and constant may sit in
+            // either operand. The accumulator must be the original
+            // dividend, which the adjacent pair provably left
+            // unmodified.
+            bool ops_match =
+                (rn == state->rem_xq && rm == state->rem_x8)
+                || (rn == state->rem_x8 && rm == state->rem_xq);
+            if (((sf != 0) == state->rem_is_64bit)
+                    && ops_match
+                    && ra == state->rem_xn
+                    && (rd == state->rem_xq || rd == state->rem_x8)) {
+                char w_or_x = state->rem_is_64bit ? 'x' : 'w';
+                uint64_t mask = (1ull << state->rem_n) - 1u;
+
+                *out = state->rem_finding;
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> and %c%u, %c%u, #0x%" PRIx64,
+                    w_or_x, rd, w_or_x, state->rem_xn, mask);
+                snprintf(out->lines[state->rem_lines],
+                    sizeof(out->lines[state->rem_lines]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+
+                // The destination killed one temporary; defer on the
+                // other until it is provably dead.
+                unsigned gate = (rd == state->rem_xq)
+                    ? state->rem_x8 : state->rem_xq;
+                defer_dead_mov(state, out, gate);
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->rem_active = false;
+    }
+
+    // (2) Open: a UDIV whose divisor is a MOV-chain power of two?
+    //     UDIV is Data-processing 2-source, opcode 000010. The
+    //     quotient must be a fresh register: xq == xn would clobber
+    //     the dividend the MSUB re-reads, xq == the constant would
+    //     clobber the divisor it re-reads, and ZR operands are
+    //     degenerate. N = 0 (dividing by 1) is the identity, a
+    //     different idiom.
+    if (state->mov_active
+            && (op & 0x7FE0FC00u) == 0x1AC00800u) {
+        unsigned sf = (op >> 31) & 1u;
+        unsigned xq = op & 0x1Fu;
+        unsigned xn = (op >> 5) & 0x1Fu;
+        unsigned rm = (op >> 16) & 0x1Fu;
+        uint64_t c = state->mov_value;
+        unsigned datasize = sf ? 64u : 32u;
+        if (((sf != 0) == state->mov_is_64bit)
+                && rm == state->mov_rd
+                && xq != 31 && xq != xn && xq != state->mov_rd
+                && xn != 31 && xn != state->mov_rd
+                && c != 0 && (c & (c - 1u)) == 0) {
+            unsigned n = 0;
+            for (uint64_t t = c; (t & 1u) == 0; t >>= 1) {
+                n++;
+            }
+            if (n >= 1 && n < datasize) {
+                char w_or_x = sf ? 'x' : 'w';
+                armlint_finding *p = &state->rem_finding;
+                p->name = "remainder by power of two foldable to AND";
+                p->start_offset = state->mov_start_offset;
+                p->insn_count = state->mov_insn_count + 2;
+                clear_finding_strings(p);
+
+                // Two lines are reserved for the UDIV and MSUB, so a
+                // long chain truncates like the other MOV-chain folds.
+                unsigned max_chain = ARMLINT_FINDING_LINES - 2u;
+                unsigned chain_n = state->mov_insn_count;
+                if (chain_n > max_chain) {
+                    chain_n = max_chain;
+                }
+                for (unsigned i = 0; i < chain_n; i++) {
+                    const mov_entry *e = &state->mov_entries[i];
+                    const char *mov_mnem = e->opc == 2 ? "movz"
+                                      : (e->opc == 0 ? "movn" : "movk");
+                    unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+                    if (mshift == 0) {
+                        snprintf(p->lines[i], sizeof(p->lines[i]),
+                            "%s %c%u, #0x%x",
+                            mov_mnem, w_or_x, state->mov_rd, e->imm16);
+                    } else {
+                        snprintf(p->lines[i], sizeof(p->lines[i]),
+                            "%s %c%u, #0x%x, lsl #%u",
+                            mov_mnem, w_or_x, state->mov_rd, e->imm16,
+                            mshift);
+                    }
+                }
+                snprintf(p->lines[chain_n], sizeof(p->lines[chain_n]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+
+                state->rem_active = true;
+                state->rem_is_64bit = (sf != 0);
+                state->rem_xq = xq;
+                state->rem_x8 = state->mov_rd;
+                state->rem_xn = xn;
+                state->rem_n = n;
+                state->rem_lines = chain_n + 1;
+            }
+        }
+    }
+
+    return false;
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -9767,6 +9916,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_csel_fold,
     check_mov_shift_fold,
     check_mov_madd_fold,
+    check_udiv_msub_remainder,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,

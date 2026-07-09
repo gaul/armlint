@@ -1,0 +1,24 @@
+remainder by power of two foldable to AND at offset: 0x0: -> and x9, x1, #0xf (3 instructions)
+  movz x8, #0x10
+  udiv x9, x1, x8
+  msub x9, x9, x8, x1
+
+remainder by power of two foldable to AND at offset: 0x10: -> and x9, x1, #0x7 (3 instructions)
+  movz x8, #0x8
+  udiv x9, x1, x8
+  msub x9, x8, x9, x1
+
+remainder by power of two foldable to AND at offset: 0x20: -> and x8, x1, #0xf (3 instructions)
+  movz x8, #0x10
+  udiv x9, x1, x8
+  msub x8, x9, x8, x1
+
+remainder by power of two foldable to AND at offset: 0x30: -> and w9, w1, #0x1 (3 instructions)
+  movz w8, #0x2
+  udiv w9, w1, w8
+  msub w9, w9, w8, w1
+
+Optimization opportunities by type:
+       4  remainder by power of two foldable to AND
+
+4 optimization opportunities in 29 instructions

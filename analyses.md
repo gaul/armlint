@@ -1025,6 +1025,38 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ZR (result discarded) and Rn == ZR (dividend always zero) are
   excluded as different idioms.
 
+## remainder by power of two foldable to AND
+
+* The three-instruction remainder idiom spelled through the divide:
+  * `mov x8, #16 ; udiv x9, x1, x8 ; msub x9, x9, x8, x1`
+    -> `and x9, x1, #0xf`
+  `dividend - (dividend / 2^N) * 2^N` is `dividend mod 2^N`, and
+  `UDIV`'s truncation is the flooring the identity needs for
+  unsigned values, so a single `AND` with `2^N - 1` (always a valid
+  bitmask immediate -- a run of `N` low ones) replaces all three
+  instructions and retires one of the slowest A64 operations. The
+  signed (`SDIV`) idiom does NOT fold: for negative dividends the
+  flooring `AND` disagrees with `SDIV`'s truncation toward zero.
+* The `MSUB`'s multiply commutes (quotient and constant in either
+  operand); its accumulator must be the ORIGINAL dividend, which the
+  adjacent pair provably left unmodified. At the `UDIV`, the
+  quotient must be a fresh register -- overwriting the dividend
+  clobbers what the `MSUB` re-reads, overwriting the constant
+  clobbers the divisor -- and ZR operands and `N = 0` (dividing
+  by 1, the identity) are excluded. All widths must match.
+* Deadness: the rewrite deletes the MOV, the `UDIV` and the `MSUB`,
+  leaving TWO temporaries -- the quotient and the constant. The
+  `MSUB`'s own destination kills one structurally (compilers reuse
+  the quotient register); the forward register-liveness scan gates
+  the other. A fresh destination would need two proofs at once and
+  is conservatively skipped.
+* Composes cleanly with the
+  [`UDIV` strength reduction](#udiv-by-constant-foldable-to-shift):
+  on this shape its dead-constant scan sees the `MSUB` re-read the
+  constant and discards, so the two checks never double-report --
+  the pair-only `LSR` finding appears exactly when the quotient is
+  the real product, and this finding when the remainder is.
+
 ## MOV + ADD/SUB foldable to immediate form
 
 * `mov xc, #C ; add xd, xn, xc` instead of `add xd, xn, #C` when

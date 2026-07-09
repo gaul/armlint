@@ -653,6 +653,40 @@ bool check_mov_shift_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_madd_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
 
+// Detect the unsigned remainder-by-power-of-two idiom spelled through
+// a divide: a MOV chain materialising 2^N, an adjacent UDIV taking it
+// as divisor, and an adjacent MSUB reconstructing the remainder:
+//   mov x8, #16 ; udiv x9, x1, x8 ; msub x9, x9, x8, x1
+//     -> and x9, x1, #0xf
+// dividend - (dividend / 2^N) * 2^N is dividend mod 2^N, and UDIV's
+// truncation is the flooring the identity needs for unsigned values,
+// so a single AND with 2^N - 1 (always a valid bitmask immediate)
+// replaces all three instructions -- and retires one of the slowest
+// A64 operations. The MSUB's multiply commutes (quotient and constant
+// in either operand); its accumulator must be the original dividend,
+// which the adjacent pair provably left unmodified. The signed
+// (SDIV) idiom does NOT fold: for negative dividends the flooring
+// AND disagrees with SDIV's truncation.
+//
+// Deadness: the rewrite deletes the MOV, the UDIV and the MSUB,
+// leaving two temporaries -- the quotient and the constant. The
+// MSUB's own destination kills one structurally (compilers reuse the
+// quotient register); the forward register-liveness scan
+// (defer_dead_mov) gates the other. A fresh destination would need
+// two proofs at once and is conservatively skipped. The existing
+// MOV + UDIV -> LSR check never double-reports on this shape: its
+// own dead-constant scan sees the MSUB re-read the constant and
+// discards.
+//
+// Exclusions at the UDIV: the quotient must be a fresh register
+// (xq == dividend clobbers what the MSUB re-reads; xq == the
+// constant clobbers the divisor; ZR operands are degenerate), the
+// dividend must not be the constant or ZR, N = 0 (dividing by 1) is
+// the identity, and all widths must match. Reported as "remainder by
+// power of two foldable to AND".
+bool check_udiv_msub_remainder(armlint_state *state, const cs_insn *insn,
+                               size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
 // conversion that consumes it, when FMOV (scalar, immediate) could

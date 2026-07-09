@@ -6965,6 +6965,108 @@ static void test_mov_madd_fold(void)
     assert(run_reg_dead(code, 12, 8) == 0);
 }
 
+// UDIV: Data-processing 2-source, opcode 000010.
+static void udiv_raw(uint8_t out[4], unsigned sf, unsigned rd,
+                     unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x1AC00800u | ((sf & 1u) << 31)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_udiv_msub_remainder(void)
+{
+    uint8_t code[20];
+
+    // Canonical: mov x8, #16 ; udiv x9, x1, x8 ; msub x9, x9, x8, x1
+    // ; (x8 dies) -> and x9, x1, #0xf. The MSUB overwrites the
+    // quotient, so the deferral gates the constant.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 9, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // The MSUB's multiply commutes: msub x9, x8, x9, x1.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 9, 8, 9, 1);
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // The MSUB may overwrite the constant instead; the deferral then
+    // gates the quotient.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 8, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 9) == 1);
+
+    // W-form, divisor 2.
+    movz_w(&code[0], 8, 2);
+    udiv_raw(&code[4], 0, 9, 1, 8);
+    mac(&code[8], 0, 1, 9, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // A shifted-immediate chain: 2^16 via movz lsl #16.
+    movz_x(&code[0], 8, 1, 1);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 9, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // Without the kill neither temporary is proven dead: nothing --
+    // and the MOV + UDIV -> LSR check stays silent too, its constant
+    // re-read by the MSUB.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 9, 9, 8, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    // The MSUB's accumulator is not the original dividend: not a
+    // remainder.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 9, 9, 8, 2);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // A fresh MSUB destination would need both temporaries proven
+    // dead at once; conservatively skipped.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 10, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Non-power-of-two divisor.
+    movz_x(&code[0], 8, 6, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 9, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Dividing by 1 (N = 0) is the identity, a different idiom.
+    movz_x(&code[0], 8, 1, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 1, 9, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // The quotient clobbers the dividend (udiv x1, x1, x8): the MSUB
+    // would read the quotient where the dividend is needed.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 1, 1, 8);
+    mac(&code[8], 1, 1, 1, 1, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // MADD (o0 = 0) is not the remainder reconstruction.
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    mac(&code[8], 1, 0, 9, 9, 8, 1);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // An intervening instruction between the UDIV and the MSUB
+    // expires the pending state (and spoils the LSR check's deferral
+    // too: the MSUB still reads the constant).
+    movz_x(&code[0], 8, 16, 0);
+    udiv_raw(&code[4], 1, 9, 1, 8);
+    add_x(&code[8], 5, 6, 7);
+    mac(&code[12], 1, 1, 9, 9, 8, 1);
+    assert(run_reg_dead(code, 16, 8) == 0);
+}
+
 // FMOV (general), GPR -> FPR: fmov Sd, Wn / fmov Dd, Xn.
 static void fmov_s_from_w(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -9976,6 +10078,7 @@ int main(void)
     test_mov_csel_fold();
     test_mov_shift_fold();
     test_mov_madd_fold();
+    test_udiv_msub_remainder();
     test_mov_fmov_imm_fold();
     test_fp_zero_to_movi();
     test_extend_cvtf_fold();
