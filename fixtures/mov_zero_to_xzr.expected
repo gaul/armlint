@@ -54,7 +54,23 @@ MOV #0 + use foldable to ZR at offset: 0x68: -> tst x2, xzr (2 instructions)
   movz x0, #0x0
   tst x2, x0
 
-Optimization opportunities by type:
-      14  MOV #0 + use foldable to ZR
+MOV #0 + use foldable to ZR at offset: 0x90: -> csel x3, xzr, x2, ne (2 instructions)
+  movz x0, #0x0
+  csel x3, x0, x2, ne
 
-14 optimization opportunities in 37 instructions
+MOV #0 + use foldable to ZR at offset: 0x98: -> csneg w3, w2, wzr, lt (2 instructions)
+  movz w0, #0x0
+  csneg w3, w2, w0, lt
+
+MOV #0 + use foldable to ZR at offset: 0xa0: -> ccmp xzr, x2, #0x4, ne (2 instructions)
+  movz x0, #0x0
+  ccmp x0, x2, #0x4, ne
+
+CSEL same-operand identity at offset: 0xac: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
+  csel x3, x0, x0, ne
+
+Optimization opportunities by type:
+      17  MOV #0 + use foldable to ZR
+       1  CSEL same-operand identity
+
+18 optimization opportunities in 45 instructions

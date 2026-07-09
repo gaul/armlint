@@ -78,4 +78,22 @@ _main:
     mov     x0, #0
     add     x3, x1, x2
 
+    // P) CSEL with the zero in the then-slot.
+    mov     x0, #0
+    csel    x3, x0, x2, ne          // -> csel x3, xzr, x2, ne
+
+    // P) CSNEG with the zero in the else-slot (whole select family).
+    mov     w0, #0
+    csneg   w3, w2, w0, lt          // -> csneg w3, w2, wzr, lt
+
+    // P) Register CCMP with the zero as the left operand (the Rm
+    //    slot folds to the #0 immediate form via the CCMP fold
+    //    instead).
+    mov     x0, #0
+    ccmp    x0, x2, #4, ne          // -> ccmp xzr, x2, #4, ne
+
+    // N5) Both select slots zero: csel_self owns that shape.
+    mov     x0, #0
+    csel    x3, x0, x0, ne
+
     ret

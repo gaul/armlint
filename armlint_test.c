@@ -437,6 +437,9 @@ static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void ret_(uint8_t out[4]);
 static void cvtf_gpr(uint8_t out[4], unsigned sf, unsigned dbl,
                      unsigned is_unsigned, unsigned rd, unsigned rn);
+static void ccmp_reg(uint8_t out[4], unsigned sf, unsigned is_ccmp,
+                     unsigned rn, unsigned rm, unsigned nzcv,
+                     unsigned cond);
 static void ldr_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
 static void ldrb_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
 static void ldrh_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
@@ -6716,6 +6719,68 @@ static void test_mov_zero_to_xzr(void)
     movz_x(&code[0], 0, 0, 0);
     add_x(&code[4], 3, 1, 2);  // ADD X3, X1, X2 -- no X0
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Conditional selects: ZR is legal in either slot. --
+
+    // mov x8, #0 ; csel x0, x8, x2, ne ; (x8 dies)
+    //   -> csel x0, xzr, x2, ne.
+    movz_x(&code[0], 8, 0, 0);
+    csel_x(&code[4], 0, 8, 2, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Rm slot.
+    movz_x(&code[0], 8, 0, 0);
+    csel_x(&code[4], 0, 2, 8, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // CSINC (the whole select family folds).
+    movz_w(&code[0], 8, 0);
+    csinc_w(&code[4], 0, 8, 2, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A zero chain zeroes the full register, so a W consumer of an
+    // X-form zero still folds.
+    movz_x(&code[0], 8, 0, 0);
+    csel_w(&code[4], 0, 8, 2, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Both slots zero: csel_self owns the same-operand identity, so
+    // exactly one finding fires for the pair.
+    movz_x(&code[0], 8, 0, 0);
+    csel_x(&code[4], 0, 8, 8, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // The zero is read again before dying: discarded.
+    movz_x(&code[0], 8, 0, 0);
+    csel_x(&code[4], 0, 8, 2, 1);
+    add_x(&code[8], 5, 8, 6);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // -- Register CCMP/CCMN: only the Rn slot substitutes here (an
+    //    Rm-slot zero already folds to the immediate form via
+    //    check_mov_ccmp_imm_fold). --
+
+    // mov x8, #0 ; ccmp x8, x2, #4, ne -> ccmp xzr, x2, #4, ne.
+    movz_x(&code[0], 8, 0, 0);
+    ccmp_reg(&code[4], 1, 1, 8, 2, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // CCMN, W form.
+    movz_w(&code[0], 8, 0);
+    ccmp_reg(&code[4], 0, 0, 8, 2, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Rm slot: the immediate fold reports instead (division of
+    // labor), still exactly one finding.
+    movz_x(&code[0], 8, 0, 0);
+    ccmp_reg(&code[4], 1, 1, 2, 8, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Both slots: the rewrite would still read the register; no
+    // finding from either check.
+    movz_x(&code[0], 8, 0, 0);
+    ccmp_reg(&code[4], 1, 1, 8, 8, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 0);
 }
 
 // Conditional compare, register form: CCMN (is_ccmp=0) / CCMP

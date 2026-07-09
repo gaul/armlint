@@ -8227,6 +8227,98 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
         }
     }
 
+    // (d) Conditional select family (CSEL/CSINC/CSINV/CSNEG) with
+    // mov_rd as Rn or Rm. ZR is legal in either slot for all four
+    // ops. Both slots being the zero register is left to
+    // check_csel_self (a same-operand identity, a strictly better
+    // rewrite than two ZR substitutions that still need the select).
+    {
+        if ((op & 0x3FE00800u) == 0x1A800000u) {
+            unsigned sf = (op >> 31) & 1u;
+            unsigned rd = op & 0x1Fu;
+            unsigned rn = (op >> 5) & 0x1Fu;
+            unsigned rm = (op >> 16) & 0x1Fu;
+            unsigned cond = (op >> 12) & 0xFu;
+            unsigned opsel = (((op >> 30) & 1u) << 1) | ((op >> 10) & 1u);
+            bool rn_hit = rn == state->mov_rd;
+            bool rm_hit = rm == state->mov_rd;
+            if ((rn_hit || rm_hit) && !(rn_hit && rm_hit)) {
+                static const char *const sel_mnems[4] = {
+                    "csel", "csinc", "csinv", "csneg",
+                };
+                char wx = (sf != 0) ? 'x' : 'w';
+                unsigned new_rn = rn_hit ? 31u : rn;
+                unsigned new_rm = rm_hit ? 31u : rm;
+
+                char rd_buf[8], orig_rn_buf[8], orig_rm_buf[8];
+                char new_rn_buf[8], new_rm_buf[8];
+                format_reg(rd_buf, sizeof(rd_buf), wx, rd);
+                format_reg(orig_rn_buf, sizeof(orig_rn_buf), wx, rn);
+                format_reg(orig_rm_buf, sizeof(orig_rm_buf), wx, rm);
+                format_reg(new_rn_buf, sizeof(new_rn_buf), wx, new_rn);
+                format_reg(new_rm_buf, sizeof(new_rm_buf), wx, new_rm);
+
+                out->name = "MOV #0 + use foldable to ZR";
+                out->start_offset = state->mov_start_offset;
+                out->insn_count = state->mov_insn_count + 1;
+                clear_finding_strings(out);
+
+                char consumer_line[ARMLINT_FINDING_LINE_LEN];
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, %s, %s, %s",
+                    sel_mnems[opsel], rd_buf, new_rn_buf, new_rm_buf,
+                    a64_cond_names[cond]);
+                snprintf(consumer_line, sizeof(consumer_line),
+                    "%s %s, %s, %s, %s",
+                    sel_mnems[opsel], rd_buf, orig_rn_buf, orig_rm_buf,
+                    a64_cond_names[cond]);
+                mov_zero_finding_render_lines(state, out, consumer_line);
+                return mov_zero_defer(state, out);
+            }
+        }
+    }
+
+    // (e) Register-form CCMP/CCMN with mov_rd as Rn, the left
+    // operand, which has no immediate slot -- the Rm slot is
+    // check_mov_ccmp_imm_fold's territory (a zero there folds to the
+    // #0 immediate form, deleting the register read outright). Both
+    // slots being the zero register would leave the rewrite still
+    // reading it; skipped.
+    {
+        if ((op & 0x3FE00C10u) == 0x3A400000u) {
+            unsigned sf = (op >> 31) & 1u;
+            unsigned rn = (op >> 5) & 0x1Fu;
+            unsigned rm = (op >> 16) & 0x1Fu;
+            unsigned cond = (op >> 12) & 0xFu;
+            unsigned nzcv = op & 0xFu;
+            bool is_ccmp = ((op >> 30) & 1u) != 0;
+            if (rn == state->mov_rd && rm != state->mov_rd) {
+                char wx = (sf != 0) ? 'x' : 'w';
+                const char *mnem = is_ccmp ? "ccmp" : "ccmn";
+
+                char orig_rn_buf[8], rm_buf[8];
+                format_reg(orig_rn_buf, sizeof(orig_rn_buf), wx, rn);
+                format_reg(rm_buf, sizeof(rm_buf), wx, rm);
+
+                out->name = "MOV #0 + use foldable to ZR";
+                out->start_offset = state->mov_start_offset;
+                out->insn_count = state->mov_insn_count + 1;
+                clear_finding_strings(out);
+
+                char consumer_line[ARMLINT_FINDING_LINE_LEN];
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %czr, %s, #0x%x, %s",
+                    mnem, wx, rm_buf, nzcv, a64_cond_names[cond]);
+                snprintf(consumer_line, sizeof(consumer_line),
+                    "%s %s, %s, #0x%x, %s",
+                    mnem, orig_rn_buf, rm_buf, nzcv,
+                    a64_cond_names[cond]);
+                mov_zero_finding_render_lines(state, out, consumer_line);
+                return mov_zero_defer(state, out);
+            }
+        }
+    }
+
     return false;
 }
 

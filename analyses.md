@@ -1424,7 +1424,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 ## MOV #0 + use foldable to ZR
 
-* `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Three consumer
+* `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Five consumer
   families:
   * `STR` (B/H/W/X, unsigned-offset) with `Rt == mov_rd`
     -> `str <wzr/xzr>, [...]`. Saves the MOV when Rt-only.
@@ -1434,6 +1434,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   * `AND/ORR/EOR/ANDS` (shifted-register, LSL #0, N = 0) with Rn
     or Rm == mov_rd -> the same op with the operand as ZR. `TST`
     alias when Rd == ZR + ANDS.
+  * `CSEL/CSINC/CSINV/CSNEG` with Rn or Rm == mov_rd -> the same
+    select with that slot as ZR (legal in either slot for all
+    four). Both slots zero is left to the
+    [CSEL identity](#csel-same-operand-identity-csel-rd-rn-rn-cond),
+    a strictly better rewrite.
+  * Register-form `CCMP/CCMN` with Rn == mov_rd -> `ccmp ZR, Rm,
+    #nzcv, cond`. Only the left operand: an Rm-slot zero already
+    folds to the `#0` immediate form via the
+    [CCMP fold](#mov--ccmpccmn-foldable-to-immediate-form), which
+    deletes the register read outright.
 * The consumer's instruction count does not change, but the MOV
   becomes dead (assuming no other read of `xd`). Further
   simplification of forms like `ADD Rd, Rn, XZR -> MOV Rd, Rn` or

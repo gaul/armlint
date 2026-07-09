@@ -142,7 +142,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`sxtw`/`mov w, w` + `scvtf`/`ucvtf Xn`](analyses.md#widening-extend--scvtfucvtf-foldable-to-w-form-conversion) | `scvtf`/`ucvtf` of `Wn` |
 | [`ldr w8` + `scvtf`/`ucvtf` from GPR](analyses.md#load--scvtfucvtf-via-gpr-foldable-to-fp-load--convert) | `ldr s0` + FP-side convert (no cross-file transfer) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
-| [`mov #0` + `str`/`add`/`and` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
+| [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
 | [`mul` + `add`/`sub`](analyses.md#mul--addsub-foldable-to-maddmsub) | `madd`/`msub` (or `mneg`) |
 | [`smull`/`umull` + `add`/`sub`](analyses.md#smullumull--addsub-foldable-to-smaddlumaddl) | `smaddl`/`umaddl`/`smsubl`/`umsubl` |

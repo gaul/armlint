@@ -847,7 +847,7 @@ bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
 // Detect a MOV chain that materialises the constant 0, immediately
 // followed by an instruction that reads that register. The read can
 // be replaced by XZR/WZR (the architectural zero register), making
-// the MOV dead. Three consumer families are covered:
+// the MOV dead. Five consumer families are covered:
 //   - STR (B/H/W/X, unsigned-offset) with Rt == mov_rd
 //       -> str <wzr/xzr>, [...]
 //   - ADD/SUB/ADDS/SUBS (shifted-register, LSL #0) with Rn or Rm ==
@@ -856,6 +856,14 @@ bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
 //   - AND/ORR/EOR/ANDS (shifted-register, LSL #0, N == 0) with Rn or
 //     Rm == mov_rd -> the same op with that operand replaced by ZR.
 //     TST alias (ANDS + Rd == ZR) is rendered as the alias.
+//   - CSEL/CSINC/CSINV/CSNEG with Rn or Rm == mov_rd -> the same
+//     select with that slot as ZR (legal in either slot for all
+//     four). Both slots zero is left to check_csel_self, whose
+//     same-operand identity is the strictly better rewrite.
+//   - Register-form CCMP/CCMN with Rn == mov_rd -> the compare with
+//     ZR as the left operand. Only Rn: an Rm-slot zero already folds
+//     to the #0 immediate form via check_mov_ccmp_imm_fold, which
+//     deletes the register read outright.
 //
 // The consumer's instruction count does not change; the savings come
 // from the now-dead MOV (assuming Xd is not read elsewhere). The
