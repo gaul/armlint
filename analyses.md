@@ -1451,11 +1451,23 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   register-liveness deferral, and the RBIT's source still holds its
   original value at the consumer once the RBIT is deleted (even
   in-place).
-* The remaining CSSC candidate -- the NEON popcount round trip
-  (`fmov d0, x0 ; cnt v0.8b ; addv b0 ; fmov w0, s0` ->
-  `cnt w0, w0`) -- needs the vector temporary proven dead; the
-  FP-register liveness scan now exists, so only the four-stage chain
-  match remains future work.
+* The NEON popcount round trip folds to the GPR `CNT`:
+  `fmov d0, x1 ; cnt v0.8b, v0.8b ; addv b0, v0.8b ; fmov w0, s0` ->
+  `cnt x0, x1` ("NEON popcount foldable to CNT (CSSC)"). All vector
+  stages must run in place on one register with strict adjacency;
+  the 8B and 16B `CNT`/`ADDV` forms both match (the opening `FMOV`
+  zeroed the upper half), and the closing transfer may read the S or
+  D view into any GPR -- the count fits every view and both
+  spellings zero above it. The rewrite never writes the vector
+  register and nothing in the chain can kill it structurally, so
+  emission always defers through the
+  FP/vector-register liveness scan. This retires four instructions,
+  two of them cross-register-file transfers. One honest limit: a
+  chain that runs straight into `ret` -- the canonical standalone
+  `__builtin_popcountll` emission -- stays unreported, because v0 is
+  the FP return-value register and the scan stops conservatively at
+  every control transfer; the realistic catch is the inlined chain
+  whose vector register is reused shortly after.
 
 ## LDR literal foldable to MOV/FMOV immediate
 

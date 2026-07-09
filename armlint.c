@@ -349,6 +349,17 @@ struct armlint_state {
     size_t rbc_offset;
     char rbc_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // CSSC popcount chain progress: FMOV (GPR -> FP), CNT 8B/16B,
+    // ADDV, FMOV (FP -> GPR), all on one vector register with strict
+    // adjacency between stages. pcnt_stage counts completed stages
+    // (1..3); the per-stage disassembly accumulates for the finding.
+    unsigned pcnt_stage;
+    bool pcnt_src_is64;
+    unsigned pcnt_vreg;
+    unsigned pcnt_src;
+    size_t pcnt_offset;
+    char pcnt_lines[3][ARMLINT_FINDING_LINE_LEN];
+
     // Deferred CSSC finding awaiting proof that NZCV is dead: the
     // MAX/MIN and ABS rewrites delete the compare and set no flags at
     // all, so any later flag reader (before an overwrite) discards.
@@ -1026,6 +1037,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->cmx_active = false;
     state->cab_active = false;
     state->rbc_active = false;
+    state->pcnt_stage = 0;
     state->pending_cssc_active = false;
     state->pending_fp_active = false;
     return mov_close(state, out);
@@ -1179,6 +1191,8 @@ static bool fp8_encodable(uint64_t bits, bool is_double);
 static void format_fp8(char *buf, size_t bufsz, double v);
 static bool decode_ldrsw_uimm(uint32_t op, unsigned *out_imm12,
                               unsigned *out_rn, unsigned *out_rt);
+static bool decode_fmov_from_gpr(uint32_t op, bool *out_is_double,
+                                 unsigned *out_rn, unsigned *out_rd);
 static bool decode_fp_ldr_str_uimm(uint32_t op, bool *out_is_load,
                                    unsigned *out_lg2size,
                                    unsigned *out_imm12,
@@ -7711,6 +7725,102 @@ bool check_cssc_ctz(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+bool check_cssc_popcount(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_CSSC)) {
+        state->pcnt_stage = 0;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // Advance the chain: FMOV in -> CNT -> ADDV -> FMOV out, every
+    // vector stage in place on the one register. The 8B and 16B
+    // forms of CNT and ADDV both match (the FMOV zeroed the upper
+    // half, so the extra lanes contribute zero), and the final
+    // transfer may read the S or the D view (ADDV zeroed everything
+    // above byte 0). Strict adjacency: a mismatch at any stage drops
+    // the chain, then falls through to (re)open on an FMOV.
+    unsigned prev_stage = state->pcnt_stage;
+    state->pcnt_stage = 0;
+    if (prev_stage == 1u && (op & 0xBFFFFC00u) == 0x0E205800u) {
+        // CNT vd.8b/.16b, vn.
+        unsigned rd = op & 0x1Fu;
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if (rd == state->pcnt_vreg && rn == state->pcnt_vreg) {
+            snprintf(state->pcnt_lines[1], sizeof(state->pcnt_lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            state->pcnt_stage = 2;
+            return false;
+        }
+    } else if (prev_stage == 2u && (op & 0xBFFFFC00u) == 0x0E31B800u) {
+        // ADDV bd, vn.8b/.16b.
+        unsigned rd = op & 0x1Fu;
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if (rd == state->pcnt_vreg && rn == state->pcnt_vreg) {
+            snprintf(state->pcnt_lines[2], sizeof(state->pcnt_lines[2]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            state->pcnt_stage = 3;
+            return false;
+        }
+    } else if (prev_stage == 3u
+            && ((op & 0xFFFFFC00u) == 0x1E260000u
+                || (op & 0xFFFFFC00u) == 0x9E660000u)) {
+        // FMOV Wd, Sn / FMOV Xd, Dn reading the accumulated count.
+        unsigned rd = op & 0x1Fu;
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if (rn == state->pcnt_vreg) {
+            // CSSC CNT counts at the source's width; the count fits
+            // any destination view (<= 64), and both spellings zero
+            // the destination above it, so the final GPR state is
+            // identical whichever transfer width the chain used.
+            char w_or_x = state->pcnt_src_is64 ? 'x' : 'w';
+
+            out->name = "NEON popcount foldable to CNT (CSSC)";
+            out->start_offset = state->pcnt_offset;
+            out->insn_count = 4;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> cnt %c%u, %c%u",
+                w_or_x, rd, w_or_x, state->pcnt_src);
+            for (unsigned i = 0; i < 3; i++) {
+                snprintf(out->lines[i], sizeof(out->lines[i]),
+                    "%s", state->pcnt_lines[i]);
+            }
+            snprintf(out->lines[3], sizeof(out->lines[3]),
+                "%s %s", insn->mnemonic, insn->op_str);
+
+            // The rewrite deletes all four instructions and never
+            // writes the vector register: it must be dead afterward.
+            // No stage can kill it structurally (the close writes a
+            // GPR), so emission always defers through the
+            // vector-register liveness scan.
+            return defer_dead_fpreg(state, out, state->pcnt_vreg);
+        }
+    }
+
+    // (Re)open: FMOV Dd, Xn / FMOV Sd, Wn materialising the popcount
+    // input. A ZR source is the FP-zeroing idiom
+    // (check_fp_zero_to_movi's shape), not a popcount.
+    {
+        bool is_double;
+        unsigned rn, rd;
+        if (decode_fmov_from_gpr(op, &is_double, &rn, &rd)
+                && rn != 31) {
+            state->pcnt_stage = 1;
+            state->pcnt_src_is64 = is_double;
+            state->pcnt_vreg = rd;
+            state->pcnt_src = rn;
+            state->pcnt_offset = offset;
+            snprintf(state->pcnt_lines[0], sizeof(state->pcnt_lines[0]),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    return false;
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -11553,6 +11663,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cssc_minmax,
     check_cssc_abs,
     check_cssc_ctz,
+    check_cssc_popcount,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,

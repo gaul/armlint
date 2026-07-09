@@ -27,6 +27,14 @@ _main:
     rbit    x0, x1
     clz     x0, x0                  // -> ctz x0, x1
 
+    // 5) NEON popcount round trip; v0 dies at the trailing fmov, so
+    //    the vector-register scan commits the finding.
+    fmov    d0, x1
+    cnt     v0.8b, v0.8b
+    addv    b0, v0.8b
+    fmov    w0, s0                  // -> cnt x0, x1
+    fmov    d0, x9
+
     // Negatives:
     // N1) A later flag reader keeps the compare alive: no fold.
     cmp     x1, x2

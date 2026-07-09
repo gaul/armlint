@@ -874,17 +874,33 @@ bool check_adr_fold(armlint_state *state, const cs_insn *insn,
 // and uses the standard register deferral: a CLZ destination that IS
 // the reversed register kills it structurally.
 //
-// The remaining CSSC candidate -- the NEON popcount round trip
-// (fmov d0, x0 ; cnt ; addv ; fmov) -> cnt Xd, Xn -- requires
-// proving the vector temporary dead; the FP-register liveness scan
-// (armlint_advance_pending_fp) now exists, so only the four-stage
-// chain match remains future work.
+// The fourth check folds the NEON popcount round trip:
+//
+//   fmov d0, x0 ; cnt v0.8b, v0.8b ; addv b0, v0.8b ; fmov w0, s0
+//     -> cnt x0, x0
+//
+// (the W-source chain likewise, to cnt Wd, Wn). All vector stages
+// must run in place on ONE register with strict adjacency; the 8B
+// and 16B forms of CNT/ADDV both match (the opening FMOV zeroed the
+// upper half, so the extra lanes contribute zero), and the closing
+// transfer may read the S or D view (ADDV zeroed everything above
+// byte 0) into any GPR. CSSC CNT counts at the source's width; the
+// count fits any destination view and both spellings zero above it,
+// so the final GPR state is identical. A ZR source never opens (the
+// FP-zeroing idiom). The rewrite deletes all four instructions and
+// never writes the vector register, and no stage can kill it
+// structurally (the close writes a GPR), so emission always defers
+// through the vector-register liveness scan
+// (armlint_advance_pending_fp). Reported as "NEON popcount foldable
+// to CNT (CSSC)".
 bool check_cssc_minmax(armlint_state *state, const cs_insn *insn,
                        size_t offset, armlint_finding *out);
 bool check_cssc_abs(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
 bool check_cssc_ctz(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
+bool check_cssc_popcount(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
 
 // NZCV-death advancer for the deferred CSSC findings, parallel to
 // armlint_advance_pending_zs.

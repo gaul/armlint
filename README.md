@@ -151,6 +151,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`cmp` + `csel` (max/min shape)](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `smax`/`smin`/`umax`/`umin` (`-m cssc`) |
 | [`cmp #0` + `cneg`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `abs` (`-m cssc`) |
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
+| [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |

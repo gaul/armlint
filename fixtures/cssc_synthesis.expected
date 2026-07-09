@@ -14,9 +14,16 @@ RBIT + CLZ foldable to CTZ (CSSC) at offset: 0x24: -> ctz x0, x1 (2 instructions
   rbit x0, x1
   clz x0, x0
 
+NEON popcount foldable to CNT (CSSC) at offset: 0x2c: -> cnt x0, x1 (4 instructions)
+  fmov d0, x1
+  cnt v0.8b, v0.8b
+  addv b0, v0.8b
+  fmov w0, s0
+
 Optimization opportunities by type:
        2  CMP + CSEL foldable to MAX/MIN (CSSC)
        1  CMP #0 + CNEG foldable to ABS (CSSC)
+       1  NEON popcount foldable to CNT (CSSC)
        1  RBIT + CLZ foldable to CTZ (CSSC)
 
-4 optimization opportunities in 18 instructions
+5 optimization opportunities in 23 instructions

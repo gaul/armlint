@@ -9826,6 +9826,68 @@ static void test_cssc_ctz(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_cssc_popcount(void)
+{
+    uint8_t code[24];
+
+    // fmov d0, x1 ; cnt v0.8b ; addv b0 ; fmov w0, s0 ; (v0 dies at
+    // the trailing fmov d0, x5) -> cnt x0, x1.
+    write_le32(&code[0],  0x9E670000u | (1u << 5) | 0u);
+    write_le32(&code[4],  0x0E205800u | (0u << 5) | 0u);
+    write_le32(&code[8],  0x0E31B800u | (0u << 5) | 0u);
+    write_le32(&code[12], 0x1E260000u | (0u << 5) | 0u);
+    write_le32(&code[16], 0x9E670000u | (5u << 5) | 0u);
+    assert(run_cssc_check(code, 20) == 1);
+
+    // W-source chain, 16B forms, X-from-D close: -> cnt w2, w1.
+    write_le32(&code[0],  0x1E270000u | (1u << 5) | 3u);
+    write_le32(&code[4],  0x4E205800u | (3u << 5) | 3u);
+    write_le32(&code[8],  0x4E31B800u | (3u << 5) | 3u);
+    write_le32(&code[12], 0x9E660000u | (3u << 5) | 2u);
+    write_le32(&code[16], 0x9E670000u | (5u << 5) | 3u);
+    assert(run_cssc_check(code, 20) == 1);
+
+    // A later read of the vector temporary discards the deferral.
+    write_le32(&code[0],  0x9E670000u | (1u << 5) | 0u);
+    write_le32(&code[4],  0x0E205800u | (0u << 5) | 0u);
+    write_le32(&code[8],  0x0E31B800u | (0u << 5) | 0u);
+    write_le32(&code[12], 0x1E260000u | (0u << 5) | 0u);
+    write_le32(&code[16], 0x1E602800u | (1u << 16) | (0u << 5) | 6u);
+    assert(run_cssc_check(code, 20) == 0);
+
+    // No later kill: never proven dead.
+    write_le32(&code[0],  0x9E670000u | (1u << 5) | 0u);
+    write_le32(&code[4],  0x0E205800u | (0u << 5) | 0u);
+    write_le32(&code[8],  0x0E31B800u | (0u << 5) | 0u);
+    write_le32(&code[12], 0x1E260000u | (0u << 5) | 0u);
+    assert(run_cssc_check(code, 16) == 0);
+
+    // A stage on a different vector register breaks the chain.
+    write_le32(&code[0],  0x9E670000u | (1u << 5) | 0u);
+    write_le32(&code[4],  0x0E205800u | (0u << 5) | 1u);
+    write_le32(&code[8],  0x0E31B800u | (1u << 5) | 1u);
+    write_le32(&code[12], 0x1E260000u | (1u << 5) | 0u);
+    write_le32(&code[16], 0x9E670000u | (5u << 5) | 0u);
+    assert(run_cssc_check(code, 20) == 0);
+
+    // An intervening instruction between stages breaks adjacency.
+    write_le32(&code[0],  0x9E670000u | (1u << 5) | 0u);
+    movz_x(&code[4], 5, 1, 0);
+    write_le32(&code[8],  0x0E205800u | (0u << 5) | 0u);
+    write_le32(&code[12], 0x0E31B800u | (0u << 5) | 0u);
+    write_le32(&code[16], 0x1E260000u | (0u << 5) | 0u);
+    assert(run_cssc_check(code, 20) == 0);
+
+    // Silent without the feature (the chain + kill would otherwise
+    // fold).
+    write_le32(&code[0],  0x9E670000u | (1u << 5) | 0u);
+    write_le32(&code[4],  0x0E205800u | (0u << 5) | 0u);
+    write_le32(&code[8],  0x0E31B800u | (0u << 5) | 0u);
+    write_le32(&code[12], 0x1E260000u | (0u << 5) | 0u);
+    write_le32(&code[16], 0x9E670000u | (5u << 5) | 0u);
+    assert(run_helper_check(code, 20) == 0);
+}
+
 static void test_adr_fold(void)
 {
     uint8_t code[12];
@@ -11189,6 +11251,7 @@ int main(void)
     test_cssc_minmax();
     test_cssc_abs();
     test_cssc_ctz();
+    test_cssc_popcount();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();
