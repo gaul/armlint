@@ -1,0 +1,28 @@
+MOV + variable shift foldable to immediate shift at offset: 0x0: -> lsl x0, x1, #5 (2 instructions)
+  movz x8, #0x5
+  lsl x0, x1, x8
+
+MOV + variable shift foldable to immediate shift at offset: 0xc: -> lsr x0, x1, #5 (2 instructions)
+  movz x8, #0x5
+  lsr x0, x1, x8
+
+MOV + variable shift foldable to immediate shift at offset: 0x18: -> asr w0, w1, #7 (2 instructions)
+  movz w8, #0x7
+  asr w0, w1, w8
+
+MOV + variable shift foldable to immediate shift at offset: 0x24: -> ror x0, x1, #13 (2 instructions)
+  movz x8, #0xd
+  ror x0, x1, x8
+
+MOV + variable shift foldable to immediate shift at offset: 0x30: -> lsl x0, x1, #3 (2 instructions)
+  movz x8, #0x43
+  lsl x0, x1, x8
+
+MOV + variable shift foldable to immediate shift at offset: 0x3c: -> lsl x8, x1, #5 (2 instructions)
+  movz x8, #0x5
+  lsl x8, x1, x8
+
+Optimization opportunities by type:
+       6  MOV + variable shift foldable to immediate shift
+
+6 optimization opportunities in 26 instructions

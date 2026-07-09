@@ -1106,6 +1106,34 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   register that held the 1); the select itself neither gains nor
   loses -- `CSEL` and `CSINC` cost the same on current cores.
 
+## MOV + variable shift foldable to immediate shift
+
+* `mov w8, #5 ; lsl wd, wn, w8` instead of `lsl wd, wn, #5`. The
+  variable shifts `LSLV`/`LSRV`/`ASRV`/`RORV` -- which assemblers
+  spell `lsl`/`lsr`/`asr`/`ror` with a register amount -- each have
+  an immediate-form twin (the `UBFM`/`SBFM` aliases; `EXTR` for
+  `ROR`), so a materialised shift amount folds into it and the MOV
+  dies.
+* The register form shifts by `UInt(Rm) MOD datasize`, so the folded
+  immediate is the chain's value reduced modulo 32/64: a chain of
+  `#67` feeding a 64-bit shift folds to `#3`, and a MOVN chain's
+  all-ones value folds to `#31`/`#63`. A residue of 0 shifts by
+  nothing -- a register copy, not a shift -- and is left alone as
+  degenerate.
+* Reuses the MOVZ/MOVK chain state (and shares the MUL check's
+  dead-constant caveat). The chain must feed the amount operand `Rm`;
+  the shifted operand `Rn` must not be the constant register (the
+  rewrite would still read it, so the MOV could never be deleted)
+  nor ZR (shifting zero is a constant, a different idiom). `Rd = 31`
+  (a discarded shift) is excluded, and the chain's width must match
+  the shift's.
+* The rewrite deletes the MOV; the immediate and register shift
+  forms themselves cost the same on current cores. A shift whose
+  destination IS the constant register overwrites it at the consumer
+  and reports immediately; otherwise emission defers through the
+  forward register-liveness scan until the constant register is
+  provably dead.
+
 ## MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate
 
 * `mov w8, #0x3f800000 ; fmov s0, w8` instead of `fmov s0, #1.0`.

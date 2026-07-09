@@ -5948,6 +5948,101 @@ bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+bool check_mov_shift_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // Variable shifts LSLV/LSRV/ASRV/RORV (Data-processing 2-source,
+    // opcode 0010xx): sf 00 11010110 Rm 0010 op2 Rn Rd. Assemblers
+    // and Capstone spell them lsl/lsr/asr/ror with a register
+    // amount; every one has an immediate-form twin (UBFM/SBFM
+    // aliases, EXTR for ROR).
+    if ((op & 0x7FE0F000u) != 0x1AC02000u) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 1u;
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+
+    if ((sf != 0) != state->mov_is_64bit) {
+        return false;
+    }
+    // The chain must feed the amount operand Rm. The shifted operand
+    // Rn must not be the constant register (the rewrite would still
+    // read it, so the MOV could never be deleted) nor ZR (shifting
+    // zero is a constant, a different idiom). Rd = 31 discards the
+    // shift.
+    if (rm != state->mov_rd || rn == state->mov_rd || rn == 31
+            || rd == 31) {
+        return false;
+    }
+
+    // The register form shifts by UInt(Rm) MOD datasize, so the
+    // folded immediate is the chain's value reduced -- a chain of
+    // #67 feeding a 64-bit shift folds to #3. A residue of 0 shifts
+    // by nothing (a register copy, not a shift) and is left alone as
+    // degenerate.
+    unsigned datasize = sf ? 64u : 32u;
+    unsigned amount = (unsigned)(state->mov_value & (datasize - 1u));
+    if (amount == 0) {
+        return false;
+    }
+
+    char w_or_x = sf ? 'x' : 'w';
+
+    out->name = "MOV + variable shift foldable to immediate shift";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "-> %s %c%u, %c%u, #%u",
+        insn->mnemonic, w_or_x, rd, w_or_x, rn, amount);
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // The rewrite deletes the MOV; the immediate and register shift
+    // forms themselves cost the same. A shift whose destination IS
+    // the constant register overwrites it at the consumer and
+    // reports immediately; otherwise emission defers until the
+    // constant register is provably dead.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -9502,6 +9597,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_logic_imm_fold,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,
+    check_mov_shift_fold,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,

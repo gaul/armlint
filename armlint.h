@@ -584,6 +584,33 @@ bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
 
+// Detect a MOV chain materialising a shift amount, immediately
+// followed by a variable shift (LSLV/LSRV/ASRV/RORV -- spelled
+// lsl/lsr/asr/ror with a register amount) whose Rm is the constant
+// register. Every variable shift has an immediate-form twin (the
+// UBFM/SBFM aliases; EXTR for ROR), so the pair folds:
+//   mov w8, #5 ; lsl wd, wn, w8 -> lsl wd, wn, #5
+// The register form shifts by UInt(Rm) MOD datasize, so the folded
+// immediate is the chain's value reduced modulo 32/64 (a chain of
+// #67 feeding a 64-bit shift folds to #3); a residue of 0 shifts by
+// nothing -- a register copy, not a shift -- and is left alone as
+// degenerate. The shifted operand Rn must not be the constant
+// register (the rewrite would still read it) nor ZR (a constant),
+// Rd = 31 (a discarded shift) is excluded, and the chain's width
+// must match the shift's, consistent with the other integer
+// MOV-chain folds.
+//
+// The rewrite deletes the MOV; the immediate and register shift
+// forms cost the same. A shift whose destination IS the constant
+// register overwrites it at the consumer and reports immediately;
+// otherwise the finding defers through the forward register-liveness
+// scan (defer_dead_mov) until the constant register is provably
+// dead. Runs before check_movz_movk_bitmask so the chain state is
+// still active. Reported as "MOV + variable shift foldable to
+// immediate shift".
+bool check_mov_shift_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
 // conversion that consumes it, when FMOV (scalar, immediate) could

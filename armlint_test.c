@@ -6693,6 +6693,105 @@ static void test_mov_csel_fold(void)
     assert(run_reg_dead(code, 8, 8) == 0);
 }
 
+// Variable shift LSLV/LSRV/ASRV/RORV: sf 00 11010110 Rm 0010 op2
+// Rn Rd. type: 0=lsl 1=lsr 2=asr 3=ror.
+static void vshift(uint8_t out[4], unsigned sf, unsigned type,
+                   unsigned rd, unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x1AC02000u | ((sf & 1u) << 31)
+        | ((rm & 0x1Fu) << 16) | ((type & 3u) << 10)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_mov_shift_fold(void)
+{
+    uint8_t code[16];
+
+    // mov x8, #5 ; lsl x0, x1, x8 ; (x8 dies) -> lsl x0, x1, #5.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // LSR, ASR and ROR fold the same way.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 1, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 2, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 3, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // W-form.
+    movz_w(&code[0], 8, 5);
+    vshift(&code[4], 0, 0, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // The register form shifts modulo the datasize: #67 on a 64-bit
+    // shift folds to #3.
+    movz_x(&code[0], 8, 67, 0);
+    vshift(&code[4], 1, 0, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A MOVK-extended chain folds by its net value (0x10003 mod 64
+    // = 3).
+    movz_x(&code[0], 8, 3, 0);
+    movk_x(&code[4], 8, 1, 1);
+    vshift(&code[8], 1, 0, 0, 1, 8);
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // Structural kill: the shift overwrites the constant register.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 8, 1, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Fresh destination without a kill: nothing is emitted.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 0, 1, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // The constant is read again before dying: discarded.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 0, 1, 8);
+    add_x(&code[8], 5, 8, 6);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Residue 0 shifts by nothing (a register copy): #64 mod 64 and
+    // #0 are both degenerate.
+    movz_x(&code[0], 8, 64, 0);
+    vshift(&code[4], 1, 0, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+    movz_x(&code[0], 8, 0, 0);
+    vshift(&code[4], 1, 0, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Width mismatch (W chain, X shift).
+    movz_w(&code[0], 8, 5);
+    vshift(&code[4], 1, 0, 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // The shifted operand is the constant register: the rewrite
+    // would still read it.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 0, 8, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // ZR shifted operand (a constant) and ZR destination (a dead
+    // shift) are degenerate.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 0, 31, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 31, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // The chain must feed the amount (Rm), not the shifted operand.
+    movz_x(&code[0], 8, 5, 0);
+    vshift(&code[4], 1, 0, 0, 8, 1);
+    assert(run_reg_dead(code, 8, 8) == 0);
+}
+
 // FMOV (general), GPR -> FPR: fmov Sd, Wn / fmov Dd, Xn.
 static void fmov_s_from_w(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -9702,6 +9801,7 @@ int main(void)
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();
+    test_mov_shift_fold();
     test_mov_fmov_imm_fold();
     test_fp_zero_to_movi();
     test_extend_cvtf_fold();
