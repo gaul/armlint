@@ -5463,40 +5463,67 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 
     // ADD/SUB imm form: 12-bit unsigned imm with optional LSL #12.
     // C fits iff C is in [0, 0xFFF] (sh=0) or C is a multiple of
-    // 0x1000 and (C >> 12) is in [0, 0xFFF] (sh=1).
-    bool fits_no_shift = (c <= 0xFFFu);
-    bool fits_with_shift = (c >= 0x1000u)
-        && ((c & 0xFFFu) == 0)
-        && ((c >> 12) <= 0xFFFu);
+    // 0x1000 and (C >> 12) is in [0, 0xFFF] (sh=1). A value that
+    // does not fit directly may still fold sign-crossed: a NEGATIVE
+    // value whose magnitude encodes folds into the opposite-sign
+    // consumer (add <-> sub, adds <-> subs, cmp <-> cmn). The
+    // crossing is exact for every flag: SUBS Rn, Rm with Rm = -C
+    // computes Rn + NOT(-C) + 1 = Rn + C, the identical 65-bit sum
+    // as ADDS Rn, #C, so N, Z, C and V all agree bit-for-bit (and
+    // symmetrically for ADDS of a negative).
+    uint64_t imm = c;
+    bool crossed = false;
+    bool fits_no_shift = (imm <= 0xFFFu);
+    bool fits_with_shift = (imm >= 0x1000u)
+        && ((imm & 0xFFFu) == 0)
+        && ((imm >> 12) <= 0xFFFu);
     if (!fits_no_shift && !fits_with_shift) {
-        return false;
+        uint64_t sign_bit = is_64bit ? (1ull << 63) : (1ull << 31);
+        uint64_t mask = is_64bit ? ~0ull : 0xFFFFFFFFull;
+        if ((c & sign_bit) == 0) {
+            return false;
+        }
+        uint64_t mag = (~c + 1u) & mask;
+        fits_no_shift = (mag <= 0xFFFu);
+        fits_with_shift = (mag >= 0x1000u)
+            && ((mag & 0xFFFu) == 0)
+            && ((mag >> 12) <= 0xFFFu);
+        if (!fits_no_shift && !fits_with_shift) {
+            return false;
+        }
+        crossed = true;
+        imm = mag;
     }
 
     char w_or_x = is_64bit ? 'x' : 'w';
-    const char *mnem;
-    if (is_sub) {
-        mnem = is_s ? "subs" : "sub";
+    // The fold's sign flips when the constant crossed.
+    bool fold_sub = is_sub != crossed;
+    const char *fold_mnem;
+    if (fold_sub) {
+        fold_mnem = is_s ? "subs" : "sub";
     } else {
-        mnem = is_s ? "adds" : "add";
+        fold_mnem = is_s ? "adds" : "add";
     }
-    const char *alias = NULL;
+    const char *fold_alias = NULL;
     if (rd == 31 && is_s) {
-        alias = is_sub ? "cmp" : "cmn";
+        fold_alias = fold_sub ? "cmp" : "cmn";
     }
 
-    out->name = "MOV + ADD/SUB foldable to immediate form";
+    out->name = crossed
+        ? "MOV + ADD/SUB foldable to sign-crossed immediate form"
+        : "MOV + ADD/SUB foldable to immediate form";
     out->start_offset = state->mov_start_offset;
     out->insn_count = state->mov_insn_count + 1;
     clear_finding_strings(out);
 
-    if (alias != NULL) {
+    if (fold_alias != NULL) {
         snprintf(out->detail, sizeof(out->detail),
             "-> %s %c%u, #0x%" PRIx64,
-            alias, w_or_x, other, c);
+            fold_alias, w_or_x, other, imm);
     } else {
         snprintf(out->detail, sizeof(out->detail),
             "-> %s %c%u, %c%u, #0x%" PRIx64,
-            mnem, w_or_x, rd, w_or_x, other, c);
+            fold_mnem, w_or_x, rd, w_or_x, other, imm);
     }
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
@@ -5519,9 +5546,10 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
                 mov_mnem, w_or_x, state->mov_rd, e->imm16, shift);
         }
     }
+    // Capstone's own text renders the CMP/CMN aliases correctly
+    // (the manual spelling would print the Rd = 31 slot as "x31").
     snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
-        "%s %c%u, %c%u, %c%u",
-        mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+        "%s %s", insn->mnemonic, insn->op_str);
 
     // The rewrite deletes the MOV. If the ADD/SUB writes the constant
     // register itself (Rd == mov_rd), that write already kills the
@@ -5656,7 +5684,6 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
         { "and", "orr", "eor", "ands" },  // N = 0: direct forms
         { "bic", "orn", "eon", "bics" },  // N = 1: Rm-inverting forms
     };
-    const char *cons_mnem = logic_mnems[inverted ? 1 : 0][opc];
     // The suggestion always uses the direct family -- the only one
     // with an immediate form.
     const char *mnem = logic_mnems[0][opc];
@@ -5699,9 +5726,10 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                 mov_mnem, w_or_x, state->mov_rd, e->imm16, shift);
         }
     }
+    // Capstone's own text renders the TST alias (and a Rd = 31 BICS)
+    // correctly (the manual spelling would print that slot as "x31").
     snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
-        "%s %c%u, %c%u, %c%u",
-        cons_mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+        "%s %s", insn->mnemonic, insn->op_str);
 
     // The rewrite deletes the MOV. If the logical op writes the constant
     // register itself (Rd == mov_rd), that write already kills the
@@ -5778,23 +5806,41 @@ bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
-    // The immediate form's imm5 is a 5-bit unsigned value.
+    // The immediate form's imm5 is a 5-bit unsigned value. A larger
+    // constant may still fold sign-crossed: a NEGATIVE value whose
+    // magnitude fits imm5 folds into the opposite compare
+    // (ccmp <-> ccmn), whose NZCV agree exactly -- when the condition
+    // holds, CCMP of -C and CCMN of #C perform the identical 65-bit
+    // sum (Rn + NOT(-C) + 1 = Rn + C), and when it fails both set the
+    // carried-over #nzcv literal.
     uint64_t c = state->mov_value;
+    uint64_t imm = c;
+    bool crossed = false;
     if (c > 31) {
-        return false;
+        uint64_t sign_bit = is_64bit ? (1ull << 63) : (1ull << 31);
+        uint64_t mask = is_64bit ? ~0ull : 0xFFFFFFFFull;
+        uint64_t mag = (~c + 1u) & mask;
+        if ((c & sign_bit) == 0 || mag > 31) {
+            return false;
+        }
+        crossed = true;
+        imm = mag;
     }
 
     char w_or_x = is_64bit ? 'x' : 'w';
     const char *mnem = is_ccmp ? "ccmp" : "ccmn";
+    const char *fold_mnem = (is_ccmp != crossed) ? "ccmp" : "ccmn";
 
-    out->name = "MOV + CCMP/CCMN foldable to immediate form";
+    out->name = crossed
+        ? "MOV + CCMP/CCMN foldable to sign-crossed immediate form"
+        : "MOV + CCMP/CCMN foldable to immediate form";
     out->start_offset = state->mov_start_offset;
     out->insn_count = state->mov_insn_count + 1;
     clear_finding_strings(out);
 
     snprintf(out->detail, sizeof(out->detail),
         "-> %s %c%u, #0x%" PRIx64 ", #0x%x, %s",
-        mnem, w_or_x, rn, c, nzcv, a64_cond_names[cond]);
+        fold_mnem, w_or_x, rn, imm, nzcv, a64_cond_names[cond]);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;

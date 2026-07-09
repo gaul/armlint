@@ -38,4 +38,22 @@ _main:
     ccmp    x5, x13, #0, ne
     add     x6, x13, #1
 
+    // Sign-crossed folds: a negative constant whose magnitude fits
+    // imm5 folds into the opposite compare, whose NZCV agree exactly.
+
+    // P) mov x8, #-7 ; ccmp -> ccmn #7.
+    mov     x8, #-7
+    ccmp    x0, x8, #4, ne          // -> ccmn x0, #7, #4, ne
+    mov     x8, #1
+
+    // P) mov x8, #-7 ; ccmn -> ccmp #7.
+    mov     x8, #-7
+    ccmn    x0, x8, #4, ne          // -> ccmp x0, #7, #4, ne
+    mov     x8, #1
+
+    // N) Magnitude 32 does not fit imm5.
+    mov     x8, #-32
+    ccmp    x0, x8, #4, ne
+    mov     x8, #1
+
     ret

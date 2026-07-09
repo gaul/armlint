@@ -1033,6 +1033,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `0x1000` with `C/0x1000` in `[1, 0xFFF]`). Same for `SUB`,
   `ADDS`, `SUBS`, and the `CMP`/`CMN` aliases (S-variant with
   `Rd == ZR`).
+* A NEGATIVE constant whose magnitude encodes folds *sign-crossed*
+  into the opposite consumer -- `mov x8, #-5 ; add xd, xn, x8` ->
+  `sub xd, xn, #5`, and symmetrically `sub` -> `add`, `adds` <->
+  `subs`, `cmp` <-> `cmn` -- reported as "MOV + ADD/SUB foldable to
+  sign-crossed immediate form". The crossing is exact for every
+  flag, not just the result: `SUBS Rn, Rm` with `Rm = -C` computes
+  `Rn + NOT(-C) + 1 = Rn + C`, the identical 65-bit sum as
+  `ADDS Rn, #C`, so N, Z, C and V agree bit-for-bit (and
+  symmetrically for `ADDS` of a negative). MOVN chains reach these
+  values naturally.
 * Reuses the MOVZ/MOVK chain state (and shares the MUL check's
   dead-constant caveat). ADD is commutative -- either operand may be
   the MOV destination. SUB is not: only `Rm == mov_rd` folds, since
@@ -1096,10 +1106,15 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   must not be the constant register (the rewrite would still read it)
   nor ZR (a degenerate compare-against-zero idiom). Width (W vs X) of
   the chain must match the compare's.
-* `C` outside `[0, 31]` has no immediate form and is skipped. The
-  sign-crossing rewrite for negative constants (`ccmp Rn, #-C` <->
-  `ccmn Rn, #C`, whose NZCV agree exactly) is not attempted,
-  consistent with the `MOV + ADD/SUB` fold's direct-form-only policy.
+* A non-negative `C` outside `[0, 31]` has no immediate form and is
+  skipped. A NEGATIVE constant whose magnitude fits imm5 folds
+  *sign-crossed* into the opposite compare -- `mov x8, #-7 ;
+  ccmp Rn, x8, #nzcv, cond` -> `ccmn Rn, #7, #nzcv, cond`, and
+  symmetrically `ccmn` -> `ccmp` -- reported as "MOV + CCMP/CCMN
+  foldable to sign-crossed immediate form". The NZCV agree exactly:
+  when the condition holds, the compare of `-C` and the opposite
+  compare of `#C` perform the identical 65-bit sum, and when it
+  fails both set the carried-over `#nzcv` literal.
 
 ## MOV #1 + CSEL foldable to CSINC/CSET
 

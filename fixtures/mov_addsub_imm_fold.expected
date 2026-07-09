@@ -24,11 +24,11 @@ MOV + ADD/SUB foldable to immediate form at offset: 0x28: -> subs x3, x2, #0x190
 
 MOV + ADD/SUB foldable to immediate form at offset: 0x30: -> cmp x2, #0x1f4 (2 instructions)
   movz x0, #0x1f4
-  subs x31, x2, x0
+  cmp x2, x0
 
 MOV + ADD/SUB foldable to immediate form at offset: 0x38: -> cmn x2, #0x258 (2 instructions)
   movz x0, #0x258
-  adds x31, x2, x0
+  cmn x2, x0
 
 MOV + ADD/SUB foldable to immediate form at offset: 0x40: -> add x3, x2, #0xfff (2 instructions)
   movz x0, #0xfff
@@ -38,7 +38,24 @@ MOV + ADD/SUB foldable to immediate form at offset: 0x48: -> add x3, x2, #0x1000
   movz x0, #0x1000
   add x3, x2, x0
 
+MOV + ADD/SUB foldable to sign-crossed immediate form at offset: 0x78: -> sub x3, x2, #0x5 (2 instructions)
+  movn x0, #0x4
+  add x3, x2, x0
+
+MOV + ADD/SUB foldable to sign-crossed immediate form at offset: 0x84: -> add x3, x2, #0x5 (2 instructions)
+  movn x0, #0x4
+  sub x3, x2, x0
+
+MOV + ADD/SUB foldable to sign-crossed immediate form at offset: 0x90: -> cmn x2, #0x5 (2 instructions)
+  movn x0, #0x4
+  cmp x2, x0
+
+MOV + ADD/SUB foldable to sign-crossed immediate form at offset: 0x9c: -> sub x3, x2, #0x5000 (2 instructions)
+  movn x0, #0x4fff
+  add x3, x2, x0
+
 Optimization opportunities by type:
       10  MOV + ADD/SUB foldable to immediate form
+       4  MOV + ADD/SUB foldable to sign-crossed immediate form
 
-10 optimization opportunities in 31 instructions
+14 optimization opportunities in 46 instructions

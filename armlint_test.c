@@ -6140,6 +6140,48 @@ static void test_mov_add_sub_imm_fold(void)
     movz_x(&code[0], 0, 100, 0);
     cmp_x_reg_sr(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Sign-crossed folds: a negative constant whose magnitude
+    //    encodes folds into the opposite-sign consumer. Exact for
+    //    every flag: SUBS of -C and ADDS of #C perform the identical
+    //    65-bit sum. --
+
+    // mov x8, #-5 ; add x0, x1, x8 ; (x8 dies) -> sub x0, x1, #5.
+    movn_x(&code[0], 8, 4, 0);
+    add_x(&code[4], 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // mov x8, #-5 ; sub x0, x1, x8 -> add x0, x1, #5.
+    movn_x(&code[0], 8, 4, 0);
+    sub_x(&code[4], 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // CMP alias: mov x8, #-5 ; cmp x0, x8 -> cmn x0, #5.
+    movn_x(&code[0], 8, 4, 0);
+    write_le32(&code[4], 0xEB00001Fu | (8u << 16) | (0u << 5));
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // CMN alias: mov x8, #-5 ; cmn x0, x8 -> cmp x0, #5.
+    movn_x(&code[0], 8, 4, 0);
+    write_le32(&code[4], 0xAB00001Fu | (8u << 16) | (0u << 5));
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // W-form: mov w8, #-5 ; add w0, w1, w8 -> sub w0, w1, #5.
+    movn_w(&code[0], 8, 4);
+    add_w(&code[4], 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Shifted magnitude: mov x8, #-0x5000 ; add x0, x1, x8
+    //   -> sub x0, x1, #0x5000 (magnitude fits imm12 << 12).
+    movn_x(&code[0], 8, 0x4FFF, 0);
+    add_x(&code[4], 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Negative magnitude that fits no encoding (0x1001): no fold in
+    // either direction.
+    movn_x(&code[0], 8, 0x1000, 0);
+    add_x(&code[4], 0, 1, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
 }
 
 static void test_mov_logic_imm_fold(void)
@@ -6605,6 +6647,32 @@ static void test_mov_ccmp_imm_fold(void)
     add_x(&code[4], 2, 1, 3);
     ccmp_reg(&code[8], 1, 1, 0, 8, 0, 1);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- Sign-crossed folds: a negative constant whose magnitude fits
+    //    imm5 folds into the opposite compare (ccmp <-> ccmn), whose
+    //    NZCV agree exactly. --
+
+    // mov x8, #-7 ; ccmp x0, x8, #4, ne ; (x8 dies)
+    //   -> ccmn x0, #7, #4, ne.
+    movn_x(&code[0], 8, 6, 0);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // mov x8, #-7 ; ccmn x0, x8, #4, ne -> ccmp x0, #7, #4, ne.
+    movn_x(&code[0], 8, 6, 0);
+    ccmp_reg(&code[4], 1, 0, 0, 8, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // W-form: mov w8, #-7 ; ccmp w0, w8, #4, ne
+    //   -> ccmn w0, #7, #4, ne.
+    movn_w(&code[0], 8, 6);
+    ccmp_reg(&code[4], 0, 1, 0, 8, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Magnitude 32 does not fit imm5.
+    movn_x(&code[0], 8, 31, 0);
+    ccmp_reg(&code[4], 1, 1, 0, 8, 4, 1);
+    assert(run_reg_dead(code, 8, 8) == 0);
 }
 
 static void test_mov_csel_fold(void)

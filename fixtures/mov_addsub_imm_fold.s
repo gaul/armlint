@@ -68,4 +68,33 @@ _main:
     mov     x0, #100
     add     x3, x0, x0
 
+    // Sign-crossed folds: a negative constant whose magnitude encodes
+    // folds into the opposite-sign consumer, exact for every flag
+    // (SUBS of -C and ADDS of #C perform the identical 65-bit sum).
+
+    // P) mov x0, #-5 ; add -> sub #5 (x0 dies at the trailing mov).
+    mov     x0, #-5
+    add     x3, x2, x0              // -> sub x3, x2, #0x5
+    mov     x0, #1
+
+    // P) mov x0, #-5 ; sub -> add #5.
+    mov     x0, #-5
+    sub     x3, x2, x0              // -> add x3, x2, #0x5
+    mov     x0, #1
+
+    // P) CMP crosses to CMN.
+    mov     x0, #-5
+    cmp     x2, x0                  // -> cmn x2, #0x5
+    mov     x0, #1
+
+    // P) Shifted magnitude: -0x5000 crosses to #0x5000 (imm12 << 12).
+    mov     x0, #-0x5000
+    add     x3, x2, x0              // -> sub x3, x2, #0x5000
+    mov     x0, #1
+
+    // N6) A negative magnitude that fits no encoding (0x1001).
+    mov     x0, #-0x1001
+    add     x3, x2, x0
+    mov     x0, #1
+
     ret

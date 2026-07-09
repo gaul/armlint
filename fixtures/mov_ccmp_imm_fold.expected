@@ -10,7 +10,16 @@ MOV + CCMP/CCMN foldable to immediate form at offset: 0x18: -> ccmn x2, #0xc, #0
   movz x10, #0xc
   ccmn x2, x10, #0x8, lt
 
+MOV + CCMP/CCMN foldable to sign-crossed immediate form at offset: 0x48: -> ccmn x0, #0x7, #0x4, ne (2 instructions)
+  movn x8, #0x6
+  ccmp x0, x8, #0x4, ne
+
+MOV + CCMP/CCMN foldable to sign-crossed immediate form at offset: 0x54: -> ccmp x0, #0x7, #0x4, ne (2 instructions)
+  movn x8, #0x6
+  ccmn x0, x8, #0x4, ne
+
 Optimization opportunities by type:
        3  MOV + CCMP/CCMN foldable to immediate form
+       2  MOV + CCMP/CCMN foldable to sign-crossed immediate form
 
-3 optimization opportunities in 19 instructions
+5 optimization opportunities in 28 instructions

@@ -24,7 +24,7 @@ MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x28: -> ands x3, x2,
 
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x30: -> tst x2, #0xff (2 instructions)
   movz x0, #0xff
-  ands x31, x2, x0
+  tst x2, x0
 
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x38: -> and x3, x2, #0xffff (2 instructions)
   movz x0, #0xffff
@@ -52,7 +52,7 @@ MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x60: -> ands w3, w2,
 
 MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x68: -> tst w2, #0xfffffffe (2 instructions)
   movz w0, #0x1
-  bics w31, w2, w0
+  bics wzr, w2, w0
 
 self-op identity at offset: 0x94: and x3, x0, x0 -> mov x3, x0 (1 instructions)
   and x3, x0, x0

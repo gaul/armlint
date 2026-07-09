@@ -481,6 +481,17 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
 //   mov xc, #C ; subs xd, xn, xc -> subs xd, xn, #C
 // CMP and CMN (S-variant with Rd == ZR) are rendered as the aliases.
 //
+// A NEGATIVE constant whose magnitude fits the encoding folds
+// sign-crossed into the opposite consumer (add <-> sub, adds <->
+// subs, cmp <-> cmn), reported as "MOV + ADD/SUB foldable to
+// sign-crossed immediate form":
+//   mov xc, #-5 ; add xd, xn, xc -> sub xd, xn, #5
+// The crossing is exact for every flag, not just the result:
+// SUBS Rn, Rm with Rm = -C computes Rn + NOT(-C) + 1 = Rn + C, the
+// identical 65-bit sum as ADDS Rn, #C, so N, Z, C and V agree
+// bit-for-bit (and symmetrically for ADDS of a negative). MOVN
+// chains reach these values naturally.
+//
 // ADD is commutative so either Rn or Rm may be the MOV destination;
 // SUB requires Rm == mov_rd (Rn == mov_rd would need a reverse-
 // subtract, which AArch64 does not encode in a single instruction).
@@ -541,9 +552,13 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 // encoding). The chain's width (W vs X) must match the compare's. The
 // surviving Rn must not be the constant register (the rewrite would
 // still read it) nor ZR (a degenerate compare-against-zero idiom).
-// imm5 is unsigned, so only C in [0, 31] folds; the ADDS/SUBS-crossing
-// rewrite for negative constants (ccmp #-C <-> ccmn #C) is not
-// attempted, consistent with check_mov_add_sub_imm_fold.
+// imm5 is unsigned, so a non-negative C folds only in [0, 31]; a
+// NEGATIVE constant whose magnitude fits imm5 folds sign-crossed into
+// the opposite compare (ccmp <-> ccmn), reported as "MOV + CCMP/CCMN
+// foldable to sign-crossed immediate form" -- the NZCV agree exactly
+// (when the condition holds, the compare of -C and the opposite
+// compare of #C perform the identical 65-bit sum; when it fails both
+// set the carried-over #nzcv literal).
 //
 // A conditional compare writes only NZCV and never kills the constant
 // register, so the finding always defers through the forward
