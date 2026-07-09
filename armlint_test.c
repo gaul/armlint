@@ -6792,6 +6792,111 @@ static void test_mov_shift_fold(void)
     assert(run_reg_dead(code, 8, 8) == 0);
 }
 
+// MADD/MSUB: sf 00 11011 000 Rm o0 Ra Rn Rd; o0 = 0 MADD, 1 MSUB.
+static void mac(uint8_t out[4], unsigned sf, unsigned is_msub,
+                unsigned rd, unsigned rn, unsigned rm, unsigned ra)
+{
+    write_le32(out, 0x1B000000u | ((sf & 1u) << 31)
+        | ((is_msub & 1u) << 15) | ((rm & 0x1Fu) << 16)
+        | ((ra & 0x1Fu) << 10) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_mov_madd_fold(void)
+{
+    uint8_t code[16];
+
+    // mov x8, #8 ; madd x0, x1, x8, x2 ; (x8 dies)
+    //   -> add x0, x2, x1, lsl #3.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // MSUB -> sub x0, x2, x1, lsl #3.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 1, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // The multiply commutes: the chain may sit in Rn.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 8, 1, 2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A multiplier of 1 folds to the plain ADD.
+    movz_x(&code[0], 8, 1, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // W-form.
+    movz_w(&code[0], 8, 16);
+    mac(&code[4], 0, 0, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A MOVK-extended chain (2^16 spelled movz #0 + movk #1 lsl 16
+    // would be non-minimal; use movz #1 lsl 16 directly).
+    movz_x(&code[0], 8, 1, 1);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Structural kill: the MAC overwrites the constant register.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 8, 1, 8, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Fresh destination without a kill: nothing is emitted.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Non-power-of-two multiplier has no shifted-register form.
+    movz_x(&code[0], 8, 6, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Zero multiplier: the product is 0 and the MAC is a register
+    // copy of the accumulator; not this fold.
+    movz_x(&code[0], 8, 0, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Ra = 31 is the MUL alias, owned by the strength-reduction
+    // check (whose deferred finding is the 1 here, not ours).
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 31);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // The accumulator is the constant register: the rewrite would
+    // still read it.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Both multiply operands are the constant (a constant squared).
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 8, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // ZR surviving operand: a zero product.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 31, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Rd = 31 discards the result.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 31, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Width mismatch (W chain, X MAC).
+    movz_w(&code[0], 8, 8);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // The constant is read again before dying: discarded.
+    movz_x(&code[0], 8, 8, 0);
+    mac(&code[4], 1, 0, 0, 1, 8, 2);
+    add_x(&code[8], 5, 8, 6);
+    assert(run_reg_dead(code, 12, 8) == 0);
+}
+
 // FMOV (general), GPR -> FPR: fmov Sd, Wn / fmov Dd, Xn.
 static void fmov_s_from_w(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -9802,6 +9907,7 @@ int main(void)
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();
     test_mov_shift_fold();
+    test_mov_madd_fold();
     test_mov_fmov_imm_fold();
     test_fp_zero_to_movi();
     test_extend_cvtf_fold();

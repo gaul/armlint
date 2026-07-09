@@ -6043,6 +6043,128 @@ bool check_mov_shift_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+bool check_mov_madd_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // MADD/MSUB (Data-processing 3-source, op31 = 000): sf 00 11011
+    // 000 Rm o0 Ra Rn Rd; o0 = 0 is MADD, 1 is MSUB.
+    if ((op & 0x7FE00000u) != 0x1B000000u) {
+        return false;
+    }
+    bool is_msub = ((op >> 15) & 1u) != 0;
+    unsigned sf = (op >> 31) & 1u;
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned ra = (op >> 10) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+
+    if ((sf != 0) != state->mov_is_64bit) {
+        return false;
+    }
+    // Ra = 31 is the MUL/MNEG alias, owned by the strength-reduction
+    // checks; Rd = 31 discards the result. The accumulator must not
+    // be the constant register (the rewrite still reads it, so the
+    // MOV could never be deleted).
+    if (ra == 31 || rd == 31 || ra == state->mov_rd) {
+        return false;
+    }
+
+    // The multiply commutes: the chain may sit in Rn or Rm, and the
+    // other multiply operand survives as the shifted register. That
+    // operand must not itself be the constant (a constant-squared
+    // shape, not this fold) nor ZR (a zero product -- the pair is a
+    // register copy).
+    unsigned surviving;
+    if (rm == state->mov_rd && rn != state->mov_rd) {
+        surviving = rn;
+    } else if (rn == state->mov_rd && rm != state->mov_rd) {
+        surviving = rm;
+    } else {
+        return false;
+    }
+    if (surviving == 31) {
+        return false;
+    }
+
+    // A power-of-two multiplier rides the consumer's shifted-register
+    // operand: Ra +/- (Rn << N). N = 0 (a multiplier of 1) folds to
+    // the plain ADD/SUB. Anything else has no single-instruction
+    // form here.
+    uint64_t c = state->mov_value;
+    unsigned datasize = sf ? 64u : 32u;
+    if (c == 0 || (c & (c - 1u)) != 0) {
+        return false;
+    }
+    unsigned n = 0;
+    for (uint64_t t = c; (t & 1u) == 0; t >>= 1) {
+        n++;
+    }
+    if (n >= datasize) {
+        return false;
+    }
+
+    char w_or_x = sf ? 'x' : 'w';
+    const char *fold_mnem = is_msub ? "sub" : "add";
+
+    out->name = "MOV + MADD/MSUB foldable to shifted ADD/SUB";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    if (n == 0) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, %c%u, %c%u",
+            fold_mnem, w_or_x, rd, w_or_x, ra, w_or_x, surviving);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, %c%u, %c%u, lsl #%u",
+            fold_mnem, w_or_x, rd, w_or_x, ra, w_or_x, surviving, n);
+    }
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // The rewrite deletes the MOV and moves the multiply off the
+    // multiplier pipe. A MAC whose destination IS the constant
+    // register overwrites it at the consumer and reports
+    // immediately; otherwise emission defers until the constant
+    // register is provably dead.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -9598,6 +9720,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,
     check_mov_shift_fold,
+    check_mov_madd_fold,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,

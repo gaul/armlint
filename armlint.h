@@ -611,6 +611,33 @@ bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_shift_fold(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect a MOV chain materialising a power of two, immediately
+// followed by a MADD/MSUB whose multiplier (either multiply operand;
+// the multiply commutes) is the constant register. The multiply
+// becomes the consumer's shifted-register operand:
+//   mov x8, #8 ; madd xd, xn, x8, xa -> add xd, xa, xn, lsl #3
+//   mov x8, #8 ; msub xd, xn, x8, xa -> sub xd, xa, xn, lsl #3
+// A multiplier of 1 (N = 0) folds to the plain ADD/SUB. This is the
+// non-ZR-accumulator complement of the MUL/MNEG strength reductions:
+// Ra = 31 is the MUL/MNEG alias and stays with those checks. Same
+// win as theirs -- the multiply leaves the multiplier pipe (2-3
+// cycle latency, limited throughput) for a single-cycle shifted ADD
+// -- plus the deleted MOV.
+//
+// Exclusions: Rd = 31 (result discarded); the accumulator must not
+// be the constant register (the rewrite still reads it); the
+// surviving multiply operand must not be the constant (a
+// constant-squared shape) nor ZR (a zero product -- the pair is a
+// register copy). The chain's width must match the MAC's. Deadness
+// follows the MOV-chain family: a MAC whose destination IS the
+// constant register reports immediately, otherwise emission defers
+// through the forward register-liveness scan (defer_dead_mov). Runs
+// before check_movz_movk_bitmask so the chain state is still
+// active. Reported as "MOV + MADD/MSUB foldable to shifted
+// ADD/SUB".
+bool check_mov_madd_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
 // conversion that consumes it, when FMOV (scalar, immediate) could

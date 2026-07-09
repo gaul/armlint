@@ -30,12 +30,17 @@ MNEG by constant foldable to neg/sub at offset: 0x38: -> neg x3, x2, lsl #32 (2 
   movz x0, #0x1, lsl #32
   mneg x3, x2, x0
 
+MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x58: -> sub x3, x4, x2, lsl #3 (2 instructions)
+  movz x0, #0x8
+  msub x3, x2, x0, x4
+
 MUL by constant foldable to shift/add at offset: 0x60: -> lsl x3, x2, #3 (2 instructions)
   movz x0, #0x8
   mul x3, x2, x0
 
 Optimization opportunities by type:
        8  MNEG by constant foldable to neg/sub
+       1  MOV + MADD/MSUB foldable to shifted ADD/SUB
        1  MUL by constant foldable to shift/add
 
-9 optimization opportunities in 28 instructions
+10 optimization opportunities in 28 instructions

@@ -50,9 +50,11 @@ _main:
     mov     x0, #10
     mneg    x3, x2, x0
 
-    // N4) MSUB with explicit Ra (not MNEG alias).
+    // P) MSUB with explicit Ra (not the MNEG alias): the MOV +
+    //    MADD/MSUB check's positive -- the accumulator rides along
+    //    and the multiply becomes a shifted operand.
     mov     x0, #8
-    msub    x3, x2, x0, x4
+    msub    x3, x2, x0, x4          // -> sub x3, x4, x2, lsl #3
 
     // Sanity: a MUL still fires from the MUL check. The trailing
     // "mov x0" overwrites the constant so the deferred MUL fold is

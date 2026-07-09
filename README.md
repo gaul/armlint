@@ -127,6 +127,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`sub` + `cmp` / `add` + `cmn` of the same operands (either order)](analyses.md#sub--cmp-of-identical-operands-foldable-to-subs) | `subs`/`adds` (flag-exact; drop the compare) |
 | [`mov #2^N` + `mul`](analyses.md#mul-by-constant-foldable-to-shiftadd) | `lsl`, or `add Rd, Ra, Ra, lsl #N` |
 | [`mov #C` + `mneg`](analyses.md#mneg-by-constant-foldable-to-negsub) | `neg`, or shifted `neg`/`sub` |
+| [`mov #2^N` + `madd`/`msub`](analyses.md#mov--maddmsub-foldable-to-shifted-addsub) | `add`/`sub Rd, Ra, Rn, lsl #N` |
 | [`mov #2^N` + `udiv`](analyses.md#udiv-by-constant-foldable-to-shift) | `lsr` |
 | [`mov #C` + `add`/`sub`](analyses.md#mov--addsub-foldable-to-immediate-form) | `add`/`sub Rd, Rn, #C` |
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |

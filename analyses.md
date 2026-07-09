@@ -926,7 +926,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   via `MOVZ + MOVK` (e.g. `2^16 + 1`) are caught too. The MOV's
   width must match the MUL's. MUL is the canonical alias for
   `MADD Rd, Rn, Rm, ZR`; explicit `MADD` with a non-zero
-  accumulator is not flagged.
+  accumulator is the
+  [MOV + MADD/MSUB check](#mov--maddmsub-foldable-to-shifted-addsub)'s
+  shape.
 * The `2^N - 1` case is intentionally not folded. AArch64 has no
   single shifted-register form that computes `x*(2^N - 1)`:
   `SUB Xd, Xn, Xn, LSL #N` gives `x*(1 - 2^N)`, the negation, so
@@ -971,6 +973,36 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * `2^N + 1` is not folded for MNEG: the rewrite is two
   instructions (`ADD-shifted` then `NEG`), at parity with
   `MOV+MNEG`.
+
+## MOV + MADD/MSUB foldable to shifted ADD/SUB
+
+* The non-ZR-accumulator complement of the MUL/MNEG strength
+  reductions: `Ra = 31` is the `MUL`/`MNEG` alias and stays with
+  those checks; an explicit accumulator rides the fold instead.
+  * `mov x8, #8 ; madd xd, xn, x8, xa` -> `add xd, xa, xn, lsl #3`
+  * `mov x8, #8 ; msub xd, xn, x8, xa` -> `sub xd, xa, xn, lsl #3`
+  A multiplier of 1 (`N = 0`) folds to the plain `ADD`/`SUB`. The
+  multiply commutes, so the chain may sit in either multiply operand;
+  the other survives as the shifted register.
+* Same win as the MUL check, plus the accumulate: the whole MAC
+  leaves the multiplier pipe (2-3 cycle latency, limited throughput)
+  for a single-cycle shifted `ADD`/`SUB`, and the materialising MOV
+  dies. (On cores where a shifted operand beyond `LSL #4` costs a
+  second cycle the fold is still never slower than the MAC.)
+* Reuses the MOVZ/MOVK chain state (and shares the MUL check's
+  dead-constant caveat). Exclusions: `Rd = 31` (result discarded);
+  an accumulator that is the constant register (the rewrite still
+  reads it); a surviving multiply operand that is the constant (a
+  constant-squared shape) or ZR (a zero product -- the pair is a
+  register copy of the accumulator). The chain's width must match
+  the MAC's. Only a power-of-two multiplier folds: `2^N +/- 1`
+  shapes, which the `Ra = 31` checks handle via the doubled-operand
+  trick, have no single-instruction form once a distinct accumulator
+  occupies the addend slot.
+* A MAC whose destination IS the constant register overwrites it at
+  the consumer and reports immediately; otherwise emission defers
+  through the forward register-liveness scan until the constant
+  register is provably dead.
 
 ## UDIV by constant foldable to shift
 

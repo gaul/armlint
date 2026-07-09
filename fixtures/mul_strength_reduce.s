@@ -52,9 +52,11 @@ _main:
     add     x5, x5, x6
     mul     x3, x2, x0
 
-    // N6) MADD with explicit Ra != XZR (not the MUL alias).
+    // P) MADD with explicit Ra != XZR (not the MUL alias): the MOV +
+    //    MADD/MSUB check's positive -- the accumulator rides along
+    //    and the multiply becomes a shifted operand.
     mov     x0, #8
-    madd    x3, x2, x0, x4
+    madd    x3, x2, x0, x4          // -> add x3, x4, x2, lsl #3
 
     // N7) Both operands are the constant register (squaring it): the
     //     LSL rewrite would still read x0, so the MOV could never be

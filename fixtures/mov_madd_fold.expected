@@ -1,0 +1,28 @@
+MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x0: -> add x0, x2, x1, lsl #3 (2 instructions)
+  movz x8, #0x8
+  madd x0, x1, x8, x2
+
+MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0xc: -> sub x0, x2, x1, lsl #3 (2 instructions)
+  movz x8, #0x8
+  msub x0, x1, x8, x2
+
+MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x18: -> add x0, x2, x1, lsl #4 (2 instructions)
+  movz x8, #0x10
+  madd x0, x8, x1, x2
+
+MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x24: -> add x0, x2, x1 (2 instructions)
+  movz x8, #0x1
+  madd x0, x1, x8, x2
+
+MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x30: -> sub w0, w2, w1, lsl #2 (2 instructions)
+  movz w8, #0x4
+  msub w0, w1, w8, w2
+
+MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x3c: -> add x8, x2, x1, lsl #5 (2 instructions)
+  movz x8, #0x20
+  madd x8, x1, x8, x2
+
+Optimization opportunities by type:
+       6  MOV + MADD/MSUB foldable to shifted ADD/SUB
+
+6 optimization opportunities in 26 instructions
