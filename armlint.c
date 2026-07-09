@@ -3089,6 +3089,29 @@ static bool is_cmp_cmn_any_form(uint32_t op)
         || (op & 0x3F200000u) == 0x2B200000u;       // extended
 }
 
+// ADD and CMN are commutative in value: with plain register operands
+// the compare may name them in either order and the 65-bit sum --
+// hence all four NZCV bits -- is unchanged. Only the unshifted
+// shifted-register form (LSL #0) swaps: a nonzero shift amount breaks
+// the symmetry (Rn + (Rm << s) != Rm + (Rn << s)), the immediate form
+// has no second register, the extended form applies its extension to
+// Rm only, and subtraction does not commute at all. True when cmp_op
+// is exactly the swapped-operand CMN of the given plain ADD.
+static bool cmn_swapped_match(uint32_t alu_op, uint32_t cmp_op)
+{
+    // ADD (shifted register), non-S, LSL #0:
+    //   sf 0 0 01011 00 0 Rm 000000 Rn Rd.
+    if ((alu_op & 0x7FE0FC00u) != 0x0B000000u) {
+        return false;
+    }
+    unsigned rn = (alu_op >> 5) & 0x1Fu;
+    unsigned rm = (alu_op >> 16) & 0x1Fu;
+    return cmp_op == (0x2B00001Fu
+        | (alu_op & 0x80000000u)
+        | (rn << 16)
+        | (rm << 5));
+}
+
 bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -3103,16 +3126,19 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
     bool produced = false;
 
     // (1) Close, ALU-first order: is this the compare of the pending
-    //     ADD/SUB's exact operands (CMN for ADD, CMP for SUB)? The
-    //     compare runs after the ALU wrote Rd, so Rd must not be one
-    //     of the compared registers -- the compare read the result
-    //     there, not the original operand, and the folded S-variant
-    //     would use pre-ALU values. (Rn = 31 is SP/ZR depending on
-    //     form and never collides: Rd != 31 by construction.)
+    //     ADD/SUB's exact operands (CMN for ADD, CMP for SUB) -- or,
+    //     for a plain unshifted ADD, the swapped-operand CMN, which
+    //     sums the same values? The compare runs after the ALU wrote
+    //     Rd, so Rd must not be one of the compared registers -- the
+    //     compare read the result there, not the original operand,
+    //     and the folded S-variant would use pre-ALU values. (Rn = 31
+    //     is SP/ZR depending on form and never collides: Rd != 31 by
+    //     construction.)
     if (state->scp_sub_active) {
         unsigned s_rd, s_rn, s_rm;
         bool s_has_rm, s_is_sub;
-        if (op == alu_to_cmp_word(state->scp_sub_op)
+        if ((op == alu_to_cmp_word(state->scp_sub_op)
+                    || cmn_swapped_match(state->scp_sub_op, op))
                 && decode_add_sub_non_s_any(state->scp_sub_op, &s_rd,
                                             &s_rn, &s_rm, &s_has_rm,
                                             &s_is_sub)
@@ -3137,7 +3163,8 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
     }
 
     // (2) Close, compare-first order: is this a non-S ADD/SUB of the
-    //     pending compare's exact operands? The compare wrote
+    //     pending compare's exact operands (or a plain unshifted ADD
+    //     of the pending CMN's swapped ones)? The compare wrote
     //     nothing, so the ALU reads the same values regardless of Rd
     //     -- no aliasing restriction beyond Rd != 31 (in the
     //     decoder). The word match pairs families automatically: an
@@ -3147,7 +3174,8 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
         bool s_has_rm, s_is_sub;
         if (decode_add_sub_non_s_any(op, &s_rd, &s_rn, &s_rm,
                                      &s_has_rm, &s_is_sub)
-                && alu_to_cmp_word(op) == state->scp_cmp_op) {
+                && (alu_to_cmp_word(op) == state->scp_cmp_op
+                    || cmn_swapped_match(op, state->scp_cmp_op))) {
             out->name = s_is_sub
                 ? "SUB + CMP of identical operands foldable to SUBS"
                 : "ADD + CMN of identical operands foldable to ADDS";

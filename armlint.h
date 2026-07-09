@@ -1433,10 +1433,14 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
 // immediate, shifted-register and extended-register forms, forces
 // equal widths, shift types/amounts and extend options, and pairs
 // the families automatically (an ADD's compare spelling is CMN, a
-// SUB's is CMP; ADD + CMP never matches). The reversed compare
-// (cmp wm, wn) never matches subtraction; for ADD the swapped CMN is
-// flag-identical in the unshifted register form but falls outside
-// the encoding match and is conservatively not folded.
+// SUB's is CMP; ADD + CMP never matches). ADD commutes, so the
+// swapped-operand CMN (cmn x2, x1 against add x0, x1, x2) also
+// folds for the plain unshifted register form -- it sums the same
+// values, so all four NZCV bits match. Only that form swaps: a
+// nonzero shift amount breaks the symmetry, the immediate form has
+// no second register, the extended form extends Rm only, and
+// subtraction does not commute (the reversed cmp wm, wn never
+// matches).
 //
 // In the ALU-first order the compare runs after the ALU wrote Rd, so
 // Rd must not be one of the compared registers (the compare read the

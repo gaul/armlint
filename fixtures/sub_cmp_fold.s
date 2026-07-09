@@ -70,15 +70,24 @@ _main:
     add     x0, x1, #16
     cmn     x1, #16                 // -> adds x0, x1, #16
 
-    // N5) Swapped commutative operands: flag-identical for the
-    //     unshifted form, but outside the encoding-equality match;
-    //     conservatively not folded.
+    // P) Swapped commutative operands: cmn x6, x5 sums the same
+    //    values as the ADD, so all four flags match ADDS.
     add     x0, x5, x6
+    cmn     x6, x5                  // -> adds x0, x5, x6
+
+    // P) Swapped, compare-first order (this CMN replaces the pending
+    //    compare the previous one opened).
+    cmn     x8, x7
+    add     x0, x7, x8              // -> adds x0, x7, x8
+
+    // N5) The swap needs plain operands: a shifted ADD sums different
+    //     values than the swapped plain CMN.
+    add     x0, x5, x6, lsl #1
     cmn     x6, x5
 
     // N6) Cross-family: ADD + CMP of the same operands compares a
     //     difference, not the sum; never folds.
-    add     x0, x5, x6
-    cmp     x5, x6
+    add     x0, x3, x4
+    cmp     x3, x4
 
     ret

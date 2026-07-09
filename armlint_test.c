@@ -4406,10 +4406,36 @@ static void test_sub_cmp_fold(void)
     write_le32(&code[4], 0xB100001Fu | (16u << 10) | (1u << 5));
     assert(run_helper_check(code, 8) == 1);
 
-    // Swapped commutative operands (cmn x2, x1 after add x0, x1, x2)
-    // are flag-identical for the unshifted form but do not match the
-    // encoding-equality test; conservatively not folded.
+    // Swapped commutative operands: cmn x2, x1 after add x0, x1, x2
+    // sums the same values, so all four flags match adds x0, x1, x2.
     add_x(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xAB00001Fu | (1u << 16) | (2u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // Swapped, compare-first order: cmn x2, x1 ; add x0, x1, x2.
+    write_le32(&code[0], 0xAB00001Fu | (1u << 16) | (2u << 5));
+    add_x(&code[4], 0, 1, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form swap.
+    add_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0x2B00001Fu | (1u << 16) | (2u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // The swap needs plain operands: a shifted ADD sums different
+    // values than the swapped plain CMN (x1 + (x2 << 1) vs x2 + x1).
+    write_le32(&code[0], 0x8B000400u | (2u << 16) | (1u << 5));
+    write_le32(&code[4], 0xAB00001Fu | (1u << 16) | (2u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // Subtraction does not commute: sub + swapped cmp never folds.
+    sub_x(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xEB00001Fu | (1u << 16) | (2u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // ADD-first aliasing applies to the swap too: the CMN read the
+    // sum.
+    add_x(&code[0], 1, 1, 2);
     write_le32(&code[4], 0xAB00001Fu | (1u << 16) | (2u << 5));
     assert(run_helper_check(code, 8) == 0);
 

@@ -922,10 +922,14 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `add x0, x1, x2 ; cmn x1, x2` -> `adds x0, x1, x2`, either order.
   The word match pairs families automatically (an `ADD`'s compare
   spelling is `CMN`, a `SUB`'s is `CMP`; `ADD` + `CMP` never
-  matches). One conservative gap: `ADD` commutes, so
-  `add x0, x1, x2 ; cmn x2, x1` with *swapped* compare operands is
-  flag-identical for the unshifted register form, but it falls
-  outside the encoding-equality match and is not folded.
+  matches). `ADD` commutes, so a *swapped* compare
+  (`add x0, x1, x2 ; cmn x2, x1`, in either order) also folds for the
+  plain unshifted register form: the CMN sums the same values, so all
+  four NZCV bits match. Only that form swaps -- a nonzero shift
+  amount breaks the symmetry (`Rn + (Rm << s) != Rm + (Rn << s)`),
+  the immediate form has no second register, the extended form
+  applies its extension to Rm only, and subtraction does not commute
+  at all (`cmp x2, x1` after `sub x0, x1, x2` never folds).
 * What it saves: one instruction -- the compare -- with zero flag
   risk. The shape appears when code computes a difference and
   separately compares the same operands: hand-written bounds checks
