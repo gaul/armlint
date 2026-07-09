@@ -77,7 +77,15 @@ for s in "$ROOT"/fixtures/*.s; do
     # by-type summary), so it exercises all of the report formatting.
     # armlint exits with the finding count, so any positive result
     # would trip `set -e`; we want the output, not the exit code.
-    "$ROOT/armlint" -v "$obj" > "$actual" || true
+    #
+    # A fixture may carry extra armlint flags in a sidecar
+    # fixtures/<name>.flags file (e.g. "-m cssc" for feature-gated
+    # checks); its whitespace-separated contents are passed through.
+    EXTRA_FLAGS=()
+    if [ -f "$ROOT/fixtures/$name.flags" ]; then
+        read -r -a EXTRA_FLAGS < "$ROOT/fixtures/$name.flags"
+    fi
+    "$ROOT/armlint" -v "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" "$obj" > "$actual" || true
 
     if [ "$MODE" = "regen" ]; then
         cp "$actual" "$expected"

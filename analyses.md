@@ -1420,6 +1420,42 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   forward register-liveness scan. v1 matches the unsigned-offset
   addressing form only, like the other load-rewriting folds.
 
+## CSSC synthesis (feature-gated: `-m cssc`)
+
+* Armv8.9/9.4 Common Short Sequence Compression gives single
+  instructions for idioms the base ISA spells in two. These checks
+  suggest instructions the target must support, so they stay silent
+  unless `-m cssc` is passed:
+  * `cmp x1, x2 ; csel x0, x1, x2, gt` -> `smax x0, x1, x2`
+    ("CMP + CSEL foldable to MAX/MIN (CSSC)"). GE/GT pick the larger
+    -- the equal case selects equal values, so both conditions work
+    -- LT/LE the smaller, HS/HI and LO/LS the unsigned twins, and
+    swapped CSEL operands flip the direction. Only the plain
+    shifted-register LSL #0 compare with distinct operands opens.
+  * `cmp x1, #0 ; cneg x0, x1, mi` -> `abs x0, x1`
+    ("CMP #0 + CNEG foldable to ABS (CSSC)"). The raw match is a
+    CSNEG with both sources the compared register and a condition in
+    {PL, GE, GT}: the condition holds exactly for `r >= 0` (GE
+    because V = 0 after a zero compare), or `r > 0` where the r = 0
+    else-branch still yields -0 = 0. Source-level `cneg` conditions
+    MI/LT/LE, inverted by the alias.
+  * `rbit x0, x1 ; clz x0, x0` -> `ctz x0, x1`
+    ("RBIT + CLZ foldable to CTZ (CSSC)"): counting leading zeros of
+    a bit reversal counts trailing zeros of the original.
+* Soundness: the MAX/MIN and ABS rewrites DELETE the compare and set
+  no flags at all, so they defer through an NZCV-death scan on a
+  dedicated shared slot -- any later flag reader (even `b.eq`)
+  discards, and only a full NZCV overwrite or safe terminator
+  commits. CTZ involves no flags; the reversed value must be dead,
+  with the usual structural kill (the CLZ overwrites it) or forward
+  register-liveness deferral, and the RBIT's source still holds its
+  original value at the consumer once the RBIT is deleted (even
+  in-place).
+* The remaining CSSC candidate -- the NEON popcount round trip
+  (`fmov d0, x0 ; cnt v0.8b ; addv b0 ; fmov w0, s0` ->
+  `cnt w0, w0`) -- needs the vector temporary proven dead, i.e. the
+  FP-register liveness scan; deferred until that exists.
+
 ## LDR literal foldable to MOV/FMOV immediate
 
 * `ldr w0, <literal>` where the pooled word is `0x2a` instead of

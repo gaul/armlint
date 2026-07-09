@@ -64,6 +64,14 @@ armlint_state *armlint_state_create(void);
 void armlint_state_destroy(armlint_state *state);
 void armlint_state_reset(armlint_state *state);
 
+// ISA-extension feature bits for armlint_state_set_features. Checks
+// that suggest extension instructions stay silent unless their
+// feature is enabled (the CLI maps -m cssc etc. onto these).
+#define ARMLINT_FEATURE_CSSC (1u << 0)
+
+// Enable ISA-extension-gated checks (a bitmask of ARMLINT_FEATURE_*).
+void armlint_state_set_features(armlint_state *state, unsigned features);
+
 // Give binary-aware checks access to the full scanned buffer (the
 // bytes the driver is disassembling, offset 0 = the first byte).
 // Checks that chase PC-relative data -- literal pools -- read from
@@ -839,6 +847,48 @@ bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
 // (literal)" / "ADR + BR foldable to direct branch".
 bool check_adr_fold(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out);
+
+// CSSC synthesis checks (gated on ARMLINT_FEATURE_CSSC; silent
+// otherwise). Armv8.9/9.4 Common Short Sequence Compression gives
+// single instructions for idioms the base ISA spells in two:
+//
+//   cmp x1, x2 ; csel x0, x1, x2, gt -> smax x0, x1, x2
+//     (GE/GT pick the larger -- the equal case selects equal values,
+//     so both work -- LT/LE the smaller, HS/HI and LO/LS the
+//     unsigned twins; swapped CSEL operands flip the direction. Only
+//     the plain shifted-register LSL #0 compare with distinct
+//     operands opens.)
+//   cmp x1, #0 ; cneg x0, x1, mi -> abs x0, x1
+//     (raw CSNEG with both sources the compared register and cond in
+//     {PL, GE, GT}: the condition holds exactly for r >= 0, or r > 0
+//     where the r = 0 else-branch still yields -0 = 0.)
+//   rbit x0, x1 ; clz x0, x0 -> ctz x0, x1
+//     (counting leading zeros of a bit reversal counts trailing
+//     zeros of the original.)
+//
+// The MAX/MIN and ABS rewrites DELETE the compare and set no flags,
+// so they defer through an NZCV-death scan (a dedicated shared slot,
+// armlint_advance_pending_cssc; classify_liveness is exactly right
+// because any later flag reader must discard). CTZ involves no flags
+// and uses the standard register deferral: a CLZ destination that IS
+// the reversed register kills it structurally.
+//
+// The remaining CSSC candidate -- the NEON popcount round trip
+// (fmov d0, x0 ; cnt ; addv ; fmov) -> cnt Xd, Xn -- requires
+// proving the vector temporary dead, i.e. the FP-register liveness
+// scan; deferred until that exists.
+bool check_cssc_minmax(armlint_state *state, const cs_insn *insn,
+                       size_t offset, armlint_finding *out);
+bool check_cssc_abs(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out);
+bool check_cssc_ctz(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out);
+
+// NZCV-death advancer for the deferred CSSC findings, parallel to
+// armlint_advance_pending_zs.
+bool armlint_advance_pending_cssc(armlint_state *state,
+                                  const cs_insn *insn,
+                                  size_t offset, armlint_finding *out);
 
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
@@ -1673,7 +1723,7 @@ size_t armlint_summary_instructions(const armlint_summary *summary);
 // decoded-instruction total is accumulated, regardless of verbosity.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
-                       armlint_summary *summary);
+                       armlint_summary *summary, unsigned features);
 
 #ifdef __cplusplus
 }  // extern "C"

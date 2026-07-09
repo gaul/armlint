@@ -175,6 +175,7 @@ static bool read_at(FILE *f, long off, void *buf, size_t n)
 // (the only caller of check_instructions). Kept here rather than
 // threaded through scan_elf/scan_macho/scan_fat, which don't need it.
 static bool g_verbose = false;
+static unsigned g_features = 0;
 static armlint_summary *g_summary = NULL;
 
 // Read `size` bytes at `base_offset` and run all checks. vmaddr is the
@@ -201,7 +202,7 @@ static int scan_code(FILE *f, const char *path, long base_offset,
         return -1;
     }
     int n = check_instructions(handle, buf, aligned, vmaddr,
-                               g_verbose, g_summary);
+                               g_verbose, g_summary, g_features);
     free(buf);
     return n;
 }
@@ -430,15 +431,27 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) {
             g_verbose = true;
+        } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+            // Enable ISA-extension-gated checks; suggestions may then
+            // use instructions the target must support.
+            i++;
+            if (strcmp(argv[i], "cssc") == 0) {
+                g_features |= ARMLINT_FEATURE_CSSC;
+            } else {
+                fprintf(stderr, "%s: unknown -m feature '%s' "
+                    "(known: cssc)\n", argv[0], argv[i]);
+                return 1;
+            }
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] <FILE>\n", argv[0]);
+            fprintf(stderr, "usage: %s [-v] [-m cssc] <FILE>\n",
+                argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] <FILE>\n", argv[0]);
+        fprintf(stderr, "usage: %s [-v] [-m cssc] <FILE>\n", argv[0]);
         return 1;
     }
 

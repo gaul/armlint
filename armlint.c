@@ -317,6 +317,47 @@ struct armlint_state {
     unsigned pending_zs_window;
     armlint_finding pending_zs_finding;
 
+    // Enabled ISA-extension features (ARMLINT_FEATURE_*); checks that
+    // suggest extension instructions stay silent unless their feature
+    // is set.
+    unsigned features;
+
+    // Pending plain register CMP (shifted-register, LSL #0, Rd = 31)
+    // awaiting an adjacent CSEL of the compared registers -- the
+    // CSSC MAX/MIN shape.
+    bool cmx_active;
+    bool cmx_is_64bit;
+    unsigned cmx_rn;
+    unsigned cmx_rm;
+    size_t cmx_offset;
+    char cmx_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Pending CMP Rn, #0 awaiting an adjacent CNEG of Rn -- the CSSC
+    // ABS shape.
+    bool cab_active;
+    bool cab_is_64bit;
+    unsigned cab_rn;
+    size_t cab_offset;
+    char cab_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Pending RBIT awaiting an adjacent CLZ of its destination -- the
+    // CSSC CTZ shape.
+    bool rbc_active;
+    bool rbc_is_64bit;
+    unsigned rbc_rd;
+    unsigned rbc_rs;
+    size_t rbc_offset;
+    char rbc_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Deferred CSSC finding awaiting proof that NZCV is dead: the
+    // MAX/MIN and ABS rewrites delete the compare and set no flags at
+    // all, so any later flag reader (before an overwrite) discards.
+    // A single shared slot; overlapping deferrals drop the earlier
+    // finding (false-negative only), like the shared mz slot.
+    bool pending_cssc_active;
+    unsigned pending_cssc_window;
+    armlint_finding pending_cssc_finding;
+
     // Pending halves of the SUB + identical-operand CMP pair (either
     // order): a non-S SUB awaiting the CMP, and a CMP awaiting the
     // SUB. CMP Rn, Rm is SUBS ZR, Rn, Rm, so a CMP of the SUB's exact
@@ -684,6 +725,11 @@ void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
     state->buf_len = len;
 }
 
+void armlint_state_set_features(armlint_state *state, unsigned features)
+{
+    state->features = features;
+}
+
 void armlint_state_destroy(armlint_state *state)
 {
     free(state);
@@ -969,6 +1015,10 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->fmn_active = false;
     state->lcv_active = false;
     state->adf_active = false;
+    state->cmx_active = false;
+    state->cab_active = false;
+    state->rbc_active = false;
+    state->pending_cssc_active = false;
     return mov_close(state, out);
 }
 
@@ -2634,6 +2684,34 @@ bool armlint_advance_pending_zs(armlint_state *state, const cs_insn *insn,
     return advance_one_pending(op, &state->pending_zs_active,
                                &state->pending_zs_window,
                                &state->pending_zs_finding, out);
+}
+
+bool armlint_advance_pending_cssc(armlint_state *state,
+                                  const cs_insn *insn,
+                                  size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        state->pending_cssc_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    return advance_one_pending(op, &state->pending_cssc_active,
+                               &state->pending_cssc_window,
+                               &state->pending_cssc_finding, out);
+}
+
+// Stash a CSSC finding whose rewrite deletes the compare, pending
+// proof that NZCV is dead afterward (armlint_advance_pending_cssc).
+// classify_liveness is exactly right here: the rewrite sets no flags
+// at all, so ANY later flag reader -- even B.EQ -- must discard.
+static bool defer_dead_nzcv_cssc(armlint_state *state,
+                                 const armlint_finding *out)
+{
+    state->pending_cssc_finding = *out;
+    state->pending_cssc_active = true;
+    state->pending_cssc_window = LIVENESS_WINDOW;
+    return false;
 }
 
 // Forward register-liveness scan for a deferred MOV #0 + use finding. Emits the
@@ -7176,6 +7254,254 @@ bool check_adr_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+bool check_cssc_minmax(armlint_state *state, const cs_insn *insn,
+                       size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_CSSC)) {
+        state->cmx_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a CSEL selecting between the compared registers?
+    //     CSSC's MAX/MIN family computes the pair in one instruction:
+    //       cmp x1, x2 ; csel x0, x1, x2, gt -> smax x0, x1, x2
+    //     Signedness and direction come from the condition -- GT/GE
+    //     pick the larger (the equal case selects equal values, so
+    //     both conditions work), LT/LE the smaller, HI/HS and LO/LS
+    //     their unsigned twins -- and swapped CSEL operands flip the
+    //     direction. The rewrite reads the same registers (the pair
+    //     left them unchanged) but DELETES the compare and sets no
+    //     flags, so emission defers until NZCV is provably dead.
+    //     Rd = 31 discards the select.
+    if (state->cmx_active) {
+        if ((op & 0x7FE00C00u) == 0x1A800000u) {
+            unsigned c_sf = (op >> 31) & 1u;
+            unsigned c_rd = op & 0x1Fu;
+            unsigned c_rn = (op >> 5) & 0x1Fu;
+            unsigned c_rm = (op >> 16) & 0x1Fu;
+            unsigned cond = (op >> 12) & 0xFu;
+            bool direct = c_rn == state->cmx_rn && c_rm == state->cmx_rm;
+            bool swapped = c_rn == state->cmx_rm && c_rm == state->cmx_rn;
+            const char *mnem = NULL;
+            if (((c_sf != 0) == state->cmx_is_64bit)
+                    && c_rd != 31 && (direct || swapped)) {
+                // Selecting the first compared operand when it wins
+                // the comparison is MAX; swapped operands invert.
+                switch (cond) {
+                case 10: case 12:               // GE, GT
+                    mnem = direct ? "smax" : "smin";
+                    break;
+                case 11: case 13:               // LT, LE
+                    mnem = direct ? "smin" : "smax";
+                    break;
+                case 2: case 8:                 // HS, HI
+                    mnem = direct ? "umax" : "umin";
+                    break;
+                case 3: case 9:                 // LO, LS
+                    mnem = direct ? "umin" : "umax";
+                    break;
+                default:
+                    break;
+                }
+            }
+            if (mnem != NULL) {
+                char w_or_x = state->cmx_is_64bit ? 'x' : 'w';
+                char rn_buf[8], rm_buf[8], crn_buf[8], crm_buf[8];
+                format_reg(rn_buf, sizeof(rn_buf), w_or_x,
+                    state->cmx_rn);
+                format_reg(rm_buf, sizeof(rm_buf), w_or_x,
+                    state->cmx_rm);
+                format_reg(crn_buf, sizeof(crn_buf), w_or_x, c_rn);
+                format_reg(crm_buf, sizeof(crm_buf), w_or_x, c_rm);
+
+                out->name = "CMP + CSEL foldable to MAX/MIN (CSSC)";
+                out->start_offset = state->cmx_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %s, %s",
+                    mnem, w_or_x, c_rd, rn_buf, rm_buf);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->cmx_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "csel %c%u, %s, %s, %s",
+                    w_or_x, c_rd, crn_buf, crm_buf,
+                    a64_cond_names[cond]);
+                defer_dead_nzcv_cssc(state, out);
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->cmx_active = false;
+    }
+
+    // (2) Open: a plain register compare (CMP shifted-register,
+    //     LSL #0)? Identical operands are degenerate (max(a, a));
+    //     the immediate and extended forms have no register pair to
+    //     select between.
+    if ((op & 0x7FE0FC1Fu) == 0x6B00001Fu) {
+        unsigned rn = (op >> 5) & 0x1Fu;
+        unsigned rm = (op >> 16) & 0x1Fu;
+        if (rn != rm) {
+            state->cmx_active = true;
+            state->cmx_is_64bit = ((op >> 31) & 1u) != 0;
+            state->cmx_rn = rn;
+            state->cmx_rm = rm;
+            state->cmx_offset = offset;
+            snprintf(state->cmx_disasm, sizeof(state->cmx_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    return false;
+}
+
+bool check_cssc_abs(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_CSSC)) {
+        state->cab_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a CNEG of the compared register that negates exactly
+    //     the negative (or non-positive) case? CNEG Rd, Rn, cond is
+    //     CSNEG Rd, Rn, Rn, !cond, so the raw match is a CSNEG with
+    //     both sources equal to the compared register and a condition
+    //     in {PL, GE, GT}: cond ? r : -r computes |r| when the
+    //     condition holds exactly for r >= 0 (PL; GE with V = 0 after
+    //     a zero compare) or r > 0 (GT: the r = 0 else-branch yields
+    //     -0 = 0). The rewrite is CSSC's ABS, which reads the same
+    //     register but DELETES the compare and sets no flags, so
+    //     emission defers until NZCV is provably dead. Rd = 31
+    //     discards the result.
+    if (state->cab_active) {
+        if ((op & 0x7FE00C00u) == 0x5A800400u) {
+            unsigned c_sf = (op >> 31) & 1u;
+            unsigned c_rd = op & 0x1Fu;
+            unsigned c_rn = (op >> 5) & 0x1Fu;
+            unsigned c_rm = (op >> 16) & 0x1Fu;
+            unsigned cond = (op >> 12) & 0xFu;
+            if (((c_sf != 0) == state->cab_is_64bit)
+                    && c_rd != 31
+                    && c_rn == state->cab_rn && c_rm == state->cab_rn
+                    && (cond == 5u || cond == 10u || cond == 12u)) {
+                char w_or_x = state->cab_is_64bit ? 'x' : 'w';
+
+                out->name = "CMP #0 + CNEG foldable to ABS (CSSC)";
+                out->start_offset = state->cab_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> abs %c%u, %c%u",
+                    w_or_x, c_rd, w_or_x, state->cab_rn);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->cab_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                defer_dead_nzcv_cssc(state, out);
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->cab_active = false;
+    }
+
+    // (2) Open: CMP Rn, #0 (SUBS immediate, Rd = 31, imm12 = 0; both
+    //     shift encodings of zero)? Rn = 31 compares SP, which ABS
+    //     cannot name.
+    if ((op & 0x7F80001Fu) == 0x7100001Fu
+            && ((op >> 10) & 0xFFFu) == 0
+            && ((op >> 22) & 0x3u) < 2u) {
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if (rn != 31) {
+            state->cab_active = true;
+            state->cab_is_64bit = ((op >> 31) & 1u) != 0;
+            state->cab_rn = rn;
+            state->cab_offset = offset;
+            snprintf(state->cab_disasm, sizeof(state->cab_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    return false;
+}
+
+bool check_cssc_ctz(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_CSSC)) {
+        state->rbc_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    bool produced = false;
+
+    // (1) Close: a CLZ of the bit-reversed register? Counting leading
+    //     zeros of a bit reversal counts trailing zeros of the
+    //     original -- CSSC's CTZ in one instruction. The rewrite
+    //     reads the RBIT's own source, which still holds its original
+    //     value at the consumer once the RBIT is deleted (even for
+    //     the in-place rbit wt, wt); no flags are involved. The
+    //     reversed value must be dead: a CLZ destination that IS the
+    //     reversed register kills it structurally, otherwise the
+    //     finding defers through the forward register-liveness scan.
+    if (state->rbc_active) {
+        if ((op & 0x7FFFFC00u) == 0x5AC01000u) {
+            unsigned c_sf = (op >> 31) & 1u;
+            unsigned c_rd = op & 0x1Fu;
+            unsigned c_rn = (op >> 5) & 0x1Fu;
+            if (((c_sf != 0) == state->rbc_is_64bit)
+                    && c_rn == state->rbc_rd
+                    && c_rd != 31) {
+                char w_or_x = state->rbc_is_64bit ? 'x' : 'w';
+
+                out->name = "RBIT + CLZ foldable to CTZ (CSSC)";
+                out->start_offset = state->rbc_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> ctz %c%u, %c%u",
+                    w_or_x, c_rd, w_or_x, state->rbc_rs);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->rbc_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+
+                if (c_rd == state->rbc_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, state->rbc_rd);
+                }
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->rbc_active = false;
+    }
+
+    // (2) Open: an RBIT? Rd = 31 is a dead write; Rs = 31 reverses
+    //     the zero register, a constant idiom.
+    if ((op & 0x7FFFFC00u) == 0x5AC00000u) {
+        unsigned rd = op & 0x1Fu;
+        unsigned rs = (op >> 5) & 0x1Fu;
+        if (rd != 31 && rs != 31) {
+            state->rbc_active = true;
+            state->rbc_is_64bit = ((op >> 31) & 1u) != 0;
+            state->rbc_rd = rd;
+            state->rbc_rs = rs;
+            state->rbc_offset = offset;
+            snprintf(state->rbc_disasm, sizeof(state->rbc_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    return produced;
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -10997,6 +11323,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending,
     armlint_advance_pending_sv,
     armlint_advance_pending_zs,
+    armlint_advance_pending_cssc,
     armlint_advance_pending_mz,
     armlint_advance_pending_tb,
     check_mul_strength_reduce,
@@ -11013,6 +11340,9 @@ const armlint_check_fn armlint_check_registry[] = {
     check_ldr_cvtf_fold,
     check_ldr_literal_const,
     check_adr_fold,
+    check_cssc_minmax,
+    check_cssc_abs,
+    check_cssc_ctz,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,
@@ -11069,13 +11399,14 @@ const size_t armlint_check_registry_count =
 // skip past data-in-text by hand.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
-                       armlint_summary *summary)
+                       armlint_summary *summary, unsigned features)
 {
     armlint_state *state = armlint_state_create();
     if (state == NULL) {
         return -1;
     }
     armlint_state_set_buffer(state, inst, len);
+    armlint_state_set_features(state, features);
     cs_insn *insn = cs_malloc(handle);
     if (insn == NULL) {
         armlint_state_destroy(state);

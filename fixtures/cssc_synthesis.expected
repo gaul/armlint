@@ -1,0 +1,22 @@
+CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0x0: -> smax x0, x1, x2 (2 instructions)
+  cmp x1, x2
+  csel x0, x1, x2, gt
+
+CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0xc: -> umin w0, w1, w2 (2 instructions)
+  cmp w1, w2
+  csel w0, w2, w1, hi
+
+CMP #0 + CNEG foldable to ABS (CSSC) at offset: 0x18: -> abs x0, x1 (2 instructions)
+  cmp x1, #0
+  cneg x0, x1, mi
+
+RBIT + CLZ foldable to CTZ (CSSC) at offset: 0x24: -> ctz x0, x1 (2 instructions)
+  rbit x0, x1
+  clz x0, x0
+
+Optimization opportunities by type:
+       2  CMP + CSEL foldable to MAX/MIN (CSSC)
+       1  CMP #0 + CNEG foldable to ABS (CSSC)
+       1  RBIT + CLZ foldable to CTZ (CSSC)
+
+4 optimization opportunities in 18 instructions

@@ -144,6 +144,9 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`ldr w8` + `scvtf`/`ucvtf` from GPR](analyses.md#load--scvtfucvtf-via-gpr-foldable-to-fp-load--convert) | `ldr s0` + FP-side convert (no cross-file transfer) |
 | [`ldr`/`ldrsw` (literal) of an encodable constant](analyses.md#ldr-literal-foldable-to-movfmov-immediate) | `mov #imm` / `fmov #imm8` / `movi`+`mvni` for Q (no memory access) |
 | [`adr` + `ldr [x8]`/`br x16`](analyses.md#adr--single-use-of-its-target-foldable-to-the-direct-form) | `ldr Rt, <literal>` / `b L` |
+| [`cmp` + `csel` (max/min shape)](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `smax`/`smin`/`umax`/`umin` (`-m cssc`) |
+| [`cmp #0` + `cneg`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `abs` (`-m cssc`) |
+| [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
@@ -218,7 +221,8 @@ int lint(const uint8_t *code, size_t code_len, uint64_t base_addr)
 
     armlint_summary *summary = armlint_summary_create();
     int findings = check_instructions(
-        handle, code, code_len, base_addr, /*verbose=*/true, summary);
+        handle, code, code_len, base_addr, /*verbose=*/true, summary,
+        /*features=*/0);   // or ARMLINT_FEATURE_CSSC etc.
     armlint_summary_print(summary);   // optional by-type tally
 
     armlint_summary_destroy(summary);
@@ -235,7 +239,13 @@ Mach-O, or universal/fat Mach-O) directly:
 ```sh
 ./armlint /path/to/aarch64/binary
 ./armlint /bin/ls
+./armlint -m cssc /bin/ls   # also suggest CSSC instructions
 ```
+
+`-m <feature>` enables checks whose rewrites use ISA-extension
+instructions the target must support; `cssc` (Armv8.9/9.4 Common
+Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,
+`ctz`) is the first.
 
 By default armlint prints only a summary: the opportunities grouped by
 type and sorted by prevalence, so it is clear which to look at first,

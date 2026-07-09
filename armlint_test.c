@@ -106,6 +106,43 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
     return findings;
 }
 
+// Like run_check, but with the CSSC feature enabled.
+static int run_cssc_check(const uint8_t *code, size_t code_size)
+{
+    cs_insn *insns = NULL;
+    size_t count = cs_disasm(g_handle, code, code_size, 0, 0, &insns);
+    if (count != code_size / 4) {
+        if (insns != NULL) {
+            cs_free(insns, count);
+        }
+        return -1;
+    }
+
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+    armlint_state_set_features(state, ARMLINT_FEATURE_CSSC);
+
+    int findings = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t offset = (size_t)insns[i].address;
+        for (size_t k = 0; k < armlint_check_registry_count; k++) {
+            armlint_finding f;
+            if (armlint_check_registry[k](state, &insns[i], offset, &f)) {
+                findings++;
+            }
+        }
+    }
+
+    armlint_finding f;
+    if (armlint_flush(state, &f)) {
+        findings++;
+    }
+
+    armlint_state_destroy(state);
+    cs_free(insns, count);
+    return findings;
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -9565,6 +9602,186 @@ static void br_(uint8_t out[4], unsigned rn)
     write_le32(out, 0xD61F0000u | ((rn & 0x1Fu) << 5));
 }
 
+static void test_cssc_minmax(void)
+{
+    uint8_t code[12];
+
+    // cmp x1, x2 ; csel x0, x1, x2, gt ; cmp x9, #0 -- the trailing
+    // compare overwrites NZCV, committing the deferred finding
+    // (-> smax x0, x1, x2).
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 1, 2, 12);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // GE works too (the equal case selects equal values).
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 1, 2, 10);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // LT selects the smaller: smin.
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 1, 2, 11);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // Unsigned HI: umax. W form.
+    cmp_w_reg(&code[0], 1, 2);
+    csel_w(&code[4], 0, 1, 2, 8);
+    write_le32(&code[8], 0x7100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // Swapped CSEL operands flip the direction (GT + swapped = smin).
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 2, 1, 12);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // The rewrite deletes the compare and sets no flags: a later
+    // flag reader discards the deferred finding.
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 1, 2, 12);
+    write_le32(&code[8], 0x54000000u | (2u << 5) | 0u);   // b.eq
+    assert(run_cssc_check(code, 12) == 0);
+
+    // EQ selects neither extreme.
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 1, 2, 0);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 0);
+
+    // A CSEL of unrelated registers is not the pair's selection.
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 3, 4, 12);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 0);
+
+    // Without -m cssc the check is silent on the same bytes.
+    cmp_x_reg(&code[0], 1, 2);
+    csel_x(&code[4], 0, 1, 2, 12);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_helper_check(code, 12) == 0);
+}
+
+// Raw CSNEG: sf 1 0 11010100 Rm cond 0 1 Rn Rd.
+static void csneg_raw(uint8_t out[4], unsigned sf, unsigned rd,
+                      unsigned rn, unsigned rm, unsigned cond)
+{
+    write_le32(out, 0x5A800400u | ((sf & 1u) << 31)
+        | ((rm & 0x1Fu) << 16) | ((cond & 0xFu) << 12)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_cssc_abs(void)
+{
+    uint8_t code[12];
+
+    // cmp x1, #0 ; cneg x0, x1, mi (raw csneg x0, x1, x1, pl) ;
+    // cmp x9, #0 -> abs x0, x1 once the trailing compare overwrites
+    // NZCV.
+    write_le32(&code[0], 0xF100001Fu | (1u << 5));
+    csneg_raw(&code[4], 1, 0, 1, 1, 5);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // cneg ..., lt (raw GE) and ..., le (raw GT) compute abs too.
+    write_le32(&code[0], 0xF100001Fu | (1u << 5));
+    csneg_raw(&code[4], 1, 0, 1, 1, 10);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+    write_le32(&code[0], 0xF100001Fu | (1u << 5));
+    csneg_raw(&code[4], 1, 0, 1, 1, 12);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // W form, in-place destination.
+    write_le32(&code[0], 0x7100001Fu | (1u << 5));
+    csneg_raw(&code[4], 0, 1, 1, 1, 5);
+    write_le32(&code[8], 0x7100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 1);
+
+    // cneg ..., pl (raw MI) negates the wrong case: -abs, not abs.
+    write_le32(&code[0], 0xF100001Fu | (1u << 5));
+    csneg_raw(&code[4], 1, 0, 1, 1, 4);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 0);
+
+    // The CNEG must read the compared register.
+    write_le32(&code[0], 0xF100001Fu | (1u << 5));
+    csneg_raw(&code[4], 1, 0, 2, 2, 5);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 0);
+
+    // A later flag reader discards (the rewrite sets no flags).
+    write_le32(&code[0], 0xF100001Fu | (1u << 5));
+    csneg_raw(&code[4], 1, 0, 1, 1, 5);
+    write_le32(&code[8], 0x54000000u | (2u << 5) | 0u);   // b.eq
+    assert(run_cssc_check(code, 12) == 0);
+
+    // A nonzero compare immediate is not the sign test.
+    write_le32(&code[0], 0xF100001Fu | (1u << 5) | (1u << 10));
+    csneg_raw(&code[4], 1, 0, 1, 1, 5);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_cssc_check(code, 12) == 0);
+
+    // Silent without the feature.
+    write_le32(&code[0], 0xF100001Fu | (1u << 5));
+    csneg_raw(&code[4], 1, 0, 1, 1, 5);
+    write_le32(&code[8], 0xF100001Fu | (9u << 5));
+    assert(run_helper_check(code, 12) == 0);
+}
+
+static void test_cssc_ctz(void)
+{
+    uint8_t code[12];
+
+    // rbit x0, x1 ; clz x0, x0 -> ctz x0, x1 (flag; the CLZ
+    // overwrites the reversed value -- structural kill, no flags
+    // involved).
+    write_le32(&code[0], 0xDAC00000u | (1u << 5) | 0u);
+    write_le32(&code[4], 0xDAC01000u | (0u << 5) | 0u);
+    assert(run_cssc_check(code, 8) == 1);
+
+    // Fresh CLZ destination defers on the reversed register; the
+    // appended kill commits it.
+    write_le32(&code[0], 0xDAC00000u | (1u << 5) | 2u);
+    write_le32(&code[4], 0xDAC01000u | (2u << 5) | 0u);
+    movz_x(&code[8], 2, 1, 0);
+    assert(run_cssc_check(code, 12) == 1);
+    assert(run_cssc_check(code, 8) == 0);
+
+    // In-place rbit: deleting it leaves the source intact at the CLZ.
+    write_le32(&code[0], 0xDAC00000u | (1u << 5) | 1u);
+    write_le32(&code[4], 0xDAC01000u | (1u << 5) | 1u);
+    assert(run_cssc_check(code, 8) == 1);
+
+    // W form.
+    write_le32(&code[0], 0x5AC00000u | (1u << 5) | 0u);
+    write_le32(&code[4], 0x5AC01000u | (0u << 5) | 0u);
+    assert(run_cssc_check(code, 8) == 1);
+
+    // The CLZ must read the reversed register.
+    write_le32(&code[0], 0xDAC00000u | (1u << 5) | 0u);
+    write_le32(&code[4], 0xDAC01000u | (2u << 5) | 0u);
+    assert(run_cssc_check(code, 8) == 0);
+
+    // Width mismatch.
+    write_le32(&code[0], 0xDAC00000u | (1u << 5) | 0u);
+    write_le32(&code[4], 0x5AC01000u | (0u << 5) | 0u);
+    assert(run_cssc_check(code, 8) == 0);
+
+    // CLS (opcode 000101) is not CLZ.
+    write_le32(&code[0], 0xDAC00000u | (1u << 5) | 0u);
+    write_le32(&code[4], 0xDAC01400u | (0u << 5) | 0u);
+    assert(run_cssc_check(code, 8) == 0);
+
+    // Silent without the feature.
+    write_le32(&code[0], 0xDAC00000u | (1u << 5) | 0u);
+    write_le32(&code[4], 0xDAC01000u | (0u << 5) | 0u);
+    assert(run_helper_check(code, 8) == 0);
+}
+
 static void test_adr_fold(void)
 {
     uint8_t code[12];
@@ -10925,6 +11142,9 @@ int main(void)
     test_add_one_csel_fold();
     test_ldr_literal_const();
     test_adr_fold();
+    test_cssc_minmax();
+    test_cssc_abs();
+    test_cssc_ctz();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();
