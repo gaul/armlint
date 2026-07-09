@@ -95,7 +95,8 @@ actually saves.
 ## Implemented analyses
 
 Each row links to its full description -- mechanics, soundness, and what
-the rewrite saves -- in [analyses.md](analyses.md).
+the rewrite saves -- in [analyses.md](analyses.md). Candidate checks
+not yet implemented live in [TODO.md](TODO.md).
 
 | Pattern | Rewrite |
 | --- | --- |
