@@ -31,7 +31,11 @@ rewrite provably preserves the architectural result. For a tool that
 suggests code changes, a false positive is the worst failure, so it errs
 toward false negatives -- a missed opportunity is cheaper than a wrong
 one. Each check documents the exact conditions under which its rewrite is
-equivalent; the constraints below are the ones they share.
+equivalent; the constraints below are the ones they share, and
+[analyses.md's appendix](analyses.md#appendix-folds-rejected-for-soundness)
+collects the near-miss folds that are deliberately never matched (FP
+contraction, `fcsel` -> `fmax`, the SDIV remainder, and friends) with
+the argument against each.
 
 * **Strict adjacency for matching; bounded lookahead for proof.** The
   instructions of a matched pattern must be consecutive -- an

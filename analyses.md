@@ -2039,3 +2039,111 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   writeback is pointless for a dead base, so its no-writeback rewrite
   is strictly better there. The two findings offer alternative
   outcomes, like the CMP-drop/CBZ-fold overlap.
+
+## Appendix: folds rejected for soundness
+
+Patterns that look like they should fold and deliberately do not.
+Each entry is a near-miss of an implemented check; the check's own
+section describes the sound sibling, this appendix consolidates the
+counter-arguments so a reviewer wondering "why doesn't armlint flag
+this?" has one place to look.
+
+### Floating-point rounding
+
+* **`fmul` + `fadd`/`fsub` -> `fmadd`/`fmsub`/`fnmadd`/`fnmsub`
+  (contraction).** The fused ops round ONCE: `fmadd` computes
+  `round(a*b + c)` with the infinitely precise product feeding the
+  add. The two-instruction sequence rounds twice --
+  `round(round(a*b) + c)` -- and the results differ in the last ulp
+  for well-chosen inputs. Compilers only contract under
+  `-ffp-contract=fast` (or `#pragma STDC FP_CONTRACT ON`), an
+  explicit license to change results that a binary-level linter
+  cannot assume. This is the canonical member of the family and the
+  reason the [`FMUL` + `FNEG` fold](#fmul--fneg-foldable-to-fnmul)
+  spells out why IT is exact: `FNMUL` negates the already-rounded
+  product, adding no rounding step.
+* **`fneg` of an operand + `fmul` -> `fnmul`.** Negating an operand
+  first computes `round(-(a*b))`; `FNMUL` computes `-(round(a*b))`.
+  Under round-to-nearest these agree (rounding is symmetric), but
+  under the directed modes (`FPCR.RMode` = toward +inf or -inf) they
+  differ, and armlint cannot know the dynamic rounding mode. Only
+  the result-negating order folds -- see
+  [`FMUL` + `FNEG`](#fmul--fneg-foldable-to-fnmul), whose fixture
+  pins this sibling as a negative.
+
+### Floating-point value semantics
+
+* **`fcmp` + `fcsel` -> `fmax`/`fmin`.** `FMAX`/`FMIN` have their
+  own NaN and signed-zero semantics: a quiet-NaN operand propagates
+  (the result is NaN), and `fmax(+0.0, -0.0)` is `+0.0`. The
+  compare-and-select computes something else on exactly those
+  inputs: `fcmp` with a NaN sets the unordered flags, so
+  `fcsel ..., gt` takes the ELSE operand (yielding the NaN's
+  partner, not the NaN), and +/-0.0 compare EQUAL, so the select
+  picks whichever slot the condition maps to, not canonical +0.0.
+  The integer twin has no such trap, which is why
+  [`CMP` + `CSEL` -> `SMAX`/`SMIN` (CSSC)](#cssc-synthesis-feature-gated--m-cssc)
+  folds and the FP shape never will. (`FMAXNM`/`FMINNM` change the
+  NaN rule but not the +/-0.0 one; no variant matches the select.)
+
+### Integer arithmetic
+
+* **`SDIV`-based power-of-two remainder -> `AND`.** For unsigned
+  values, `dividend - (dividend / 2^N) * 2^N` is a low-bits mask
+  because `UDIV` truncates and truncation IS flooring there. `SDIV`
+  truncates toward zero: for a negative dividend the flooring `AND`
+  and the truncating remainder disagree (C's `%` yields -1 for
+  -1 % 4; the mask yields 3). Only the unsigned idiom folds -- see
+  [remainder by power of two](#remainder-by-power-of-two-foldable-to-and).
+* **`sub` + swapped `cmp` -> `subs`.** Subtraction does not
+  commute: `cmp x2, x1` computes `x2 - x1`, whose NZCV bear no fixed
+  relation to `subs x0, x1, x2`. Only the identical-operand compare
+  folds for the SUB family; the swap is sound solely for
+  [`ADD` + `CMN`](#sub--cmp-of-identical-operands-foldable-to-subs),
+  where both spellings compute the identical 65-bit sum.
+* **`ADD` + swapped `CMN` with a shifted operand.** The swap
+  argument needs plain registers: `Rn + (Rm << s)` is not
+  `Rm + (Rn << s)`, so only the LSL #0 shifted-register form swaps.
+  The immediate form has no second register and the extended form
+  extends Rm only -- neither has a swapped spelling at all.
+* **`csinc`/`csinv`/`csneg` with equal operands as an "identity".**
+  Only [`CSEL Rd, Rn, Rn`](#csel-same-operand-identity-csel-rd-rn-rn-cond)
+  selects the same value on both branches. The rest of the family
+  computes `Rn+1`, `~Rn` or `-Rn` on the else path, so the equal-
+  operand forms are conditional increment/invert/negate (the CINC /
+  CINV / CNEG aliases), not copies.
+
+### Flag-agreement discipline
+
+* **Blessing "harmless" flag readers after a flag-CHANGING
+  rewrite.** Whether a later `b.eq` can survive a fold depends on
+  which flags the rewrite preserves, not on the reader looking
+  benign. The [zero-CMP -> S-variant fold](#addsubandbic--zero-cmp-foldable-to-s-variant)
+  keeps N and Z bit-identical but changes C and V (`cmp #0` pins
+  C = 1, V = 0), so its scan admits EQ/NE readers and rejects
+  everything else; the [CSSC folds](#cssc-synthesis-feature-gated--m-cssc)
+  delete the compare outright and set NO flags, so their scan
+  rejects every reader, `b.eq` included. Same machinery, different
+  flag-agreement proofs -- neither is transferable to the other.
+
+### Architectural rules
+
+* **`LDP` with `Rt1 == Rt2`.** CONSTRAINED UNPREDICTABLE, so
+  adjacent same-register LOADS never
+  [coalesce](#adjacent-ldrstr-foldable-into-ldpstp); adjacent
+  same-register stores do (`STP Rt, Rt` is well-defined -- it simply
+  stores the value twice).
+* **The `STR` base slot as ZR.** In addressing, register 31 means
+  SP, not the zero register: rewriting a base to "ZR" would silently
+  re-address the store. The [MOV #0 fold](#mov-0--use-foldable-to-zr)
+  substitutes only data slots (`Rt`, ALU operands, select operands),
+  never a base.
+* **`adr` + `blr` -> `bl`.** A callee legitimately receives values
+  in registers -- x8 in particular is the indirect-result (sret)
+  pointer -- so the address register cannot be assumed dead at a
+  call target the way x16/x17 can across a
+  [veneer-shaped `br`](#adr--single-use-of-its-target-foldable-to-the-direct-form).
+* **Cross-width load + convert.** `ldr w8 ; scvtf d0, w8`
+  (int32 -> double) has no FP-side twin: there is no in-SIMD
+  cross-width scalar conversion, so only the width-matched pairs
+  fold in the [load + convert check](#load--scvtfucvtf-via-gpr-foldable-to-fp-load--convert).
