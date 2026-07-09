@@ -617,6 +617,19 @@ struct armlint_state {
     unsigned fmn_rm;
     size_t fmn_offset;
     char fmn_disasm[ARMLINT_FINDING_LINE_LEN];
+
+    // Pending unsigned-offset LDR W/X awaiting an adjacent
+    // width-matched SCVTF/UCVTF of the loaded register: the pair
+    // routes an int-to-FP conversion through a GPR when loading into
+    // the FP register and converting in-SIMD performs the identical
+    // conversion without the cross-register-file transfer.
+    bool lcv_active;
+    bool lcv_is_64bit;
+    unsigned lcv_rt;
+    unsigned lcv_rn;
+    unsigned lcv_imm12;
+    size_t lcv_offset;
+    char lcv_disasm[ARMLINT_FINDING_LINE_LEN];
 };
 
 #define LIVENESS_WINDOW 16
@@ -908,6 +921,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->simd_zero_active = false;
     state->rem_active = false;
     state->fmn_active = false;
+    state->lcv_active = false;
     return mov_close(state, out);
 }
 
@@ -1048,6 +1062,13 @@ static bool decode_asr_imm(uint32_t op, unsigned *out_sf,
 static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
                            unsigned reg);
 static void format_reg(char *buf, size_t bufsz, char w_or_x, unsigned reg);
+static bool decode_cvtf_from_gpr(uint32_t op, bool *out_src_64,
+                                 bool *out_is_double,
+                                 bool *out_is_unsigned,
+                                 unsigned *out_rn, unsigned *out_rd);
+static bool decode_ldr_uimm_any_size(uint32_t op, unsigned *out_size,
+                                     unsigned *out_imm12,
+                                     unsigned *out_rn, unsigned *out_rt);
 
 // Shift-type names indexed by the shifted-register encoding's
 // shift-type field (bits 23..22).
@@ -6451,6 +6472,101 @@ bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->lcv_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a width-matched SCVTF/UCVTF of the loaded register?
+    //     Loading the same bytes into the FP register and converting
+    //     in-SIMD performs the identical conversion -- same 32/64-bit
+    //     integer value, same FPCR rounding, same FPSR exceptions,
+    //     and both spellings zero the vector register above the
+    //     written lane -- without the GPR -> FP transfer the
+    //     GPR-source form pays for (a separate several-cycle move on
+    //     current cores; vendor optimization guides recommend exactly
+    //     this rewrite). Widths must match on both sides: only the
+    //     int32 -> single and int64 -> double pairs have an in-SIMD
+    //     twin (there is no cross-width scalar conversion), which is
+    //     also why only the plain W/X loads open below.
+    if (state->lcv_active) {
+        bool src_64, is_double, is_unsigned;
+        unsigned c_rn, c_rd;
+        if (decode_cvtf_from_gpr(op, &src_64, &is_double, &is_unsigned,
+                                 &c_rn, &c_rd)
+                && c_rn == state->lcv_rt
+                && src_64 == state->lcv_is_64bit
+                && is_double == state->lcv_is_64bit) {
+            char sd = is_double ? 'd' : 's';
+            const char *cvt = is_unsigned ? "ucvtf" : "scvtf";
+            unsigned scale = state->lcv_is_64bit ? 8u : 4u;
+            unsigned byte_off = state->lcv_imm12 * scale;
+            char base_buf[8];
+            if (state->lcv_rn == 31) {
+                snprintf(base_buf, sizeof(base_buf), "sp");
+            } else {
+                snprintf(base_buf, sizeof(base_buf), "x%u",
+                    state->lcv_rn);
+            }
+
+            out->name = "load + SCVTF/UCVTF via GPR foldable to "
+                "FP load + convert";
+            out->start_offset = state->lcv_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+
+            if (byte_off == 0) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> ldr %c%u, [%s] ; %s %c%u, %c%u",
+                    sd, c_rd, base_buf, cvt, sd, c_rd, sd, c_rd);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> ldr %c%u, [%s, #0x%x] ; %s %c%u, %c%u",
+                    sd, c_rd, base_buf, byte_off, cvt, sd, c_rd,
+                    sd, c_rd);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->lcv_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+
+            // The rewrite stops writing the GPR entirely, so the
+            // loaded register must be dead afterward. The conversion
+            // writes only an FP register and can never kill it, so
+            // the finding always defers through the forward
+            // register-liveness scan.
+            state->lcv_active = false;
+            return defer_dead_mov(state, out, state->lcv_rt);
+        }
+        // Strict adjacency: clear regardless of match.
+        state->lcv_active = false;
+    }
+
+    // (2) Open: a plain unsigned-offset LDR W/X? The byte and
+    //     halfword loads have no in-SIMD conversion width, and the
+    //     sign-extending loads change the integer value's width, so
+    //     neither opens. Rt = 31 discards the load.
+    unsigned size, imm12, rn, rt;
+    if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
+            && size >= 2u && rt != 31) {
+        state->lcv_active = true;
+        state->lcv_is_64bit = (size == 3u);
+        state->lcv_rt = rt;
+        state->lcv_rn = rn;
+        state->lcv_imm12 = imm12;
+        state->lcv_offset = offset;
+        snprintf(state->lcv_disasm, sizeof(state->lcv_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return false;
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -10009,6 +10125,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_madd_fold,
     check_udiv_msub_remainder,
     check_fmul_fneg_fold,
+    check_ldr_cvtf_fold,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,

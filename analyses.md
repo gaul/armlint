@@ -1316,6 +1316,35 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   always defers through the forward register-liveness scan until the
   extended register provably dies.
 
+## load + SCVTF/UCVTF via GPR foldable to FP load + convert
+
+* `ldr w8, [x1] ; scvtf s0, w8` instead of
+  `ldr s0, [x1] ; scvtf s0, s0`. An int-to-FP conversion routed
+  through a general register pays a cross-register-file transfer the
+  FP-side spelling avoids: the GPR-source conversions crack into a
+  several-cycle GPR -> FP move plus the convert (the move rides the
+  load pipes on Apple's cores and the M0 pipe on Neoverse), while
+  loading straight into the FP register and converting in-SIMD is
+  two independent cheap ops. Apple's CPU optimization guide
+  recommends exactly this rewrite (measuring 11 -> 7 cycles on
+  M-series). The instruction count is unchanged; the win is the
+  transfer, plus the freed GPR.
+* Exactness: the rewrite performs the identical memory access (same
+  address, same size), converts the same 32/64-bit integer value
+  under the same FPCR rounding with the same FPSR exceptions, and
+  both spellings zero the vector register above the written lane.
+* Widths must match on both sides -- only int32 -> single and
+  int64 -> double have in-SIMD twins; there is no cross-width scalar
+  conversion -- so mixed pairs (`scvtf d0, w8`), the byte/halfword
+  loads and the sign-extending loads never fold. Half precision
+  (FEAT_FP16) is not matched, consistent with the FMOV folds.
+  `Rt = 31` (a discarded load) does not open.
+* The rewrite stops writing the GPR entirely, so the loaded register
+  must be dead afterward; the conversion writes only an FP register
+  and can never kill it, so the finding always defers through the
+  forward register-liveness scan. v1 matches the unsigned-offset
+  addressing form only, like the other load-rewriting folds.
+
 ## FMUL + FNEG foldable to FNMUL
 
 * `fmul d0, d1, d2 ; fneg d0, d0` instead of `fnmul d0, d1, d2`.

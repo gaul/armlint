@@ -713,6 +713,40 @@ bool check_udiv_msub_remainder(armlint_state *state, const cs_insn *insn,
 bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect an int-to-FP conversion routed through a GPR: a plain
+// unsigned-offset LDR W/X immediately followed by a width-matched
+// SCVTF/UCVTF of the loaded register. Loading into the FP register
+// and converting in-SIMD performs the identical conversion without
+// the cross-register-file transfer:
+//   ldr w8, [x1] ; scvtf s0, w8 -> ldr s0, [x1] ; scvtf s0, s0
+//   ldr x8, [x1, #8] ; ucvtf d0, x8 -> ldr d0, [x1, #8] ; ucvtf d0, d0
+// Same instruction count; the win is the transfer. The GPR-source
+// conversions pay a several-cycle GPR -> FP move on current cores
+// (it rides the load pipes on Apple's, the M0 pipe on Neoverse), and
+// Apple's CPU optimization guide recommends exactly this rewrite.
+// The loaded GPR is freed too.
+//
+// Exactness: the rewrite performs the identical memory access (same
+// address, same size), converts the same 32/64-bit integer value
+// under the same FPCR rounding with the same FPSR exceptions, and
+// both spellings zero the vector register above the written lane.
+// Widths must match on both sides -- only int32 -> single and
+// int64 -> double have in-SIMD twins; there is no cross-width scalar
+// conversion -- so mixed pairs (scvtf d0, w8), the byte/halfword
+// loads and the sign-extending loads never fold. Half precision
+// (FEAT_FP16) is excluded by the shared decoder. Rt = 31 (a
+// discarded load) does not open.
+//
+// The rewrite stops writing the GPR entirely, so the loaded register
+// must be dead afterward; the conversion writes only an FP register
+// and can never kill it, so the finding always defers through the
+// forward register-liveness scan (defer_dead_mov). v1 matches the
+// unsigned-offset addressing form only, like the other load-rewriting
+// folds. Reported as "load + SCVTF/UCVTF via GPR foldable to FP load
+// + convert".
+bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
 // conversion that consumes it, when FMOV (scalar, immediate) could

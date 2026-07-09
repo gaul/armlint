@@ -138,6 +138,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`mov #bits`/`#C` + `fmov`/`scvtf`/`ucvtf` from GPR](analyses.md#mov--fmovscvtfucvtf-foldable-to-fmov-immediate) | `fmov Sd`/`Dd, #imm` |
 | [`fmov`/`scvtf`/`dup` of `wzr`/`xzr` (or `mov #0` + transfer)](analyses.md#fpvector-zeroing-via-gpr-foldable-to-movi) | `movi dN, #0` / `movi vN.T, #0` |
 | [`sxtw`/`mov w, w` + `scvtf`/`ucvtf Xn`](analyses.md#widening-extend--scvtfucvtf-foldable-to-w-form-conversion) | `scvtf`/`ucvtf` of `Wn` |
+| [`ldr w8` + `scvtf`/`ucvtf` from GPR](analyses.md#load--scvtfucvtf-via-gpr-foldable-to-fp-load--convert) | `ldr s0` + FP-side convert (no cross-file transfer) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |

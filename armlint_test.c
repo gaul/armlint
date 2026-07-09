@@ -435,6 +435,13 @@ static void lsr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void asr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void ret_(uint8_t out[4]);
+static void cvtf_gpr(uint8_t out[4], unsigned sf, unsigned dbl,
+                     unsigned is_unsigned, unsigned rd, unsigned rn);
+static void ldr_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
+static void ldrb_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
+static void ldrh_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
+static void ldr_x_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
+                            unsigned imm12);
 
 // EXTR Rd, Rn, Rm, #lsb. W base 0x13800000; X base 0x93C00000 (N = sf).
 static void extr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm,
@@ -7146,6 +7153,68 @@ static void test_fmul_fneg_fold(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+static void test_ldr_cvtf_fold(void)
+{
+    uint8_t code[16];
+
+    // ldr w8, [x1] ; scvtf s0, w8 ; (x8 dies)
+    //   -> ldr s0, [x1] ; scvtf s0, s0 (flag; same conversion, no
+    //   GPR -> FP transfer).
+    ldr_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // UCVTF folds the same way.
+    ldr_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 0, 1, 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // X/D pair with an offset: ldr x8, [x1, #8] ; scvtf d0, x8.
+    ldr_x_uimm_with(&code[0], 8, 1, 1);
+    cvtf_gpr(&code[4], 1, 1, 0, 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Without the kill the loaded register is never proven dead.
+    ldr_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // The loaded register is read again before dying: discarded.
+    ldr_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 8);
+    add_x(&code[8], 5, 8, 6);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Mixed widths have no in-SIMD twin: int32 -> double...
+    ldr_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 1, 0, 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // ...and int64 -> single.
+    ldr_x_uimm_with(&code[0], 8, 1, 0);
+    cvtf_gpr(&code[4], 1, 0, 0, 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Byte and halfword loads have no conversion width.
+    ldrb_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+    ldrh_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // The conversion reads a different register.
+    ldr_w_uimm0(&code[0], 8, 1);
+    cvtf_gpr(&code[4], 0, 0, 0, 0, 9);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Intervening instruction breaks adjacency.
+    ldr_w_uimm0(&code[0], 8, 1);
+    movz_x(&code[4], 5, 1, 0);
+    cvtf_gpr(&code[8], 0, 0, 0, 0, 8);
+    assert(run_reg_dead(code, 12, 8) == 0);
+}
+
 // FMOV (general), GPR -> FPR: fmov Sd, Wn / fmov Dd, Xn.
 static void fmov_s_from_w(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -10159,6 +10228,7 @@ int main(void)
     test_mov_madd_fold();
     test_udiv_msub_remainder();
     test_fmul_fneg_fold();
+    test_ldr_cvtf_fold();
     test_mov_fmov_imm_fold();
     test_fp_zero_to_movi();
     test_extend_cvtf_fold();
