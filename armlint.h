@@ -610,6 +610,13 @@ bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
 // is provably dead. Runs before check_movz_movk_bitmask so the chain
 // state is still active. Reported as "MOV #1 + CSEL foldable to
 // CSINC/CSET".
+//
+// A materialised all-ones folds identically through CSINV (else
+// branch ~Rm: mov w8, #-1 ; csel wd, wn, w8, cc ->
+// csinv wd, wn, wzr, cc; ZR surviving operand -> the CSETM alias),
+// reported as "MOV #-1 + CSEL foldable to CSINV/CSETM". All-ones is
+// width-dependent (0xFFFFFFFF for a W chain), unlike the zero fold's
+// width-agnostic value, so the width gate does real work here.
 bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
 

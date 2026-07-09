@@ -136,6 +136,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` (sign-crossed for `#-C`) |
 | [`mov #1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinc Rd, Rn, wzr, cc` (`cset` when the other operand is ZR) |
+| [`mov #-1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinv Rd, Rn, wzr, cc` (`csetm` when the other operand is ZR) |
 | [`mov #C` + `lsl`/`lsr`/`asr`/`ror` (register amount)](analyses.md#mov--variable-shift-foldable-to-immediate-shift) | immediate-form shift, amount `C mod 32`/`64` |
 | [`mov #bits`/`#C` + `fmov`/`scvtf`/`ucvtf` from GPR](analyses.md#mov--fmovscvtfucvtf-foldable-to-fmov-immediate) | `fmov Sd`/`Dd, #imm` |
 | [`fmov`/`scvtf`/`dup` of `wzr`/`xzr` (or `mov #0` + transfer)](analyses.md#fpvector-zeroing-via-gpr-foldable-to-movi) | `movi dN, #0` / `movi vN.T, #0` |

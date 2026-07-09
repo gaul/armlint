@@ -55,4 +55,21 @@ _main:
     mov     x9, #1
     csel    x3, x9, x2, lt
 
+    // -- All-ones constant: CSINV's else-branch is ~ZR. --
+
+    // 7) Else slot: the condition carries over.
+    mov     x8, #-1
+    csel    x3, x2, x8, lt          // -> csinv x3, x2, xzr, lt
+    mov     x8, #5
+
+    // 8) Then slot: the condition inverts.
+    mov     x8, #-1
+    csel    x3, x8, x2, lt          // -> csinv x3, x2, xzr, ge
+    mov     x8, #5
+
+    // 9) ZR surviving operand is the CSETM alias: cc ? -1 : 0.
+    mov     w8, #-1
+    csel    w3, w8, wzr, lt         // -> csetm w3, lt
+    mov     w8, #5
+
     ret

@@ -1231,12 +1231,20 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (`cset wd, cc` / `cset wd, !cc` -- the condition under which the
   result is 1). That shape -- a bool built through a constant
   register instead of from the flags -- is the flagship catch.
+* A materialised ALL-ONES folds the same way through `CSINV`, whose
+  else-branch is `~Rm` (`mov w8, #-1 ; csel wd, wn, w8, cc` ->
+  `csinv wd, wn, wzr, cc`; ZR surviving operand -> the `CSETM`
+  alias), reported as "MOV #-1 + CSEL foldable to CSINV/CSETM".
+  All-ones is width-dependent (`0xFFFFFFFF` for a W chain), unlike
+  the zero fold's width-agnostic value, so the width gate does real
+  work here: a W chain holding `0xFFFFFFFF` does not fold into an X
+  select.
 * Only `CSEL` proper (op2 = 00) matches; `CSINC`/`CSINV`/`CSNEG` have
   different else-branches. The rewrite reads the same NZCV the `CSEL`
   did (the MOV writes no flags), so no flag-liveness scan is needed.
   Reuses the MOVZ/MOVK chain state; the chain's value must be exactly
-  1 and its width (W vs X) must match the select's, consistent with
-  the other integer MOV-chain folds.
+  1 (or all-ones) and its width (W vs X) must match the select's,
+  consistent with the other integer MOV-chain folds.
 * `AL`/`NV` conditions are excluded (`ConditionHolds` treats both as
   always-true, so the select is a plain `MOV` and the then-slot
   inversion, `AL` <-> `NV`, would still be always-taken), as are

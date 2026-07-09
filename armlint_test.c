@@ -6991,6 +6991,42 @@ static void test_mov_csel_fold(void)
     write_le32(&code[4], 0x9A800400u | (8u << 16) | (11u << 12)
         | (2u << 5) | 3u);      // csinc x3, x2, x8, lt
     assert(run_reg_dead(code, 8, 8) == 0);
+
+    // -- All-ones constant: CSINV's else-branch is ~ZR. --
+
+    // mov x8, #-1 ; csel x3, x2, x8, lt ; (x8 dies)
+    //   -> csinv x3, x2, xzr, lt (else slot: condition carries over).
+    movn_x(&code[0], 8, 0, 0);
+    csel_x(&code[4], 3, 2, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Then slot inverts: mov x8, #-1 ; csel x3, x8, x2, lt
+    //   -> csinv x3, x2, xzr, ge.
+    movn_x(&code[0], 8, 0, 0);
+    csel_x(&code[4], 3, 8, 2, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // ZR surviving operand: the CSETM materialisation
+    //   (-> csetm x3, lt).
+    movn_x(&code[0], 8, 0, 0);
+    csel_x(&code[4], 3, 31, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // W form: all-ones is width-dependent (0xFFFFFFFF).
+    movn_w(&code[0], 8, 0);
+    csel_w(&code[4], 3, 2, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A W chain holding 0xFFFFFFFF does not fold into an X select:
+    // the X all-ones differs (width gate).
+    movn_w(&code[0], 8, 0);
+    csel_x(&code[4], 3, 2, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // -2 is neither 1 nor all-ones.
+    movn_x(&code[0], 8, 1, 0);
+    csel_x(&code[4], 3, 2, 8, 11);
+    assert(run_reg_dead(code, 8, 8) == 0);
 }
 
 // Variable shift LSLV/LSRV/ASRV/RORV: sf 00 11010110 Rm 0010 op2

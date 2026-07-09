@@ -6119,9 +6119,15 @@ bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
     if ((sf != 0) != state->mov_is_64bit) {
         return false;
     }
-    // Only a materialised 1 folds: CSINC's else-branch is Rm + 1, so
-    // the constant is reproduced by incrementing ZR.
-    if (state->mov_value != 1) {
+    // Only a materialised 1 or all-ones folds: CSINC's else-branch
+    // is Rm + 1, reproducing the 1 by incrementing ZR, and CSINV's
+    // is ~Rm, reproducing all-ones by complementing it. All-ones is
+    // width-dependent (0xFFFFFFFF for a W chain), unlike the zero
+    // fold's width-agnostic value; the width gate above already
+    // matched chain and consumer.
+    uint64_t all_ones = state->mov_is_64bit ? ~0ull : 0xFFFFFFFFull;
+    bool ones = state->mov_value == all_ones;
+    if (state->mov_value != 1 && !ones) {
         return false;
     }
     // AL/NV are excluded: ConditionHolds treats both as always-true,
@@ -6134,12 +6140,13 @@ bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
 
     // Exactly one CSEL operand is the constant; both-equal is the
     // same-operand identity (check_csel_self's shape). The surviving
-    // operand becomes the CSINC's Rn -- ZR included, which is the
-    // CSET alias -- with the condition inverted when the constant sat
-    // in the then slot (the 1 must move to the else branch, where
-    // CSINC's increment produces it):
-    //   mov w8, #1 ; csel wd, w8, wn, cc -> csinc wd, wn, wzr, !cc
-    //   mov w8, #1 ; csel wd, wn, w8, cc -> csinc wd, wn, wzr, cc
+    // operand becomes the CSINC/CSINV's Rn -- ZR included, which is
+    // the CSET/CSETM alias -- with the condition inverted when the
+    // constant sat in the then slot (it must move to the else
+    // branch, where the increment or complement produces it):
+    //   mov w8, #1  ; csel wd, w8, wn, cc -> csinc wd, wn, wzr, !cc
+    //   mov w8, #1  ; csel wd, wn, w8, cc -> csinc wd, wn, wzr, cc
+    //   mov w8, #-1 ; csel wd, wn, w8, cc -> csinv wd, wn, wzr, cc
     unsigned t = state->mov_rd;
     unsigned surviving;
     bool invert;
@@ -6160,22 +6167,26 @@ bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
     format_reg(rm_buf, sizeof(rm_buf), w_or_x, rm);
     format_reg(surv_buf, sizeof(surv_buf), w_or_x, surviving);
 
-    out->name = "MOV #1 + CSEL foldable to CSINC/CSET";
+    out->name = ones
+        ? "MOV #-1 + CSEL foldable to CSINV/CSETM"
+        : "MOV #1 + CSEL foldable to CSINC/CSET";
     out->start_offset = state->mov_start_offset;
     out->insn_count = state->mov_insn_count + 1;
     clear_finding_strings(out);
 
     // A ZR surviving operand is the boolean materialisation itself:
-    // CSET Rd, cc is the alias of CSINC Rd, ZR, ZR, !cc, so the CSET
-    // condition is the CSINC field inverted -- the condition under
-    // which the result is 1.
+    // CSET Rd, cc is the alias of CSINC Rd, ZR, ZR, !cc (CSETM of
+    // CSINV likewise), so the alias condition is the field inverted
+    // -- the condition under which the result is the constant.
     if (surviving == 31) {
         snprintf(out->detail, sizeof(out->detail),
-            "-> cset %c%u, %s",
+            "-> %s %c%u, %s",
+            ones ? "csetm" : "cset",
             w_or_x, rd, a64_cond_names[csinc_cond ^ 1u]);
     } else {
         snprintf(out->detail, sizeof(out->detail),
-            "-> csinc %c%u, %s, %czr, %s",
+            "-> %s %c%u, %s, %czr, %s",
+            ones ? "csinv" : "csinc",
             w_or_x, rd, surv_buf, w_or_x,
             a64_cond_names[csinc_cond]);
     }

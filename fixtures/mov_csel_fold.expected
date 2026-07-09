@@ -22,7 +22,20 @@ MOV #1 + CSEL foldable to CSINC/CSET at offset: 0x3c: -> csinc x8, x2, xzr, ge (
   movz x8, #0x1
   csel x8, x8, x2, lt
 
+MOV #-1 + CSEL foldable to CSINV/CSETM at offset: 0x64: -> csinv x3, x2, xzr, lt (2 instructions)
+  movn x8, #0x0
+  csel x3, x2, x8, lt
+
+MOV #-1 + CSEL foldable to CSINV/CSETM at offset: 0x70: -> csinv x3, x2, xzr, ge (2 instructions)
+  movn x8, #0x0
+  csel x3, x8, x2, lt
+
+MOV #-1 + CSEL foldable to CSINV/CSETM at offset: 0x7c: -> csetm w3, lt (2 instructions)
+  movn w8, #0x0
+  csel w3, w8, wzr, lt
+
 Optimization opportunities by type:
        6  MOV #1 + CSEL foldable to CSINC/CSET
+       3  MOV #-1 + CSEL foldable to CSINV/CSETM
 
-6 optimization opportunities in 26 instructions
+9 optimization opportunities in 35 instructions
