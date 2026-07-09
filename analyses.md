@@ -1316,6 +1316,38 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   always defers through the forward register-liveness scan until the
   extended register provably dies.
 
+## FMUL + FNEG foldable to FNMUL
+
+* `fmul d0, d1, d2 ; fneg d0, d0` instead of `fnmul d0, d1, d2`.
+  `FNMUL`'s pseudocode is `FPMul` followed by `FPNeg` of the
+  ALREADY-ROUNDED product -- negation is a pure sign flip, applied
+  after rounding and raising nothing -- which is exactly what the
+  two-instruction spelling computes. The fold is therefore bit-exact
+  in every FPCR rounding mode with identical FPSR exceptions, NaNs
+  included: both spellings apply the same `FPNeg` to the same `FPMul`
+  result. All three scalar writes zero the vector register above the
+  written lane, so the final 128-bit state is identical too.
+* The unsound sibling is deliberately not matched: negating an
+  *operand* before the multiply (`fneg d1, d1 ; fmul d0, d1, d2`)
+  computes `round(-(a*b))`, which differs from `FNMUL`'s
+  `-(round(a*b))` under the directed rounding modes (`FPCR.RMode` =
+  RP or RM) -- the two agree only under round-to-nearest, and armlint
+  cannot know the dynamic mode.
+* Soundness (structural): the `FNEG` must read and overwrite the
+  `FMUL`'s destination in place (`fneg dd, dd`), proving the
+  intermediate product dead -- the same argument as the integer
+  producer folds. A fresh `FNEG` destination would need an
+  FP-register liveness scan, which does not exist yet (the same v1
+  limitation as the `MOVI` + vector-compare fold). No aliasing
+  exclusions are needed: the rewrite reads the multiply's own sources
+  at its position, and even in-place multiplies read before writing
+  in both spellings.
+* Single and double precision fold; half precision (FEAT_FP16) is
+  not matched, consistent with the FMOV folds.
+* What it saves: one instruction, and the dependent `FNEG` leaves
+  the critical path -- `FNMUL` costs the same as `FMUL` on current
+  cores, so the negation is free.
+
 ## MOV #0 + use foldable to ZR
 
 * `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Three consumer

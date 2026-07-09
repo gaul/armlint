@@ -7067,6 +7067,85 @@ static void test_udiv_msub_remainder(void)
     assert(run_reg_dead(code, 16, 8) == 0);
 }
 
+// Scalar FMUL: 0001 1110 0 ty 1 Rm 0000 10 Rn Rd (ty: 0=S, 1=D).
+static void fmul_scalar(uint8_t out[4], unsigned type, unsigned rd,
+                        unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x1E200800u | ((type & 3u) << 22)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// Scalar FNEG: 0001 1110 0 ty 1 0000 10 10000 Rn Rd.
+static void fneg_scalar(uint8_t out[4], unsigned type, unsigned rd,
+                        unsigned rn)
+{
+    write_le32(out, 0x1E214000u | ((type & 3u) << 22)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_fmul_fneg_fold(void)
+{
+    uint8_t code[12];
+
+    // fmul d0, d1, d2 ; fneg d0, d0 -> fnmul d0, d1, d2 (flag; the
+    // in-place FNEG overwrites the product, and FNMUL's negation
+    // applies to the already-rounded product -- bit-exact in every
+    // rounding mode).
+    fmul_scalar(&code[0], 1, 0, 1, 2);
+    fneg_scalar(&code[4], 1, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Single precision.
+    fmul_scalar(&code[0], 0, 0, 1, 2);
+    fneg_scalar(&code[4], 0, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // In-place multiply source: fmul d0, d0, d2 ; fneg d0, d0
+    //   -> fnmul d0, d0, d2 (reads pre-write in both spellings).
+    fmul_scalar(&code[0], 1, 0, 0, 2);
+    fneg_scalar(&code[4], 1, 0, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // FNEG into a fresh register leaves the product live; no
+    // FP-register liveness scan exists, so no fold.
+    fmul_scalar(&code[0], 1, 0, 1, 2);
+    fneg_scalar(&code[4], 1, 5, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // FNEG of a different register is not the product's negation.
+    fmul_scalar(&code[0], 1, 0, 1, 2);
+    fneg_scalar(&code[4], 1, 0, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Precision mismatch (D multiply, S negate).
+    fmul_scalar(&code[0], 1, 0, 1, 2);
+    fneg_scalar(&code[4], 0, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Half precision (FEAT_FP16, type 3) is not matched.
+    fmul_scalar(&code[0], 3, 0, 1, 2);
+    fneg_scalar(&code[4], 3, 0, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // FABS (opcode 000001) is not FNEG.
+    fmul_scalar(&code[0], 1, 0, 1, 2);
+    write_le32(&code[4], 0x1E20C000u | (1u << 22) | (0u << 5) | 0u);
+    assert(run_helper_check(code, 8) == 0);
+
+    // The unsound sibling: negating an OPERAND before the multiply
+    // computes round(-(a*b)), not FNMUL's -(round(a*b)); no state
+    // opens on the FNEG, so nothing matches.
+    fneg_scalar(&code[0], 1, 1, 1);
+    fmul_scalar(&code[4], 1, 0, 1, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction breaks adjacency.
+    fmul_scalar(&code[0], 1, 0, 1, 2);
+    add_x(&code[4], 5, 6, 7);
+    fneg_scalar(&code[8], 1, 0, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 // FMOV (general), GPR -> FPR: fmov Sd, Wn / fmov Dd, Xn.
 static void fmov_s_from_w(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -10079,6 +10158,7 @@ int main(void)
     test_mov_shift_fold();
     test_mov_madd_fold();
     test_udiv_msub_remainder();
+    test_fmul_fneg_fold();
     test_mov_fmov_imm_fold();
     test_fp_zero_to_movi();
     test_extend_cvtf_fold();

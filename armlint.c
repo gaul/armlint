@@ -604,6 +604,19 @@ struct armlint_state {
     unsigned rem_n;         // log2 of the divisor
     unsigned rem_lines;
     armlint_finding rem_finding;
+
+    // Pending scalar FMUL (S or D) awaiting an adjacent in-place FNEG
+    // of its destination -- the pair is FNMUL, whose pseudocode
+    // applies FPNeg to the already-rounded FPMul product, exactly
+    // what the two-instruction spelling computes. fmn_type is the
+    // ftype field (0 = S, 1 = D).
+    bool fmn_active;
+    unsigned fmn_type;
+    unsigned fmn_rd;
+    unsigned fmn_rn;
+    unsigned fmn_rm;
+    size_t fmn_offset;
+    char fmn_disasm[ARMLINT_FINDING_LINE_LEN];
 };
 
 #define LIVENESS_WINDOW 16
@@ -894,6 +907,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lspr_pending = false;
     state->simd_zero_active = false;
     state->rem_active = false;
+    state->fmn_active = false;
     return mov_close(state, out);
 }
 
@@ -6360,6 +6374,83 @@ bool check_udiv_msub_remainder(armlint_state *state, const cs_insn *insn,
     return false;
 }
 
+bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->fmn_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    bool produced = false;
+
+    // (1) Close: an in-place FNEG of the pending FMUL's destination,
+    //     at the same precision? FNMUL's pseudocode is FPMul followed
+    //     by FPNeg of the ROUNDED product -- negation is a pure sign
+    //     flip, after rounding and raising nothing -- so the fold is
+    //     bit-exact in every FPCR rounding mode with identical FPSR
+    //     exceptions, NaNs included (both spellings apply the same
+    //     FPNeg to the same FPMul result). Contrast the unsound
+    //     sibling: negating an OPERAND first computes
+    //     round(-(a*b)), which differs from -(round(a*b)) under the
+    //     directed rounding modes, and is deliberately not matched.
+    //     The FNEG must overwrite the product in place (Rd == Rn ==
+    //     the FMUL's Rd): a fresh destination would leave the
+    //     product live, and no FP-register liveness scan exists yet.
+    //     All three scalar writes zero the vector register above the
+    //     lane, so the final 128-bit state is identical too.
+    if (state->fmn_active) {
+        if ((op & 0xFF3FFC00u) == 0x1E214000u) {
+            unsigned type = (op >> 22) & 0x3u;
+            unsigned rd = op & 0x1Fu;
+            unsigned rn = (op >> 5) & 0x1Fu;
+            if (type == state->fmn_type
+                    && rd == state->fmn_rd
+                    && rn == state->fmn_rd) {
+                char sd = state->fmn_type ? 'd' : 's';
+
+                out->name = "FMUL + FNEG foldable to FNMUL";
+                out->start_offset = state->fmn_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> fnmul %c%u, %c%u, %c%u",
+                    sd, state->fmn_rd, sd, state->fmn_rn,
+                    sd, state->fmn_rm);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->fmn_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->fmn_active = false;
+    }
+
+    // (2) Open: a scalar FMUL? Single and double precision only;
+    //     half precision (FEAT_FP16) is not matched, consistent with
+    //     the FMOV folds.
+    if ((op & 0xFF20FC00u) == 0x1E200800u) {
+        unsigned type = (op >> 22) & 0x3u;
+        if (type <= 1u) {
+            state->fmn_active = true;
+            state->fmn_type = type;
+            state->fmn_rd = op & 0x1Fu;
+            state->fmn_rn = (op >> 5) & 0x1Fu;
+            state->fmn_rm = (op >> 16) & 0x1Fu;
+            state->fmn_offset = offset;
+            snprintf(state->fmn_disasm, sizeof(state->fmn_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    return produced;
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -9917,6 +10008,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_shift_fold,
     check_mov_madd_fold,
     check_udiv_msub_remainder,
+    check_fmul_fneg_fold,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,

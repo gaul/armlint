@@ -1,0 +1,16 @@
+FMUL + FNEG foldable to FNMUL at offset: 0x0: -> fnmul d0, d1, d2 (2 instructions)
+  fmul d0, d1, d2
+  fneg d0, d0
+
+FMUL + FNEG foldable to FNMUL at offset: 0x8: -> fnmul s0, s1, s2 (2 instructions)
+  fmul s0, s1, s2
+  fneg s0, s0
+
+FMUL + FNEG foldable to FNMUL at offset: 0x10: -> fnmul d0, d0, d2 (2 instructions)
+  fmul d0, d0, d2
+  fneg d0, d0
+
+Optimization opportunities by type:
+       3  FMUL + FNEG foldable to FNMUL
+
+3 optimization opportunities in 13 instructions

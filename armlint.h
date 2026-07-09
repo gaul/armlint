@@ -687,6 +687,32 @@ bool check_mov_madd_fold(armlint_state *state, const cs_insn *insn,
 bool check_udiv_msub_remainder(armlint_state *state, const cs_insn *insn,
                                size_t offset, armlint_finding *out);
 
+// Detect a scalar FMUL (S or D) immediately followed by an in-place
+// FNEG of its destination; the pair is a single FNMUL:
+//   fmul d0, d1, d2 ; fneg d0, d0 -> fnmul d0, d1, d2
+// FNMUL's pseudocode is FPMul followed by FPNeg of the ROUNDED
+// product -- negation is a pure sign flip, applied after rounding and
+// raising nothing -- so the fold is bit-exact in every FPCR rounding
+// mode with identical FPSR exceptions, NaNs included: both spellings
+// apply the same FPNeg to the same FPMul result. The unsound sibling
+// is deliberately not matched: negating an OPERAND first computes
+// round(-(a*b)), which differs from -(round(a*b)) under the directed
+// rounding modes (FNMUL is the latter).
+//
+// The FNEG must read and overwrite the FMUL's destination (Rd == Rn
+// == the product register): that proves the intermediate product dead
+// structurally, and a fresh FNEG destination would need an FP-register
+// liveness scan, which does not exist yet -- the same v1 limitation as
+// the MOVI + vector-compare fold. All three scalar writes zero the
+// vector register above the written lane, so the final 128-bit state
+// is identical. Half precision (FEAT_FP16) is not matched, consistent
+// with the FMOV folds. No aliasing exclusions are needed: the rewrite
+// reads the FMUL's own sources at the FMUL's position, and even
+// in-place multiplies (Rd among the sources) read before writing in
+// both spellings. Reported as "FMUL + FNEG foldable to FNMUL".
+bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
 // conversion that consumes it, when FMOV (scalar, immediate) could
