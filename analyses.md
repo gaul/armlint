@@ -1451,6 +1451,41 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the memory access -- load-use latency and a cache line -- plus the
   pool slot when nothing else references it.
 
+## ADR + single use of its target foldable to the direct form
+
+* `adr x8, L ; ldr x8, [x8]` instead of `ldr x8, L`: the consumer
+  has a direct PC-relative form of its own, so the address never
+  needs to exist in a register. The load form covers every
+  literal-capable width -- `LDR` W/X, `LDRSW`, and SIMD&FP S/D/Q
+  (byte/halfword loads have no literal form) -- at zero offset, and
+  performs the identical access. `adr x16, L ; br x16` folds to
+  `b L`, dropping an indirect branch (BTB/indirect-predictor
+  pressure and mispredict risk) for a fully static one.
+* Encodability, load form: the literal's word-scaled imm19 anchors
+  at the LOAD's PC, one instruction after the ADR's, so the target
+  must be 4-byte aligned (ADR can name any byte) and the re-anchored
+  displacement must still fit +/-1MB -- it can fall off the low edge
+  when the ADR named exactly -1MB. Branch form: `B` reaches
+  +/-128MB, strictly covering ADR's +/-1MB, so no range check at
+  all. The target may lie outside the scanned buffer; the fold never
+  reads the pointed-to data, so unlike the literal-constant check no
+  buffer is required.
+* Deadness: the rewrite deletes the ADR. A load destination that IS
+  the address register kills it structurally; other load
+  destinations (all FP ones included) defer through the forward
+  register-liveness scan. `BR` never writes the address register and
+  the linear scan cannot follow the branch, so v1 folds only
+  x16/x17 (IP0/IP1): the ABI reserves them as veneer scratch, and
+  code at the target is not entitled to receive values in them
+  across exactly this shape -- the general-register case would need
+  liveness at the TARGET, future work. `BLR` is excluded outright (a
+  callee legitimately receives registers, x8 -- the indirect-result
+  pointer -- in particular). ADRP does not open (page arithmetic);
+  ADR to XZR is a dead write.
+* Composes with the literal-constant fold: once the load is
+  rewritten to `ldr x8, L`, that check may further fold it to a
+  `mov`/`movi` when the pooled value is immediate-encodable.
+
 ## FMUL + FNEG foldable to FNMUL
 
 * `fmul d0, d1, d2 ; fneg d0, d0` instead of `fnmul d0, d1, d2`.

@@ -805,6 +805,41 @@ bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
 bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
+// Detect an ADR whose materialised address is consumed once by the
+// adjacent instruction, where the consumer has a direct PC-relative
+// form of its own:
+//   adr x8, L ; ldr x8, [x8]   -> ldr x8, L    (LDR (literal))
+//   adr x16, L ; br x16        -> b L          (direct branch)
+// The load form covers every literal-capable width -- LDR W/X,
+// LDRSW, and SIMD&FP S/D/Q; byte/halfword loads have no literal
+// form -- at zero offset, and performs the identical access without
+// the address ever existing in a register. Encodability gates: the
+// literal's word-scaled imm19 is anchored at the LOAD's PC (one
+// instruction after the ADR's), so the target must be 4-byte
+// aligned and the re-anchored displacement must still fit +/-1MB
+// (it can fall off the low edge when the ADR named exactly -1MB).
+// The rewrite deletes the ADR, so the address register must be dead:
+// a load destination that IS the address register kills it
+// structurally; otherwise the finding defers through the forward
+// register-liveness scan. The target may lie outside the scanned
+// buffer -- the fold never reads the pointed-to data, so no buffer
+// is required at all.
+//
+// The branch form's rewrite range is a non-issue (B reaches
+// +/-128MB, strictly covering ADR's +/-1MB), but BR never writes the
+// address register and the linear liveness scan cannot follow the
+// branch, so v1 folds only x16/x17 (IP0/IP1): the ABI reserves them
+// as veneer scratch, and code at the target is not entitled to
+// receive values in them across exactly this shape. The general-
+// register case would need liveness at the TARGET, future work. BLR
+// is excluded outright -- a callee legitimately receives registers,
+// x8 (the indirect-result pointer) in particular. ADRP does not
+// open (page arithmetic, a different fold); ADR to XZR is a dead
+// write. Reported as "ADR + load of its target foldable to LDR
+// (literal)" / "ADR + BR foldable to direct branch".
+bool check_adr_fold(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
 // conversion that consumes it, when FMOV (scalar, immediate) could

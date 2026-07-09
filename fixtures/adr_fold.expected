@@ -1,0 +1,21 @@
+ADR + load of its target foldable to LDR (literal) at offset: 0x0: -> ldr x8, #0x40 (2 instructions)
+  adr x8, #0x40
+  ldr x8, [x8]
+
+ADR + load of its target foldable to LDR (literal) at offset: 0x8: -> ldr w10, #0x40 (2 instructions)
+  adr x9, #0x40
+  ldr w10, [x9]
+
+ADR + load of its target foldable to LDR (literal) at offset: 0x14: -> ldr d0, #0x40 (2 instructions)
+  adr x11, #0x40
+  ldr d0, [x11]
+
+ADR + BR foldable to direct branch at offset: 0x20: -> b #0x28 (2 instructions)
+  adr x16, #0x28
+  br x16
+
+Optimization opportunities by type:
+       3  ADR + load of its target foldable to LDR (literal)
+       1  ADR + BR foldable to direct branch
+
+4 optimization opportunities in 18 instructions

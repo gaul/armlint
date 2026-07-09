@@ -9552,6 +9552,103 @@ static void test_ldr_literal_const(void)
     assert(run_buffer_check(qcode, 16) == 0);
 }
 
+// ADR: op(31)=0 immlo(30:29) 10000 immhi(23:5) Rd; disp in bytes.
+static void adr_(uint8_t out[4], unsigned rd, int disp)
+{
+    uint32_t d = (uint32_t)disp & 0x1FFFFFu;
+    write_le32(out, 0x10000000u | ((d & 3u) << 29)
+        | (((d >> 2) & 0x7FFFFu) << 5) | (rd & 0x1Fu));
+}
+
+static void br_(uint8_t out[4], unsigned rn)
+{
+    write_le32(out, 0xD61F0000u | ((rn & 0x1Fu) << 5));
+}
+
+static void test_adr_fold(void)
+{
+    uint8_t code[12];
+
+    // adr x8, #8 ; ldr x8, [x8] -> ldr x8, #0x8 (flag; the load
+    // overwrites the address register -- structural kill).
+    adr_(&code[0], 8, 8);
+    ldr_x(&code[4], 8, 8, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W destination differs from the address: defers on x8.
+    adr_(&code[0], 8, 8);
+    ldr_w(&code[4], 9, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // ...and without the kill nothing is emitted.
+    adr_(&code[0], 8, 8);
+    ldr_w(&code[4], 9, 8, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LDRSW through the address.
+    adr_(&code[0], 8, 8);
+    write_le32(&code[4], 0xB9800000u | (8u << 5) | 8u);
+    assert(run_helper_check(code, 8) == 1);
+
+    // FP destination can never kill the address; defers.
+    adr_(&code[0], 8, 8);
+    ldr_d_fp(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Q form folds too.
+    adr_(&code[0], 8, 8);
+    ldr_q_fp(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Byte loads have no literal form.
+    adr_(&code[0], 8, 8);
+    ldrb_w_uimm0(&code[4], 9, 8);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // A non-zero load offset is not the plain address use.
+    adr_(&code[0], 8, 8);
+    ldr_x(&code[4], 8, 8, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // An unaligned ADR target has no word-scaled literal spelling.
+    adr_(&code[0], 8, 6);
+    ldr_x(&code[4], 8, 8, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // The literal anchors at the load's PC, 4 bytes after the ADR's:
+    // a target at exactly -1MB falls off the imm19 low edge.
+    adr_(&code[0], 8, -0x100000);
+    ldr_x(&code[4], 8, 8, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // adr x16, #12 ; br x16 -> b #0xc (IP0 is veneer scratch).
+    adr_(&code[0], 16, 12);
+    br_(&code[4], 16);
+    assert(run_helper_check(code, 8) == 1);
+
+    // x17 likewise.
+    adr_(&code[0], 17, 12);
+    br_(&code[4], 17);
+    assert(run_helper_check(code, 8) == 1);
+
+    // A general register may carry the address to the target; the
+    // linear scan cannot follow the branch, so no fold.
+    adr_(&code[0], 8, 12);
+    br_(&code[4], 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // BLR is excluded: a callee legitimately receives registers.
+    adr_(&code[0], 16, 12);
+    write_le32(&code[4], 0xD63F0000u | (16u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // An intervening instruction expires the pending ADR.
+    adr_(&code[0], 8, 8);
+    movz_x(&code[4], 5, 1, 0);
+    ldr_x(&code[8], 8, 8, 0);
+    assert(run_helper_check(code, 12) == 0);
+}
+
 static void test_add_one_csel_fold(void)
 {
     uint8_t code[12];
@@ -10827,6 +10924,7 @@ int main(void)
     test_mvn_logic_fold();
     test_add_one_csel_fold();
     test_ldr_literal_const();
+    test_adr_fold();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();

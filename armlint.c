@@ -631,6 +631,17 @@ struct armlint_state {
     const uint8_t *buf;
     size_t buf_len;
 
+    // Pending ADR awaiting an adjacent single use of the materialised
+    // address: a zero-offset load through it (foldable to LDR
+    // (literal)) or a BR of it (foldable to a direct B). adf_target
+    // is the ADR's byte target relative to the scan base; it may lie
+    // outside the buffer -- the fold never reads the pointed-to data.
+    bool adf_active;
+    unsigned adf_rd;
+    int64_t adf_target;
+    size_t adf_offset;
+    char adf_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending scalar FMUL (S or D) awaiting an adjacent in-place FNEG
     // of its destination -- the pair is FNMUL, whose pseudocode
     // applies FPNeg to the already-rounded FPMul product, exactly
@@ -957,6 +968,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->rem_active = false;
     state->fmn_active = false;
     state->lcv_active = false;
+    state->adf_active = false;
     return mov_close(state, out);
 }
 
@@ -1106,6 +1118,12 @@ static bool decode_ldr_uimm_any_size(uint32_t op, unsigned *out_size,
                                      unsigned *out_rn, unsigned *out_rt);
 static bool fp8_encodable(uint64_t bits, bool is_double);
 static void format_fp8(char *buf, size_t bufsz, double v);
+static bool decode_ldrsw_uimm(uint32_t op, unsigned *out_imm12,
+                              unsigned *out_rn, unsigned *out_rt);
+static bool decode_fp_ldr_str_uimm(uint32_t op, bool *out_is_load,
+                                   unsigned *out_lg2size,
+                                   unsigned *out_imm12,
+                                   unsigned *out_rn, unsigned *out_rt);
 
 // Shift-type names indexed by the shifted-register encoding's
 // shift-type field (bits 23..22).
@@ -7007,6 +7025,157 @@ bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+bool check_adr_fold(armlint_state *state, const cs_insn *insn,
+                    size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->adf_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    bool produced = false;
+
+    if (state->adf_active) {
+        unsigned t = state->adf_rd;
+
+        // (1a) Close: a zero-offset load through the address? Every
+        //     literal-capable width folds -- LDR W/X, LDRSW, and the
+        //     SIMD&FP S/D/Q -- to LDR (literal), which performs the
+        //     identical access (same address, same size) without
+        //     materialising the address at all. The byte and halfword
+        //     loads have no literal form and never fold.
+        //
+        //     Encodability: the literal's imm19 is word-scaled and
+        //     anchored at the LOAD's PC, one instruction after the
+        //     ADR's -- the target must be 4-byte aligned (ADR can
+        //     name any byte) and the re-anchored displacement must
+        //     still fit +/-1MB (it can fall off the low edge when
+        //     the ADR named exactly -1MB). The target may lie outside
+        //     the scanned buffer: the original pair accessed it too,
+        //     and the fold never reads the data.
+        bool is_load = false;
+        bool structural = false;
+        char rt_buf[8];
+        const char *ld_mnem = NULL;
+        {
+            unsigned size, imm12, rn, rt;
+            unsigned fp_lg2 = 0;
+            bool fp_is_load = false;
+            if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
+                    && size >= 2u && imm12 == 0 && rn == t) {
+                is_load = true;
+                ld_mnem = "ldr";
+                structural = rt == t;
+                format_reg(rt_buf, sizeof(rt_buf),
+                    size == 3u ? 'x' : 'w', rt);
+            } else if (decode_ldrsw_uimm(op, &imm12, &rn, &rt)
+                    && imm12 == 0 && rn == t) {
+                is_load = true;
+                ld_mnem = "ldrsw";
+                structural = rt == t;
+                format_reg(rt_buf, sizeof(rt_buf), 'x', rt);
+            } else if (decode_fp_ldr_str_uimm(op, &fp_is_load, &fp_lg2,
+                                              &imm12, &rn, &rt)
+                    && fp_is_load && fp_lg2 >= 2u && imm12 == 0
+                    && rn == t) {
+                // An FP destination can never overwrite the GPR
+                // address, so this arm always defers.
+                is_load = true;
+                ld_mnem = "ldr";
+                static const char fp_class[5] = { 'b', 'h', 's', 'd',
+                                                  'q' };
+                snprintf(rt_buf, sizeof(rt_buf), "%c%u",
+                    fp_class[fp_lg2], rt);
+            }
+        }
+        if (is_load) {
+            int64_t disp = state->adf_target
+                - (int64_t)(state->adf_offset + 4u);
+            if ((disp & 3) == 0
+                    && disp >= -(int64_t)0x100000
+                    && disp <= 0xFFFFC) {
+                out->name = "ADR + load of its target foldable to "
+                    "LDR (literal)";
+                out->start_offset = state->adf_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, #0x%" PRIx64,
+                    ld_mnem, rt_buf, (uint64_t)state->adf_target);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->adf_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+
+                // The rewrite deletes the ADR; the address register
+                // must be dead afterward. A load whose destination IS
+                // that register kills it on the spot; otherwise the
+                // finding defers through the forward
+                // register-liveness scan.
+                if (structural) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, t);
+                }
+            }
+        }
+
+        // (1b) Close: BR of the address? The target is statically
+        //     known, so the indirect branch is a direct b -- and B's
+        //     +/-128MB range strictly covers ADR's +/-1MB, so no
+        //     range check is needed. BR never writes the address
+        //     register and the linear liveness scan cannot follow the
+        //     branch, so v1 folds only x16/x17 (IP0/IP1): the ABI
+        //     reserves them as veneer scratch, and code at the target
+        //     is not entitled to receive values in them across
+        //     exactly this shape. BLR is excluded outright -- a
+        //     callee legitimately receives registers, x8 in
+        //     particular (the indirect-result pointer).
+        if ((op & 0xFFFFFC1Fu) == 0xD61F0000u) {
+            unsigned rn = (op >> 5) & 0x1Fu;
+            if (rn == t && (t == 16u || t == 17u)) {
+                out->name = "ADR + BR foldable to direct branch";
+                out->start_offset = state->adf_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> b #0x%" PRIx64, (uint64_t)state->adf_target);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->adf_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
+        }
+
+        // Strict adjacency: clear regardless of match.
+        state->adf_active = false;
+    }
+
+    // (2) Open: an ADR? ADRP (op = 1) computes a page address --
+    //     different arithmetic, different fold -- and Rd = 31 is a
+    //     dead write (ADR has no SP form).
+    if ((op & 0x9F000000u) == 0x10000000u) {
+        unsigned rd = op & 0x1Fu;
+        if (rd != 31) {
+            unsigned immlo = (op >> 29) & 0x3u;
+            uint32_t immhi = (op >> 5) & 0x7FFFFu;
+            int64_t disp = (int64_t)(int32_t)((immhi << 2 | immlo) << 11)
+                >> 11;
+            state->adf_active = true;
+            state->adf_rd = rd;
+            state->adf_target = (int64_t)offset + disp;
+            state->adf_offset = offset;
+            snprintf(state->adf_disasm, sizeof(state->adf_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    return produced;
+}
+
 // FMOV (scalar, immediate) encodability: VFPExpandImm in reverse.
 // imm8 = a:b:cd:efgh expands to
 //   sign = a,  exp = NOT(b) : Replicate(b, 8 or 5) : cd,
@@ -10843,6 +11012,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_fmul_fneg_fold,
     check_ldr_cvtf_fold,
     check_ldr_literal_const,
+    check_adr_fold,
     check_mov_fmov_imm_fold,
     check_fp_zero_to_movi,
     check_extend_cvtf_fold,

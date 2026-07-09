@@ -143,6 +143,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`sxtw`/`mov w, w` + `scvtf`/`ucvtf Xn`](analyses.md#widening-extend--scvtfucvtf-foldable-to-w-form-conversion) | `scvtf`/`ucvtf` of `Wn` |
 | [`ldr w8` + `scvtf`/`ucvtf` from GPR](analyses.md#load--scvtfucvtf-via-gpr-foldable-to-fp-load--convert) | `ldr s0` + FP-side convert (no cross-file transfer) |
 | [`ldr`/`ldrsw` (literal) of an encodable constant](analyses.md#ldr-literal-foldable-to-movfmov-immediate) | `mov #imm` / `fmov #imm8` / `movi`+`mvni` for Q (no memory access) |
+| [`adr` + `ldr [x8]`/`br x16`](analyses.md#adr--single-use-of-its-target-foldable-to-the-direct-form) | `ldr Rt, <literal>` / `b L` |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
