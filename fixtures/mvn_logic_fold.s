@@ -52,4 +52,18 @@ _main:
     orr     w6, w7, w0
     mov     w0, #1
 
+    // P) CSEL consumer, else slot: CSINV's else-branch is a
+    //    complement, so the condition carries over.
+    mvn     x3, x1
+    csel    x3, x2, x3, lt          // -> csinv x3, x2, x1, lt
+
+    // P) CSEL consumer, then slot: operands swap and the condition
+    //    inverts.
+    mvn     x3, x1
+    csel    x3, x3, x2, lt          // -> csinv x3, x2, x1, ge
+
+    // N4) AL select is unconditional; excluded.
+    mvn     x3, x1
+    csel    x3, x2, x3, al
+
     ret

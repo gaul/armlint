@@ -26,7 +26,16 @@ MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x30: -> bic w5, w3, w1 (2 
   mvn w0, w1
   and w5, w3, w0
 
+MVN + CSEL foldable to CSINV at offset: 0x58: -> csinv x3, x2, x1, lt (2 instructions)
+  mvn x3, x1
+  csel x3, x2, x3, lt
+
+MVN + CSEL foldable to CSINV at offset: 0x60: -> csinv x3, x2, x1, ge (2 instructions)
+  mvn x3, x1
+  csel x3, x3, x2, lt
+
 Optimization opportunities by type:
        7  MVN + AND/ORR/EOR foldable to BIC/ORN/EON
+       2  MVN + CSEL foldable to CSINV
 
-7 optimization opportunities in 23 instructions
+9 optimization opportunities in 29 instructions

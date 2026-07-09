@@ -1627,6 +1627,15 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   (the consumer would shift the complemented value, not `ws`). `MVN`
   to ZR, and `MVN` of ZR (the all-ones `mov wd, #-1` idiom), are
   excluded.
+* A `CSEL` consumer folds to `CSINV`, whose else-branch is a
+  complement (`Rd = cond ? Rn : ~Rm`) -- the exact mirror of the
+  [`NEG` + `CSEL` -> `CSNEG`](#neg--addsubcsel-foldable-to-negated-operand-form)
+  fold: the else slot carries the condition over
+  (`mvn wt, ws ; csel wd, wn, wt, cc` -> `csinv wd, wn, ws, cc`),
+  the then slot swaps operands and inverts it. AL/NV, `Rd = 31`,
+  both-slots (check_csel_self's shape) and width mismatches are
+  excluded; the destination overwriting `wt` reports immediately,
+  a fresh destination defers through the register-liveness scan.
 * Fuse win (see the shift fold): the `MVN` is absorbed into the
   consumer's negated-operand form -- one fewer instruction, the `MVN`
   off the critical path.

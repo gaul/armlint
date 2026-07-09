@@ -1039,6 +1039,15 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
 // constants). The shifted MVN form is not handled -- the consumer
 // would shift the complemented value, not Rs. MVN writing ZR, and
 // MVN of ZR (the all-ones constant), are excluded.
+//
+// A CSEL consumer folds to CSINV, whose else-branch is a complement
+// (Rd = cond ? Rn : ~Rm) -- the exact mirror of the NEG + CSEL ->
+// CSNEG fold in check_neg_add_sub_fold:
+//   mvn wt, ws ; csel wd, wn, wt, cc -> csinv wd, wn, ws, cc
+//   mvn wt, ws ; csel wd, wt, wm, cc -> csinv wd, wm, ws, !cc
+// (then slot: operands swap, condition inverts). AL/NV, Rd = 31,
+// both-slots (check_csel_self's shape) and width mismatches are
+// excluded. Reported as "MVN + CSEL foldable to CSINV".
 bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 

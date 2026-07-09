@@ -9254,6 +9254,51 @@ static void test_mvn_logic_fold(void)
     movz_w(&code[4], 5, 1);
     and_w(&code[8], 0, 3, 0);
     assert(run_helper_check(code, 12) == 0);
+
+    // -- CSEL consumers: CSINV's else-branch is a complement. --
+
+    // Else slot: mvn x3, x1 ; csel x3, x2, x3, lt
+    //   -> csinv x3, x2, x1, lt (flag; condition carries over).
+    mvn_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Then slot: mvn x3, x1 ; csel x3, x3, x2, lt
+    //   -> csinv x3, x2, x1, ge (operands swap, condition inverts).
+    mvn_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 3, 2, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form, else slot.
+    mvn_w(&code[0], 3, 1);
+    csel_w(&code[4], 3, 2, 3, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Fresh destination defers; the appended kill lets it emit.
+    mvn_x(&code[0], 3, 1);
+    csel_x(&code[4], 5, 2, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Fresh destination without a kill: nothing.
+    mvn_x(&code[0], 3, 1);
+    csel_x(&code[4], 5, 2, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Both CSEL operands are the complement: check_csel_self's
+    // shape (the 1 finding here is csel_self's).
+    mvn_x(&code[0], 3, 1);
+    csel_x(&code[4], 5, 3, 3, 11);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // AL condition is excluded.
+    mvn_x(&code[0], 3, 1);
+    csel_x(&code[4], 3, 2, 3, 14);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch (X-form MVN, W-form CSEL).
+    mvn_x(&code[0], 3, 1);
+    csel_w(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 static void test_extend_add_sub_fold(void)
