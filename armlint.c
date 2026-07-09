@@ -337,6 +337,15 @@ struct armlint_state {
     size_t scp_cmp_offset;
     char scp_cmp_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending flag-setting ADD/SUB (ADDS/SUBS/CMP/CMN, any form)
+    // awaiting an adjacent compare of its own operands, which
+    // recomputes NZCV the producer already set and can simply be
+    // dropped.
+    bool rcs_active;
+    uint32_t rcs_op;
+    size_t rcs_offset;
+    char rcs_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Deferred "MOV #0 + use foldable to ZR" finding awaiting forward
     // register-liveness verification. Dropping the MOV only saves an
     // instruction when the materialized zero register is dead after the
@@ -899,6 +908,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->zs_cmp_active = false;
     state->scp_sub_active = false;
     state->scp_cmp_active = false;
+    state->rcs_active = false;
     state->pending_active = false;
     state->pending_sv_active = false;
     state->pending_zs_active = false;
@@ -3215,6 +3225,76 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
         state->scp_cmp_op = op;
         state->scp_cmp_offset = offset;
         snprintf(state->scp_cmp_disasm, sizeof(state->scp_cmp_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
+bool check_subs_cmp_redundant(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->rcs_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    bool produced = false;
+
+    // (1) Close: is this the compare of the pending flag-setting
+    //     ADD/SUB's own operands (CMP for SUBS, CMN for ADDS; the
+    //     swapped-operand CMN also matches for the plain unshifted
+    //     ADDS -- probing with the S bit cleared reuses the non-S
+    //     ADD matcher)? The producer already computed exactly these
+    //     flags, so the compare recomputes the same NZCV and is
+    //     simply dropped -- nothing else is rewritten, so even the
+    //     imm = 0 spellings need no exclusion here. The compare must
+    //     not read the producer's destination (Rd not among its
+    //     operands), where it would see the result rather than the
+    //     original value. A producer with Rd = 31 is itself a
+    //     compare, making the pair an adjacent duplicate compare,
+    //     equally droppable.
+    if (state->rcs_active) {
+        if (op == alu_to_cmp_word(state->rcs_op)
+                || cmn_swapped_match(state->rcs_op & ~0x20000000u, op)) {
+            unsigned p_rd = state->rcs_op & 0x1Fu;
+            unsigned p_rn = (state->rcs_op >> 5) & 0x1Fu;
+            unsigned p_rm = (state->rcs_op >> 16) & 0x1Fu;
+            bool p_imm = ((state->rcs_op >> 24) & 0x1Fu) == 0x11u;
+            if (p_rd != p_rn && (p_imm || p_rd != p_rm)) {
+                bool p_is_sub = ((state->rcs_op >> 30) & 1u) != 0;
+                out->name = p_is_sub
+                    ? "SUBS + CMP of identical operands: redundant compare"
+                    : "ADDS + CMN of identical operands: redundant compare";
+                out->start_offset = state->rcs_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> drop %s %s (NZCV already set by %s)",
+                    insn->mnemonic, insn->op_str, state->rcs_disasm);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->rcs_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                produced = true;
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->rcs_active = false;
+    }
+
+    // (2) Open: any flag-setting ADD/SUB -- the three CMP/CMN forms
+    //     without the Rd = 31 requirement. A compare that just closed
+    //     a pair opens the next, so chained duplicates each report.
+    if ((op & 0x3F800000u) == 0x31000000u
+            || (op & 0x3F200000u) == 0x2B000000u
+            || (op & 0x3F200000u) == 0x2B200000u) {
+        state->rcs_active = true;
+        state->rcs_op = op;
+        state->rcs_offset = offset;
+        snprintf(state->rcs_disasm, sizeof(state->rcs_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
@@ -10236,6 +10316,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_redundant_cmp_after_s_variant,
     check_zero_cmp_to_s_variant,
     check_sub_cmp_fold,
+    check_subs_cmp_redundant,
     check_mul_add_sub_fold,
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,

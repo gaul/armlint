@@ -1,0 +1,21 @@
+SUBS + CMP of identical operands: redundant compare at offset: 0x0: -> drop cmp x1, x2 (NZCV already set by subs x0, x1, x2) (2 instructions)
+  subs x0, x1, x2
+  cmp x1, x2
+
+ADDS + CMN of identical operands: redundant compare at offset: 0x8: -> drop cmn x6, x5 (NZCV already set by adds x0, x5, x6) (2 instructions)
+  adds x0, x5, x6
+  cmn x6, x5
+
+SUBS + CMP of identical operands: redundant compare at offset: 0x10: -> drop cmp w1, #0x10 (NZCV already set by subs w0, w1, #0x10) (2 instructions)
+  subs w0, w1, #0x10
+  cmp w1, #0x10
+
+SUBS + CMP of identical operands: redundant compare at offset: 0x18: -> drop cmp x3, x4 (NZCV already set by cmp x3, x4) (2 instructions)
+  cmp x3, x4
+  cmp x3, x4
+
+Optimization opportunities by type:
+       3  SUBS + CMP of identical operands: redundant compare
+       1  ADDS + CMN of identical operands: redundant compare
+
+4 optimization opportunities in 13 instructions

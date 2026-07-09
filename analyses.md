@@ -935,6 +935,28 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   separately compares the same operands: hand-written bounds checks
   and naive codegen; optimizing compilers emit the `SUBS` directly.
 
+## SUBS/ADDS + CMP/CMN of identical operands: redundant compare
+
+* The S-producer sibling of the fold above: when the ALU is ALREADY
+  flag-setting, the adjacent compare of its own operands recomputes
+  the NZCV the producer just set --
+  `subs x0, x1, x2 ; cmp x1, x2` -> drop the `cmp` (same for
+  `ADDS` + `CMN`, including the swapped-operand `CMN` for the plain
+  unshifted form, by the same commutativity argument). Nothing else
+  is rewritten -- no mnemonic gains an "s" -- so even the `imm = 0`
+  spellings need no exclusion here.
+* A producer with `Rd = 31` is itself a compare, so adjacent
+  duplicate compares (`cmp x3, x4 ; cmp x3, x4`) report under the
+  same check. Chains report per pair: a compare that just closed one
+  pair opens the next.
+* The compare must not read the producer's destination (`Rd` among
+  the compared registers reads the result, not the original
+  operand). Distinct from the
+  [redundant `CMP` after S-variant](#redundant-cmp-after-s-variant)
+  check, which flags the compare of the RESULT against zero; this
+  one flags the compare of the operands, and it needs no NZCV scan:
+  the flags after the drop are bit-identical, unconditionally.
+
 ## MUL by constant foldable to shift/add
 
 * `mov xc, #(1<<N) ; mul xd, xa, xc` instead of `lsl xd, xa, #N`

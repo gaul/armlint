@@ -26,6 +26,10 @@ SUB + CMP of identical operands foldable to SUBS at offset: 0x30: -> subs x1, x1
   cmp x1, x2
   sub x1, x1, x2
 
+SUBS + CMP of identical operands: redundant compare at offset: 0x50: -> drop cmp x1, x2 (NZCV already set by subs x0, x1, x2) (2 instructions)
+  subs x0, x1, x2
+  cmp x1, x2
+
 ADD + CMN of identical operands foldable to ADDS at offset: 0x58: -> adds x0, x1, x2 (drop cmn x1, x2) (2 instructions)
   add x0, x1, x2
   cmn x1, x2
@@ -49,5 +53,6 @@ ADD + CMN of identical operands foldable to ADDS at offset: 0x78: -> adds x0, x7
 Optimization opportunities by type:
        7  SUB + CMP of identical operands foldable to SUBS
        5  ADD + CMN of identical operands foldable to ADDS
+       1  SUBS + CMP of identical operands: redundant compare
 
-12 optimization opportunities in 37 instructions
+13 optimization opportunities in 37 instructions

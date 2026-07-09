@@ -49,9 +49,9 @@ _main:
     sub     x0, x1, x2, lsl #3
     cmp     x1, x2, lsl #2
 
-    // N4) SUBS producer: the flags are already set (a redundant
-    //     identical-operand CMP after SUBS is a separate,
-    //     unimplemented finding).
+    // P) SUBS producer: nothing to S-ify, but the compare recomputes
+    //    flags the producer already set -- check_subs_cmp_redundant
+    //    reports it (-> drop the cmp).
     subs    x0, x1, x2
     cmp     x1, x2
 

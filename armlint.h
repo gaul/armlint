@@ -1460,6 +1460,30 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
 bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);
 
+// Detect a flag-setting ADD/SUB (ADDS/SUBS in any of the three
+// forms, including the CMP/CMN aliases) immediately followed by a
+// compare of its OWN operands:
+//   subs x0, x1, x2 ; cmp x1, x2   -> drop the cmp
+//   adds x0, x1, x2 ; cmn x1, x2   -> drop the cmn
+// The producer already computed exactly these flags, so the compare
+// recomputes the same NZCV and is simply dropped -- nothing else is
+// rewritten (unlike the non-S sibling check_sub_cmp_fold, no
+// mnemonic gains an "s", so even the imm = 0 spellings need no
+// exclusion). The swapped-operand CMN also matches for the plain
+// unshifted ADDS (commutative sum, same guard rules as the sibling),
+// and a producer with Rd = 31 is itself a compare, making the pair
+// an adjacent duplicate compare -- equally droppable.
+//
+// The compare must not read the producer's destination (Rd among
+// the compared registers reads the result, not the original
+// operand). Distinct from check_redundant_cmp_after_s_variant,
+// which flags the compare of the RESULT against zero; this check
+// flags the compare of the operands. Reported per family as
+// "SUBS + CMP of identical operands: redundant compare" /
+// "ADDS + CMN of identical operands: redundant compare".
+bool check_subs_cmp_redundant(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out);
+
 // Advance the deferred "redundant CMP after S-variant" finding's
 // flag-liveness scan by one instruction. Parallel to
 // armlint_advance_pending; call before per-instruction checks each

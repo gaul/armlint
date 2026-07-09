@@ -4373,12 +4373,12 @@ static void test_sub_cmp_fold(void)
     cmp_x_reg(&code[4], 1, 2);
     assert(run_helper_check(code, 8) == 0);
 
-    // SUBS producer: the flags are already set; not this fold's
-    // shape (a redundant identical-operand CMP after SUBS is a
-    // separate, unimplemented finding).
+    // SUBS producer: not this fold's shape (nothing to S-ify), but
+    // the compare is redundant -- check_subs_cmp_redundant fires
+    // instead, so the pair still reports exactly once.
     write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
     cmp_x_reg(&code[4], 1, 2);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
 
     // Intervening instruction breaks adjacency.
     sub_x(&code[0], 0, 1, 2);
@@ -4461,6 +4461,70 @@ static void test_sub_cmp_fold(void)
     write_le32(&code[0], 0x91000000u | (31u << 5) | 0u);
     write_le32(&code[4], 0xB100001Fu | (31u << 5));
     assert(run_helper_check(code, 8) == 0);
+}
+
+static void test_subs_cmp_redundant(void)
+{
+    uint8_t code[12];
+
+    // subs x0, x1, x2 ; cmp x1, x2: the producer already set exactly
+    // these flags; the compare is dropped outright.
+    write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
+    write_le32(&code[4], 0xEB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // ADDS + CMN family.
+    write_le32(&code[0], 0xAB000000u | (2u << 16) | (1u << 5) | 0u);
+    write_le32(&code[4], 0xAB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // The swapped CMN matches too (commutative sum).
+    write_le32(&code[0], 0xAB000000u | (2u << 16) | (1u << 5) | 0u);
+    write_le32(&code[4], 0xAB00001Fu | (1u << 16) | (2u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // Immediate form: subs x0, x1, #16 ; cmp x1, #16.
+    write_le32(&code[0], 0xF1000000u | (16u << 10) | (1u << 5) | 0u);
+    write_le32(&code[4], 0xF100001Fu | (16u << 10) | (1u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // An adjacent duplicate compare is the Rd = 31 producer case.
+    cmp_x_reg(&code[0], 1, 2);
+    cmp_x_reg(&code[4], 1, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form.
+    write_le32(&code[0], 0x6B000000u | (2u << 16) | (1u << 5) | 0u);
+    write_le32(&code[4], 0x6B00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 1);
+
+    // The compare reads the producer's destination: not the original
+    // operands, so nothing is redundant.
+    write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 1u);
+    write_le32(&code[4], 0xEB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // Cross-family: SUBS + CMN of the same operands compares a
+    // different computation.
+    write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
+    write_le32(&code[4], 0xAB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // The swapped CMP never matches: subtraction does not commute.
+    write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
+    write_le32(&code[4], 0xEB00001Fu | (1u << 16) | (2u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // Different operands: a genuine second compare.
+    write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
+    write_le32(&code[4], 0xEB00001Fu | (3u << 16) | (1u << 5));
+    assert(run_helper_check(code, 8) == 0);
+
+    // Intervening instruction breaks adjacency.
+    write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
+    movz_x(&code[4], 5, 1, 0);
+    write_le32(&code[8], 0xEB00001Fu | (2u << 16) | (1u << 5));
+    assert(run_helper_check(code, 12) == 0);
 }
 
 static void test_add_sub_zero(void)
@@ -10304,6 +10368,7 @@ int main(void)
     test_redundant_cmp_after_s_variant();
     test_zero_cmp_to_s_variant();
     test_sub_cmp_fold();
+    test_subs_cmp_redundant();
     test_add_sub_zero();
     test_self_op();
     test_csel_self();
