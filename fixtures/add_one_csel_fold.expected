@@ -1,0 +1,16 @@
+ADD #1 + CSEL foldable to CSINC at offset: 0x0: -> csinc x3, x2, x1, lt (2 instructions)
+  add x3, x1, #1
+  csel x3, x2, x3, lt
+
+ADD #1 + CSEL foldable to CSINC at offset: 0x8: -> csinc x3, x2, x1, ge (2 instructions)
+  add x3, x1, #1
+  csel x3, x3, x2, lt
+
+ADD #1 + CSEL foldable to CSINC at offset: 0x10: -> csinc w1, w2, w1, eq (2 instructions)
+  add w1, w1, #1
+  csel w1, w2, w1, eq
+
+Optimization opportunities by type:
+       3  ADD #1 + CSEL foldable to CSINC
+
+3 optimization opportunities in 11 instructions

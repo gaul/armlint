@@ -149,6 +149,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`neg` + `add`/`sub`](analyses.md#neg--addsub-foldable-to-subadd) | `sub`/`add` |
 | [`neg` + `csel`](analyses.md#neg--addsub-foldable-to-subadd) | `csneg` (inverted cond for the then slot) |
 | [`mvn` + `csel`](analyses.md#mvn--andorreor-foldable-to-bicorneon) | `csinv` (inverted cond for the then slot) |
+| [`add #1` + `csel`](analyses.md#add-1--csel-foldable-to-csinc) | `csinc` (inverted cond for the then slot) |
 | [`mvn` + `and`/`orr`/`eor`/`ands`](analyses.md#mvn--andorreor-foldable-to-bicorneon) | `bic`/`orn`/`eon`/`bics` |
 | [`add` + `ldr`/`str [xt]`](analyses.md#add--ldr-foldable-to-register-offset-ldr) | `ldr`/`str [xn, xm{, lsl #s}]` |
 | [`sxtw` + `ldr`/`str [xn, xt]`](analyses.md#sxtw--register-offset-ldr-foldable-into-the-load) | `ldr`/`str [xn, ws, sxtw {#s}]` |

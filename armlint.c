@@ -427,6 +427,16 @@ struct armlint_state {
     size_t neg_pending_offset;
     char neg_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending ADD Rt, Rs, #1 (immediate, no shift, non-S) awaiting an
+    // adjacent CSEL reading Rt -- CSINC's else-branch is an increment,
+    // so the pair folds to a single CSINC.
+    bool ao_pending;
+    bool ao_is_64bit;
+    unsigned ao_rd;
+    unsigned ao_rs;
+    size_t ao_offset;
+    char ao_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending MVN Rt, Rs (the ORN Rt, XZR, Rs alias, no shift) awaiting
     // an adjacent AND/ORR/EOR/ANDS (shifted-register, LSL #0, N=0)
     // consumer whose Rd overwrites Rt and one of whose sources is Rt --
@@ -921,6 +931,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->wmul_pending = false;
     state->neg_pending = false;
     state->mvn_pending = false;
+    state->ao_pending = false;
     state->ext_pending = false;
     state->sxl_pending = false;
     state->lsx_active = false;
@@ -7885,6 +7896,116 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+bool check_add_one_csel_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->ao_pending = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    bool produced = false;
+
+    // (1) Close: a CSEL reading the incremented register? CSINC's
+    //     else-branch is an increment (Rd = cond ? Rn : Rm + 1), the
+    //     exact mirror of the CSNEG and CSINV folds: the else slot
+    //     carries the condition over, the then slot swaps operands
+    //     and inverts it:
+    //       add wt, ws, #1 ; csel wd, wn, wt, cc -> csinc wd, wn, ws, cc
+    //       add wt, ws, #1 ; csel wd, wt, wm, cc -> csinc wd, wm, ws, !cc
+    //     The rewrite reads the same NZCV the CSEL did (the non-S ADD
+    //     writes no flags) and reads ws, which still holds its
+    //     original value at the consumer once the ADD is deleted --
+    //     even for the in-place add wt, wt, #1. AL/NV are excluded
+    //     (the select is unconditional and the then-slot inversion
+    //     would still be always-taken); Rd = 31 discards the select;
+    //     both slots reading wt is check_csel_self's shape.
+    if (state->ao_pending) {
+        if ((op & 0x7FE00C00u) == 0x1A800000u) {
+            unsigned c_sf = (op >> 31) & 1u;
+            unsigned c_rd = op & 0x1Fu;
+            unsigned c_rn = (op >> 5) & 0x1Fu;
+            unsigned c_rm = (op >> 16) & 0x1Fu;
+            unsigned cond = (op >> 12) & 0xFu;
+            unsigned t = state->ao_rd;
+            bool then_slot = false;
+            bool valid = false;
+            unsigned surviving = 0;
+            if ((c_sf != 0) == state->ao_is_64bit
+                    && c_rd != 31 && cond < 14u) {
+                if (c_rm == t && c_rn != t) {
+                    valid = true;
+                    surviving = c_rn;   // else slot: condition unchanged
+                } else if (c_rn == t && c_rm != t) {
+                    valid = true;
+                    surviving = c_rm;   // then slot: swap and invert
+                    then_slot = true;
+                }
+            }
+
+            if (valid) {
+                char w_or_x = state->ao_is_64bit ? 'x' : 'w';
+                unsigned new_cond = then_slot ? (cond ^ 1u) : cond;
+                char surv_buf[8], rn_buf[8], rm_buf[8];
+                format_reg(surv_buf, sizeof(surv_buf), w_or_x, surviving);
+                format_reg(rn_buf, sizeof(rn_buf), w_or_x, c_rn);
+                format_reg(rm_buf, sizeof(rm_buf), w_or_x, c_rm);
+
+                out->name = "ADD #1 + CSEL foldable to CSINC";
+                out->start_offset = state->ao_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> csinc %c%u, %s, %c%u, %s",
+                    w_or_x, c_rd, surv_buf,
+                    w_or_x, state->ao_rs,
+                    a64_cond_names[new_cond]);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->ao_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "csel %c%u, %s, %s, %s",
+                    w_or_x, c_rd, rn_buf, rm_buf,
+                    a64_cond_names[cond]);
+
+                if (c_rd == t) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, t);
+                }
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->ao_pending = false;
+    }
+
+    // (2) Open: an ADD Rt, Rs, #1 (immediate, no shift, non-S)?
+    //     Register 31 in ADD-immediate means SP for both Rd and Rn,
+    //     while CSINC's slots are ZR-flavoured: an SP source has no
+    //     CSINC expression and an SP destination is not a select
+    //     temporary, so both are excluded.
+    if ((op & 0x7FFFFC00u) == 0x11000400u) {
+        unsigned a_sf = (op >> 31) & 1u;
+        unsigned a_rd = op & 0x1Fu;
+        unsigned a_rn = (op >> 5) & 0x1Fu;
+        if (a_rd != 31 && a_rn != 31) {
+            state->ao_pending = true;
+            state->ao_is_64bit = (a_sf != 0);
+            state->ao_rd = a_rd;
+            state->ao_rs = a_rn;
+            state->ao_offset = offset;
+            char w_or_x = (a_sf != 0) ? 'x' : 'w';
+            snprintf(state->ao_disasm, sizeof(state->ao_disasm),
+                "add %c%u, %c%u, #1",
+                w_or_x, a_rd, w_or_x, a_rn);
+        }
+    }
+
+    return produced;
+}
+
 // ADD/SUB extended-register "option" field names, indexed by the 3-bit
 // option (bits 15..13). UXTX/SXTX (011/111) are the LSL forms and are
 // not produced here.
@@ -10486,6 +10607,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,
     check_mvn_logic_fold,
+    check_add_one_csel_fold,
     check_extend_add_sub_fold,
     check_add_ldr_register_offset,
     check_sxtw_ldr_fold,

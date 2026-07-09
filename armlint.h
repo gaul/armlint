@@ -1051,6 +1051,25 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
 bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect ADD Rt, Rs, #1 (immediate, no shift, non-S) immediately
+// followed by a CSEL reading Rt: CSINC's else-branch is an increment
+// (Rd = cond ? Rn : Rm + 1), so the pair folds -- the exact mirror
+// of the NEG -> CSNEG and MVN -> CSINV consumers:
+//   add wt, ws, #1 ; csel wd, wn, wt, cc -> csinc wd, wn, ws, cc
+//   add wt, ws, #1 ; csel wd, wt, wm, cc -> csinc wd, wm, ws, !cc
+// (then slot: operands swap, condition inverts). The rewrite reads
+// the same NZCV the CSEL did and reads Rs, which still holds its
+// original value at the consumer once the ADD is deleted, even
+// in-place. AL/NV, Rd = 31 (discarded select), both-slots
+// (check_csel_self's shape) and width mismatches are excluded.
+// Register 31 in ADD-immediate means SP for both Rd and Rn, while
+// CSINC's slots are ZR-flavoured, so SP source/destination never
+// open. A destination overwriting Rt reports immediately; a fresh
+// destination defers through the forward register-liveness scan.
+// Reported as "ADD #1 + CSEL foldable to CSINC".
+bool check_add_one_csel_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 // Extend-analogue of the shift fold. Detect a standalone extend
 // (UXTB/UXTH (W-form), SXTB/SXTH (W or X), SXTW (X)) immediately
 // followed by an ADD/SUB (shifted-register, LSL #0) that consumes its

@@ -9301,6 +9301,71 @@ static void test_mvn_logic_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+static void test_add_one_csel_fold(void)
+{
+    uint8_t code[12];
+
+    // Else slot: add x3, x1, #1 ; csel x3, x2, x3, lt
+    //   -> csinc x3, x2, x1, lt (flag; condition carries over).
+    add_x_imm(&code[0], 3, 1, 1);
+    csel_x(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Then slot: add x3, x1, #1 ; csel x3, x3, x2, lt
+    //   -> csinc x3, x2, x1, ge (operands swap, condition inverts).
+    add_x_imm(&code[0], 3, 1, 1);
+    csel_x(&code[4], 3, 3, 2, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form, else slot.
+    add_w_imm(&code[0], 3, 1, 1);
+    csel_w(&code[4], 3, 2, 3, 8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // In-place increment: deleting the ADD leaves x1 holding its
+    // original value at the select.
+    add_x_imm(&code[0], 1, 1, 1);
+    csel_x(&code[4], 1, 2, 1, 11);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Fresh destination defers; the appended kill lets it emit.
+    add_x_imm(&code[0], 3, 1, 1);
+    csel_x(&code[4], 5, 2, 3, 0);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // Fresh destination without a kill: nothing.
+    add_x_imm(&code[0], 3, 1, 1);
+    csel_x(&code[4], 5, 2, 3, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Both CSEL operands read the increment: check_csel_self's shape
+    // (the 1 finding here is csel_self's).
+    add_x_imm(&code[0], 3, 1, 1);
+    csel_x(&code[4], 5, 3, 3, 11);
+    assert(run_reg_dead(code, 8, 3) == 1);
+
+    // An increment other than #1 is not CSINC.
+    add_x_imm(&code[0], 3, 1, 2);
+    csel_x(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 0);
+
+    // AL condition is excluded.
+    add_x_imm(&code[0], 3, 1, 1);
+    csel_x(&code[4], 3, 2, 3, 14);
+    assert(run_helper_check(code, 8) == 0);
+
+    // SP source (add x3, sp, #1) never opens: CSINC's slot is
+    // ZR-flavoured.
+    add_x_imm(&code[0], 3, 31, 1);
+    csel_x(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Width mismatch (X-form ADD, W-form CSEL).
+    add_x_imm(&code[0], 3, 1, 1);
+    csel_w(&code[4], 3, 2, 3, 11);
+    assert(run_helper_check(code, 8) == 0);
+}
+
 static void test_extend_add_sub_fold(void)
 {
     uint8_t code[16];
@@ -10509,6 +10574,7 @@ int main(void)
     test_widening_mul_add_sub_fold();
     test_neg_add_sub_fold();
     test_mvn_logic_fold();
+    test_add_one_csel_fold();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();

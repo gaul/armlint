@@ -957,6 +957,28 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   one flags the compare of the operands, and it needs no NZCV scan:
   the flags after the drop are bit-identical, unconditionally.
 
+## ADD #1 + CSEL foldable to CSINC
+
+* `add wt, ws, #1 ; csel wd, wn, wt, cc` instead of
+  `csinc wd, wn, ws, cc`: CSINC's else-branch is an increment
+  (`Rd = cond ? Rn : Rm + 1`), the exact mirror of the
+  [`NEG` -> `CSNEG`](#neg--addsubcsel-foldable-to-negated-operand-form)
+  and `MVN` -> `CSINV` consumers. The else slot carries the
+  condition over; the then slot swaps operands and inverts it
+  (`csel wd, wt, wm, cc` -> `csinc wd, wm, ws, !cc`).
+* The rewrite reads the same NZCV the `CSEL` did (the non-S `ADD`
+  writes no flags) and reads `ws`, which still holds its original
+  value at the consumer once the `ADD` is deleted -- even for the
+  in-place `add wt, wt, #1`. AL/NV are excluded (the select is
+  unconditional and the then-slot inversion would still be
+  always-taken); `Rd = 31` discards the select; both slots reading
+  `wt` is the [CSEL identity](#csel-same-operand-identity-csel-rd-rn-rn-cond)'s
+  shape; widths must match. Register 31 in ADD-immediate means SP
+  for both `Rd` and `Rn`, while CSINC's slots are ZR-flavoured, so
+  SP source/destination never open.
+* A destination overwriting `wt` reports immediately; a fresh
+  destination defers through the forward register-liveness scan.
+
 ## MUL by constant foldable to shift/add
 
 * `mov xc, #(1<<N) ; mul xd, xa, xc` instead of `lsl xd, xa, #N`
