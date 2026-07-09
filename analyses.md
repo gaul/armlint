@@ -1427,9 +1427,18 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `fmov d0, #1.5`. GPR values fold when they are MOVZ / MOVN /
   bitmask-immediate encodable (exactly the assembler's `mov Rd, #imm`
   forms); FP values when FMOV-imm8 encodable (VFPExpandImm in
-  reverse). `LDRSW` re-widths the value, `PRFM` is not a load, and a
-  128-bit Q constant has no single-instruction materialisation; none
-  fold.
+  reverse). An `LDRSW` literal materialises the SIGN-EXTENDED value,
+  folding when that 64-bit value is mov-encodable
+  (`ldrsw x3, <literal 0xfffffff6>` -> `mov x3, #-10`). A Q literal
+  folds when the 128-bit pattern has an integer `MOVI`/`MVNI`
+  spelling (AdvSimdExpandImm in reverse): both 64-bit halves equal
+  -- every MOVI form replicates -- and the half byte-replicated
+  (`.16b`), halfword-replicated (`.8h`, `LSL #0/8`, MOVI or MVNI),
+  word-replicated (`.4s`, `LSL #0/8/16/24` or the MSL "shifting
+  ones", MOVI or MVNI), or a per-byte 00/FF mask (`.2d`). The
+  smallest element wins the rendering; the FP-vector immediates
+  (`FMOV Vd.4s/2d, #imm8`) are not attempted. `PRFM` is not a load
+  and never folds.
 * The first binary-aware check: the literal is PC-relative, so the
   check reads the pooled bytes out of the scanned buffer itself. A
   target outside the buffer (an out-of-section pool) is silently

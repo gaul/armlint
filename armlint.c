@@ -6784,6 +6784,116 @@ static bool mov_imm_encodable(uint64_t v, bool is_64)
     return is_bitmask_immediate(v, is_64 ? 64u : 32u);
 }
 
+// AdvSimdExpandImm in reverse, integer forms: does a 128-bit pattern
+// whose two 64-bit halves both equal `half` have a single MOVI/MVNI
+// spelling? Every MOVI form replicates its element across the full
+// vector, so equal halves are the caller's precondition. Checked
+// smallest element first, so the simplest spelling wins: byte
+// (16B), halfword (8H, LSL #0/8, MOVI then MVNI), word (4S,
+// LSL #0/8/16/24 and the MSL "shifting ones", MOVI then MVNI), and
+// finally the 2D per-byte mask (every byte 00 or FF). The FP-vector
+// immediates (cmode 1111) are not attempted. Renders the winning
+// spelling into buf.
+static bool q_movi_spelling(uint64_t half, unsigned vt,
+                            char *buf, size_t bufsz)
+{
+    uint64_t b0 = half & 0xFFu;
+    if (half == 0x0101010101010101ull * b0) {
+        snprintf(buf, bufsz, "movi v%u.16b, #0x%" PRIx64, vt, b0);
+        return true;
+    }
+
+    uint64_t h0 = half & 0xFFFFu;
+    if (half == 0x0001000100010001ull * h0) {
+        uint64_t nh = ~h0 & 0xFFFFu;
+        if ((h0 & 0xFF00u) == 0) {
+            snprintf(buf, bufsz, "movi v%u.8h, #0x%" PRIx64, vt, h0);
+            return true;
+        }
+        if ((h0 & 0x00FFu) == 0) {
+            snprintf(buf, bufsz, "movi v%u.8h, #0x%" PRIx64 ", lsl #8",
+                vt, h0 >> 8);
+            return true;
+        }
+        if ((nh & 0xFF00u) == 0) {
+            snprintf(buf, bufsz, "mvni v%u.8h, #0x%" PRIx64, vt, nh);
+            return true;
+        }
+        if ((nh & 0x00FFu) == 0) {
+            snprintf(buf, bufsz, "mvni v%u.8h, #0x%" PRIx64 ", lsl #8",
+                vt, nh >> 8);
+            return true;
+        }
+    }
+
+    uint64_t w0 = half & 0xFFFFFFFFu;
+    if (half == 0x0000000100000001ull * w0) {
+        uint64_t nw = ~w0 & 0xFFFFFFFFu;
+        for (unsigned s = 0; s < 32; s += 8) {
+            if ((w0 & ~(0xFFull << s)) == 0) {
+                if (s == 0) {
+                    snprintf(buf, bufsz, "movi v%u.4s, #0x%" PRIx64,
+                        vt, w0);
+                } else {
+                    snprintf(buf, bufsz,
+                        "movi v%u.4s, #0x%" PRIx64 ", lsl #%u",
+                        vt, w0 >> s, s);
+                }
+                return true;
+            }
+        }
+        if ((w0 & 0xFFu) == 0xFFu && (w0 >> 8) <= 0xFFu) {
+            snprintf(buf, bufsz, "movi v%u.4s, #0x%" PRIx64 ", msl #8",
+                vt, w0 >> 8);
+            return true;
+        }
+        if ((w0 & 0xFFFFu) == 0xFFFFu && (w0 >> 16) <= 0xFFu) {
+            snprintf(buf, bufsz, "movi v%u.4s, #0x%" PRIx64 ", msl #16",
+                vt, w0 >> 16);
+            return true;
+        }
+        for (unsigned s = 0; s < 32; s += 8) {
+            if ((nw & ~(0xFFull << s)) == 0) {
+                if (s == 0) {
+                    snprintf(buf, bufsz, "mvni v%u.4s, #0x%" PRIx64,
+                        vt, nw);
+                } else {
+                    snprintf(buf, bufsz,
+                        "mvni v%u.4s, #0x%" PRIx64 ", lsl #%u",
+                        vt, nw >> s, s);
+                }
+                return true;
+            }
+        }
+        if ((nw & 0xFFu) == 0xFFu && (nw >> 8) <= 0xFFu) {
+            snprintf(buf, bufsz, "mvni v%u.4s, #0x%" PRIx64 ", msl #8",
+                vt, nw >> 8);
+            return true;
+        }
+        if ((nw & 0xFFFFu) == 0xFFFFu && (nw >> 16) <= 0xFFu) {
+            snprintf(buf, bufsz, "mvni v%u.4s, #0x%" PRIx64 ", msl #16",
+                vt, nw >> 16);
+            return true;
+        }
+    }
+
+    // MOVI .2D: each byte of the 64-bit element independently 00 or
+    // FF (op = 1, cmode = 1110).
+    bool mask_ok = true;
+    for (unsigned i = 0; i < 8; i++) {
+        unsigned byte = (unsigned)((half >> (8u * i)) & 0xFFu);
+        if (byte != 0x00u && byte != 0xFFu) {
+            mask_ok = false;
+            break;
+        }
+    }
+    if (mask_ok) {
+        snprintf(buf, bufsz, "movi v%u.2d, #0x%016" PRIx64, vt, half);
+        return true;
+    }
+    return false;
+}
+
 bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out)
 {
@@ -6794,19 +6904,19 @@ bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
 
     // LDR (literal): opc(31:30) 011 V 00 imm19 Rt. GPR (V = 0):
-    // opc 00 = W, 01 = X (10 = LDRSW, 11 = PRFM); SIMD&FP (V = 1):
-    // opc 00 = S, 01 = D (10 = Q). Only the W/X/S/D forms fold:
-    // LDRSW re-widths the value, PRFM is not a load, and a 128-bit Q
-    // constant has no single-instruction materialisation.
+    // opc 00 = W, 01 = X, 10 = LDRSW (11 = PRFM, not a load).
+    // SIMD&FP (V = 1): opc 00 = S, 01 = D, 10 = Q (11 unallocated).
+    // W/X fold via the mov-immediate forms, LDRSW via the same at X
+    // width after sign-extending the loaded word, S/D via FMOV-imm8,
+    // and Q via the integer MOVI/MVNI immediates.
     if ((op & 0x3B000000u) != 0x18000000u) {
         return false;
     }
     unsigned opc = (op >> 30) & 0x3u;
-    if (opc > 1u) {
+    if (opc == 3u) {
         return false;
     }
     bool is_fp = ((op >> 26) & 1u) != 0;
-    bool is_64 = opc == 1u;
     unsigned rt = op & 0x1Fu;
     if (!is_fp && rt == 31) {
         return false;   // literal load to ZR: a discarded load
@@ -6814,21 +6924,43 @@ bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
 
     // The pool must land inside the scanned buffer: the target is
     // PC-relative, so an out-of-section pool (or a truncated read at
-    // the buffer edge) is silently skipped.
+    // the buffer edge) is silently skipped. LDRSW transfers 4 bytes;
+    // the Q form 16.
     int64_t rel = ((int64_t)(int32_t)(op << 8) >> 13) * 4;
     int64_t target = (int64_t)offset + rel;
-    unsigned nbytes = is_64 ? 8u : 4u;
+    unsigned nbytes;
+    if (is_fp) {
+        nbytes = 4u << opc;
+    } else {
+        nbytes = (opc == 1u) ? 8u : 4u;
+    }
     if (target < 0 || (uint64_t)target + nbytes > state->buf_len) {
         return false;
     }
 
     uint64_t bits = 0;
-    for (unsigned i = 0; i < nbytes; i++) {
+    uint64_t bits_hi = 0;
+    for (unsigned i = 0; i < nbytes && i < 8u; i++) {
         bits |= (uint64_t)state->buf[(size_t)target + i] << (8u * i);
+    }
+    for (unsigned i = 8; i < nbytes; i++) {
+        bits_hi |= (uint64_t)state->buf[(size_t)target + i]
+            << (8u * (i - 8u));
     }
 
     char detail[ARMLINT_FINDING_LINE_LEN];
-    if (is_fp) {
+    if (is_fp && opc == 2u) {
+        // Q: every MOVI form replicates across the full vector, so
+        // unequal halves can never fold.
+        char spell_buf[64];
+        if (bits != bits_hi
+                || !q_movi_spelling(bits, rt, spell_buf,
+                                    sizeof(spell_buf))) {
+            return false;
+        }
+        snprintf(detail, sizeof(detail), "-> %s", spell_buf);
+    } else if (is_fp) {
+        bool is_64 = opc == 1u;
         if (!fp8_encodable(bits, is_64)) {
             return false;
         }
@@ -6846,6 +6978,12 @@ bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
         snprintf(detail, sizeof(detail), "-> fmov %c%u, #%s",
             is_64 ? 'd' : 's', rt, val_buf);
     } else {
+        // LDRSW writes the sign-extension of the loaded word, so its
+        // materialisation is the 64-bit sign-extended value.
+        bool is_64 = opc != 0u;
+        if (opc == 2u) {
+            bits = (uint64_t)(int64_t)(int32_t)(uint32_t)bits;
+        }
         if (!mov_imm_encodable(bits, is_64)) {
             return false;
         }

@@ -783,8 +783,12 @@ bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
 // GPR values fold when MOVZ/MOVN/bitmask-immediate encodable (the
 // forms the assembler accepts for mov Rd, #imm); FP values when
 // FMOV-imm8 encodable (VFPExpandImm in reverse, via fp8_encodable).
-// LDRSW re-widths the value, PRFM is not a load, and a 128-bit Q
-// constant has no single-instruction materialisation; none fold.
+// An LDRSW literal materialises the SIGN-EXTENDED value and folds
+// when that is mov-encodable at X width. A Q literal folds when the
+// 128-bit pattern has an integer MOVI/MVNI spelling
+// (q_movi_spelling: halves equal, then 16B/8H/4S LSL+MSL/2D
+// byte-mask, smallest element first; the FP-vector immediates are
+// not attempted). PRFM is not a load and never folds.
 //
 // The first binary-aware check: the literal is PC-relative, so the
 // check reads the pooled bytes out of the scanned buffer itself

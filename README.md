@@ -142,7 +142,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`fmov`/`scvtf`/`dup` of `wzr`/`xzr` (or `mov #0` + transfer)](analyses.md#fpvector-zeroing-via-gpr-foldable-to-movi) | `movi dN, #0` / `movi vN.T, #0` |
 | [`sxtw`/`mov w, w` + `scvtf`/`ucvtf Xn`](analyses.md#widening-extend--scvtfucvtf-foldable-to-w-form-conversion) | `scvtf`/`ucvtf` of `Wn` |
 | [`ldr w8` + `scvtf`/`ucvtf` from GPR](analyses.md#load--scvtfucvtf-via-gpr-foldable-to-fp-load--convert) | `ldr s0` + FP-side convert (no cross-file transfer) |
-| [`ldr` (literal) of an encodable constant](analyses.md#ldr-literal-foldable-to-movfmov-immediate) | `mov #imm` / `fmov #imm8` (no memory access) |
+| [`ldr`/`ldrsw` (literal) of an encodable constant](analyses.md#ldr-literal-foldable-to-movfmov-immediate) | `mov #imm` / `fmov #imm8` / `movi`+`mvni` for Q (no memory access) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |

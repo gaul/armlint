@@ -9453,10 +9453,23 @@ static void test_ldr_literal_const(void)
     write_le32(&code[8], 0x2Au);
     assert(run_buffer_check(code, 12) == 0);
 
-    // LDRSW literal re-widths the value; not this fold.
+    // LDRSW literal: the materialisation is the sign-extended value.
     ldr_lit(&code[0], 2, 0, 2, 0);
     ret_(&code[4]);
     write_le32(&code[8], 0x2Au);
+    assert(run_buffer_check(code, 12) == 1);
+
+    // Negative loaded word: sext(0xfffffff6) = -10, MOVN-encodable
+    // at X width.
+    ldr_lit(&code[0], 2, 0, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0xFFFFFFF6u);
+    assert(run_buffer_check(code, 12) == 1);
+
+    // A sign-extended value can still be unencodable.
+    ldr_lit(&code[0], 2, 0, 2, 0);
+    ret_(&code[4]);
+    write_le32(&code[8], 0x12345678u);
     assert(run_buffer_check(code, 12) == 0);
 
     // A literal load to ZR is a discarded load.
@@ -9464,6 +9477,79 @@ static void test_ldr_literal_const(void)
     ret_(&code[4]);
     write_le32(&code[8], 0x2Au);
     assert(run_buffer_check(code, 12) == 0);
+
+    // -- Q literals: the integer MOVI/MVNI immediates. --
+    uint8_t qcode[24];
+
+    // All bytes equal -> movi v0.16b.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0x2A2A2A2Au);
+    write_le32(&qcode[12], 0x2A2A2A2Au);
+    write_le32(&qcode[16], 0x2A2A2A2Au);
+    write_le32(&qcode[20], 0x2A2A2A2Au);
+    assert(run_buffer_check(qcode, 24) == 1);
+
+    // Halfword-replicated 0x0100 -> movi v0.8h, #1, lsl #8.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0x01000100u);
+    write_le32(&qcode[12], 0x01000100u);
+    write_le32(&qcode[16], 0x01000100u);
+    write_le32(&qcode[20], 0x01000100u);
+    assert(run_buffer_check(qcode, 24) == 1);
+
+    // Word-replicated shifting-ones 0x0001ffff -> movi .4s, msl #16.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0x0001FFFFu);
+    write_le32(&qcode[12], 0x0001FFFFu);
+    write_le32(&qcode[16], 0x0001FFFFu);
+    write_le32(&qcode[20], 0x0001FFFFu);
+    assert(run_buffer_check(qcode, 24) == 1);
+
+    // Word-replicated 0xffff00ff -> mvni v0.4s, #0xff, lsl #8.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0xFFFF00FFu);
+    write_le32(&qcode[12], 0xFFFF00FFu);
+    write_le32(&qcode[16], 0xFFFF00FFu);
+    write_le32(&qcode[20], 0xFFFF00FFu);
+    assert(run_buffer_check(qcode, 24) == 1);
+
+    // Per-byte 00/FF mask within the element -> movi v0.2d.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0x00000000u);
+    write_le32(&qcode[12], 0xFFFFFFFFu);
+    write_le32(&qcode[16], 0x00000000u);
+    write_le32(&qcode[20], 0xFFFFFFFFu);
+    assert(run_buffer_check(qcode, 24) == 1);
+
+    // Unequal halves can never come from a MOVI.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0x2A2A2A2Au);
+    write_le32(&qcode[12], 0x2A2A2A2Au);
+    write_le32(&qcode[16], 0x2A2A2A2Au);
+    write_le32(&qcode[20], 0x2A2A2A2Bu);
+    assert(run_buffer_check(qcode, 24) == 0);
+
+    // Equal halves with no integer MOVI pattern.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0x12345678u);
+    write_le32(&qcode[12], 0x9ABCDEF0u);
+    write_le32(&qcode[16], 0x12345678u);
+    write_le32(&qcode[20], 0x9ABCDEF0u);
+    assert(run_buffer_check(qcode, 24) == 0);
+
+    // A truncated Q pool at the buffer edge is skipped.
+    ldr_lit(&qcode[0], 2, 1, 2, 0);
+    ret_(&qcode[4]);
+    write_le32(&qcode[8],  0x2A2A2A2Au);
+    write_le32(&qcode[12], 0x2A2A2A2Au);
+    assert(run_buffer_check(qcode, 16) == 0);
 }
 
 static void test_add_one_csel_fold(void)
