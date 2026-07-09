@@ -4696,6 +4696,46 @@ static void test_csel_self(void)
     assert(run_helper_check(code, 8) == 2);
 }
 
+// FCSEL: 0001 1110 0 ty 1 Rm cond 11 Rn Rd (ty: 0=S, 1=D, 3=H).
+static void fcsel(uint8_t out[4], unsigned type, unsigned rd,
+                  unsigned rn, unsigned rm, unsigned cond)
+{
+    write_le32(out, 0x1E200C00u | ((type & 3u) << 22)
+        | ((rm & 0x1Fu) << 16) | ((cond & 0xFu) << 12)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_fcsel_self(void)
+{
+    uint8_t code[8];
+
+    // fcsel d0, d1, d1, ne -> fmov d0, d1 (flag; both branches are
+    // the same bit pattern, so the condition is irrelevant).
+    fcsel(&code[0], 1, 0, 1, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // Single precision.
+    fcsel(&code[0], 0, 0, 1, 1, 1);
+    assert(run_helper_check(code, 4) == 1);
+
+    // Fully self-referential (fcsel d0, d0, d0): still exact -- both
+    // spellings rewrite d0 and zero the upper lane.
+    fcsel(&code[0], 1, 0, 0, 0, 11);
+    assert(run_helper_check(code, 4) == 1);
+
+    // AL condition is no more or less irrelevant than any other.
+    fcsel(&code[0], 1, 0, 1, 1, 14);
+    assert(run_helper_check(code, 4) == 1);
+
+    // Distinct operands select genuinely different values.
+    fcsel(&code[0], 1, 0, 1, 2, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // Half precision (FEAT_FP16, type 3) is not matched.
+    fcsel(&code[0], 3, 0, 1, 1, 1);
+    assert(run_helper_check(code, 4) == 0);
+}
+
 static void test_bfxil_synth(void)
 {
     uint8_t code[16];
@@ -10211,6 +10251,7 @@ int main(void)
     test_add_sub_zero();
     test_self_op();
     test_csel_self();
+    test_fcsel_self();
     test_bfxil_synth();
     test_ldp_stp_coalesce();
     test_simd_cmp_zero();

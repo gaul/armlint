@@ -1,0 +1,13 @@
+FCSEL same-operand identity at offset: 0x0: fcsel d0, d1, d1, ne -> fmov d0, d1 (cond irrelevant: both branches = d1) (1 instructions)
+  fcsel d0, d1, d1, ne
+
+FCSEL same-operand identity at offset: 0x4: fcsel s2, s3, s3, lt -> fmov s2, s3 (cond irrelevant: both branches = s3) (1 instructions)
+  fcsel s2, s3, s3, lt
+
+FCSEL same-operand identity at offset: 0x8: fcsel d4, d4, d4, eq -> fmov d4, d4 (cond irrelevant: both branches = d4) (1 instructions)
+  fcsel d4, d4, d4, eq
+
+Optimization opportunities by type:
+       3  FCSEL same-operand identity
+
+3 optimization opportunities in 5 instructions

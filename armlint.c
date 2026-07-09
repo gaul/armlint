@@ -4676,6 +4676,56 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+bool check_fcsel_self(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // FCSEL: 0001 1110 0 type 1 Rm cond 11 Rn Rd. A pure bit-pattern
+    // select -- no arithmetic, no NaN processing -- so Rn == Rm makes
+    // the condition irrelevant and the instruction a register copy:
+    // FMOV (register), which like FCSEL zeroes the vector register
+    // above the written lane, so the rewrite is exact for the full
+    // 128 bits. The pointless NZCV read disappears too. Single and
+    // double precision only; half precision (FEAT_FP16, type 11) is
+    // not matched, consistent with the other FP checks. FP registers
+    // have no ZR/SP encoding, so no operand exclusions are needed.
+    if ((op & 0xFF200C00u) != 0x1E200C00u) {
+        return false;
+    }
+    unsigned type = (op >> 22) & 0x3u;
+    if (type > 1u) {
+        return false;
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rd = op & 0x1Fu;
+    if (rn != rm) {
+        return false;
+    }
+
+    char sd = type ? 'd' : 's';
+
+    out->name = "FCSEL same-operand identity";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "%s %s -> fmov %c%u, %c%u (cond irrelevant: both branches = %c%u)",
+        insn->mnemonic, insn->op_str,
+        sd, rd, sd, rn, sd, rn);
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 // Decode AND-immediate with a "high-only" mask: ~((1<<w)-1), i.e.,
 // the top (datasize - w) bits are 1 and the low w bits are 0. The
 // bitmask-immediate encoding for this shape has immr = imms + 1
@@ -10149,6 +10199,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_add_sub_zero,
     check_self_op,
     check_csel_self,
+    check_fcsel_self,
     check_bfxil_synth,
     check_ldp_stp_coalesce,
     check_simd_cmp_zero,

@@ -121,6 +121,7 @@ the rewrite saves -- in [analyses.md](analyses.md).
 | [`movi #0` + vector `cmeq`/`cmge`/`cmgt` (or FP `fcm*`)](analyses.md#zeroing-movi-then-vector-compare-foldable-to-compare-with-zero) | `cmeq`/`cmge`/`cmgt`/`cmle`/`cmlt Vd, X, #0` (drop the `movi`) |
 | [`and` + `and`/`ubfiz` + `orr` (clear/isolate/merge)](analyses.md#bfxil-and-bfi-bitfield-insert-synthesis) | `bfxil`/`bfi` |
 | [`csel Rd, Rn, Rn, cond`](analyses.md#csel-same-operand-identity-csel-rd-rn-rn-cond) | `mov Rd, Rn` |
+| [`fcsel Vd, Vn, Vn, cond`](analyses.md#fcsel-same-operand-identity-fcsel-vd-vn-vn-cond) | `fmov Vd, Vn` |
 | [`add`/`sub Rd, Rn, #0`](analyses.md#addsub-0-is-redundant) | `mov Rd, Rn`, or remove |
 | [`adds`/`subs`/`ands` + `cmp #0` + `b.eq`/`b.ne`](analyses.md#redundant-zero-cmptst-after-a-flag-setting-alu) | drop the redundant `cmp`/`tst` |
 | [`add`/`sub`/`and`/`bic` + `cmp #0` + `b.eq`/`b.ne`](analyses.md#addsubandbic--zero-cmp-foldable-to-s-variant) | `adds`/`subs`/`ands`/`bics` (drop the `cmp`/`tst`) |

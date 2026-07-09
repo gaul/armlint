@@ -787,6 +787,22 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * `Rd = 31` (result discarded) and `Rn = 31` (`ZR` source) are
   excluded for consistency with the other self-op identity check.
 
+## FCSEL same-operand identity (`FCSEL Vd, Vn, Vn, cond`)
+
+* The FP mirror of the check above: `FCSEL` is a pure bit-pattern
+  select -- no arithmetic, no NaN processing -- so `Vn == Vm` makes
+  the condition irrelevant and the instruction a register copy,
+  `fmov Vd, Vn`. Both `FCSEL` and `FMOV (register)` zero the vector
+  register above the written lane, so the rewrite is exact for the
+  full 128 bits; the pointless NZCV read disappears too, freeing the
+  select from its flags dependency.
+* Single and double precision only; half precision (FEAT_FP16) is
+  not matched, consistent with the other FP checks. FP registers
+  have no ZR/SP encoding, so no operand exclusions apply -- even the
+  fully self-referential `fcsel d0, d0, d0, cc` folds (to
+  `fmov d0, d0`, which is not a no-op: both spellings rewrite the
+  lane and zero above it).
+
 ## ADD/SUB #0 is redundant
 
 * The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a

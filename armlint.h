@@ -375,6 +375,20 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
 bool check_csel_self(armlint_state *state, const cs_insn *insn,
                      size_t offset, armlint_finding *out);
 
+// FP mirror of check_csel_self: FCSEL Vd, Vn, Vm, cond with Vn == Vm
+// selects the same value on both branches, so the condition is
+// irrelevant and the instruction is a register copy --
+// FMOV (register). FCSEL is a pure bit-pattern select (no
+// arithmetic, no NaN processing), and both FCSEL and FMOV zero the
+// vector register above the written lane, so the rewrite is exact
+// for the full 128 bits; the pointless NZCV read disappears too.
+// Single and double precision only (half precision, FEAT_FP16, is
+// not matched, consistent with the other FP checks); FP registers
+// have no ZR/SP encoding, so no operand exclusions apply. Reported
+// as "FCSEL same-operand identity".
+bool check_fcsel_self(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out);
+
 // Detect the 3-instruction BFXIL synthesis pattern:
 //   AND Rd, Rd, #~mask    ; clear Rd[w-1..0]
 //   AND Rt, Rs, #mask     ; isolate Rs[w-1..0] into Rt
