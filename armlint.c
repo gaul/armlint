@@ -358,6 +358,14 @@ struct armlint_state {
     unsigned pending_cssc_window;
     armlint_finding pending_cssc_finding;
 
+    // Deferred finding gated on an FP/vector register's death,
+    // advanced by armlint_advance_pending_fp -- the FP twin of the
+    // pending_mz slot (single slot, same collision semantics).
+    bool pending_fp_active;
+    unsigned pending_fp_window;
+    int pending_fp_reg;
+    armlint_finding pending_fp_finding;
+
     // Pending halves of the SUB + identical-operand CMP pair (either
     // order): a non-S SUB awaiting the CMP, and a CMP awaiting the
     // SUB. CMP Rn, Rm is SUBS ZR, Rn, Rm, so a CMP of the SUB's exact
@@ -1019,6 +1027,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->cab_active = false;
     state->rbc_active = false;
     state->pending_cssc_active = false;
+    state->pending_fp_active = false;
     return mov_close(state, out);
 }
 
@@ -2772,6 +2781,198 @@ static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
     state->pending_mz_active = true;
     state->pending_mz_window = LIVENESS_WINDOW;
     state->pending_mz_reg = (int)reg;
+    return false;
+}
+
+// Map a Capstone AArch64 register operand to its 0..31 vector register
+// number, or -1 for non-vector registers. All six views of the same
+// architectural register -- B, H, S, D, Q and the V vector spelling --
+// map to one number: a read or write through any view touches the one
+// register. Each bank is contiguous in the Capstone enum.
+static int arm64_vreg_num(unsigned reg)
+{
+    if (reg >= ARM64_REG_B0 && reg <= ARM64_REG_B31) {
+        return (int)(reg - ARM64_REG_B0);
+    }
+    if (reg >= ARM64_REG_H0 && reg <= ARM64_REG_H31) {
+        return (int)(reg - ARM64_REG_H0);
+    }
+    if (reg >= ARM64_REG_S0 && reg <= ARM64_REG_S31) {
+        return (int)(reg - ARM64_REG_S0);
+    }
+    if (reg >= ARM64_REG_D0 && reg <= ARM64_REG_D31) {
+        return (int)(reg - ARM64_REG_D0);
+    }
+    if (reg >= ARM64_REG_Q0 && reg <= ARM64_REG_Q31) {
+        return (int)(reg - ARM64_REG_Q0);
+    }
+    if (reg >= ARM64_REG_V0 && reg <= ARM64_REG_V31) {
+        return (int)(reg - ARM64_REG_V0);
+    }
+    return -1;
+}
+
+// True for instruction classes whose vector-register DESTINATION is a
+// full pure overwrite. The FP world inverts the GPR arbiter's default:
+// where GPR read-modify-writers are two enumerable encodings (MOVK,
+// BFM), vector RMW writers are everywhere -- accumulators (FMLA, MLA,
+// SDOT), lane inserts (INS), bitwise selects (BSL/BIT/BIF), shift
+// inserts (SLI/SRI), the vector ORR/BIC immediates sharing MOVI's
+// class, the *2 narrowing-high forms -- so a written vector operand is
+// treated as ALSO READ unless its class is on this whitelist. Sound in
+// the false-negative direction only: an unlisted pure overwrite merely
+// fails to commit a deferred finding.
+//
+//   - FP data processing, scalar (0x1E class, bit 21 set): 1-source
+//     (FMOV/FABS/FNEG/FSQRT/FCVT), 2-source (FADD..FDIV, FNMUL),
+//     conditional select, immediate, and the GPR<->FP conversions.
+//     All write the full vector register, zeroing above the lane.
+//   - FP data processing, 3-source (0x1F class): FMADD..FNMSUB. The
+//     accumulator is a separate source operand (Ra), not the
+//     destination, so Rd is a pure write (Rd == Ra aliasing arrives
+//     as a read of Ra and stops the scan anyway).
+//   - SIMD&FP loads: unsigned-offset, the other addressing modes,
+//     the literal form, and LDP. Loads replace the register.
+static bool insn_overwrites_vreg_dest(uint32_t op)
+{
+    if ((op & 0x5F200000u) == 0x1E200000u) {
+        return true;    // FP scalar data processing + conversions
+    }
+    if ((op & 0x5F000000u) == 0x1F000000u) {
+        return true;    // FP scalar 3-source
+    }
+    if ((op & 0x3F000000u) == 0x3D000000u) {
+        return true;    // SIMD&FP LDR/STR, unsigned offset
+    }
+    if ((op & 0x3F200000u) == 0x3C000000u) {
+        return true;    // SIMD&FP LDUR/LDR pre/post/register-offset
+    }
+    if ((op & 0x3B000000u) == 0x18000000u && (op & (1u << 26)) != 0) {
+        return true;    // SIMD&FP LDR (literal)
+    }
+    if ((op & 0x3A000000u) == 0x28000000u && (op & (1u << 26)) != 0) {
+        return true;    // SIMD&FP LDP/STP (all addressing modes)
+    }
+    return false;
+}
+
+// Determine whether `insn` reads and/or writes vector register `reg`
+// (0..31), from the Capstone detail. Parallel to insn_reg_access with
+// the written-operand default inverted: see insn_overwrites_vreg_dest.
+// With no detail available, conservatively assume a read.
+static void insn_vreg_access(const cs_insn *insn, int reg,
+                             bool *reads, bool *writes)
+{
+    *reads = false;
+    *writes = false;
+    uint32_t op = insn->size == 4 ? insn_word(insn) : 0;
+    const cs_detail *detail = insn->detail;
+    if (detail == NULL) {
+        *reads = true;
+        return;
+    }
+    const cs_arm64 *a = &detail->arm64;
+    for (int i = 0; i < a->op_count; i++) {
+        const cs_arm64_op *o = &a->operands[i];
+        if (o->type != ARM64_OP_REG) {
+            continue;
+        }
+        if (arm64_vreg_num(o->reg) != reg) {
+            continue;
+        }
+        if (o->access & CS_AC_WRITE) {
+            *writes = true;
+            if (!insn_overwrites_vreg_dest(op)) {
+                *reads = true;
+            }
+        }
+        if (o->access & CS_AC_READ) {
+            *reads = true;
+        }
+    }
+    for (uint8_t i = 0; i < detail->regs_read_count; i++) {
+        if (arm64_vreg_num(detail->regs_read[i]) == reg) {
+            *reads = true;
+        }
+    }
+    for (uint8_t i = 0; i < detail->regs_write_count; i++) {
+        if (arm64_vreg_num(detail->regs_write[i]) == reg) {
+            *writes = true;
+            if (!insn_overwrites_vreg_dest(op)) {
+                *reads = true;
+            }
+        }
+    }
+}
+
+// Vector-register liveness classification, parallel to
+// classify_reg_liveness. Any control transfer stops the scan
+// conservatively; a read keeps the register live; a whitelisted full
+// overwrite kills it.
+static liveness_t classify_fpreg_liveness(const cs_insn *insn, int reg)
+{
+    uint32_t op = insn_word(insn);
+    if ((op & 0xFF000010u) == 0x54000000u
+            || (op & 0x7C000000u) == 0x14000000u
+            || (op & 0x7E000000u) == 0x34000000u
+            || (op & 0x7E000000u) == 0x36000000u
+            || (op & 0xFE000000u) == 0xD6000000u) {
+        return LIV_TERM_UNSAFE;
+    }
+    bool reads, writes;
+    insn_vreg_access(insn, reg, &reads, &writes);
+    if (reads) {
+        return LIV_READ;
+    }
+    if (writes) {
+        return LIV_OVERWRITE;
+    }
+    return LIV_UNKNOWN;
+}
+
+// Forward vector-register liveness scan for a deferred finding whose
+// rewrite deletes the producer of an FP/vector temporary, parallel to
+// armlint_advance_pending_mz.
+bool armlint_advance_pending_fp(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (!state->pending_fp_active) {
+        return false;
+    }
+    if (insn->size != 4) {
+        state->pending_fp_active = false;
+        return false;
+    }
+    switch (classify_fpreg_liveness(insn, state->pending_fp_reg)) {
+    case LIV_OVERWRITE:
+        *out = state->pending_fp_finding;
+        state->pending_fp_active = false;
+        return true;
+    case LIV_READ:
+    case LIV_TERM_SAFE:
+    case LIV_TERM_UNSAFE:
+        state->pending_fp_active = false;
+        return false;
+    case LIV_UNKNOWN:
+        if (state->pending_fp_window == 0 || --state->pending_fp_window == 0) {
+            state->pending_fp_active = false;
+        }
+        return false;
+    }
+    return false;
+}
+
+// Stash *out as a deferred finding gated on vector register `reg`
+// being dead afterward -- the FP twin of defer_dead_mov, with the same
+// single-slot semantics.
+static bool defer_dead_fpreg(armlint_state *state,
+                             const armlint_finding *out, unsigned reg)
+{
+    state->pending_fp_finding = *out;
+    state->pending_fp_active = true;
+    state->pending_fp_window = LIVENESS_WINDOW;
+    state->pending_fp_reg = (int)reg;
     return false;
 }
 
@@ -6709,9 +6910,9 @@ bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
     //     sibling: negating an OPERAND first computes
     //     round(-(a*b)), which differs from -(round(a*b)) under the
     //     directed rounding modes, and is deliberately not matched.
-    //     The FNEG must overwrite the product in place (Rd == Rn ==
-    //     the FMUL's Rd): a fresh destination would leave the
-    //     product live, and no FP-register liveness scan exists yet.
+    //     The FNEG must read the product (Rn == the FMUL's Rd). An
+    //     in-place destination kills it structurally; a fresh one
+    //     defers through the vector-register liveness scan.
     //     All three scalar writes zero the vector register above the
     //     lane, so the final 128-bit state is identical too.
     if (state->fmn_active) {
@@ -6720,7 +6921,6 @@ bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
             unsigned rd = op & 0x1Fu;
             unsigned rn = (op >> 5) & 0x1Fu;
             if (type == state->fmn_type
-                    && rd == state->fmn_rd
                     && rn == state->fmn_rd) {
                 char sd = state->fmn_type ? 'd' : 's';
 
@@ -6731,13 +6931,22 @@ bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
 
                 snprintf(out->detail, sizeof(out->detail),
                     "-> fnmul %c%u, %c%u, %c%u",
-                    sd, state->fmn_rd, sd, state->fmn_rn,
+                    sd, rd, sd, state->fmn_rn,
                     sd, state->fmn_rm);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->fmn_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
                     "%s %s", insn->mnemonic, insn->op_str);
-                produced = true;
+
+                // The rewrite deletes both instructions; the product
+                // register must be dead afterward. An in-place FNEG
+                // overwrites it on the spot; a fresh destination
+                // defers through the vector-register liveness scan.
+                if (rd == state->fmn_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_fpreg(state, out, state->fmn_rd);
+                }
             }
         }
         // Strict adjacency: clear regardless of match.
@@ -11324,6 +11533,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_sv,
     armlint_advance_pending_zs,
     armlint_advance_pending_cssc,
+    armlint_advance_pending_fp,
     armlint_advance_pending_mz,
     armlint_advance_pending_tb,
     check_mul_strength_reduce,

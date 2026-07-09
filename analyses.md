@@ -1453,8 +1453,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   in-place).
 * The remaining CSSC candidate -- the NEON popcount round trip
   (`fmov d0, x0 ; cnt v0.8b ; addv b0 ; fmov w0, s0` ->
-  `cnt w0, w0`) -- needs the vector temporary proven dead, i.e. the
-  FP-register liveness scan; deferred until that exists.
+  `cnt w0, w0`) -- needs the vector temporary proven dead; the
+  FP-register liveness scan now exists, so only the four-stage chain
+  match remains future work.
 
 ## LDR literal foldable to MOV/FMOV immediate
 
@@ -1539,12 +1540,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `-(round(a*b))` under the directed rounding modes (`FPCR.RMode` =
   RP or RM) -- the two agree only under round-to-nearest, and armlint
   cannot know the dynamic mode.
-* Soundness (structural): the `FNEG` must read and overwrite the
-  `FMUL`'s destination in place (`fneg dd, dd`), proving the
-  intermediate product dead -- the same argument as the integer
-  producer folds. A fresh `FNEG` destination would need an
-  FP-register liveness scan, which does not exist yet (the same v1
-  limitation as the `MOVI` + vector-compare fold). No aliasing
+* Soundness: the `FNEG` must read the `FMUL`'s destination (`Rn` =
+  the product register). An in-place `fneg dd, dd` overwrites the
+  product on the spot -- the same structural argument as the integer
+  producer folds -- and reports immediately; a fresh destination
+  defers through the FP/vector-register liveness scan until the
+  product register provably dies. The scan watches all six views
+  (B/H/S/D/Q/V) of the register and treats written vector operands
+  as read-modify-writes unless their class provably overwrites in
+  full (scalar FP ops, FP loads) -- lane inserts, accumulators and
+  friends can never wrongly commit a finding. No aliasing
   exclusions are needed: the rewrite reads the multiply's own sources
   at its position, and even in-place multiplies read before writing
   in both spellings.

@@ -7456,8 +7456,52 @@ static void test_fmul_fneg_fold(void)
     fneg_scalar(&code[4], 1, 0, 0);
     assert(run_helper_check(code, 8) == 1);
 
-    // FNEG into a fresh register leaves the product live; no
-    // FP-register liveness scan exists, so no fold.
+    // FNEG into a fresh register defers on the product register; an
+    // FP-side overwrite (scalar FP class) commits it.
+    {
+        uint8_t buf[12];
+        fmul_scalar(&buf[0], 1, 0, 1, 2);
+        fneg_scalar(&buf[4], 1, 5, 0);
+        // fmov d0, d3 fully overwrites v0.
+        write_le32(&buf[8], 0x1E604000u | (1u << 22) | (3u << 5) | 0u);
+        assert(run_helper_check(buf, 12) == 1);
+
+        // A SIMD&FP load kills through the Q view too.
+        fmul_scalar(&buf[0], 1, 0, 1, 2);
+        fneg_scalar(&buf[4], 1, 5, 0);
+        ldr_q_fp(&buf[8], 0, 1, 0);
+        assert(run_helper_check(buf, 12) == 1);
+
+        // A read of the product through ANY view discards: fadd
+        // reading d0...
+        fmul_scalar(&buf[0], 1, 0, 1, 2);
+        fneg_scalar(&buf[4], 1, 5, 0);
+        write_le32(&buf[8], 0x1E602800u | (1u << 22) | (1u << 16)
+            | (0u << 5) | 6u);
+        assert(run_helper_check(buf, 12) == 0);
+
+        // ...or the S view of the same register.
+        fmul_scalar(&buf[0], 1, 0, 1, 2);
+        fneg_scalar(&buf[4], 1, 5, 0);
+        write_le32(&buf[8], 0x1E202800u | (1u << 16) | (0u << 5) | 6u);
+        assert(run_helper_check(buf, 12) == 0);
+
+        // A lane insert into the product register is a partial write
+        // -- a read-modify-write, never a kill.
+        fmul_scalar(&buf[0], 1, 0, 1, 2);
+        fneg_scalar(&buf[4], 1, 5, 0);
+        write_le32(&buf[8], 0x4E0C1C00u | (1u << 5) | 0u);
+        assert(run_helper_check(buf, 12) == 0);
+
+        // A control transfer stops the scan conservatively.
+        fmul_scalar(&buf[0], 1, 0, 1, 2);
+        fneg_scalar(&buf[4], 1, 5, 0);
+        ret_(&buf[8]);
+        assert(run_helper_check(buf, 12) == 0);
+    }
+
+    // Without any later kill the fresh-destination product is never
+    // proven dead: nothing is emitted.
     fmul_scalar(&code[0], 1, 0, 1, 2);
     fneg_scalar(&code[4], 1, 5, 0);
     assert(run_helper_check(code, 8) == 0);

@@ -736,11 +736,12 @@ bool check_udiv_msub_remainder(armlint_state *state, const cs_insn *insn,
 // round(-(a*b)), which differs from -(round(a*b)) under the directed
 // rounding modes (FNMUL is the latter).
 //
-// The FNEG must read and overwrite the FMUL's destination (Rd == Rn
-// == the product register): that proves the intermediate product dead
-// structurally, and a fresh FNEG destination would need an FP-register
-// liveness scan, which does not exist yet -- the same v1 limitation as
-// the MOVI + vector-compare fold. All three scalar writes zero the
+// The FNEG must read the FMUL's destination (Rn == the product
+// register). An FNEG that overwrites it in place (Rd == Rn) proves
+// the intermediate product dead structurally and reports
+// immediately; a fresh destination defers through the FP/vector
+// register liveness scan (armlint_advance_pending_fp) until the
+// product register provably dies. All three scalar writes zero the
 // vector register above the written lane, so the final 128-bit state
 // is identical. Half precision (FEAT_FP16) is not matched, consistent
 // with the FMOV folds. No aliasing exclusions are needed: the rewrite
@@ -875,8 +876,9 @@ bool check_adr_fold(armlint_state *state, const cs_insn *insn,
 //
 // The remaining CSSC candidate -- the NEON popcount round trip
 // (fmov d0, x0 ; cnt ; addv ; fmov) -> cnt Xd, Xn -- requires
-// proving the vector temporary dead, i.e. the FP-register liveness
-// scan; deferred until that exists.
+// proving the vector temporary dead; the FP-register liveness scan
+// (armlint_advance_pending_fp) now exists, so only the four-stage
+// chain match remains future work.
 bool check_cssc_minmax(armlint_state *state, const cs_insn *insn,
                        size_t offset, armlint_finding *out);
 bool check_cssc_abs(armlint_state *state, const cs_insn *insn,
@@ -889,6 +891,24 @@ bool check_cssc_ctz(armlint_state *state, const cs_insn *insn,
 bool armlint_advance_pending_cssc(armlint_state *state,
                                   const cs_insn *insn,
                                   size_t offset, armlint_finding *out);
+
+// Forward FP/vector-register liveness scan, the FP twin of
+// armlint_advance_pending_mz: emits a deferred finding once a later
+// instruction provably overwrites the watched vector register before
+// any read or control transfer. All six views (B/H/S/D/Q/V) of the
+// register count as touches. Because vector read-modify-writers are
+// pervasive (accumulators, lane inserts, bitwise selects, the vector
+// ORR/BIC immediates), a written vector operand is treated as also
+// read unless its class is on the pure-overwrite whitelist (scalar FP
+// data processing, FP 3-source, SIMD&FP loads) -- unlisted writers
+// merely fail to commit, keeping all error in the false-negative
+// direction. Used by the FMUL + FNEG fold's fresh-destination
+// consumer; unlocks the MOVI + vector-compare fresh destination, the
+// CSSC popcount chain, the FCVTZS + STR store fold, and the FMOV
+// round trips as follow-ups.
+bool armlint_advance_pending_fp(armlint_state *state,
+                                const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
 
 // Detect a MOV chain materialising an FP bit pattern or a small
 // integer, immediately followed by the GPR -> FP transfer or
