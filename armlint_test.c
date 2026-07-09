@@ -5210,13 +5210,13 @@ static void test_ldp_stp_coalesce(void)
     str_w(&code[4], 31, 2, 2);
     assert(run_helper_check(code, 8) == 1);
 
-    // -- Negative: X-form zero stores do NOT consolidate. Two XZR stores
-    //    span 16 bytes (no single-GPR-store form), and their shared
-    //    transfer register keeps them out of the STP path too. --
+    // -- Positive: X-form zero stores span 16 bytes -- no
+    //    single-GPR-store form -- so they take the ordinary STP path,
+    //    folding to the canonical 16-byte zero store STP XZR, XZR. --
 
     str_x(&code[0], 31, 2, 0);
     str_x(&code[4], 31, 2, 1);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
 
     // -- Positive: a mixed pair (only one WZR source) still coalesces
     //    into a plain STP; the zero operand must render as WZR. --
@@ -5224,6 +5224,36 @@ static void test_ldp_stp_coalesce(void)
     str_w(&code[0], 31, 2, 0);   // str wzr, [x2, #0]
     str_w(&code[4], 0, 2, 1);    // str w0,  [x2, #4]  -> stp wzr, w0
     assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: repeated STORE source. STP has no Rt1 != Rt2
+    //    restriction (only loads are CONSTRAINED UNPREDICTABLE), so
+    //    storing the same register twice pairs fine. --
+
+    // str x5, [x2, #0] ; str x5, [x2, #8] -> stp x5, x5, [x2, #0]
+    str_x(&code[0], 5, 2, 0);
+    str_x(&code[4], 5, 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W-form.
+    str_w(&code[0], 5, 2, 0);
+    str_w(&code[4], 5, 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Reverse order.
+    str_x(&code[0], 5, 2, 1);
+    str_x(&code[4], 5, 2, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // FP D-form.
+    str_d_fp(&code[0], 0, 1, 0);
+    str_d_fp(&code[4], 0, 1, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Repeated LOAD destination still never folds: LDP with
+    // Rt1 == Rt2 is CONSTRAINED UNPREDICTABLE.
+    ldr_x(&code[0], 5, 2, 0);
+    ldr_x(&code[4], 5, 2, 1);
+    assert(run_helper_check(code, 8) == 0);
 }
 
 // MOVI Vd.4S, #0 (Q=1, 32-bit element, imm8=0): 0x4f000400 | Rd.

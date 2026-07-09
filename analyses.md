@@ -623,8 +623,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Constraints checked: same base register `Rn`; same access size
   (both W, both X, or the same S/D/Q); same direction (load/load or
   store/store); consecutive offsets (`imm12_2 = imm12_1 + 1` in
-  scaled units); `Rt1 != Rt2` (LDP/STP requires distinct
-  destinations); for integer loads, the first instruction's
+  scaled units); `Rt1 != Rt2` for LOADS only -- `LDP`/`LDPSW` with
+  `Rt1 == Rt2` is CONSTRAINED UNPREDICTABLE, but stores have no such
+  restriction, so a repeated source pairs fine
+  (`str x5, [sp] ; str x5, [sp, #8]` -> `stp x5, x5, [sp]`); for
+  integer loads, the first instruction's
   `Rt != Rn` (else the first load clobbers the base before the
   second load reads it) -- a SIMD&FP `Rt` can never alias the
   integer base, so that guard does not apply to FP pairs. The LOWER

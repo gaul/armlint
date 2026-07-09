@@ -1329,6 +1329,13 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
 // scaled); LDUR / pre- and post-indexed forms are deferred to avoid
 // the implementation-defined behaviour around unaligned LDP/STP.
 // A pending LDR/STR will not pair with an LDRSW (different opcode).
+//
+// A repeated register pairs only for STORES: STP Rt, Rt simply
+// stores the value twice (str x5, [sp] ; str x5, [sp, #8] ->
+// stp x5, x5, [sp]), while LDP/LDPSW with Rt1 == Rt2 is CONSTRAINED
+// UNPREDICTABLE and never folds. The W-form zero-register store pair
+// keeps its narrower rewrite (STR XZR covers the same eight bytes);
+// the X-form pair folds to STP XZR, XZR like any repeated source.
 bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 

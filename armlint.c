@@ -8472,7 +8472,10 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     //   - same size (W/W, X/X, or equal S/D/Q)
     //   - same base Rn
     //   - consecutive in scaled units (forward or reverse)
-    //   - distinct destination registers (LDP/STP requires Rt1 != Rt2)
+    //   - distinct destination registers for LOADS: LDP/LDPSW with
+    //     Rt1 == Rt2 is CONSTRAINED UNPREDICTABLE. Stores have no
+    //     such restriction -- STP Rt, Rt stores the value twice --
+    //     so a repeated source register pairs fine.
     //   - pending's Rt != Rn for integer loads (the FIRST load in
     //     source order would clobber the base before the second's
     //     address is computed in the original sequence). The aliasing
@@ -8485,10 +8488,8 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     unsigned low_imm12 = forward ? state->lsp_imm12 : imm12;
 
     // A pair of adjacent W-form zero-register stores writes the same
-    // eight bytes as one STR XZR. The LDP/STP gate below would reject it
-    // for sharing a transfer register (rt == lsp_rt == 31); allow that
-    // single case through and emit the narrower single store instead of
-    // an STP WZR, WZR.
+    // eight bytes as one STR XZR: prefer that narrower rewrite over
+    // the STP WZR, WZR the general path would emit.
     bool zero_store = !is_load && !is_fp && !is_64bit && !is_sext
         && state->lsp_rt == 31u && rt == 31u;
 
@@ -8499,7 +8500,7 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
             && state->lsp_is_load == is_load
             && (is_fp || state->lsp_is_64bit == is_64bit)
             && state->lsp_rn == rn
-            && (rt != state->lsp_rt || zero_store)
+            && (!is_load || rt != state->lsp_rt)
             && low_imm12 <= 63u
             && (!is_load || is_fp || state->lsp_rt != rn)) {
         // LDPSW always loads Xt with 4-byte transfer; SIMD&FP pairs

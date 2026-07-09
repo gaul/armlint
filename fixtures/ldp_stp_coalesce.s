@@ -74,4 +74,25 @@ _main:
     str     wzr, [x12]
     str     w5, [x12, #4]          // -> stp wzr, w5, [x12]
 
+    // Positive: a repeated STORE source pairs fine -- STP has no
+    // Rt1 != Rt2 restriction (only loads are CONSTRAINED
+    // UNPREDICTABLE).
+    str     x5, [sp]
+    str     x5, [sp, #8]           // -> stp x5, x5, [sp]
+
+    // Positive: FP repeated source.
+    str     d0, [x2]
+    str     d0, [x2, #8]           // -> stp d0, d0, [x2]
+
+    // Positive: X-form zero stores span 16 bytes -- no single store
+    // covers that -- so they fold to the canonical 16-byte zero
+    // store.
+    str     xzr, [x12]
+    str     xzr, [x12, #8]         // -> stp xzr, xzr, [x12]
+
+    // Negative: a repeated LOAD destination never folds (LDP with
+    // Rt1 == Rt2 is CONSTRAINED UNPREDICTABLE).
+    ldr     x5, [sp]
+    ldr     x5, [sp, #8]
+
     ret
