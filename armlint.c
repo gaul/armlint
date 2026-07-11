@@ -691,6 +691,14 @@ struct armlint_state {
     const uint8_t *buf;
     size_t buf_len;
 
+    // One bit per 4-byte slot of the buffer (bit i covers byte offset
+    // 4*i), set when some direct branch in the buffer targets that
+    // slot. Built by armlint_state_set_buffer alongside buf; NULL when
+    // no buffer was given (or on allocation failure), which keeps the
+    // side-entry gate off. Heap-owned by the state.
+    uint8_t *branch_targets;
+    size_t branch_target_slots;
+
     // Pending ADR awaiting an adjacent single use of the materialised
     // address: a zero-offset load through it (foldable to LDR
     // (literal)) or a BR of it (foldable to a direct B). adf_target
@@ -731,6 +739,90 @@ struct armlint_state {
 
 #define LIVENESS_WINDOW 16
 
+// Decode one little-endian A64 word straight out of the raw buffer.
+static uint32_t buf_word_at(const uint8_t *buf, size_t offset)
+{
+    return (uint32_t)buf[offset]
+        | ((uint32_t)buf[offset + 1] << 8)
+        | ((uint32_t)buf[offset + 2] << 16)
+        | ((uint32_t)buf[offset + 3] << 24);
+}
+
+// Scan the raw buffer once and mark every 4-byte slot that some
+// direct branch targets: B/BL (imm26), B.cond/BC.cond (imm19),
+// CBZ/CBNZ (imm19), TBZ/TBNZ (imm14). Returns a heap bitmap (one bit
+// per slot, bit i covering byte offset 4*i) and stores the slot
+// count in *out_slots; NULL when there is nothing to scan or the
+// allocation fails. The map can only under-approximate real entry
+// points: indirect branches (BR/BLR, jump tables) and branches from
+// other sections are invisible. Data-in-text words that happen to
+// decode as branches add spurious targets, and an unresolved
+// object-file branch relocation (displacement 0) marks its own slot;
+// consumers use the map to suppress rewrites, so a spurious bit costs
+// at most a finding, never soundness -- and a branch word is never
+// itself a foldable memory op.
+static uint8_t *scan_branch_targets(const uint8_t *buf, size_t len,
+                                    size_t *out_slots)
+{
+    *out_slots = 0;
+    if (buf == NULL || len < 4) {
+        return NULL;
+    }
+    size_t slots = len / 4;
+    uint8_t *map = calloc((slots + 7) / 8, 1);
+    if (map == NULL) {
+        return NULL;
+    }
+    for (size_t off = 0; off + 4 <= len; off += 4) {
+        uint32_t op = buf_word_at(buf, off);
+        int64_t disp;
+        if ((op & 0x7C000000u) == 0x14000000u) {
+            // B / BL: imm26, in words.
+            int32_t imm26 = (int32_t)(op & 0x3FFFFFFu);
+            imm26 = (imm26 ^ 0x2000000) - 0x2000000;
+            disp = (int64_t)imm26 * 4;
+        } else if ((op & 0xFF000000u) == 0x54000000u
+                || (op & 0x7E000000u) == 0x34000000u) {
+            // B.cond/BC.cond (bit 4 distinguishes them; both carry
+            // imm19) and CBZ/CBNZ: imm19, in words.
+            int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+            imm19 = (imm19 ^ 0x40000) - 0x40000;
+            disp = (int64_t)imm19 * 4;
+        } else if ((op & 0x7E000000u) == 0x36000000u) {
+            // TBZ/TBNZ: imm14, in words.
+            int32_t imm14 = (int32_t)((op >> 5) & 0x3FFFu);
+            imm14 = (imm14 ^ 0x2000) - 0x2000;
+            disp = (int64_t)imm14 * 4;
+        } else {
+            continue;
+        }
+        int64_t target = (int64_t)off + disp;
+        if (target >= 0 && (uint64_t)target < (uint64_t)len) {
+            size_t slot = (size_t)target / 4u;
+            map[slot >> 3] |= (uint8_t)(1u << (slot & 7u));
+        }
+    }
+    *out_slots = slots;
+    return map;
+}
+
+// True when the instruction at this buffer offset is the target of a
+// direct branch (see scan_branch_targets). A 2->1 fold must not
+// rewrite a memory op that is independently a branch target: the side
+// entry skips the paired ADD/SUB, so the merged instruction would
+// compute a different address (or writeback) on that path. Without a
+// buffer there is no map and the gate stays off.
+static bool offset_is_branch_target(const armlint_state *state,
+                                    size_t offset)
+{
+    size_t slot = offset / 4u;
+    if (state->branch_targets == NULL
+            || slot >= state->branch_target_slots) {
+        return false;
+    }
+    return ((state->branch_targets[slot >> 3] >> (slot & 7u)) & 1u) != 0;
+}
+
 armlint_state *armlint_state_create(void)
 {
     armlint_state *s = calloc(1, sizeof(*s));
@@ -742,6 +834,9 @@ void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
 {
     state->buf = buf;
     state->buf_len = len;
+    free(state->branch_targets);
+    state->branch_targets = scan_branch_targets(buf, len,
+        &state->branch_target_slots);
 }
 
 void armlint_state_set_features(armlint_state *state, unsigned features)
@@ -751,11 +846,17 @@ void armlint_state_set_features(armlint_state *state, unsigned features)
 
 void armlint_state_destroy(armlint_state *state)
 {
+    if (state != NULL) {
+        free(state->branch_targets);
+    }
     free(state);
 }
 
 void armlint_state_reset(armlint_state *state)
 {
+    // Reset drops the buffer association (buf is zeroed), so the
+    // branch-target map goes with it.
+    free(state->branch_targets);
     memset(state, 0, sizeof(*state));
 }
 
@@ -10920,10 +11021,15 @@ bool check_add_ldr_imm_offset(armlint_state *state,
             is_store = true;
         }
         // A store whose data register is the ADD's Rd cannot fold:
-        // the rewritten store would read the deleted sum.
+        // the rewritten store would read the deleted sum. A memory op
+        // that is itself a direct-branch target cannot either: the
+        // side entry skips the ADD (rotated loops and list walks
+        // branch straight to the load), so the folded form would
+        // apply the immediate on a path that never added it.
         if (matched
                 && ls_rn == state->addi_pending_rd
-                && !(is_store && ls_rt == state->addi_pending_rd)) {
+                && !(is_store && ls_rt == state->addi_pending_rd)
+                && !offset_is_branch_target(state, offset)) {
             // The access's own byte offset is imm12 * access_size,
             // already a multiple of access_size by construction. So the
             // combined offset's alignment depends only on the ADD's imm,
@@ -11382,7 +11488,14 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
                     pimm <= (state->lspr_pending_is_sub ? 256u : 255u);
             }
         }
-        if (matched && !rt_aliases_rn && imm_in_range) {
+        // A close that is itself a direct-branch target has a side
+        // entry that skips the ADD/SUB: the pre-indexed rewrite would
+        // bump the base on that path too (the rotated-loop idiom --
+        // while (isspace(*p)) p++ -- enters at the load, past the
+        // increment).
+        bool side_entry = matched
+            && offset_is_branch_target(state, offset);
+        if (matched && !rt_aliases_rn && imm_in_range && !side_entry) {
             const char *mnem = is_pair
                 ? pair_mnemonic(is_load, is_sw)
                 : ls_mnemonic(is_fp, is_load, size);

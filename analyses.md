@@ -1943,6 +1943,22 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   update.
 * SUB-immediate is not folded: the LDR unsigned-offset form has
   no negative-immediate encoding.
+* Side entries: a memory op that is itself the target of a direct
+  branch (B/BL, B.cond/BC.cond, CBZ/CBNZ, TBZ/TBNZ) never closes a
+  fold. The entering path skips the ADD -- the list-walk idiom
+  `p = p->next` re-enters at the load with the base holding a node
+  pointer, not the ADD's sum -- so the merged instruction would apply
+  the immediate on a path that never added it. The gate reads the
+  branch-target map that armlint_state_set_buffer builds once per
+  section from the raw words; without a buffer it is off (bufferless
+  callers keep the old behavior). The map deliberately
+  under-approximates: indirect branches (BR, jump tables) and
+  cross-section entries are invisible, so a residual false positive
+  is possible where such an entry lands exactly on a flagged memory
+  op. A branch onto the ADD itself does not suppress the fold --
+  that entry executes the whole pair. Data words that decode as
+  branches can only add spurious targets, i.e. suppress a finding,
+  never unsuppress one.
 
 ## LDR/STR (or LDP/STP) + ADD/SUB foldable to post-indexed form
 
@@ -2056,6 +2072,17 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   writeback is pointless for a dead base, so its no-writeback rewrite
   is strictly better there. The two findings offer alternative
   outcomes, like the CMP-drop/CBZ-fold overlap.
+* Side entries: a memory op that is itself the target of a direct
+  branch never closes a fold. The rotated-loop idiom -- `while
+  (isspace(*p)) p++` compiles to an entry branch that lands on the
+  load, past the increment -- is exactly this shape, and the
+  pre-indexed rewrite would bump the base on the entering path too.
+  Unlike the immediate-offset fold, no liveness argument catches
+  this (the rewrite keeps the base live on purpose), so the gate is
+  the only defense. It shares the branch-target map described in the
+  immediate-offset section (built by armlint_state_set_buffer; off
+  without a buffer; blind to indirect branches). A branch onto the
+  ADD/SUB itself does not suppress the fold.
 
 ## Appendix: folds rejected for soundness
 

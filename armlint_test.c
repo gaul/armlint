@@ -11186,6 +11186,45 @@ static void test_liveness_matches_capstone(void)
     cs_free(insn, 1);
 }
 
+// A direct branch landing on the memory op of a would-be fold marks a
+// side entry: paths through the branch skip the ADD, so neither the
+// unsigned-offset nor the pre-indexed rewrite is sound. The gate keys
+// off the branch-target map that armlint_state_set_buffer builds, so
+// it needs the buffer-aware harness; the plain harness has no map and
+// keeps the old behavior. A branch onto the ADD itself is harmless --
+// that entry runs the whole pair -- and must not suppress the fold.
+static void test_branch_target_side_entry(void)
+{
+    uint8_t code[12];
+
+    // Unsigned-offset shape: add x3, x1, #16 ; ldr x3, [x3] with a
+    // conditional branch back onto the LDR (the list-walk re-entry).
+    add_x_imm(&code[0], 3, 1, 16);
+    ldr_x_uimm0(&code[4], 3, 3);
+    b_cond(&code[8], 1 /* NE */, -4);
+    assert(run_buffer_check(code, 12) == 0);
+    // No buffer -> no branch-target map -> flagged as before.
+    assert(run_check(code, 12) == 1);
+
+    // Branch onto the ADD instead: still flagged.
+    b_cond(&code[8], 1 /* NE */, -8);
+    assert(run_buffer_check(code, 12) == 1);
+
+    // Pre-indexed shape: add x3, x3, #1 ; ldrb w8, [x3] with the
+    // rotated-loop back edge onto the LDRB. (The deferred
+    // unsigned-offset fold is discarded either way: the branch ends
+    // its liveness scan.)
+    add_x_imm(&code[0], 3, 3, 1);
+    ldrb_w_uimm0(&code[4], 8, 3);
+    b_cond(&code[8], 0 /* EQ */, -4);
+    assert(run_buffer_check(code, 12) == 0);
+    assert(run_check(code, 12) == 1);
+
+    // Branch onto the ADD instead: still flagged.
+    b_cond(&code[8], 0 /* EQ */, -8);
+    assert(run_buffer_check(code, 12) == 1);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -11259,6 +11298,7 @@ int main(void)
     test_add_ldr_imm_offset();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
+    test_branch_target_side_entry();
     test_liveness_matches_capstone();
 
     cs_close(&g_handle);

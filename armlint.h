@@ -75,8 +75,11 @@ void armlint_state_set_features(armlint_state *state, unsigned features);
 // Give binary-aware checks access to the full scanned buffer (the
 // bytes the driver is disassembling, offset 0 = the first byte).
 // Checks that chase PC-relative data -- literal pools -- read from
-// it; without a buffer those checks stay silent. The pointer must
-// outlive the scan.
+// it; without a buffer those checks stay silent. Setting the buffer
+// also runs a one-pass scan of its direct branches (B/BL, B.cond,
+// CBZ/CBNZ, TBZ/TBNZ) to build the branch-target map that gates the
+// 2->1 memory-op folds against side entries; without a buffer that
+// gate stays off. The pointer must outlive the scan.
 void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
                               size_t len);
 
@@ -1425,6 +1428,13 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
 // discarded LDR (Rt=XZR), losing the SP update, so Rd = 31 is
 // excluded. imm = 0 with a GPR source is the redundant ADD that
 // check_add_sub_zero owns and is excluded here.
+//
+// Side entries: a memory op that is itself a direct-branch target is
+// never folded -- the entering path skips the ADD (list walks re-enter
+// at the load), so the merged instruction would apply the immediate on
+// a path that never added it. The gate needs the branch-target map
+// built by armlint_state_set_buffer; without a buffer it is off.
+// Indirect branches (BR, jump tables) remain invisible to it.
 bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset, armlint_finding *out);
@@ -1513,6 +1523,14 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
 // preserves both the access address and the final base value. Same
 // code-size/decode-slot win as post-index; no backend throughput
 // change on most OoO cores.
+//
+// Side entries: a memory op that is itself a direct-branch target is
+// never folded. The rotated-loop idiom -- while (isspace(*p)) p++ --
+// puts the increment at the loop top and enters at the load, so the
+// pre-indexed rewrite would bump the base on the entering path too.
+// The gate needs the branch-target map built by
+// armlint_state_set_buffer; without a buffer it is off. Indirect
+// branches (BR, jump tables) remain invisible to it.
 bool check_add_ldr_str_pre_indexed(armlint_state *state,
                                    const cs_insn *insn,
                                    size_t offset, armlint_finding *out);
