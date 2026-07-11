@@ -120,8 +120,21 @@ typedef bool (*armlint_check_fn)(armlint_state *state, const cs_insn *insn,
 // Iterate from 0 to armlint_check_registry_count - 1; both
 // check_instructions (driver) and the test harness drive findings off
 // this single list, so adding a check requires editing only one place.
+// Consumers must drop any finding for which
+// armlint_finding_has_side_entry() returns true before reporting it;
+// the driver and the test harness both do.
 extern const armlint_check_fn armlint_check_registry[];
 extern const size_t armlint_check_registry_count;
+
+// True when some instruction of the finding's window AFTER the first
+// is the target of a direct branch -- a side entry into the rewritten
+// window, which invalidates any multi-instruction rewrite because the
+// entering path skips the window's head. Registry consumers drop such
+// findings at emission. Requires the branch-target map built by
+// armlint_state_set_buffer; without a buffer this always returns
+// false (single-instruction findings are immune either way).
+bool armlint_finding_has_side_entry(const armlint_state *state,
+                                    const armlint_finding *finding);
 
 // Track MOVZ/MOVN + MOVK chains and flag one whose final value is
 // reachable more cheaply: either as a single bitmask-immediate MOV

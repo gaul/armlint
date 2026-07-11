@@ -1600,6 +1600,15 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * The Rn (base) slot of STR is intentionally excluded: register 31
   in addressing means SP, not ZR, so replacing the base would
   silently change semantics.
+* Side entries dominate this check's false positives on optimized
+  code -- by selection: were the pair straight-line, the compiler
+  would have used ZR directly, so the findings that survive skew
+  toward the shared-return shape, `mov x8, #0` on one arm joining a
+  common `mov x0, x8 ; ret` tail whose other predecessors arrive
+  with a live, non-zero register (every one of the 67 findings on
+  /bin/bash and 38 on /bin/zsh was this). The central emission gate
+  (`armlint_finding_has_side_entry`) drops a finding whose use slot
+  is a direct-branch target.
 
 ## MOV + register-offset LDR/STR foldable to immediate offset
 
@@ -1958,7 +1967,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   op. A branch onto the ADD itself does not suppress the fold --
   that entry executes the whole pair. Data words that decode as
   branches can only add spurious targets, i.e. suppress a finding,
-  never unsuppress one.
+  never unsuppress one. The same rule is enforced centrally for
+  every multi-instruction finding at emission
+  (`armlint_finding_has_side_entry`: no instruction of the rewritten
+  window after the first may be a branch target); this check gates
+  at close anyway so a doomed pairing never occupies the shared
+  deferral slot.
 
 ## LDR/STR (or LDP/STP) + ADD/SUB foldable to post-indexed form
 
@@ -2081,8 +2095,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   this (the rewrite keeps the base live on purpose), so the gate is
   the only defense. It shares the branch-target map described in the
   immediate-offset section (built by armlint_state_set_buffer; off
-  without a buffer; blind to indirect branches). A branch onto the
-  ADD/SUB itself does not suppress the fold.
+  without a buffer; blind to indirect branches), and the central
+  emission gate covers it as well. A branch onto the ADD/SUB itself
+  does not suppress the fold.
 
 ## Appendix: folds rejected for soundness
 

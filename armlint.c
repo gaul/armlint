@@ -823,6 +823,27 @@ static bool offset_is_branch_target(const armlint_state *state,
     return ((state->branch_targets[slot >> 3] >> (slot & 7u)) & 1u) != 0;
 }
 
+bool armlint_finding_has_side_entry(const armlint_state *state,
+                                    const armlint_finding *finding)
+{
+    // Every finding replaces the contiguous insn_count-instruction
+    // window at start_offset with an equivalent that is only correct
+    // when entered at its top, so a branch onto any later slot
+    // invalidates the rewrite: the entering path would execute a
+    // suffix that no longer exists (a deleted MOV's consumer, a
+    // coalesced pair's second access, a merged writeback's
+    // increment). Single-instruction findings are immune by
+    // construction; without a buffer there is no map and nothing is
+    // ever suppressed.
+    for (unsigned i = 1; i < finding->insn_count; i++) {
+        if (offset_is_branch_target(state,
+                finding->start_offset + 4u * (size_t)i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 armlint_state *armlint_state_create(void)
 {
     armlint_state *s = calloc(1, sizeof(*s));
@@ -11862,7 +11883,9 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             for (size_t k = 0; k < armlint_check_registry_count; k++) {
                 armlint_finding finding;
                 if (armlint_check_registry[k](state, insn, offset,
-                                              &finding)) {
+                                              &finding)
+                        && !armlint_finding_has_side_entry(state,
+                                                           &finding)) {
                     report_finding(&finding, verbose);
                     summary_add(summary, finding.name);
                     errors++;
@@ -11873,7 +11896,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             // word. Flush first so an in-progress sequence cannot
             // straddle the gap.
             armlint_finding finding;
-            if (armlint_flush(state, &finding)) {
+            if (armlint_flush(state, &finding)
+                    && !armlint_finding_has_side_entry(state, &finding)) {
                 report_finding(&finding, verbose);
                 summary_add(summary, finding.name);
                 errors++;
@@ -11885,7 +11909,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     }
 
     armlint_finding finding;
-    if (armlint_flush(state, &finding)) {
+    if (armlint_flush(state, &finding)
+            && !armlint_finding_has_side_entry(state, &finding)) {
         report_finding(&finding, verbose);
         summary_add(summary, finding.name);
         errors++;

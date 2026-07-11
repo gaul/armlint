@@ -80,6 +80,5 @@ The largest untouched family; none of these need liveness machinery.
 | --- | --- |
 | Multi-slot deferral | The single pending_mz/pending_fp slots drop the earlier finding when two deferrals overlap; false-negative-only, documented in `defer_dead_mov` |
 | Target-side liveness | Scan at a known branch target (buffer access exists); unlocks the general-register BR fold |
-| Side-entry gate for the remaining 2->1 folds | The branch-target map now gates the unsigned-offset and pre-indexed closes; the post-indexed, register-offset, and LDP/STP-coalescing closes share the same hazard (a branch onto the second instruction of the pair) and should adopt the same gate |
 | Hybrid `mov`/`orr`+`movk` constant chains | Docs-acknowledged deferral in the MOV-chain machinery |
 | LDUR / writeback pair coalescing; load+sext at other addressing modes | Docs-acknowledged deferrals of the coalescer and sext folds |

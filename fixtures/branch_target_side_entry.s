@@ -1,11 +1,14 @@
-// Integration fixture for the branch-target (side-entry) gate shared
-// by check_add_ldr_imm_offset and check_add_ldr_str_pre_indexed: a
-// direct branch that lands on the memory op of a would-be 2->1 fold
-// enters past the ADD, so the merged instruction would apply the
-// immediate (or bump the base) on a path that never added it. The
-// N-cases must produce no findings; the P-cases keep the same shapes
-// without a side entry (or with the branch landing on the ADD, which
-// runs the whole pair) and must still be flagged.
+// Integration fixture for the branch-target (side-entry) gate: a
+// direct branch that lands inside a finding's window, past its first
+// instruction, invalidates the rewrite -- the entering path would
+// execute a suffix that no longer exists. N1/N2 exercise the
+// close-side gates in check_add_ldr_imm_offset and
+// check_add_ldr_str_pre_indexed; N3-N5 exercise the central emission
+// gate (armlint_finding_has_side_entry) on checks with no gate of
+// their own. The N-cases must produce no findings; the P-cases keep
+// the same shapes without a side entry (or with the branch landing on
+// the window's first instruction, which runs the whole pattern) and
+// must still be flagged.
 
     .text
     .globl  _main
@@ -42,5 +45,39 @@ Ladd3:
     add     x12, x12, #0x10
     ldr     x12, [x12]
     b       Ladd3
+
+    // N3: shared return tail -- the MOV #0's use is entered from a
+    // path whose register is live and non-zero, so the ZR rewrite
+    // must not fire (central gate; the fold defers through the
+    // liveness scan and emits at the kill).
+    cbz     x0, Lzero3
+    add     x8, x0, #1
+    b       Luse3
+Lzero3:
+    mov     x8, #0
+Luse3:
+    mov     x0, x8
+    mov     x8, #1
+
+    // N4: adjacent loads whose second is a loop entry -- coalescing
+    // to LDP would drop the re-entered load (central gate).
+    ldr     x20, [x19, #0x18]
+Lentry4:
+    ldr     x0, [x19, #0x20]
+    cbz     x0, Lentry4
+
+    // N5: post-index shape whose self-update is the loop-continue
+    // target -- merging removes the increment's entry point
+    // (central gate).
+    ldrb    w9, [x8]
+Lstep5:
+    add     x8, x8, #1
+    cbnz    w9, Lstep5
+
+    // P3: straight-line MOV #0 + use with no side entry -- still
+    // flagged (deferred, emitted at the kill).
+    mov     x8, #0
+    mov     x0, x8
+    mov     x8, #2
 
     ret

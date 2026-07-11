@@ -45,14 +45,16 @@ static int run_check(const uint8_t *code, size_t code_size)
         size_t offset = (size_t)insns[i].address;
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
-            if (armlint_check_registry[k](state, &insns[i], offset, &f)) {
+            if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && !armlint_finding_has_side_entry(state, &f)) {
                 findings++;
             }
         }
     }
 
     armlint_finding f;
-    if (armlint_flush(state, &f)) {
+    if (armlint_flush(state, &f)
+            && !armlint_finding_has_side_entry(state, &f)) {
         findings++;
     }
 
@@ -82,13 +84,15 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
             for (size_t k = 0; k < armlint_check_registry_count; k++) {
                 armlint_finding f;
                 if (armlint_check_registry[k](state, insn,
-                                              (size_t)insn_addr, &f)) {
+                                              (size_t)insn_addr, &f)
+                        && !armlint_finding_has_side_entry(state, &f)) {
                     findings++;
                 }
             }
         } else {
             armlint_finding f;
-            if (armlint_flush(state, &f)) {
+            if (armlint_flush(state, &f)
+                    && !armlint_finding_has_side_entry(state, &f)) {
                 findings++;
             }
             p += 4;
@@ -97,7 +101,8 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
         }
     }
     armlint_finding f;
-    if (armlint_flush(state, &f)) {
+    if (armlint_flush(state, &f)
+            && !armlint_finding_has_side_entry(state, &f)) {
         findings++;
     }
 
@@ -127,14 +132,16 @@ static int run_cssc_check(const uint8_t *code, size_t code_size)
         size_t offset = (size_t)insns[i].address;
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
-            if (armlint_check_registry[k](state, &insns[i], offset, &f)) {
+            if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && !armlint_finding_has_side_entry(state, &f)) {
                 findings++;
             }
         }
     }
 
     armlint_finding f;
-    if (armlint_flush(state, &f)) {
+    if (armlint_flush(state, &f)
+            && !armlint_finding_has_side_entry(state, &f)) {
         findings++;
     }
 
@@ -11186,6 +11193,54 @@ static void test_liveness_matches_capstone(void)
     cs_free(insn, 1);
 }
 
+// The central emission gate (armlint_finding_has_side_entry): a
+// finding whose window contains a direct-branch target after its
+// first instruction is dropped by every registry consumer, covering
+// the checks that have no close-side gate of their own. Exercised on
+// three shapes: the deferred MOV #0 + use (the shared-return idiom --
+// other predecessors reach the use with a live register), adjacent-LDR
+// coalescing (the second load is a loop entry), and the post-indexed
+// fold (the self-update is the loop-continue target). A branch onto
+// the window's FIRST instruction runs the whole pattern and must not
+// suppress; the bufferless harness has no map and keeps the old
+// behavior.
+static void test_central_side_entry_gate(void)
+{
+    uint8_t code[16];
+
+    // mov x3, #0 ; mov x0, x3 (the use) ; mov x3, #1 (kill: the
+    // deferred fold emits here) ; cbz w0 back onto the use.
+    movz_x(&code[0], 3, 0, 0);
+    mov_x(&code[4], 0, 3);
+    movz_x(&code[8], 3, 1, 0);
+    cbz_w(&code[12], 0, -8);
+    assert(run_buffer_check(code, 16) == 0);
+    assert(run_check(code, 16) == 1);
+    // Branch onto the MOV #0 itself: still flagged.
+    cbz_w(&code[12], 0, -12);
+    assert(run_buffer_check(code, 16) == 1);
+
+    // ldr x1, [x9] ; ldr x2, [x9, #8] ; cbz w0 onto the second load.
+    ldr_x_uimm0(&code[0], 1, 9);
+    ldr_x_uimm_with(&code[4], 2, 9, 1);
+    cbz_w(&code[8], 0, -4);
+    assert(run_buffer_check(code, 12) == 0);
+    assert(run_check(code, 12) == 1);
+    // Branch onto the first load: still flagged.
+    cbz_w(&code[8], 0, -8);
+    assert(run_buffer_check(code, 12) == 1);
+
+    // ldr x1, [x9] ; add x9, x9, #8 ; cbz w0 onto the self-update.
+    ldr_x_uimm0(&code[0], 1, 9);
+    add_x_imm(&code[4], 9, 9, 8);
+    cbz_w(&code[8], 0, -4);
+    assert(run_buffer_check(code, 12) == 0);
+    assert(run_check(code, 12) == 1);
+    // Branch onto the load: still flagged.
+    cbz_w(&code[8], 0, -8);
+    assert(run_buffer_check(code, 12) == 1);
+}
+
 // A direct branch landing on the memory op of a would-be fold marks a
 // side entry: paths through the branch skip the ADD, so neither the
 // unsigned-offset nor the pre-indexed rewrite is sound. The gate keys
@@ -11299,6 +11354,7 @@ int main(void)
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();
+    test_central_side_entry_gate();
     test_liveness_matches_capstone();
 
     cs_close(&g_handle);

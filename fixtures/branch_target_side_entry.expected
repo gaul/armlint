@@ -6,8 +6,13 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x2c: -> ldr x12, [x12, #0
   add x12, x12, #0x10
   ldr x12, [x12]
 
+MOV #0 + use foldable to ZR at offset: 0x68: -> orr x0, xzr, xzr (2 instructions)
+  movz x8, #0x0
+  orr x0, xzr, x8
+
 Optimization opportunities by type:
        1  ADD + LDR foldable to immediate-offset LDR
        1  ADD + LDR foldable to pre-indexed LDR
+       1  MOV #0 + use foldable to ZR
 
-2 optimization opportunities in 15 instructions
+3 optimization opportunities in 30 instructions
