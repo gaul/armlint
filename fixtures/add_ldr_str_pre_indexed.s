@@ -149,4 +149,14 @@ _main:
     add     x11, x11, #16
     ldp     x11, x2, [x11]
 
+    // N) ADRP+ADD relocation pair: the ADD's #lo12 is a linker field
+    //    (ELF R_AARCH64_ADD_ABS_LO12_NC / Mach-O PAGEOFF12), and no
+    //    relocation type targets the pre-indexed imm9 or pair imm7
+    //    slot, so the fold is not expressible -- not flagged. Emit
+    //    ADRP via .long to avoid Mach-O/ELF relocation-syntax
+    //    differences (`@PAGE` is Mach-O-only).
+    .long   0x9000001b              // adrp x27, page0
+    add     x27, x27, #0x60
+    ldp     x3, x4, [x27]
+
     ret

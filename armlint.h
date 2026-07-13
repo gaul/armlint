@@ -1537,6 +1537,17 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
 // code-size/decode-slot win as post-index; no backend throughput
 // change on most OoO cores.
 //
+// Relocation pairs: an ADD self-update immediately preceded by an
+// ADR/ADRP of the same Rd never opens the pattern. That shape is the
+// linker-materialized "ADRP Rd, page ; ADD Rd, Rd, #pageoff" pair
+// (ELF R_AARCH64_ADD_ABS_LO12_NC, Mach-O ARM64_RELOC_PAGEOFF12, Go's
+// R_ADDRARM64): the ADD immediate is a relocation field, and no
+// relocation type targets the pre-indexed imm9 or pair imm7 slot, so
+// no toolchain can express the fold. SUB opens are unaffected -- no
+// relocation uses SUB. Same rationale as check_add_sub_zero's
+// ADRP + ADD #0 suppression, tracked privately because that check
+// clears the shared adr_recent flag before this one runs.
+//
 // Side entries: a memory op that is itself a direct-branch target is
 // never folded. The rotated-loop idiom -- while (isspace(*p)) p++ --
 // puts the increment at the loop top and enters at the load, so the

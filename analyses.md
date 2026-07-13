@@ -2098,6 +2098,34 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   without a buffer; blind to indirect branches), and the central
   emission gate covers it as well. A branch onto the ADD/SUB itself
   does not suppress the fold.
+* The `ADD` half of a linker-materialized address pair never opens
+  the pattern: `ADD Rd, Rd, #imm` immediately preceded by `ADR`/`ADRP`
+  with the same `Rd` is the page-relative addressing pair
+  (`adrp xn, page ; add xn, xn, #pageoff`), and `#pageoff` is a
+  relocation field (ELF `R_AARCH64_ADD_ABS_LO12_NC`, Mach-O
+  `ARM64_RELOC_PAGEOFF12`, Go's `R_ADDRARM64`). Relocation types
+  exist only for the single load/store scaled imm12 slot (the
+  `R_AARCH64_LDST{8,16,32,64}_ABS_LO12_NC` family) -- none targets
+  the pre-indexed imm9 or the pair imm7 field -- so no compiler or
+  assembler can emit the suggested rewrite; changing the pair
+  requires re-linking, not a code rewrite, the same reasoning as the
+  ADD/SUB #0 check's ADRP+ADD suppression. This is why toolchains
+  that fold `#pageoff` into single loads (Go emits
+  `adrp ; ldr xt, [xn, #lo12]` for every aligned global load) still
+  emit `adrp ; add ; ldp` for pair loads of 16-byte globals -- the
+  three-instruction form is already optimal under the available
+  relocations, and flagging it (209 LDP + 12 STP + 1 STR sites in
+  go1.26.4's `go` binary, every one an ADRP pair) would demand the
+  impossible. `SUB` self-updates are unaffected (no relocation uses
+  `SUB`), an intervening instruction between the ADR/ADRP and the
+  ADD re-enables the fold (strict adjacency, matching the relocation
+  span), and the tracking is private to this check:
+  `check_add_sub_zero` owns the shared `adr_recent` flag and has
+  already cleared it (the ADD is not an ADR) by the time this check
+  runs. `check_add_ldr_imm_offset` deliberately keeps flagging
+  ADRP-paired singles: its unsigned-offset rewrite *is* expressible
+  with the LDST relocations, so those findings mark real toolchain
+  gaps (typically missing alignment metadata on the symbol).
 
 ## Appendix: folds rejected for soundness
 

@@ -637,6 +637,20 @@ struct armlint_state {
     size_t lspr_pending_offset;
     char lspr_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Most-recent instruction was ADR / ADRP with the recorded Rd --
+    // check_add_ldr_str_pre_indexed's private copy of adr_recent
+    // (its owner, check_add_sub_zero, runs earlier in the registry
+    // and has already cleared the shared flag by the time the ADD
+    // reaches this check). An ADD self-update immediately after an
+    // ADR/ADRP of the same Rd is the linker-materialized
+    // "ADRP Rd, page ; ADD Rd, Rd, #pageoff" addressing pair: the
+    // immediate is a relocation field (ELF R_AARCH64_ADD_ABS_LO12_NC,
+    // Mach-O ARM64_RELOC_PAGEOFF12), and no relocation type targets
+    // the pre-indexed imm9 or pair imm7 slot, so no assembler can
+    // express the fold and the pattern never opens on it.
+    bool lspr_adr_recent;
+    unsigned lspr_adr_recent_rd;
+
     // Pending unsigned-offset LDR/STR/LDRSW awaiting an adjacent
     // partner for LDP/STP/LDPSW coalescing. The next instruction of
     // the same kind (sext or zext, integer or SIMD&FP) with the same
@@ -1151,6 +1165,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->addi_pending = false;
     state->lspi_pending = false;
     state->lspr_pending = false;
+    state->lspr_adr_recent = false;
     state->simd_zero_active = false;
     state->rem_active = false;
     state->fmn_active = false;
@@ -11438,6 +11453,7 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
 {
     if (insn->size != 4) {
         state->lspr_pending = false;
+        state->lspr_adr_recent = false;
         return false;
     }
 
@@ -11594,7 +11610,23 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
     uint32_t a_imm;
     bool is_add = decode_add_imm_x(op, &a_rd, &a_rn, &a_imm);
     bool is_sub = !is_add && decode_sub_imm_x(op, &a_rd, &a_rn, &a_imm);
+    // An ADD self-update immediately preceded by an ADR/ADRP of the
+    // same Rd is the linker-resolved page-address pair (adrp xn,
+    // page ; add xn, xn, #pageoff): the immediate is a relocation
+    // field, and no relocation type targets the pre-indexed imm9 or
+    // pair imm7 slot, so no compiler or assembler can emit the fold
+    // -- never open on it. SUB never carries the pageoff relocation.
+    // a_rd != 31 keeps SP self-updates open: ADD Rd=31 means SP
+    // while ADR/ADRP Rd=31 means XZR, so the two never pair.
+    // is_add leads the conjunction: a_rd is uninitialized unless a
+    // decode succeeded.
+    bool is_adr_pair = is_add
+        && a_rd != 31
+        && state->lspr_adr_recent
+        && state->lspr_adr_recent_rd == a_rd
+        && a_rd == a_rn;
     if ((is_add || is_sub)
+            && !is_adr_pair
             && a_rd == a_rn
             && a_imm >= 1
             && a_imm <= (is_sub ? 1024u : 1008u)) {
@@ -11613,6 +11645,16 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
                 sizeof(state->lspr_pending_disasm),
                 "%s x%u, x%u, #0x%x", upd_mnem, a_rd, a_rn, a_imm);
         }
+    }
+
+    // Track ADR/ADRP for the next call's is_adr_pair test. ADR and
+    // ADRP share bits 28..24 = 10000; an ADR/ADRP is never itself an
+    // open or a close, so consulting before updating is safe.
+    if ((op & 0x1F000000u) == 0x10000000u) {
+        state->lspr_adr_recent = true;
+        state->lspr_adr_recent_rd = op & 0x1Fu;
+    } else {
+        state->lspr_adr_recent = false;
     }
 
     return produced;

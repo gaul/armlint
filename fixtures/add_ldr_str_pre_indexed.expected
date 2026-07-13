@@ -146,4 +146,4 @@ Optimization opportunities by type:
        1  SUB + LDR foldable to pre-indexed LDR
        1  SUB + STR foldable to pre-indexed STR
 
-34 optimization opportunities in 68 instructions
+34 optimization opportunities in 71 instructions

@@ -262,11 +262,9 @@ per-opportunity detail is suppressed unless requested:
 ```console
 $ ./armlint /bin/ls
 Optimization opportunities by type:
-      39  ADD + LDR foldable to pre-indexed LDR
-      36  ADD + LDR foldable to immediate-offset LDR
-       1  adjacent STRs foldable into STP
+      38  ADD + LDR foldable to immediate-offset LDR
 
-76 optimization opportunities in 4153 instructions
+38 optimization opportunities in 4153 instructions
 ```
 
 Pass `-v` to also print each opportunity -- its one-line summary plus

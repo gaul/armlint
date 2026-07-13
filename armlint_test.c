@@ -10788,7 +10788,7 @@ static void test_ldr_str_add_post_indexed(void)
 
 static void test_add_ldr_str_pre_indexed(void)
 {
-    uint8_t code[12];
+    uint8_t code[16];
 
     // -- Positives: ADD self-update + LDR/STR -> pre-indexed. --
 
@@ -11030,6 +11030,47 @@ static void test_add_ldr_str_pre_indexed(void)
     add_x_imm(&code[0], 1, 1, 16);
     ldp_x_soff(&code[4], 3, 4, 1, 1);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- ADRP+ADD relocation pairs: the ADD's immediate is a linker
+    //    field (R_AARCH64_ADD_ABS_LO12_NC), so no toolchain can move
+    //    it into a pre-index slot; the pattern never opens. --
+
+    // adrp x27, 1 ; add x27, x27, #0x60 ; ldp x3, x4, [x27]
+    adrp_x(&code[0], 27, 1);
+    add_x_imm(&code[4], 27, 27, 0x60);
+    ldp_x_soff(&code[8], 3, 4, 27, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // STP and single-STR closes are suppressed the same way.
+    adrp_x(&code[0], 27, 1);
+    add_x_imm(&code[4], 27, 27, 0x30);
+    stp_x_soff(&code[8], 3, 4, 27, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    adrp_x(&code[0], 27, 1);
+    add_x_imm(&code[4], 27, 27, 8);
+    str_x_uimm(&code[8], 3, 27, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // ADRP writing a DIFFERENT register does not protect the ADD.
+    adrp_x(&code[0], 8, 1);
+    add_x_imm(&code[4], 27, 27, 0x60);
+    ldp_x_soff(&code[8], 3, 4, 27, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Strict adjacency: an intervening instruction ends the
+    // protection.
+    adrp_x(&code[0], 27, 1);
+    movz_x(&code[4], 9, 5, 0);
+    add_x_imm(&code[8], 27, 27, 0x60);
+    ldp_x_soff(&code[12], 3, 4, 27, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // SUB after ADRP still flags: relocation pairs only use ADD.
+    adrp_x(&code[0], 27, 1);
+    sub_x_imm(&code[4], 27, 27, 16);
+    ldr_x_uimm0(&code[8], 3, 27);
+    assert(run_helper_check(code, 12) == 1);
 }
 
 // Cross-validate classify_liveness (armlint's hand-rolled NZCV
