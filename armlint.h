@@ -305,6 +305,28 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
 bool check_cset_fold(armlint_state *state, const cs_insn *insn,
                      size_t offset, armlint_finding *out);
 
+// Detect CMP Rn, #0 immediately followed by a CSET or CSETM that
+// materializes the compared register's sign -- a single shift of the
+// sign bit:
+//   cmp x1, #0 ; cset  x0, lt -> lsr x0, x1, #63   (w: #31)
+//   cmp x1, #0 ; csetm x0, mi -> asr x0, x1, #63   (w: #31)
+// Subtracting zero can neither borrow nor overflow, so the compare
+// leaves N = sign(Rn), Z = (Rn == 0), C = 1, V = 0: conditions LT
+// (N != V) and MI (N) both hold exactly when Rn is negative. CSET
+// writes that bit as 0/1 (LSR of the sign bit); CSETM writes it
+// replicated as 0/all-ones (ASR). The GE/PL complements need a second
+// instruction (EOR #1 / MVN) and stay unflagged. The widths must
+// agree: an X CSETM after a W compare is a 64-bit mask no single
+// W-form shift produces (the sound-but-fiddly mixed CSET cases are
+// gated with it). Rn = 31 compares SP, which the shift cannot name;
+// AL/NV condition fields and ZR destinations are excluded by the
+// CSET/CSETM decode. The rewrite DELETES the compare and sets no
+// flags, so emission defers until NZCV is provably dead
+// (armlint_advance_pending_sgn). Reported as "CMP #0 + sign
+// CSET/CSETM foldable to LSR/ASR".
+bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect a producer that provably zeros bits 63..P of its destination,
 // immediately followed by an in-place zero-extension consumer that
 // clears bits >= C with P <= C -- a no-op. Producers: any W-form
@@ -923,6 +945,12 @@ bool check_cssc_popcount(armlint_state *state, const cs_insn *insn,
 bool armlint_advance_pending_cssc(armlint_state *state,
                                   const cs_insn *insn,
                                   size_t offset, armlint_finding *out);
+
+// NZCV-death advancer for the deferred sign-shift finding
+// (check_cmp_cset_sign), parallel to armlint_advance_pending_cssc.
+bool armlint_advance_pending_sgn(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
 
 // Forward FP/vector-register liveness scan, the FP twin of
 // armlint_advance_pending_mz: emits a deferred finding once a later

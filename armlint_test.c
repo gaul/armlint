@@ -524,6 +524,8 @@ static void lsr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void asr_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void asr_x(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift);
 static void ret_(uint8_t out[4]);
+static void csneg_raw(uint8_t out[4], unsigned sf, unsigned rd,
+                      unsigned rn, unsigned rm, unsigned cond);
 static void cvtf_gpr(uint8_t out[4], unsigned sf, unsigned dbl,
                      unsigned is_unsigned, unsigned rd, unsigned rn);
 static void ccmp_reg(uint8_t out[4], unsigned sf, unsigned is_ccmp,
@@ -2532,6 +2534,140 @@ static void test_cset_fold(void)
     cset_(&code[0], 0, 8, 0);
     cbz_cbnz(&code[4], 0, 1, 8, 2);
     add_x(&code[8], 1, 2, 3);
+    assert(run_helper_check(code, 12) == 0);
+}
+
+static void test_cmp_cset_sign(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: cmp x1, #0 ; cset x0, lt -> lsr x0, x1, #63 once
+    //    the trailing compare overwrites NZCV. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 11);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: W form -> lsr w0, w1, #31. --
+
+    cmp_w_imm(&code[0], 1, 0);
+    cset_(&code[4], 0, 0, 11);
+    cmp_w_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: MI is the same sign bit (V = 0 after a zero
+    //    compare). --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 4);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: CSETM materializes the mask -> asr x0, x1, #63. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    csetm_(&code[4], 1, 0, 11);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: W CSETM of MI -> asr w3, w2, #31. --
+
+    cmp_w_imm(&code[0], 2, 0);
+    csetm_(&code[4], 0, 3, 4);
+    cmp_w_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: in-place destination (LSR reads Rn before writing
+    //    it). --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 1, 11);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Positive: RET commits -- the function ends, NZCV is dead. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 11);
+    ret_(&code[8]);
+    assert(run_helper_check(code, 12) == 1);
+
+    // -- Negative: GE is the complement; lsr + eor #1 is 2-for-2 and
+    //    deliberately unflagged. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 10);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: EQ reads Z, not the sign. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 0);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a nonzero compare immediate is not the sign
+    //    test. --
+
+    cmp_x_imm(&code[0], 1, 1);
+    cset_(&code[4], 1, 0, 11);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: width mismatch (W compare, X CSET) -- gated with
+    //    the unsound CSETM twin. --
+
+    cmp_w_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 11);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a later flag reader keeps the compare alive. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 11);
+    b_cond(&code[8], 11, 8);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: no NZCV overwrite before end-of-region -- the
+    //    pending is discarded at flush. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 11);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: intervening instruction breaks adjacency. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    add_x(&code[4], 5, 6, 7);
+    cset_(&code[8], 1, 0, 11);
+    cmp_x_imm(&code[12], 9, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: Rn = 31 compares SP, which the shift cannot
+    //    name. --
+
+    cmp_x_imm(&code[0], 31, 0);
+    cset_(&code[4], 1, 0, 11);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Negative: a ZR destination discards the result -- dead code,
+    //    not this fold. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 31, 11);
+    cmp_x_imm(&code[8], 9, 0);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Division of labor: CMP #0 + CNEG is check_cssc_abs's shape
+    //    (and only under -m cssc) -- silent here. --
+
+    cmp_x_imm(&code[0], 1, 0);
+    csneg_raw(&code[4], 1, 0, 1, 1, 5);
+    cmp_x_imm(&code[8], 9, 0);
     assert(run_helper_check(code, 12) == 0);
 }
 
@@ -11338,6 +11474,7 @@ int main(void)
     test_tst_branch();
     test_single_bit_cbz();
     test_cset_fold();
+    test_cmp_cset_sign();
     test_tst_cset();
     test_redundant_zext();
     test_lsl_lsr_to_ubfx();

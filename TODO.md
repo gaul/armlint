@@ -15,6 +15,8 @@ the existing checks.
 | --- | --- | --- |
 | zero-CMP→S-variant: `b.mi`/`b.pl` consumers | same | N agrees exactly after a zero compare (V = 0); v1 of the check consumes EQ/NE only |
 | zero-CMP→S-variant: `adc`/`sbc` producers | `adcs`/`sbcs` | Excluded in v1: they read the carry the deleted compare set; needs a separate flag argument |
+| sign CSET/CSETM: GE/PL complements | `lsr`+`eor #1` / `mvn`+`asr` | 2-for-2, no size win (frees NZCV only); v1 of the sign-shift fold flags LT/MI |
+| sign CSET/CSETM: `tst Rn, Rn` / `cmn Rn, #0` producers | `lsr`/`asr` | Same N/V pinning as `cmp Rn, #0`; rarer zero-test spellings |
 | `add x0, x0, #a ; add x0, x0, #b` | one `add`/`sub` | Coalesce adjacent same-register immediate adjustments; skip the canonical imm12 + imm12<<12 pair the assembler splits |
 
 ## Branches and dead code

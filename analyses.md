@@ -979,6 +979,43 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * A destination overwriting `wt` reports immediately; a fresh
   destination defers through the forward register-liveness scan.
 
+## compare-zero sign CSET/CSETM foldable into LSR/ASR
+
+* `cmp x1, #0 ; cset x0, lt` instead of `lsr x0, x1, #63`, and
+  `cmp x1, #0 ; csetm x0, lt` instead of `asr x0, x1, #63` (`#31`
+  for the W forms; `mi` works the same way). Materializing "is
+  negative" is just moving the sign bit down: subtracting zero can
+  neither borrow nor overflow, so the compare leaves `N = sign(Rn)`,
+  `Z = (Rn == 0)`, `C = 1`, `V = 0`, and both LT (`N != V`) and MI
+  (`N`) reduce to the bare sign bit. `CSET` writes it as 0/1 --
+  exactly the logical shift (the `UBFM` alias) -- and `CSETM` writes
+  it replicated as 0/all-ones -- exactly the arithmetic shift (the
+  `SBFM` alias). This is the value-materializing twin of the
+  [compare-zero signed-branch fold](#compare-zero-signed-branch-foldable-into-tbztbnz).
+* The rewrite deletes the compare and sets no flags, so emission
+  defers until NZCV is provably dead (any later flag reader -- even
+  `b.eq` -- discards), the same rule as the CSSC MAX/MIN/ABS folds.
+* The GE/PL complements are matched by neither: `cset x0, ge` needs
+  `lsr` + `eor #1` and `csetm x0, ge` needs `mvn` + `asr` -- two
+  instructions for two, no win to report.
+* The widths must agree. The instructive counterexample is the X
+  `CSETM` after a W compare: it writes a 64-bit 0/all-ones mask,
+  which no single W-form shift produces (`asr w, w, #31`
+  zero-extends its 32-bit mask) -- the sound-but-fiddly mixed `CSET`
+  combinations are gated with it for uniformity. `Rn = 31` compares
+  SP, which the shift cannot name; AL/NV condition fields (a
+  constant, not a conditional) and ZR destinations (dead code) never
+  match.
+* Only the `CMP Rn, #0` producer opens. `tst x1, x1` and
+  `cmn x1, #0` pin the same `N`/`V` and would fold identically, but
+  those zero-test spellings are left for a later pass.
+* Provenance: this is precisely the rewrite Go's ARM64 compiler
+  backend adopted in
+  [CL 801282](https://go-review.googlesource.com/c/go/+/801282)
+  ("use right shift to compute >= 0 and < 0", 2026) -- binaries from
+  older compilers and hand-written assembly still carry the
+  two-instruction shape.
+
 ## MUL by constant foldable to shift/add
 
 * `mov xc, #(1<<N) ; mul xd, xa, xc` instead of `lsl xd, xa, #N`

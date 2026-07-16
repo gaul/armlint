@@ -182,6 +182,14 @@ struct armlint_state {
     size_t cset_offset;
     char cset_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
+    // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
+    bool sgn_active;
+    bool sgn_is64bit;
+    unsigned sgn_rn;
+    size_t sgn_offset;
+    char sgn_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Widening-extend producer (SXTW Xd, Wn, or the zero-extending
     // MOV Wd, Wm) pending a 64-bit-source SCVTF/UCVTF consumer for
     // the narrower-conversion fold. xtc_signed distinguishes the
@@ -368,6 +376,15 @@ struct armlint_state {
     bool pending_cssc_active;
     unsigned pending_cssc_window;
     armlint_finding pending_cssc_finding;
+
+    // Deferred sign-shift finding awaiting proof that NZCV is dead:
+    // the LSR/ASR rewrite deletes the compare and sets no flags, the
+    // same rule as the CSSC slot above. Dedicated rather than shared
+    // because check_cset_fold can defer one instruction after this
+    // check's consumer and the collision would drop a finding.
+    bool pending_sgn_active;
+    unsigned pending_sgn_window;
+    armlint_finding pending_sgn_finding;
 
     // Deferred finding gated on an FP/vector register's death,
     // advanced by armlint_advance_pending_fp -- the FP twin of the
@@ -1176,6 +1193,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->rbc_active = false;
     state->pcnt_stage = 0;
     state->pending_cssc_active = false;
+    state->sgn_active = false;
+    state->pending_sgn_active = false;
     state->pending_fp_active = false;
     return mov_close(state, out);
 }
@@ -2874,6 +2893,32 @@ static bool defer_dead_nzcv_cssc(armlint_state *state,
     return false;
 }
 
+bool armlint_advance_pending_sgn(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        state->pending_sgn_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    return advance_one_pending(op, &state->pending_sgn_active,
+                               &state->pending_sgn_window,
+                               &state->pending_sgn_finding, out);
+}
+
+// The sign-shift twin of defer_dead_nzcv_cssc: the LSR/ASR rewrite
+// also deletes the compare and sets no flags.
+static bool defer_dead_nzcv_sgn(armlint_state *state,
+                                const armlint_finding *out)
+{
+    state->pending_sgn_finding = *out;
+    state->pending_sgn_active = true;
+    state->pending_sgn_window = LIVENESS_WINDOW;
+    return false;
+}
+
 // Forward register-liveness scan for a deferred MOV #0 + use finding. Emits the
 // stashed finding only once a later instruction provably overwrites the zero
 // register before any read or control transfer; a read or branch/call/return
@@ -4344,6 +4389,76 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
         state->cset_offset = offset;
         snprintf(state->cset_disasm, sizeof(state->cset_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return false;
+}
+
+bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->sgn_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a CSET or CSETM of the compared register's sign?
+    //     After CMP Rn, #0 the flags are N = sign(Rn), Z = (Rn == 0),
+    //     C = 1, V = 0 (subtracting zero can neither borrow nor
+    //     overflow), so LT (N != V) and MI (N) both hold exactly when
+    //     Rn is negative. CSET materializes that bit as 0/1 -- a plain
+    //     LSR of the sign bit -- and CSETM as 0/all-ones -- an ASR.
+    //     The widths must agree: an X CSETM after a W compare is a
+    //     64-bit mask no single W shift produces (the CSET twin is
+    //     gated with it for uniformity). The rewrite DELETES the
+    //     compare and sets no flags, so emission defers until NZCV is
+    //     provably dead. The GE/PL complements cost a second
+    //     instruction (EOR #1 / MVN) and are left unflagged.
+    if (state->sgn_active) {
+        unsigned c_rd = 0, c_cond = 0;
+        bool is_cset = decode_cset(op, &c_rd, &c_cond);
+        bool is_csetm = !is_cset && decode_csetm(op, &c_rd, &c_cond);
+        if ((is_cset || is_csetm)
+                && (((op >> 31) & 1u) != 0) == state->sgn_is64bit
+                && (c_cond == 4u || c_cond == 11u)) {
+            char w_or_x = state->sgn_is64bit ? 'x' : 'w';
+            unsigned sign_bit = state->sgn_is64bit ? 63u : 31u;
+
+            out->name = "CMP #0 + sign CSET/CSETM foldable to LSR/ASR";
+            out->start_offset = state->sgn_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, %c%u, #%u",
+                is_cset ? "lsr" : "asr",
+                w_or_x, c_rd, w_or_x, state->sgn_rn, sign_bit);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->sgn_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            defer_dead_nzcv_sgn(state, out);
+        }
+        // Strict adjacency: clear regardless of match.
+        state->sgn_active = false;
+    }
+
+    // (2) Open: CMP Rn, #0 (SUBS immediate, Rd = 31, imm12 = 0; both
+    //     shift encodings of zero)? Rn = 31 compares SP, which the
+    //     shift cannot name.
+    if ((op & 0x7F80001Fu) == 0x7100001Fu
+            && ((op >> 10) & 0xFFFu) == 0
+            && ((op >> 22) & 0x3u) < 2u) {
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if (rn != 31) {
+            state->sgn_active = true;
+            state->sgn_is64bit = ((op >> 31) & 1u) != 0;
+            state->sgn_rn = rn;
+            state->sgn_offset = offset;
+            snprintf(state->sgn_disasm, sizeof(state->sgn_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
     }
 
     return false;
@@ -11819,6 +11934,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_sv,
     armlint_advance_pending_zs,
     armlint_advance_pending_cssc,
+    armlint_advance_pending_sgn,
     armlint_advance_pending_fp,
     armlint_advance_pending_mz,
     armlint_advance_pending_tb,
@@ -11853,6 +11969,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_tst_branch,   // which expires the pair on any non-branch
     check_single_bit_cbz,
     check_cset_fold,
+    check_cmp_cset_sign,
     check_redundant_zext,
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,

@@ -1,0 +1,24 @@
+CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x0: -> lsr x0, x1, #63 (2 instructions)
+  cmp x1, #0
+  cset x0, lt
+
+CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0xc: -> lsr w0, w1, #31 (2 instructions)
+  cmp w1, #0
+  cset w0, lt
+
+CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x18: -> lsr x0, x1, #63 (2 instructions)
+  cmp x1, #0
+  cset x0, mi
+
+CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x24: -> asr x0, x1, #63 (2 instructions)
+  cmp x1, #0
+  csetm x0, lt
+
+CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x6c: -> asr w3, w2, #31 (2 instructions)
+  cmp w2, #0
+  csetm w3, mi
+
+Optimization opportunities by type:
+       5  CMP #0 + sign CSET/CSETM foldable to LSR/ASR
+
+5 optimization opportunities in 30 instructions

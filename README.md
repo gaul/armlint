@@ -132,6 +132,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`add`/`sub`/`and`/`bic` + `cmp #0` + `b.eq`/`b.ne`](analyses.md#addsubandbic--zero-cmp-foldable-to-s-variant) | `adds`/`subs`/`ands`/`bics` (drop the `cmp`/`tst`) |
 | [`sub` + `cmp` / `add` + `cmn` of the same operands (either order)](analyses.md#sub--cmp-of-identical-operands-foldable-to-subs) | `subs`/`adds` (flag-exact; drop the compare) |
 | [`subs`/`adds` + `cmp`/`cmn` of its own operands](analyses.md#subsadds--cmpcmn-of-identical-operands-redundant-compare) | drop the compare (flags already set) |
+| [`cmp #0` + `cset`/`csetm` of `lt`/`mi`](analyses.md#compare-zero-sign-csetcsetm-foldable-into-lsrasr) | `lsr`/`asr Rd, Rn, #(msb)` (the sign bit; drop the compare) |
 | [`mov #2^N` + `mul`](analyses.md#mul-by-constant-foldable-to-shiftadd) | `lsl`, or `add Rd, Ra, Ra, lsl #N` |
 | [`mov #C` + `mneg`](analyses.md#mneg-by-constant-foldable-to-negsub) | `neg`, or shifted `neg`/`sub` |
 | [`mov #2^N` + `madd`/`msub`](analyses.md#mov--maddmsub-foldable-to-shifted-addsub) | `add`/`sub Rd, Ra, Rn, lsl #N` |
