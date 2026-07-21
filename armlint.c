@@ -3002,9 +3002,13 @@ static int arm64_vreg_num(unsigned reg)
     if (reg >= ARM64_REG_Q0 && reg <= ARM64_REG_Q31) {
         return (int)(reg - ARM64_REG_Q0);
     }
+#if CS_API_MAJOR < 6
+    // Capstone 6 dropped the dedicated V0..V31 ids; vector-arrangement
+    // operands report the Q view (with is_vreg set) instead.
     if (reg >= ARM64_REG_V0 && reg <= ARM64_REG_V31) {
         return (int)(reg - ARM64_REG_V0);
     }
+#endif
     return -1;
 }
 

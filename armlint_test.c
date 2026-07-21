@@ -10907,14 +10907,16 @@ static void test_ldr_str_add_post_indexed(void)
     assert(run_helper_check(code, 8) == 0);
 
     // LDP with Rt == Rt2 is CONSTRAINED UNPREDICTABLE even without
-    // writeback; the opener rejects it. This Capstone refuses to
-    // decode the encoding at all, so the harness reports a decode
-    // error (-1) rather than 0 findings -- either way, no fold. The
-    // opener's own Rt == Rt2 guard stays as defense in depth for
-    // Capstone versions that do decode it.
+    // writeback; the opener rejects it. Capstone 5 refuses to decode
+    // the encoding at all, so the harness reports a decode error (-1)
+    // rather than 0 findings; Capstone 6 decodes it and the opener's
+    // own Rt == Rt2 guard rejects the fold -- either way, no fold.
     ldp_x_soff(&code[0], 3, 3, 1, 0);
     add_x_imm(&code[4], 1, 1, 16);
-    assert(run_helper_check(code, 8) == -1);
+    {
+        int r = run_helper_check(code, 8);
+        assert(r == -1 || r == 0);
+    }
 
     // A non-zero pair offset cannot combine with a post-index update.
     ldp_x_soff(&code[0], 3, 4, 1, 1);
@@ -11148,13 +11150,16 @@ static void test_add_ldr_str_pre_indexed(void)
     assert(run_helper_check(code, 8) == 0);
 
     // LDP with Rt == Rt2: CONSTRAINED UNPREDICTABLE on its own; the
-    // closer rejects it. This Capstone refuses to decode the
-    // encoding, so the harness reports a decode error (-1) rather
-    // than 0 findings -- either way, no fold (the in-check guard is
-    // defense in depth for Capstone versions that do decode it).
+    // closer rejects it. Capstone 5 refuses to decode the encoding,
+    // so the harness reports a decode error (-1) rather than 0
+    // findings; Capstone 6 decodes it and the in-check guard rejects
+    // the fold -- either way, no fold.
     add_x_imm(&code[0], 1, 1, 16);
     ldp_x_soff(&code[4], 3, 3, 1, 0);
-    assert(run_helper_check(code, 8) == -1);
+    {
+        int r = run_helper_check(code, 8);
+        assert(r == -1 || r == 0);
+    }
 
     // Store pair with a repeated source folds (the zero-fill shape).
     sub_x_imm(&code[0], 31, 31, 16);
