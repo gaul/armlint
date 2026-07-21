@@ -2531,11 +2531,15 @@ liveness_t classify_liveness(uint32_t op)
     }
     // CFINV (Armv8.4) inverts C; XAFLAG/AXFLAG (Armv8.5) rewrite NZCV
     // from the prior flags. All three read the condition flags and share
-    // the flag-manipulation MSR-immediate encoding (CRm = 0, Rt = 31),
-    // differing only in op2 (bits 7..5); the mask leaves op2 free so all
-    // are caught (unallocated op2 values conservatively too). DAIFSet/
-    // DAIFClr/SPSel have a different CRm and are excluded.
-    if ((op & 0xFFFFFF1Fu) == 0xD500401Fu) {
+    // the flag-manipulation MSR-immediate encoding (op1 = 000, CRn =
+    // 0100, Rt = 31), differing only in op2 (bits 7..5). CRm (bits
+    // 11..8) is architecturally unused by the flag ops and LLVM-derived
+    // decoders (Capstone 6) treat it as don't-care, so the mask leaves
+    // both op2 and CRm free: everything swept in is at worst a
+    // conservative read (this includes the PSTATE-immediate writes
+    // UAO/PAN/SPSel and unallocated op2/CRm combinations). DAIFSet/
+    // DAIFClr sit at op1 = 011 (bits 18..16) and stay excluded.
+    if ((op & 0xFFFFF01Fu) == 0xD500401Fu) {
         return LIV_READ;
     }
     // MRS Xt, NZCV reads the condition flags into a GPR (system register
@@ -2573,6 +2577,46 @@ liveness_t classify_liveness(uint32_t op)
     }
     if ((op & 0xFF200C00u) == 0x1E200400u) {
         return LIV_READ;   // FCCMP / FCCMPE
+    }
+    // Memory Copy and Memory Set (FEAT_MOPS, Armv8.8): CPYF*/CPY*/
+    // SET*/SETG* run as prologue/main/epilogue triples that pass
+    // algorithm state THROUGH the flags -- the prologue unconditionally
+    // writes all of NZCV (option A/B selection and, for CPY, direction)
+    // and the main/epilogue stages read it back. Common space: bits
+    // 31..30 = 00, 29..27 = 011, 25..24 = 01, 21 = 0, 11..10 = 01.
+    // Bit 26 selects CPYF/SET vs CPY/SETG; op1 (bits 23..22) is the
+    // copy stage (00 P / 01 M / 10 E), with 11 meaning the SET family
+    // whose stage is in bits 15..14 instead. Main/epilogue classify as
+    // reads regardless of register operands: even the CONSTRAINED
+    // UNPREDICTABLE overlapped-register forms may execute as the
+    // instruction and consume the flags. The prologue is an overwrite,
+    // but only provably so for well-formed encodings -- an overlapped
+    // or reg == 31 form may be UNDEFINED or a NOP that leaves the prior
+    // flags intact, so those fall through to LIV_UNKNOWN rather than
+    // prove the flags dead (SET's source register is a value, not a
+    // pointer, and may legitimately be XZR: the memset-zero idiom).
+    if ((op & 0xFB200C00u) == 0x19000400u) {
+        unsigned stage = (op >> 22) & 0x3u;
+        bool is_set = stage == 0x3u;
+        if (is_set) {
+            stage = (op >> 14) & 0x3u;
+        }
+        if (stage == 0x1u || stage == 0x2u) {
+            return LIV_READ;   // main / epilogue
+        }
+        if (stage == 0x0u) {   // prologue
+            unsigned rd = op & 0x1Fu;
+            unsigned rn = (op >> 5) & 0x1Fu;
+            unsigned rs = (op >> 16) & 0x1Fu;
+            bool well_formed = rd != 31 && rn != 31 && rd != rn
+                    && (is_set ? (rs == 31 || (rs != rd && rs != rn))
+                               : (rs != 31 && rs != rd && rs != rn));
+            if (well_formed) {
+                return LIV_OVERWRITE;
+            }
+        }
+        // Malformed prologues and the unallocated SET stage 11.
+        return LIV_UNKNOWN;
     }
 
     // ADDS/SUBS immediate (S=1): bit 29 = 1, bits 28..23 = 100010.

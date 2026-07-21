@@ -40,9 +40,11 @@ bool is_bitmask_immediate(uint64_t imm, unsigned reg_width);
 // Capstone's register-access model (test_liveness_matches_capstone).
 //
 // The classifier is hand-rolled rather than derived from Capstone because
-// Capstone's implicit-flag model is incomplete: as of 5.0.x cs_regs_access
-// does not record the NZCV read of BC.cond, MRS NZCV, CFINV/XAFLAG/AXFLAG,
-// RMIF, or SETF8/SETF16 -- precisely the readers that must not be dropped.
+// Capstone's implicit-flag model is incomplete: 5.0.x cs_regs_access
+// records none of the NZCV reads of BC.cond, MRS NZCV, CFINV/XAFLAG/
+// AXFLAG, RMIF, SETF8/SETF16, or the FEAT_MOPS main/epilogue stages
+// (which it decodes but models no flag access for), and 6.0 still
+// misses MRS NZCV -- precisely the readers that must not be dropped.
 // The cross-check therefore treats Capstone as a one-directional partial
 // oracle (see the test for the exact properties).
 typedef enum {

@@ -198,9 +198,14 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   reads N, C, or V (e.g. `ADCS`, `CSEL`, `B.LT`, `CCMP`). armlint
   runs a forward NZCV-liveness scan on the fall-through path: the
   finding is emitted only after seeing an instruction that
-  overwrites NZCV without reading them (ADDS/SUBS/ANDS/BICS/FCMP)
-  or a terminator that makes prior flags unobservable (RET, BL,
-  BLR). The scan suppresses on any flag-reader, an unsafe
+  overwrites NZCV without reading them (ADDS/SUBS/ANDS/BICS/FCMP, or
+  a well-formed FEAT_MOPS prologue CPYFP*/CPYP*/SETP*/SETGP*, which
+  unconditionally rewrites all four flags -- overlapped-register or
+  reg == 31 forms are CONSTRAINED UNPREDICTABLE or UNDEFINED and do
+  not count) or a terminator that makes prior flags unobservable
+  (RET, BL, BLR). The scan suppresses on any flag-reader (including
+  the FEAT_MOPS main/epilogue stages, which consume the algorithm
+  state their prologue left in NZCV), an unsafe
   terminator (B unconditional, BR, or a conditional CBZ/CBNZ/TBZ/TBNZ
   whose taken target may still observe the flags), or after a
   16-instruction window with no decision. The branch-target path is

@@ -11313,6 +11313,11 @@ static void test_liveness_matches_capstone(void)
         { 0xD500401Fu, LIV_READ, "cfinv" },
         { 0xD500403Fu, LIV_READ, "xaflag" },
         { 0xD500405Fu, LIV_READ, "axflag" },
+        // CRm is architecturally unused by the flag ops and LLVM-derived
+        // decoders (Capstone 6) accept any value, so nonzero CRm must
+        // classify as the same read.
+        { 0xD500413Fu, LIV_READ, "xaflag CRm!=0" },
+        { 0xD500445Fu, LIV_READ, "axflag CRm!=0" },
         { 0xBA000400u, LIV_READ, "rmif" },
         { 0x3A00080Du, LIV_READ, "setf8" },
         { 0x3A00480Du, LIV_READ, "setf16" },
@@ -11326,6 +11331,29 @@ static void test_liveness_matches_capstone(void)
         { 0xEA01001Fu, LIV_OVERWRITE, "tst" },
         { 0x1E212000u, LIV_OVERWRITE, "fcmp" },
         { 0x1E212010u, LIV_OVERWRITE, "fcmpe" },
+        // FEAT_MOPS memcpy/memset triples pass algorithm state through
+        // the flags: the prologue overwrites NZCV, the main/epilogue
+        // stages read it back. Capstone 5 decodes the well-formed forms
+        // but models no NZCV access for them, so only the direct
+        // classification assertion has teeth there; Capstone 6 reports
+        // the flag access and corroborates.
+        { 0x19400422u, LIV_READ, "cpyfm" },
+        { 0x19800422u, LIV_READ, "cpyfe" },
+        { 0x1D400422u, LIV_READ, "cpym" },
+        { 0x19C04422u, LIV_READ, "setm" },
+        { 0x19C08422u, LIV_READ, "sete" },
+        { 0x1DC04422u, LIV_READ, "setgm" },
+        { 0x19000422u, LIV_OVERWRITE, "cpyfp" },
+        { 0x1D000422u, LIV_OVERWRITE, "cpyp" },
+        { 0x19C00422u, LIV_OVERWRITE, "setp" },
+        { 0x1DC00422u, LIV_OVERWRITE, "setgp" },
+        { 0x19DF0422u, LIV_OVERWRITE, "setp xzr-source" },
+        // Overlapped registers are CONSTRAINED UNPREDICTABLE: a
+        // prologue that may be UNDEFINED or a NOP must not prove the
+        // flags dead, while a main stage that may still execute must
+        // keep counting as a read.
+        { 0x19000420u, LIV_UNKNOWN, "cpyfp d==s (CU)" },
+        { 0x19400420u, LIV_READ, "cpyfm d==s (CU)" },
         // Neutral (no NZCV effect):
         { 0xAA0103E0u, LIV_UNKNOWN, "mov" },
         { 0x8B020020u, LIV_UNKNOWN, "add" },
@@ -11373,6 +11401,34 @@ static void test_liveness_matches_capstone(void)
     }
 
     cs_free(insn, 1);
+}
+
+// FEAT_MOPS interaction with the NZCV dead-flag scan, end to end: a
+// main stage consumes the flags its prologue wrote, so it must stop
+// the scan like any reader, while a well-formed prologue rewrites all
+// of NZCV and proves earlier flags dead like any overwrite. Both
+// Capstone 5 and 6 decode the well-formed MOPS forms (only the NZCV
+// access metadata differs between them), and classify_liveness works
+// on the raw word regardless, so the expectations here are
+// version-independent.
+static void test_mops_flag_liveness(void)
+{
+    uint8_t code[16];
+
+    // cmp x1, #0 ; cset x0, lt ; cpyfm [x2]!, [x0]!, x1! ; cmp x9, #0
+    // -- the main stage reads NZCV, so no fold.
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 11);
+    write_le32(&code[8], 0x19400422u);
+    cmp_x_imm(&code[12], 9, 0);
+    assert(run_helper_check(code, 16) == 0);
+
+    // cmp x1, #0 ; cset x0, lt ; setp [x2]!, x1!, x0 -- the prologue
+    // overwrites NZCV, proving the compare's flags dead.
+    cmp_x_imm(&code[0], 1, 0);
+    cset_(&code[4], 1, 0, 11);
+    write_le32(&code[8], 0x19C00422u);
+    assert(run_helper_check(code, 12) == 1);
 }
 
 // The central emission gate (armlint_finding_has_side_entry): a
@@ -11539,6 +11595,7 @@ int main(void)
     test_branch_target_side_entry();
     test_central_side_entry_gate();
     test_liveness_matches_capstone();
+    test_mops_flag_liveness();
 
     cs_close(&g_handle);
     printf("all tests passed\n");
