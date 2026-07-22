@@ -6589,6 +6589,96 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+// Whether one instruction can materialize `value` at `reg_width`: a lone
+// MOVZ or MOVN, or a logical immediate moved with ORR from ZR.
+static bool is_one_instruction_constant(uint64_t value, unsigned reg_width)
+{
+    return minimal_mov_wide_count(value, reg_width) == 1
+        || is_bitmask_immediate(value, reg_width);
+}
+
+bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    // Producer: a one-instruction MOV chain (a lone MOVZ or MOVN, no
+    // MOVKs). Multi-instruction chains keep the copy -- rematerializing
+    // would cost more -- which also excludes linker-patched MOVZ+MOVK
+    // address sequences whose lint-time value is not final.
+    if (!state->mov_active || state->mov_insn_count != 1) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // Consumer: the canonical register MOV, ORR Rd, ZR, Rm (LSL #0).
+    unsigned sf, opc, n_bit, rd, rn, rm;
+    if (!decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn, &rm)) {
+        return false;
+    }
+    if (opc != 1 || n_bit != 0 || rn != 31) {
+        return false;
+    }
+    if (rm != state->mov_rd || rd == 31 || rd == rm) {
+        return false;
+    }
+
+    // The value the copy reads. A W chain zeroes the upper half of the
+    // register, so a 64-bit copy reads the zero-extended value (mov_value
+    // is stored masked to the producer width); a 32-bit copy of an X
+    // chain reads the low half. Unlike the immediate folds above, the
+    // widths need not match: the value is re-checked at the consumer's
+    // width below.
+    bool is_64bit = (sf != 0);
+    unsigned reg_width = is_64bit ? 64u : 32u;
+    uint64_t value = state->mov_value & width_mask(reg_width);
+
+    // Zero-valued chains are the MOV #0 check's territory.
+    if (value == 0) {
+        return false;
+    }
+    // The rewrite must be a single instruction at the consumer's width.
+    if (!is_one_instruction_constant(value, reg_width)) {
+        return false;
+    }
+
+    // Both instructions remain -- the constant register typically stays
+    // live (e.g. both registers are outgoing call arguments homed by a
+    // compiler's move resolver) -- so unlike the folds above no deadness
+    // condition applies and nothing defers: the rewrite replaces only
+    // the copy, is value-equivalent, and removes the register
+    // dependency between the two instructions.
+    char cons_w = is_64bit ? 'x' : 'w';
+    char prod_w = state->mov_is_64bit ? 'x' : 'w';
+
+    out->name = "MOV of one-instruction constant foldable to MOV #imm";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = 2;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "-> mov %c%u, #0x%" PRIx64, cons_w, rd, value);
+
+    const mov_entry *e = &state->mov_entries[0];
+    const char *mov_mnem = (e->opc == 2) ? "movz" : "movn";
+    unsigned shift = (unsigned)e->shift_div_16 * 16u;
+    if (shift == 0) {
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s %c%u, #0x%x", mov_mnem, prod_w, state->mov_rd, e->imm16);
+    } else {
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s %c%u, #0x%x, lsl #%u",
+            mov_mnem, prod_w, state->mov_rd, e->imm16, shift);
+    }
+    snprintf(out->lines[1], sizeof(out->lines[1]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    return true;
+}
+
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
 //   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
 // Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
@@ -11991,6 +12081,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_udiv_strength_reduce,
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
+    check_cheap_const_copy,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,
     check_mov_shift_fold,

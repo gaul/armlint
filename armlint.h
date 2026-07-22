@@ -610,6 +610,29 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// Detect a register MOV (ORR Rd, ZR, Rm) whose source was materialised
+// by the immediately preceding one-instruction MOV chain (a lone MOVZ
+// or MOVN, no MOVKs), where the moved value is itself materialisable
+// by one instruction at the consumer's width:
+//     movz w1, #0x1
+//     orr  w2, wzr, w1     -> mov w2, #0x1
+// The copy costs the same as rematerialising but adds a register
+// dependency. Unlike the immediate folds above, both instructions
+// remain -- the constant register typically stays live (e.g. both
+// registers are outgoing call arguments homed by a compiler's move
+// resolver) -- so no deadness condition applies and nothing defers:
+// the rewrite is value-equivalent and dependency-free. A 64-bit copy
+// of a W chain reads the zero-extended value (a W write zeroes the
+// upper half); a 32-bit copy of an X chain reads the low half; in
+// both cases the value is re-checked for one-instruction encodability
+// (MOVZ, MOVN or logical immediate) at the consumer's width.
+// Zero-valued chains are left to the MOV #0 check; multi-instruction
+// chains keep the copy (rematerialising would cost more), which also
+// excludes linker-patched MOVZ+MOVK address sequences whose lint-time
+// value is not final.
+bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising a constant C in [0, 31], immediately
 // followed by a register-form conditional compare whose Rm is the
 // constant. The compare folds to its immediate form, making the MOV

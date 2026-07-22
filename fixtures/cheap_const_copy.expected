@@ -1,0 +1,21 @@
+MOV of one-instruction constant foldable to MOV #imm at offset: 0x0: -> mov x2, #0x1 (2 instructions)
+  movz w1, #0x1
+  mov x2, x1
+
+MOV of one-instruction constant foldable to MOV #imm at offset: 0x8: -> mov x4, #0xffffffffffffffff (2 instructions)
+  movn x3, #0x0
+  mov x4, x3
+
+MOV of one-instruction constant foldable to MOV #imm at offset: 0x10: -> mov x6, #0xffffffff (2 instructions)
+  movn w5, #0x0
+  mov x6, x5
+
+MOV #0 + use foldable to ZR at offset: 0x24: -> orr x10, xzr, xzr (2 instructions)
+  movz w9, #0x0
+  orr x10, xzr, x9
+
+Optimization opportunities by type:
+       3  MOV of one-instruction constant foldable to MOV #imm
+       1  MOV #0 + use foldable to ZR
+
+4 optimization opportunities in 15 instructions

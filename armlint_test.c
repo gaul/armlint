@@ -6579,6 +6579,75 @@ static void test_mov_add_sub_imm_fold(void)
     assert(run_reg_dead(code, 8, 8) == 0);
 }
 
+
+static void test_cheap_const_copy(void)
+{
+    uint8_t code[16];
+
+    // The move-resolver argument-homing shape: movz w1, #1 ; mov x2, x1.
+    // The value rematerializes as one instruction at 64 bits, so the
+    // dependent copy should be an independent mov x2, #1. Both registers
+    // stay live (both are call arguments), so no deadness gate applies
+    // and no overwrite appendix is needed.
+    movz_w(&code[0], 1, 1);
+    mov_x_reg(&code[4], 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Same-width W copy.
+    movz_w(&code[0], 1, 1);
+    mov_w_reg(&code[4], 2, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // MOVN producer: mov x3, #-1 ; mov x4, x3.
+    movn_x(&code[0], 3, 0, 0);
+    mov_x_reg(&code[4], 4, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W MOVN + X copy: the copy reads 0xffffffff zero-extended, still a
+    // one-instruction constant (logical immediate) at 64 bits.
+    movn_w(&code[0], 5, 0);
+    mov_x_reg(&code[4], 6, 5);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negatives. --
+
+    // W MOVN #0x1234 + X copy: 0xffffedcb zero-extends to a value that
+    // needs two instructions at 64 bits -- the copy is the cheapest form.
+    movn_w(&code[0], 5, 0x1234);
+    mov_x_reg(&code[4], 6, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Multi-instruction chain (MOVZ+MOVK): rematerializing would cost
+    // more, and a linker-patched address sequence must keep the copy.
+    movz_x(&code[0], 7, 0x6789, 0);
+    movk_x(&code[4], 7, 0x2345, 1);
+    mov_x_reg(&code[8], 8, 7);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Zero chain: MOV #0 -> ZR territory. Exactly one finding (that
+    // check's, deferred until x0 is dead) -- this check must not add a
+    // second one.
+    movz_w(&code[0], 0, 0);
+    mov_x_reg(&code[4], 10, 0);
+    assert(run_x0_dead(code, 8) == 1);
+
+    // An intervening instruction closes the chain.
+    movz_w(&code[0], 11, 7);
+    add_w(&code[4], 12, 13, 14);
+    mov_x_reg(&code[8], 15, 11);
+    assert(run_helper_check(code, 12) == 0);
+
+    // Copy of a register other than the chain destination.
+    movz_w(&code[0], 1, 5);
+    mov_x_reg(&code[4], 2, 3);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Self-copy is check_mov_reg_self territory, not a rematerialization.
+    movz_w(&code[0], 1, 5);
+    mov_x_reg(&code[4], 1, 1);
+    assert(run_helper_check(code, 8) == 1);  // mov x1, x1: self-MOV finding only
+}
+
 static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
@@ -11562,6 +11631,7 @@ int main(void)
     test_udiv_strength_reduce();
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
+    test_cheap_const_copy();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();
