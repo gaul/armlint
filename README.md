@@ -205,6 +205,31 @@ arm64 toolchain. After an intentional output change, regenerate the
 snapshots with `make integration-test-regen` and review the diff
 before committing.
 
+### Testing against Capstone 6
+
+Capstone 6 (in alpha as of mid-2026) rewrote the AArch64 module from
+LLVM. armlint compiles against it unchanged via Capstone's
+compatibility header, and CI tracks the pinned pre-release below. To
+reproduce locally:
+
+```sh
+git clone --depth 1 --branch 6.0.0-Alpha10 \
+    https://github.com/capstone-engine/capstone.git capstone6
+cmake -B capstone6/build -S capstone6 -DCMAKE_BUILD_TYPE=Release
+cmake --build capstone6/build -j8
+make clean   # never mix objects built against different Capstone ABIs
+make CAPSTONE_CFLAGS="-I$PWD/capstone6/include -DCAPSTONE_AARCH64_COMPAT_HEADER" \
+     CAPSTONE_LIBS="$PWD/capstone6/build/libcapstone.a" all
+```
+
+The overrides must be `make` arguments (not environment variables) to
+beat the Makefile's `pkg-config` defaults. The unit tests and the
+`ARMLINT_LIVENESS_SWEEP=1` sweep pass under both major versions;
+`make integration-test` is expected to show a handful of cosmetic
+snapshot diffs under v6 (it prints shift/bitfield immediates in
+decimal and drops `#` on `adr`/`ldr`-literal operands), so the
+fixtures remain pinned to Capstone 5.x rendering until v6 stabilizes.
+
 ## Usage
 
 armlint is intended to be part of compiler test suites which should

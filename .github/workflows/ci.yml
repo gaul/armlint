@@ -66,6 +66,55 @@ jobs:
       - name: Run integration tests
         run: make integration-test
 
+  build-capstone6:
+    # Capstone 6 (still in alpha) rewrote the AArch64 module from LLVM.
+    # armlint compiles against it unchanged via the compatibility header,
+    # so track it continuously to be ready when distros ship v6. The
+    # snapshot fixtures are deliberately NOT run here: they pin Capstone
+    # 5.x rendering, and v6 cosmetically diverges in 7 of them (decimal
+    # shift/bitfield immediates, no `#` on adr/ldr-literal operands) --
+    # revisit when v6 reaches beta/stable.
+    runs-on: ubuntu-26.04-arm
+    env:
+      # v6 pre-release tags have no `v` prefix. Bumped deliberately, not
+      # automatically: rendering and decode behavior can shift between
+      # alphas, which is exactly what this job is meant to surface.
+      CAPSTONE6_TAG: 6.0.0-Alpha10
+      # Must be passed as make ARGUMENTS, not environment: the Makefile
+      # assigns CAPSTONE_CFLAGS/CAPSTONE_LIBS with :=, which beats the
+      # environment but yields to the command line.
+      CAPSTONE6_CFLAGS: >-
+        -I${{ github.workspace }}/capstone6/include
+        -DCAPSTONE_AARCH64_COMPAT_HEADER
+      CAPSTONE6_LIBS: ${{ github.workspace }}/capstone6/build/libcapstone.a
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache Capstone 6 build
+        uses: actions/cache@v6
+        with:
+          path: capstone6
+          key: capstone6-${{ env.CAPSTONE6_TAG }}-${{ runner.arch }}
+
+      - name: Build Capstone 6 from source
+        run: |
+          if [ ! -f capstone6/build/libcapstone.a ]; then
+            git clone --depth 1 --branch "$CAPSTONE6_TAG" \
+              https://github.com/capstone-engine/capstone.git capstone6
+            cmake -B capstone6/build -S capstone6 -DCMAKE_BUILD_TYPE=Release
+            cmake --build capstone6/build -j"$(nproc)"
+          fi
+
+      - name: Build
+        run: >
+          make CAPSTONE_CFLAGS="$CAPSTONE6_CFLAGS"
+          CAPSTONE_LIBS="$CAPSTONE6_LIBS" armlint lib
+
+      - name: Run tests
+        run: >
+          make CAPSTONE_CFLAGS="$CAPSTONE6_CFLAGS"
+          CAPSTONE_LIBS="$CAPSTONE6_LIBS" test
+
   liveness-sweep:
     # Exhaustive classify_liveness-vs-Capstone cross-check over the entire
     # 2^32 encoding space (several minutes). Too slow for every PR, so it
@@ -85,3 +134,41 @@ jobs:
 
       - name: Build and run the exhaustive NZCV liveness sweep
         run: ARMLINT_LIVENESS_SWEEP=1 make test
+
+  liveness-sweep-capstone6:
+    # The exhaustive sweep again, but against Capstone 6: its LLVM-derived
+    # register-access model corroborates readers 5.x cannot -- the
+    # FEAT_MOPS main/epilogue stages plus BC.cond, CFINV/XAFLAG/AXFLAG,
+    # RMIF, and SETF8/SETF16 -- so property A of the cross-check has real
+    # teeth here (this configuration is what exposed the MOPS liveness
+    # gap). ~25 minutes locally; up to an hour on CI runners.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-26.04-arm
+    env:
+      CAPSTONE6_TAG: 6.0.0-Alpha10
+      CAPSTONE6_CFLAGS: >-
+        -I${{ github.workspace }}/capstone6/include
+        -DCAPSTONE_AARCH64_COMPAT_HEADER
+      CAPSTONE6_LIBS: ${{ github.workspace }}/capstone6/build/libcapstone.a
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache Capstone 6 build
+        uses: actions/cache@v6
+        with:
+          path: capstone6
+          key: capstone6-${{ env.CAPSTONE6_TAG }}-${{ runner.arch }}
+
+      - name: Build Capstone 6 from source
+        run: |
+          if [ ! -f capstone6/build/libcapstone.a ]; then
+            git clone --depth 1 --branch "$CAPSTONE6_TAG" \
+              https://github.com/capstone-engine/capstone.git capstone6
+            cmake -B capstone6/build -S capstone6 -DCMAKE_BUILD_TYPE=Release
+            cmake --build capstone6/build -j"$(nproc)"
+          fi
+
+      - name: Build and run the exhaustive NZCV liveness sweep
+        run: >
+          ARMLINT_LIVENESS_SWEEP=1 make CAPSTONE_CFLAGS="$CAPSTONE6_CFLAGS"
+          CAPSTONE_LIBS="$CAPSTONE6_LIBS" test
