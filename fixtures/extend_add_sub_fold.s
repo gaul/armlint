@@ -58,8 +58,9 @@ _main:
     uxtb    w0, w1
     add     w0, wzr, w0
 
-    // N4) Fresh destination, but the extended value is read again
-    // before dying: the deferred finding is discarded.
+    // D1) Fresh destination, but the extended value is read again
+    // before dying: the deleting fold fails and the pair downgrades
+    // to the consumer-only rewrite (the extend stays).
     sxtw    x0, w1
     add     x2, x3, x0
     add     x4, x0, x5

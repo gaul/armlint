@@ -10478,11 +10478,11 @@ static void test_extend_add_sub_fold(void)
 
     // -- Negatives. --
 
-    // Fresh destination with no later kill -- the deferred finding's
-    // liveness scan never proves the extended value dead.
+    // Fresh destination with no later kill: the deleting grade stays
+    // unproven, but the consumer-only downgrade survives the flush.
     sxtw_x(&code[0], 0, 1);
     add_x(&code[4], 2, 3, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_helper_check(code, 8) == 1);
 
     // The same pair with a trailing kill emits the deferred finding:
     // -> add x2, x3, w1, sxtw.
@@ -10491,11 +10491,12 @@ static void test_extend_add_sub_fold(void)
     assert(run_x0_dead(code, 8) == 1);
 
     // Fresh destination, but the extended value is read again before
-    // dying: discarded.
+    // dying: the deleting grade fails and the pair downgrades to the
+    // consumer-only rewrite (the extend stays).
     sxtw_x(&code[0], 0, 1);
     add_x(&code[4], 2, 3, 0);
     add_x(&code[8], 4, 0, 5);
-    assert(run_x0_dead(code, 12) == 0);
+    assert(run_x0_dead(code, 12) == 1);
 
     // Rd = 31 consumer is excluded even with a kill: the shifted-
     // register consumer's Rd = 31 is a discarded ZR write, but the
@@ -10525,14 +10526,50 @@ static void test_extend_add_sub_fold(void)
     add_x(&code[4], 0, 3, 0);
     assert(run_helper_check(code, 8) == 0);
 
-    // Consumer carries a shift (imm6 != 0): add x0, x3, x0, lsl #1.
+    // A consumer shift of up to 4 rides on the extended-register
+    // operand: add x0, x3, x0, lsl #1 -> add x0, x3, w1, sxtw #1.
     sxtw_x(&code[0], 0, 1);
-    {
-        uint32_t op = 0x8B000000u | (0u << 16) | (1u << 10)
-            | (3u << 5) | 0u;   // add x0, x3, x0, lsl #1
-        write_le32(&code[4], op);
-    }
+    add_x_lsl(&code[4], 0, 3, 0, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Shifted consumer with a fresh destination and the temp read
+    // again: the consumer-only downgrade fires.
+    sxtw_x(&code[0], 0, 1);
+    add_x_lsl(&code[4], 2, 3, 0, 4);
+    add_x(&code[8], 4, 0, 5);
+    assert(run_x0_dead(code, 12) == 1);
+
+    // A shift rides on Rm only: with the extend result in Rn and a
+    // shifted Rm the pair cannot fold.
+    sxtw_x(&code[0], 0, 1);
+    add_x_lsl(&code[4], 2, 0, 3, 1);
     assert(run_helper_check(code, 8) == 0);
+
+    // Shift amounts 5..31 neither fit the extended-register form nor
+    // discard a SXTW's sign bits.
+    sxtw_x(&code[0], 0, 1);
+    add_x_lsl(&code[4], 0, 3, 0, 5);
+    assert(run_helper_check(code, 8) == 0);
+
+    // LSL #32 and above shifts every SXTW-produced bit out: the
+    // consumer can read the raw source, deleting the extend when the
+    // temp dies in place.
+    sxtw_x(&code[0], 0, 1);
+    add_x_lsl(&code[4], 0, 3, 0, 32);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Same with a fresh destination and a live temp: the consumer-only
+    // rewrite (extend stays).
+    sxtw_x(&code[0], 0, 1);
+    add_x_lsl(&code[4], 2, 3, 0, 40);
+    add_x(&code[8], 4, 0, 5);
+    assert(run_x0_dead(code, 12) == 1);
+
+    // The W-zext-into-X relaxation also carries a shift: uxth w0, w1 ;
+    // add x0, x3, x0, lsl #2 -> add x0, x3, w1, uxth #2.
+    uxth_w(&code[0], 0, 1);
+    add_x_lsl(&code[4], 0, 3, 0, 2);
+    assert(run_helper_check(code, 8) == 1);
 
     // Extend dest = ZR (Rd=31) does not open: without the guard this
     // would fold `add xzr, x3, xzr` to `add xzr, x3, w1, sxtw`.

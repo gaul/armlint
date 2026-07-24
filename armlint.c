@@ -6432,13 +6432,17 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
 // extending-register form (which has bit 21 = 1). imm6 at bits
 // 15..10 must be 0 (no LSL shift on Rm); a nonzero imm6 would change
 // the effective constant value, defeating the fold.
-static bool decode_add_sub_shifted_lsl0(uint32_t op,
-                                        unsigned *out_sf,
-                                        bool *out_is_sub,
-                                        bool *out_is_s,
-                                        unsigned *out_rd,
-                                        unsigned *out_rn,
-                                        unsigned *out_rm)
+// ADD/SUB (shifted register) with an LSL shift of any legal amount;
+// the amount comes back in *out_lsl. LSR/ASR shifts and the reserved
+// W-form amounts >= 32 are rejected.
+static bool decode_add_sub_shifted_lsl(uint32_t op,
+                                       unsigned *out_sf,
+                                       bool *out_is_sub,
+                                       bool *out_is_s,
+                                       unsigned *out_rd,
+                                       unsigned *out_rn,
+                                       unsigned *out_rm,
+                                       unsigned *out_lsl)
 {
     if ((op & 0x1F200000u) != 0x0B000000u) {
         return false;
@@ -6447,17 +6451,33 @@ static bool decode_add_sub_shifted_lsl0(uint32_t op,
     if (shift_type != 0) {
         return false;
     }
+    unsigned sf = (op >> 31) & 1u;
     unsigned imm6 = (op >> 10) & 0x3Fu;
-    if (imm6 != 0) {
+    if (sf == 0 && imm6 >= 32u) {
         return false;
     }
-    *out_sf = (op >> 31) & 1u;
+    *out_sf = sf;
     *out_is_sub = ((op >> 30) & 1u) != 0;
     *out_is_s = ((op >> 29) & 1u) != 0;
     *out_rd = op & 0x1Fu;
     *out_rn = (op >> 5) & 0x1Fu;
     *out_rm = (op >> 16) & 0x1Fu;
+    *out_lsl = imm6;
     return true;
+}
+
+static bool decode_add_sub_shifted_lsl0(uint32_t op,
+                                        unsigned *out_sf,
+                                        bool *out_is_sub,
+                                        bool *out_is_s,
+                                        unsigned *out_rd,
+                                        unsigned *out_rn,
+                                        unsigned *out_rm)
+{
+    unsigned lsl;
+    return decode_add_sub_shifted_lsl(op, out_sf, out_is_sub, out_is_s,
+                                      out_rd, out_rn, out_rm, &lsl)
+        && lsl == 0;
 }
 
 bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
@@ -9888,7 +9908,7 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
     //     or Rn (commutative ADD/ADDS only, swapped to Rm). The other
     //     source must not also be the extend's Rd (a self-op otherwise).
     if (state->ext_pending) {
-        unsigned sf, rd, rn, rm;
+        unsigned sf, rd, rn, rm, lsl;
         bool is_sub, is_s;
         // The widths must match, with one relaxation: a W-form
         // zero-extend (UXTB/UXTH, option <= 1) also feeds an X-form
@@ -9898,8 +9918,8 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
         // sign-extends do NOT get this relaxation: they too zero the
         // high half, where the X-form SXT option would replicate the
         // sign.
-        if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
-                                        &rd, &rn, &rm)
+        if (decode_add_sub_shifted_lsl(op, &sf, &is_sub, &is_s,
+                                       &rd, &rn, &rm, &lsl)
                 && (((sf != 0) == state->ext_pending_is_64bit)
                     || (sf == 1u && !state->ext_pending_is_64bit
                         && state->ext_pending_option <= 1u))) {
@@ -9914,28 +9934,41 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
             // consumer's Rd = 31 is a discarded ZR write, but the
             // extended-register rewrite's Rd = 31 is SP -- the fold
             // would turn dead code into a stack-pointer update.
-            // The rewrite deletes the extend, so its destination must
-            // be dead afterward: a consumer that overwrites it proves
-            // that on the spot, and one writing a fresh register
-            // defers through the forward register-liveness scan.
+            // A non-zero LSL rides on Rm, so only the Rm slot
+            // qualifies then; with LSL #0, ADD/ADDS commute and the
+            // extend may sit in either source.
             if (rd != 31) {
                 if (rm == t && rn != t && rn != 31) {
                     valid = true;
                     indep = rn;
-                } else if (!is_sub && rn == t && rm != t && rm != 31) {
+                } else if (lsl == 0 && !is_sub && rn == t && rm != t
+                        && rm != 31) {
                     valid = true;
                     indep = rm;
                 }
             }
 
-            if (valid) {
-                // Render at the consumer's width: it differs from the
-                // producer's in the relaxed W-zext-into-X case.
+            // The extension's width: how many low source bits the
+            // extended value actually carries.
+            unsigned opt = state->ext_pending_option;
+            unsigned ext_w = (opt == 0u || opt == 4u) ? 8u
+                           : (opt == 1u || opt == 5u) ? 16u : 32u;
+            unsigned reg_w = sf ? 64u : 32u;
+
+            if (valid && lsl <= 4u) {
+                // The extended-register form carries the extend and an
+                // LSL of up to 4 on Rm in one operand. The rewrite
+                // deletes the extend, so its destination must be dead
+                // afterward: a consumer that overwrites it proves that
+                // on the spot, and one writing a fresh register defers
+                // through the forward register-liveness scan --
+                // downgrading on a failed proof to rewriting only the
+                // consumer, which reads the source directly and keeps
+                // the extend (valid regardless of liveness).
                 char w_or_x = sf ? 'x' : 'w';
                 const char *mnem = is_sub ? (is_s ? "subs" : "sub")
                                           : (is_s ? "adds" : "add");
-                const char *ext =
-                    extend_option_name[state->ext_pending_option];
+                const char *ext = extend_option_name[opt];
 
                 out->name =
                     "extend + ADD/SUB foldable to extended-register form";
@@ -9945,21 +9978,88 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
 
                 // The extended operand is always a W register (UXTB
                 // through SXTW all source 32 bits or fewer).
-                snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %c%u, %c%u, w%u, %s",
-                    mnem, w_or_x, rd, w_or_x, indep,
-                    state->ext_pending_rs, ext);
+                if (lsl == 0) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, %c%u, w%u, %s",
+                        mnem, w_or_x, rd, w_or_x, indep,
+                        state->ext_pending_rs, ext);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %c%u, %c%u, w%u, %s #%u",
+                        mnem, w_or_x, rd, w_or_x, indep,
+                        state->ext_pending_rs, ext, lsl);
+                }
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->ext_pending_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %c%u, %c%u, %c%u",
-                    mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+                if (lsl == 0) {
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "%s %c%u, %c%u, %c%u",
+                        mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm);
+                } else {
+                    snprintf(out->lines[1], sizeof(out->lines[1]),
+                        "%s %c%u, %c%u, %c%u, lsl #%u",
+                        mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm, lsl);
+                }
 
                 if (rd == t) {
                     produced = true;
                 } else {
+                    armlint_finding fb;
+                    fb.name = "ADD/SUB of a live extend foldable to "
+                              "extended-register form";
+                    fb.start_offset = out->start_offset;
+                    fb.insn_count = 2;
+                    clear_finding_strings(&fb);
+                    snprintf(fb.detail, sizeof(fb.detail),
+                        "%s (extend stays)", out->detail);
+                    snprintf(fb.lines[0], sizeof(fb.lines[0]),
+                        "%s", out->lines[0]);
+                    snprintf(fb.lines[1], sizeof(fb.lines[1]),
+                        "%s", out->lines[1]);
                     defer_dead_mov(state, out, t);
+                    state->pending_mz_has_fallback = true;
+                    state->pending_mz_fallback = fb;
+                }
+            } else if (valid && lsl >= reg_w - ext_w) {
+                // The LSL shifts every extended bit out of the
+                // register: only source bits [0, reg_w-lsl) remain
+                // visible, all within the extension's width, so the
+                // consumer can read the raw source register and the
+                // extend is irrelevant. Deleting it needs the usual
+                // deadness proof; the consumer-only rewrite holds
+                // regardless.
+                char w_or_x = sf ? 'x' : 'w';
+                const char *mnem = is_sub ? (is_s ? "subs" : "sub")
+                                          : (is_s ? "adds" : "add");
+
+                out->name =
+                    "extension discarded by ADD/SUB shift is redundant";
+                out->start_offset = state->ext_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %c%u, %c%u, lsl #%u",
+                    mnem, w_or_x, rd, w_or_x, indep,
+                    w_or_x, state->ext_pending_rs, lsl);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->ext_pending_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %c%u, %c%u, %c%u, lsl #%u",
+                    mnem, w_or_x, rd, w_or_x, rn, w_or_x, rm, lsl);
+
+                if (rd == t) {
+                    produced = true;
+                } else {
+                    armlint_finding fb = *out;
+                    snprintf(fb.detail, sizeof(fb.detail),
+                        "-> %s %c%u, %c%u, %c%u, lsl #%u (extend stays)",
+                        mnem, w_or_x, rd, w_or_x, indep,
+                        w_or_x, state->ext_pending_rs, lsl);
+                    defer_dead_mov(state, out, t);
+                    state->pending_mz_has_fallback = true;
+                    state->pending_mz_fallback = fb;
                 }
             }
         }

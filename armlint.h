@@ -1383,6 +1383,22 @@ bool check_add_one_csel_fold(armlint_state *state, const cs_insn *insn,
 // option would replicate the sign). Extend of/into ZR is excluded.
 // The standalone 32->64 zero-extend (UXTW, normally a W MOV) is not
 // matched as a producer.
+//
+// The consumer may also carry an LSL of up to 4 on Rm -- the
+// extended-register operand encodes extend plus shift together
+// (add x0, x3, x0, lsl #1 after sxtw x0, w1 -> add x0, x3, w1,
+// sxtw #1); a shifted Rm cannot commute, so only the Rm slot
+// qualifies then. An LSL of at least (register width - extension
+// width) instead shifts every extended bit out: the consumer can read
+// the raw source register unchanged and the extend is irrelevant
+// ("extension discarded by ADD/SUB shift is redundant"). In both
+// shapes, when the deleting proof fails the pair downgrades to
+// rewriting only the consumer -- it reads the source directly and the
+// extend stays ("ADD/SUB of a live extend foldable to
+// extended-register form"), valid regardless of liveness. This is the
+// shape a compiler emits for `base + ((long) i << k)` addressing when
+// it merges the shift but not the widening conversion into the
+// operand.
 bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                                size_t offset, armlint_finding *out);
 

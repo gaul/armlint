@@ -30,7 +30,12 @@ extend + ADD/SUB foldable to extended-register form at offset: 0x38: -> add x2, 
   sxtw x0, w1
   add x2, x3, x0
 
+ADD/SUB of a live extend foldable to extended-register form at offset: 0x58: -> add x2, x3, w1, sxtw (extend stays) (2 instructions)
+  sxtw x0, w1
+  add x2, x3, x0
+
 Optimization opportunities by type:
        8  extend + ADD/SUB foldable to extended-register form
+       1  ADD/SUB of a live extend foldable to extended-register form
 
-8 optimization opportunities in 27 instructions
+9 optimization opportunities in 27 instructions
