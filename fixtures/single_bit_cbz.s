@@ -36,15 +36,16 @@ _main:
     add     x1, x2, x3
 5:  mov     x16, #0
 
-    // Negative: the masked temp is read on the fall-through -- the
-    // producer cannot be deleted.
+    // Downgrade: the masked temp is read on the fall-through -- the
+    // producer cannot be deleted, but the branch alone rebinds to a
+    // TBZ of the source bit.
     and     w19, w20, #0x10
     cbz     w19, 6f
     add     w1, w19, w2
 6:  mov     w19, #0
 
-    // Negative: the branch target lies beyond the overwrite, so the
-    // taken path's liveness is unproven.
+    // Downgrade: the branch target lies beyond the overwrite, so the
+    // taken path's liveness is unproven -- the branch alone rebinds.
     and     w21, w22, #0x10
     cbz     w21, 7f
     mov     w21, #0

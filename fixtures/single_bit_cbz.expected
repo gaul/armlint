@@ -18,7 +18,16 @@ single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ at offset: 0x40: -> tbz x17, #
   and x16, x17, #0x10000000000
   cbz x16, 0x4c
 
+CBZ/CBNZ of a live single-bit test foldable to TBZ/TBNZ at offset: 0x50: -> tbz w20, #4, 0x5c (producer stays) (2 instructions)
+  and w19, w20, #0x10
+  cbz w19, 0x5c
+
+CBZ/CBNZ of a live single-bit test foldable to TBZ/TBNZ at offset: 0x60: -> tbz w22, #4, 0x70 (producer stays) (2 instructions)
+  and w21, w22, #0x10
+  cbz w21, 0x70
+
 Optimization opportunities by type:
        5  single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ
+       2  CBZ/CBNZ of a live single-bit test foldable to TBZ/TBNZ
 
-5 optimization opportunities in 29 instructions
+7 optimization opportunities in 29 instructions

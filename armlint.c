@@ -4238,7 +4238,8 @@ bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
 bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out)
 {
-    (void)out;  // emission goes through armlint_advance_pending_tb
+    // The deleting grade emits through armlint_advance_pending_tb;
+    // only the immediate branch-only downgrade uses `out` directly.
 
     if (insn->size != 4) {
         state->tbf_active = false;
@@ -4261,27 +4262,54 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                 // sign replication would make it visible, but that
                 // exotic shape is conservatively skipped too.)
                 && !(c_sf == 0 && state->tbf_bit >= 32u)) {
-            // Range: the TBZ replaces the producer, 4 bytes before the
-            // CBZ, so its displacement is imm19 + 1 instruction units,
-            // within TBZ's signed 14 bits. (The containment gate in
-            // the pending scan restricts the target far more tightly;
-            // this keeps the encoding constraint visible.) The target
-            // must also lie at or after the fall-through: a backward
-            // target can never satisfy the containment proof, so it is
-            // dropped now rather than deferred.
             int64_t tbz_disp = (int64_t)imm19 + 1;
             int64_t t_off = (int64_t)offset + (int64_t)imm19 * 4;
+            uint64_t target = insn->address
+                + (uint64_t)((int64_t)imm19 * 4);
+            // TBZ names a W source for bits 0..31 and an X source
+            // for bits 32..63, independent of the CBZ's width.
+            char s_wx = state->tbf_bit < 32u ? 'w' : 'x';
+            char c_wx = c_sf ? 'x' : 'w';
+            const char *tb_mnem = is_cbnz ? "tbnz" : "tbz";
+            const char *cb_mnem = is_cbnz ? "cbnz" : "cbz";
+
+            // The branch-only rebind: TBZ/TBNZ of the producer's
+            // SOURCE bit at the branch's own position, keeping the
+            // producer. Valid regardless of the producer's liveness --
+            // for a self-masked AND the destination still carries the
+            // isolated bit unchanged -- so it needs no deadness proof;
+            // only the branch's own displacement (imm19 units) must
+            // fit TBZ's signed 14 bits.
+            bool fb_ok = imm19 >= -8192 && imm19 <= 8191;
+            armlint_finding fb;
+            if (fb_ok) {
+                fb.name = "CBZ/CBNZ of a live single-bit test "
+                          "foldable to TBZ/TBNZ";
+                fb.start_offset = state->tbf_offset;
+                fb.insn_count = 2;
+                clear_finding_strings(&fb);
+                snprintf(fb.detail, sizeof(fb.detail),
+                    "-> %s %c%u, #%u, 0x%" PRIx64 " (producer stays)",
+                    tb_mnem, s_wx, state->tbf_rs, state->tbf_bit,
+                    target);
+                snprintf(fb.lines[0], sizeof(fb.lines[0]),
+                    "%s", state->tbf_disasm);
+                snprintf(fb.lines[1], sizeof(fb.lines[1]),
+                    "%s %c%u, 0x%" PRIx64,
+                    cb_mnem, c_wx, rt, target);
+            }
+
+            // Range for the deleting grade: the TBZ replaces the
+            // producer, 4 bytes before the CBZ, so its displacement is
+            // imm19 + 1 instruction units, within TBZ's signed 14
+            // bits. (The containment gate in the pending scan
+            // restricts the target far more tightly; this keeps the
+            // encoding constraint visible.) The target must also lie
+            // at or after the fall-through: a backward target can
+            // never satisfy the containment proof, so it downgrades
+            // at the consumer rather than deferring.
             if (tbz_disp >= -8192 && tbz_disp <= 8191
                     && t_off >= (int64_t)(offset + 4u)) {
-                uint64_t target = insn->address
-                    + (uint64_t)((int64_t)imm19 * 4);
-                // TBZ names a W source for bits 0..31 and an X source
-                // for bits 32..63, independent of the CBZ's width.
-                char s_wx = state->tbf_bit < 32u ? 'w' : 'x';
-                char c_wx = c_sf ? 'x' : 'w';
-                const char *tb_mnem = is_cbnz ? "tbnz" : "tbz";
-                const char *cb_mnem = is_cbnz ? "cbnz" : "cbz";
-
                 armlint_finding *p = &state->pending_tb_finding;
                 p->name =
                     "single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ";
@@ -4304,9 +4332,14 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                 state->pending_tb_reg = (int)state->tbf_rd;
                 state->pending_tb_ft = offset + 4u;
                 state->pending_tb_target = (size_t)t_off;
-                // The single-bit fold has no branch-only downgrade:
-                // the TBZ rewrite deletes the producer or is nothing.
-                state->pending_tb_has_fallback = false;
+                state->pending_tb_has_fallback = fb_ok;
+                if (fb_ok) {
+                    state->pending_tb_fallback = fb;
+                }
+            } else if (fb_ok) {
+                state->tbf_active = false;
+                *out = fb;
+                return true;
             }
         }
         // Strict adjacency: any non-matching instruction expires.

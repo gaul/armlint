@@ -264,17 +264,28 @@ bool check_tst_cset(armlint_state *state, const cs_insn *insn,
 // the finding is emitted only when the branch target lies within
 // [fall-through, kill], the span the scan just proved free of reads
 // and control transfers, so the taken edge enters that clean span and
-// reaches the same kill. Backward targets and targets beyond the kill
-// are conservatively dropped. This is the canonical skip-a-small-
-// block shape; if/else diamonds whose kill precedes the join are left
-// unflagged.
+// reaches the same kill. This is the canonical skip-a-small-block
+// shape; if/else diamonds whose kill precedes the join are left
+// unflagged by the deleting grade.
+//
+// When the deleting proof cannot hold -- the temp read again, a
+// control transfer, window expiry, a backward or uncontained target,
+// or end of region -- the pair downgrades instead of dropping: the
+// branch alone rebinds to a TBZ/TBNZ of the producer's SOURCE bit at
+// its own position and the producer stays ("CBZ/CBNZ of a live
+// single-bit test foldable to TBZ/TBNZ"). The rebind holds regardless
+// of the producer's liveness (a self-masked AND still carries the
+// isolated bit unchanged), so it needs no proof at all; only the
+// branch's own displacement (imm19 units) must fit the signed 14-bit
+// TBZ encoding. This is the shape a compiler emits for Java-style
+// `(flags & F) == 0` tests whose masked temp it re-tests with CBZ.
 //
 // A W-form CBZ after a producer isolating bit >= 32 is rejected (the
 // branch cannot observe the bit -- degenerate). ANDS producers are
 // excluded (deleting one loses the NZCV write), as are ZR sources
-// (constant branches) and ZR destinations. The TBZ displacement
-// (imm19 + 1 units) is range-checked against the signed 14-bit
-// encoding, though the containment gate restricts it far more
+// (constant branches) and ZR destinations. The deleting grade's TBZ
+// displacement (imm19 + 1 units) is range-checked against the signed
+// 14-bit encoding, though the containment gate restricts it far more
 // tightly in practice.
 bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);

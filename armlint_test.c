@@ -2252,39 +2252,42 @@ static void test_single_bit_cbz(void)
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 1);
 
-    // -- Negative: the masked temp is read on the fall-through. --
+    // -- Downgrade: the masked temp is read on the fall-through, so
+    //    the producer stays -- the branch alone rebinds to a TBZ of
+    //    the source bit. --
 
     and_w_bit(&code[0], 8, 9, 4);
     cbz_cbnz(&code[4], 0, 0, 8, 2);
     add_w(&code[8], 1, 8, 2);            // reads w8
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
-    // -- Negative: the target lies beyond the kill, so the taken
-    //    path's liveness is unproven. --
+    // -- Downgrade: the target lies beyond the kill, so the taken
+    //    path's liveness is unproven and only the branch rebinds. --
 
     and_w_bit(&code[0], 8, 9, 4);
     cbz_cbnz(&code[4], 0, 0, 8, 4);      // target +16, kill at +8
     add_x(&code[8], 1, 2, 3);
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
-    // -- Negative: backward target -- the taken path is behind the
-    //    scan and can never be proven. --
+    // -- Downgrade: backward target -- the deleting proof can never
+    //    hold; the branch-only rebind emits at the consumer. --
 
     movz_w(&code[0], 5, 1);
     and_w_bit(&code[4], 8, 9, 4);
     cbz_cbnz(&code[8], 0, 0, 8, -2);     // target offset 0
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
-    // -- Negative: a control transfer inside the span discards. --
+    // -- Downgrade: a control transfer inside the span leaves the
+    //    deleting proof unprovable. --
 
     and_w_bit(&code[0], 8, 9, 4);
     cbz_cbnz(&code[4], 0, 0, 8, 3);      // target +12
     ret_(&code[8]);
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
     // -- Negative: a W-form CBZ cannot observe bit 40. --
 
@@ -2319,13 +2322,13 @@ static void test_single_bit_cbz(void)
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 0);
 
-    // -- Negative: no kill before end-of-region -- the pending is
-    //    discarded at flush. --
+    // -- Downgrade at flush: no kill before end-of-region, but the
+    //    branch-only rebind was complete at the consumer. --
 
     and_w_bit(&code[0], 8, 9, 4);
     cbz_cbnz(&code[4], 0, 0, 8, 2);
     add_x(&code[8], 1, 2, 3);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_helper_check(code, 12) == 1);
 
     // -- Negative: intervening instruction breaks adjacency. --
 
