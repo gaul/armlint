@@ -2,3 +2,5 @@ armlint
 armlint_test
 libarmlint.a
 *.o
+tools/pairscan
+tools/defuse

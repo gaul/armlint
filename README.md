@@ -307,6 +307,31 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x60: -> ldr w8, [x8, #0x2
 The process exits non-zero when any opportunity is found, so armlint
 can gate a compiler test suite.
 
+## Mining tools
+
+`tools/` holds the research utilities that feed armlint's check
+backlog, built separately with `make tools`:
+
+* `tools/pairscan` counts adjacent-instruction pairs by normalized
+  shape (registers collapsed to classes, immediates to `#0`/`#i`)
+  across the executable sections of ELF files, surfacing frequent
+  patterns worth a new check. `-e SUBSTR` prints example sites for
+  shapes matching a substring.
+* `tools/defuse` profiles block-local def-to-use distances (how far a
+  value's sole consumer sits from its producer) and multi-instruction
+  redundancies no pair statistic can see: dead definitions, redundant
+  reloads of the same address, re-materialized constants, and zero
+  compares of a value whose producer could have set the flags.
+
+The workflow that produced several of the current checks: compile a
+representative corpus, run `pairscan` to rank pair shapes, classify
+the top shapes as by-design or foldable, then use `defuse` to decide
+whether a candidate needs adjacency only or a liveness window. Both
+tools lean on Capstone's register-access model, which mis-reports the
+compare aliases (`CMP`/`CMN`/`TST` mark their first operand as a
+write); `defuse` corrects for this, and armlint's own checks decode
+the raw encodings precisely to avoid that class of problem.
+
 ## References
 
 * [Arm A-profile A64 Instruction Set Architecture](https://developer.arm.com/documentation/ddi0602/latest/) - per-instruction reference, including alias conditions

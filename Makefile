@@ -35,6 +35,16 @@ integration-test: armlint
 integration-test-regen: armlint
 	./scripts/run_fixtures.sh regen
 
+# Corpus-mining research utilities (see "Mining tools" in README.md);
+# not part of the default build or test targets.
+tools: tools/pairscan tools/defuse
+
+tools/pairscan: tools/pairscan.c
+	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) $< $(CAPSTONE_LIBS) -o $@
+
+tools/defuse: tools/defuse.c
+	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) $< $(CAPSTONE_LIBS) -o $@
+
 all: lib armlint test
 
 clean:
@@ -42,6 +52,8 @@ clean:
 		armlint \
 		armlint_test \
 		libarmlint.a \
+		tools/pairscan \
+		tools/defuse \
 		*.o
 
-.PHONY: all clean lib test integration-test integration-test-regen
+.PHONY: all clean lib test integration-test integration-test-regen tools
