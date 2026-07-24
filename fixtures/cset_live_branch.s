@@ -34,4 +34,19 @@ _main:
     tbnz    w11, #3, 4f
 4:  mov     w11, #0
 
+    // Downgrade: both the boolean and its negation stay live -- the
+    // EOR becomes an independent inverted CSET off the flags.
+    cmp     w0, w1
+    cset    w12, hi
+    eor     w13, w12, #1
+    strb    w12, [x2]
+    mov     w12, #0
+
+    // Downgrade: NEG of a still-live temp becomes CSETM.
+    cmp     w0, w1
+    cset    w14, mi
+    neg     w15, w14
+    strb    w14, [x2]
+    mov     w14, #0
+
     ret

@@ -184,6 +184,14 @@ struct armlint_state {
     bool pending_tb_has_fallback;
     armlint_finding pending_tb_fallback;
 
+    // Same downgrade slot for the plain forward scan (defer_dead_mov /
+    // armlint_advance_pending_mz): set only by checks whose rewrite has
+    // a liveness-independent branch- or consumer-only form (currently
+    // the CSET EOR/NEG consumers). Cleared by defer_dead_mov itself so
+    // the many other deferring folds never inherit a stale fallback.
+    bool pending_mz_has_fallback;
+    armlint_finding pending_mz_fallback;
+
     // CSET producer (CSINC Rd, ZR, ZR, cond; cond not AL/NV) pending a
     // consumer: CBZ/CBNZ or TBZ/TBNZ #0 of Rd (fold to B.cond -- the
     // deleting grade when Rd dies, the branch-only rebind otherwise),
@@ -1178,8 +1186,12 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
         && state->pending_tb_has_fallback;
     if (have_fallback) {
         *out = state->pending_tb_fallback;
+    } else if (state->pending_mz_active && state->pending_mz_has_fallback) {
+        *out = state->pending_mz_fallback;
+        have_fallback = true;
     }
     state->pending_tb_has_fallback = false;
+    state->pending_mz_has_fallback = false;
     state->shf_active = false;
     state->bsx_active = false;
     state->lra_active = false;
@@ -3016,6 +3028,21 @@ static bool defer_dead_nzcv_sgn(armlint_state *state,
 // register before any read or control transfer; a read or branch/call/return
 // (or window expiry) discards it -- the MOV is needed and dropping it would
 // save nothing.
+// Emit the stashed downgrade of a failed deleting fold, if the check
+// that deferred provided one (currently only the CSET EOR/NEG
+// consumers do). The downgrade was complete at the consumer, so a
+// failed deadness proof does not invalidate it.
+static bool emit_pending_mz_fallback(armlint_state *state,
+                                     armlint_finding *out)
+{
+    if (!state->pending_mz_has_fallback) {
+        return false;
+    }
+    state->pending_mz_has_fallback = false;
+    *out = state->pending_mz_fallback;
+    return true;
+}
+
 bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out)
 {
@@ -3025,21 +3052,23 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
     }
     if (insn->size != 4) {
         state->pending_mz_active = false;
-        return false;
+        return emit_pending_mz_fallback(state, out);
     }
     switch (classify_reg_liveness(insn, state->pending_mz_reg)) {
     case LIV_OVERWRITE:
         *out = state->pending_mz_finding;
         state->pending_mz_active = false;
+        state->pending_mz_has_fallback = false;
         return true;
     case LIV_READ:
     case LIV_TERM_SAFE:
     case LIV_TERM_UNSAFE:
         state->pending_mz_active = false;
-        return false;
+        return emit_pending_mz_fallback(state, out);
     case LIV_UNKNOWN:
         if (state->pending_mz_window == 0 || --state->pending_mz_window == 0) {
             state->pending_mz_active = false;
+            return emit_pending_mz_fallback(state, out);
         }
         return false;
     }
@@ -3069,6 +3098,9 @@ static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
     state->pending_mz_active = true;
     state->pending_mz_window = LIVENESS_WINDOW;
     state->pending_mz_reg = (int)reg;
+    // No downgrade by default; a check with a liveness-independent
+    // fallback stashes it right after this call.
+    state->pending_mz_has_fallback = false;
     return false;
 }
 
@@ -4532,11 +4564,14 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
         // (b) EOR #1 of the temp inverts the boolean: the pair is the
         // inverted CSET, at the consumer's width. (c) NEG of the temp
         // maps 1 to all-ones: CSETM, condition unchanged. Either way
-        // the rewrite deletes the CSET, so the temp must die: a
-        // consumer overwriting the temp itself kills it on the spot
-        // (emit now); otherwise defer through the forward scan.
-        // (decode_eor_imm_1 already rejected Rd = 31 as SP; NEG's
-        // Rd = 31 is ZR, a discarded result not worth rewriting.)
+        // the deleting rewrite requires the temp dead: a consumer
+        // overwriting the temp itself kills it on the spot (emit now);
+        // otherwise defer through the forward scan, downgrading on a
+        // failed proof -- the consumer alone can become an independent
+        // CSET/CSETM off the still-valid flags, keeping the original
+        // CSET, which holds for the adjacent pair regardless of
+        // liveness. (decode_eor_imm_1 already rejected Rd = 31 as SP;
+        // NEG's Rd = 31 is ZR, a discarded result not worth rewriting.)
         unsigned e_sf, e_rd, e_rn;
         bool is_eor = decode_eor_imm_1(op, &e_sf, &e_rd, &e_rn);
         bool is_neg = !is_eor && decode_neg(op, &e_sf, &e_rd, &e_rn);
@@ -4563,7 +4598,26 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
             if (e_rd == p_rd) {
                 return true;
             }
-            return defer_dead_mov(state, out, p_rd);
+
+            armlint_finding fb;
+            fb.name = is_eor
+                ? "EOR #1 of a live CSET foldable to inverted CSET"
+                : "NEG of a live CSET foldable to CSETM";
+            fb.start_offset = out->start_offset;
+            fb.insn_count = 2;
+            clear_finding_strings(&fb);
+            snprintf(fb.detail, sizeof(fb.detail),
+                "-> %s %c%u, %s (CSET stays)",
+                new_mnem, e_wx, e_rd, a64_cond_names[new_cond]);
+            snprintf(fb.lines[0], sizeof(fb.lines[0]),
+                "%s", out->lines[0]);
+            snprintf(fb.lines[1], sizeof(fb.lines[1]),
+                "%s", out->lines[1]);
+
+            defer_dead_mov(state, out, p_rd);
+            state->pending_mz_has_fallback = true;
+            state->pending_mz_fallback = fb;
+            return false;
         }
     }
 

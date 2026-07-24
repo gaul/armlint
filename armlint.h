@@ -315,7 +315,11 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
 // output with CBNZ until its HIf codegen learned to branch on the
 // still-live flags). For EOR/NEG, a consumer overwriting the temp
 // itself kills it on the spot (emit immediately); otherwise emission
-// defers through the plain forward scan (defer_dead_mov).
+// defers through the plain forward scan (defer_dead_mov), downgrading
+// on a failed proof just like the branch consumer: the EOR (NEG)
+// alone becomes an independent inverted CSET (CSETM) off the
+// still-valid flags with the original CSET kept ("... of a live CSET
+// foldable to ...").
 bool check_cset_fold(armlint_state *state, const cs_insn *insn,
                      size_t offset, armlint_finding *out);
 

@@ -10,9 +10,19 @@ TBZ/TBNZ #0 of a live CSET foldable to B.cond at offset: 0x24: -> b.eq 0x30 (CSE
   cset w10, ne
   tbz w10, #0, 0x30
 
+EOR #1 of a live CSET foldable to inverted CSET at offset: 0x48: -> cset w13, ls (CSET stays) (2 instructions)
+  cset w12, hi
+  eor w13, w12, #1
+
+NEG of a live CSET foldable to CSETM at offset: 0x5c: -> csetm w15, mi (CSET stays) (2 instructions)
+  cset w14, mi
+  neg w15, w14
+
 Optimization opportunities by type:
        1  CBZ/CBNZ of a live CSET foldable to B.cond
        1  CSET + TBZ/TBNZ #0 foldable into B.cond
+       1  EOR #1 of a live CSET foldable to inverted CSET
+       1  NEG of a live CSET foldable to CSETM
        1  TBZ/TBNZ #0 of a live CSET foldable to B.cond
 
-3 optimization opportunities in 18 instructions
+5 optimization opportunities in 28 instructions

@@ -2494,13 +2494,28 @@ static void test_cset_fold(void)
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 1);
 
-    // (The EOR consumer has no branch-only variant: a live temp stays
-    // a negative.)
+    // The EOR consumer downgrades the same way: with the temp read
+    // again, the pair keeps both instructions and the EOR becomes an
+    // independent inverted CSET off the still-valid flags.
     cset_(&code[0], 0, 8, 0);
     eor_imm(&code[4], 0, 9, 8, 0, 0, 0);
     add_w(&code[8], 1, 8, 2);
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // Same for NEG: a live temp yields the CSETM downgrade.
+    cset_(&code[0], 0, 8, 12);
+    neg_(&code[4], 0, 0, 9, 8);
+    add_w(&code[8], 1, 8, 2);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // The EOR downgrade survives end-of-region flush too: it was
+    // complete at the consumer.
+    cset_(&code[0], 0, 8, 0);
+    eor_imm(&code[4], 0, 9, 8, 0, 0, 0);
+    add_x(&code[8], 1, 2, 3);
+    assert(run_helper_check(code, 12) == 1);
 
     // -- Downgrade: branch target beyond the kill -- the taken edge is
     //    unproven, so only the branch rebinds. --
