@@ -1257,6 +1257,24 @@ static void mov_w_reg(uint8_t out[4], unsigned rd, unsigned rm)
     write_le32(out, op);
 }
 
+// FMOV Sd, Sn (register). Base 0x1E204000.
+static void fmov_s_reg(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x1E204000u
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// FMOV Dd, Dn (register). Base 0x1E604000.
+static void fmov_d_reg(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    uint32_t op = 0x1E604000u
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
 // AND Wd, Wn, #0xFF -- sf=0, N=0, immr=0, imms=7.
 static void and_w_ff(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -6648,6 +6666,96 @@ static void test_cheap_const_copy(void)
     assert(run_helper_check(code, 8) == 1);  // mov x1, x1: self-MOV finding only
 }
 
+static void test_reg_copy_chain(void)
+{
+    uint8_t code[16];
+
+    // The move-resolver fan-out shape: mov x1, x0 ; mov x24, x1 -- the
+    // second copy can read x0 directly.
+    mov_x_reg(&code[0], 1, 0);
+    mov_x_reg(&code[4], 24, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Same at W width.
+    mov_w_reg(&code[0], 1, 0);
+    mov_w_reg(&code[4], 24, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // A W read of an X copy sees the low half of the same value.
+    mov_x_reg(&code[0], 1, 0);
+    mov_w_reg(&code[4], 24, 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // An X read of a W copy observes the zeroed upper half, which x0
+    // does not guarantee -- no finding.
+    mov_w_reg(&code[0], 1, 0);
+    mov_x_reg(&code[4], 24, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Full-width copy-back: x1 still holds the value, the second copy
+    // is a deletable no-op.
+    mov_x_reg(&code[0], 22, 1);
+    mov_x_reg(&code[4], 1, 22);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W copy-back also zeroes the upper half -- skipped.
+    mov_w_reg(&code[0], 22, 1);
+    mov_w_reg(&code[4], 1, 22);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Fan-out from the same source is already independent -- the second
+    // copy reads x0, not x1.
+    mov_x_reg(&code[0], 1, 0);
+    mov_x_reg(&code[4], 2, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Three-copy chain: one finding per rewritable link.
+    mov_x_reg(&code[0], 1, 0);
+    mov_x_reg(&code[4], 2, 1);
+    mov_x_reg(&code[8], 3, 2);
+    assert(run_helper_check(code, 12) == 2);
+
+    // A non-copy between the two breaks adjacency.
+    mov_x_reg(&code[0], 1, 0);
+    add_x(&code[4], 9, 9, 9);
+    mov_x_reg(&code[8], 24, 1);
+    assert(run_helper_check(code, 12) == 0);
+
+    // FP chains: fmov d2, d0 ; fmov d3, d2, and the S read of a D copy.
+    fmov_d_reg(&code[0], 2, 0);
+    fmov_d_reg(&code[4], 3, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    fmov_d_reg(&code[0], 2, 0);
+    fmov_s_reg(&code[4], 3, 2);
+    assert(run_helper_check(code, 8) == 1);
+
+    // A D read of an S copy -- upper half not guaranteed; no finding.
+    fmov_s_reg(&code[0], 2, 0);
+    fmov_d_reg(&code[4], 3, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // GPR and FP copies do not chain across register files.
+    mov_x_reg(&code[0], 1, 0);
+    fmov_d_reg(&code[4], 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // A copy from ZR is a constant materialization -- the MOV #0
+    // check's territory (which defers on the register's deadness and
+    // stays silent here) -- and never a chain producer.
+    mov_x_reg(&code[0], 1, 31);
+    mov_x_reg(&code[4], 2, 1);
+    assert(run_helper_check(code, 8) == 0);
+
+    // Side entry between the copies: a branch target on the second
+    // copy suppresses the finding (central side-entry gate, needs the
+    // buffer-aware harness for the branch-target map).
+    mov_x_reg(&code[0], 1, 0);
+    mov_x_reg(&code[4], 24, 1);
+    cbz_cbnz(&code[8], 1, 0, 9, -1);   // cbz x9, back to the second copy
+    assert(run_buffer_check(code, 12) == 0);
+}
+
 static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
@@ -11632,6 +11740,7 @@ int main(void)
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
     test_cheap_const_copy();
+    test_reg_copy_chain();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

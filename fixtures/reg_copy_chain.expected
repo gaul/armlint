@@ -1,0 +1,37 @@
+chained register copy foldable to the original source at offset: 0x0: -> mov x24, x0 (2 instructions)
+  mov x1, x0
+  mov x24, x1
+
+chained register copy foldable to the original source at offset: 0x8: -> mov w5, w2 (2 instructions)
+  mov w3, w2
+  mov w5, w3
+
+chained register copy foldable to the original source at offset: 0x10: -> mov w8, w6 (2 instructions)
+  mov x7, x6
+  mov w8, w7
+
+copy-back register MOV is redundant at offset: 0x18: -> delete: x10 still holds the copied value (2 instructions)
+  mov x11, x10
+  mov x10, x11
+
+chained register copy foldable to the original source at offset: 0x20: -> mov x14, x12 (2 instructions)
+  mov x13, x12
+  mov x14, x13
+
+chained register copy foldable to the original source at offset: 0x24: -> mov x15, x13 (2 instructions)
+  mov x14, x13
+  mov x15, x14
+
+chained register copy foldable to the original source at offset: 0x2c: -> fmov d3, d1 (2 instructions)
+  fmov d2, d1
+  fmov d3, d2
+
+chained register copy foldable to the original source at offset: 0x34: -> fmov s6, s4 (2 instructions)
+  fmov s5, s4
+  fmov s6, s5
+
+Optimization opportunities by type:
+       7  chained register copy foldable to the original source
+       1  copy-back register MOV is redundant
+
+8 optimization opportunities in 24 instructions

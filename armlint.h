@@ -633,6 +633,28 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// Detect two adjacent register copies where the second reads the
+// first's destination -- a chain that serialises otherwise-independent
+// copies:
+//     mov x1, x0
+//     mov x24, x1          -> mov x24, x0
+// A copy is the canonical GPR MOV (ORR Rd, ZR, Rm, LSL #0; copies from
+// ZR are constant materialisations owned by other checks, self-copies
+// by the self-MOV check) or an FP FMOV Sd, Sn / Dd, Dn. Both copies
+// remain and only the second's source operand changes, so no deadness
+// condition applies and nothing defers -- this is the dependency-
+// quality shape a compiler's parallel move resolver emits when it
+// redirects later copies of a fanned-out value at the copy just made.
+// The second copy may read at most the width the first wrote (an X or
+// D read of a W or S copy would observe the zeroed upper half, which
+// the original source does not hold). The full-width copy-back
+// MOV Rb, Ra ; MOV Ra, Rb is reported separately as a deletable no-op;
+// its W/S variant is skipped (the second copy also zeroes the upper
+// half, and the chain rewrite degenerates to a self-MOV). A chain of
+// three or more copies reports one finding per rewritable link.
+bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising a constant C in [0, 31], immediately
 // followed by a register-form conditional compare whose Rm is the
 // constant. The compare folds to its immediate form, making the MOV

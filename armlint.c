@@ -182,6 +182,19 @@ struct armlint_state {
     size_t cset_offset;
     char cset_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Canonical register copy (ORR Rd, ZR, Rm for GPRs, FMOV Sd/Dd,
+    // Sn/Dn for FP) pending an adjacent second copy that reads its
+    // destination -- a chain whose second link can read the original
+    // source instead, or a copy-back that restores a value the target
+    // register still holds.
+    bool rcc_active;
+    bool rcc_is_fp;
+    bool rcc_is_64bit;
+    unsigned rcc_rd;
+    unsigned rcc_rn;
+    size_t rcc_offset;
+    char rcc_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
     // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
     bool sgn_active;
@@ -1152,6 +1165,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->tbf_active = false;
     state->pending_tb_active = false;
     state->cset_active = false;
+    state->rcc_active = false;
     state->xtc_active = false;
     state->wzx_active = false;
     state->sxt_active = false;
@@ -6679,6 +6693,128 @@ bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// FMOV (register, single/double precision): FMOV Sd, Sn / FMOV Dd, Dn,
+//   0 0 0 11110 0t 1 0000 00 10000 Rn Rd     (type t: 0 = S, 1 = D)
+// The mask pins every bit except the type's low bit, Rn and Rd; keeping
+// bit 23 fixed excludes the half-precision form.
+static bool decode_fmov_reg(uint32_t op, bool *out_is_double,
+                            unsigned *out_rd, unsigned *out_rn)
+{
+    if ((op & 0xFFBFFC00u) != 0x1E204000u) {
+        return false;
+    }
+    *out_is_double = ((op >> 22) & 1u) != 0;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rd = op & 0x1Fu;
+    return true;
+}
+
+bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->rcc_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // A canonical register copy: ORR Rd, ZR, Rm (LSL #0) for GPRs, or
+    // FMOV Sd, Sn / Dd, Dn for FP registers. Copies FROM ZR are
+    // constant materializations (the MOV #0 and cheap-constant checks'
+    // territory) and self-copies belong to the self-MOV check, so both
+    // are excluded here.
+    bool is_copy = false;
+    bool is_fp = false;
+    bool is_64 = false;
+    unsigned rd = 0;
+    unsigned rn = 0;
+    unsigned sf, opc, n_bit, l_rd, l_rn, l_rm;
+    bool fmov_double;
+    if (decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit,
+                                  &l_rd, &l_rn, &l_rm)
+            && opc == 1 && n_bit == 0 && l_rn == 31
+            && l_rm != 31 && l_rd != 31 && l_rd != l_rm) {
+        is_copy = true;
+        is_64 = (sf != 0);
+        rd = l_rd;
+        rn = l_rm;
+    } else if (decode_fmov_reg(op, &fmov_double, &rd, &rn) && rd != rn) {
+        is_copy = true;
+        is_fp = true;
+        is_64 = fmov_double;
+    }
+
+    bool found = false;
+    if (state->rcc_active && is_copy && is_fp == state->rcc_is_fp
+            && rn == state->rcc_rd
+            // The second copy may read at most the width the producer
+            // wrote: an X (D) read of a W (S) copy observes the zeroed
+            // upper half, which the original source does not hold.
+            && (state->rcc_is_64bit || !is_64)) {
+        char w = is_fp ? (is_64 ? 'd' : 's') : (is_64 ? 'x' : 'w');
+        const char *mnem = is_fp ? "fmov" : "mov";
+
+        if (rd == state->rcc_rn && is_64 && state->rcc_is_64bit) {
+            // Copy-back: MOV Rb, Ra ; MOV Ra, Rb. Ra still holds the
+            // value, so the second copy is a no-op -- full width only,
+            // since a W (S) copy-back additionally zeroes the upper
+            // half, which deleting would not preserve.
+            out->name = "copy-back register MOV is redundant";
+            out->start_offset = state->rcc_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> delete: %c%u still holds the copied value", w, rd);
+            found = true;
+        } else if (rd != state->rcc_rn) {
+            // Chain: MOV Rb, Ra ; MOV Rc, Rb. The second copy can read
+            // the original source directly, removing its dependency on
+            // the first -- the shape a compiler's move resolver emits
+            // when it redirects later copies of a fanned-out value at
+            // the copy just made (ART's arm64 backend did this for
+            // every multi-destination register move until its move
+            // resolver learned to keep register sources). Both copies
+            // remain and only the source operand changes, so no
+            // deadness condition applies and nothing defers.
+            out->name = "chained register copy foldable to the original source";
+            out->start_offset = state->rcc_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, %c%u", mnem, w, rd, w, state->rcc_rn);
+            found = true;
+        }
+        // (A W/S copy-back falls through unflagged: the chain rewrite
+        // would degenerate to a self-MOV and deletion is blocked by
+        // the upper-half zeroing.)
+        if (found) {
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->rcc_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    // Open or refresh the producer: any copy heads the next link, so a
+    // flagged consumer immediately becomes the new producer (a
+    // three-copy chain yields two findings, one per rewritable link,
+    // and the rewritten sources stay valid link by link).
+    if (is_copy) {
+        state->rcc_active = true;
+        state->rcc_is_fp = is_fp;
+        state->rcc_is_64bit = is_64;
+        state->rcc_rd = rd;
+        state->rcc_rn = rn;
+        state->rcc_offset = offset;
+        snprintf(state->rcc_disasm, sizeof(state->rcc_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    } else {
+        state->rcc_active = false;
+    }
+    return found;
+}
+
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
 //   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
 // Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
@@ -12082,6 +12218,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
     check_cheap_const_copy,
+    check_reg_copy_chain,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,
     check_mov_shift_fold,
