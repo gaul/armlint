@@ -172,10 +172,24 @@ struct armlint_state {
     size_t pending_tb_target;     // branch-target offset
     armlint_finding pending_tb_finding;
 
+    // Downgrade for the CSET+branch fold: when the deleting fold's
+    // liveness proof fails (the temp is read again, a control transfer
+    // intervenes, the window expires, the target is backward or
+    // uncontained, or the region ends), the branch alone can still be
+    // rebound to B.cond with the CSET kept -- valid for the adjacent
+    // pair regardless of liveness, since CSET preserves the flags. The
+    // fallback finding is stashed when the pending fold is armed and
+    // emitted wherever the proof fails. Only the CSET consumer arms
+    // it; the single-bit TBZ fold has no branch-only variant.
+    bool pending_tb_has_fallback;
+    armlint_finding pending_tb_fallback;
+
     // CSET producer (CSINC Rd, ZR, ZR, cond; cond not AL/NV) pending a
-    // consumer: CBZ/CBNZ of Rd (fold to B.cond), EOR Rd', Rd, #1 (fold
-    // to the inverted CSET) or NEG Rd', Rd (fold to CSETM). cset_cond
-    // is the logical CSET condition -- the raw CSINC field inverted.
+    // consumer: CBZ/CBNZ or TBZ/TBNZ #0 of Rd (fold to B.cond -- the
+    // deleting grade when Rd dies, the branch-only rebind otherwise),
+    // EOR Rd', Rd, #1 (fold to the inverted CSET) or NEG Rd', Rd (fold
+    // to CSETM). cset_cond is the logical CSET condition -- the raw
+    // CSINC field inverted.
     bool cset_active;
     unsigned cset_rd;
     unsigned cset_cond;
@@ -1155,6 +1169,17 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     // pending CMP+B.EQ/NE or TST+B.EQ/NE finding is discarded too:
     // without seeing a safe stopper before end-of-region, we cannot
     // prove the fold is sound.
+    //
+    // The CSET+branch fallback is the exception: the branch-only
+    // rebind is complete at the consumer and needs no forward proof,
+    // so an unresolved pending fold at end-of-region still yields the
+    // downgraded finding.
+    bool have_fallback = state->pending_tb_active
+        && state->pending_tb_has_fallback;
+    if (have_fallback) {
+        *out = state->pending_tb_fallback;
+    }
+    state->pending_tb_has_fallback = false;
     state->shf_active = false;
     state->bsx_active = false;
     state->lra_active = false;
@@ -1210,6 +1235,15 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->sgn_active = false;
     state->pending_sgn_active = false;
     state->pending_fp_active = false;
+    if (have_fallback) {
+        // Still run mov_close for its state reset; a MOV-chain finding
+        // colliding with the fallback at end-of-region is forfeited
+        // (flush returns a single finding, and it already discards
+        // whole classes of unproven pendings).
+        armlint_finding discard;
+        mov_close(state, &discard);
+        return true;
+    }
     return mov_close(state, out);
 }
 
@@ -4087,6 +4121,44 @@ static bool decode_cbz_cbnz(uint32_t op, unsigned *out_sf,
     return true;
 }
 
+// TBZ (op = 0) / TBNZ (op = 1):
+//   b5 011011 op b40 imm14 Rt
+// The tested bit is b5:b40; b5 doubles as the register-width bit in
+// the assembly rendering (bit >= 32 prints Xt).
+static bool decode_tbz_tbnz(uint32_t op, unsigned *out_sf,
+                            bool *out_is_tbnz, unsigned *out_bit,
+                            int32_t *out_imm14, unsigned *out_rt)
+{
+    if ((op & 0x7E000000u) != 0x36000000u) {
+        return false;
+    }
+    unsigned b5 = (op >> 31) & 1u;
+    *out_sf = b5;
+    *out_is_tbnz = ((op >> 24) & 1u) != 0;
+    *out_bit = (b5 << 5) | ((op >> 19) & 0x1Fu);
+    int32_t imm14 = (int32_t)((op >> 5) & 0x3FFFu);
+    if (imm14 & 0x2000) {
+        imm14 -= 0x4000;    // sign-extend 14 bits
+    }
+    *out_imm14 = imm14;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// Emit the branch-only downgrade of a failed CSET+branch fold, if one
+// was stashed. The rebind is valid regardless of why the deleting
+// fold's proof failed -- it was complete at the consumer.
+static bool emit_pending_tb_fallback(armlint_state *state,
+                                     armlint_finding *out)
+{
+    if (!state->pending_tb_has_fallback) {
+        return false;
+    }
+    state->pending_tb_has_fallback = false;
+    *out = state->pending_tb_fallback;
+    return true;
+}
+
 bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out)
 {
@@ -4095,7 +4167,7 @@ bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
     }
     if (insn->size != 4) {
         state->pending_tb_active = false;
-        return false;
+        return emit_pending_tb_fallback(state, out);
     }
     switch (classify_reg_liveness(insn, state->pending_tb_reg)) {
     case LIV_OVERWRITE:
@@ -4106,22 +4178,25 @@ bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
         // lies inside that clean span (inclusive of the kill itself):
         // execution entering anywhere in it runs straight to the same
         // kill. A target before the fall-through (backward) or beyond
-        // the kill leaves the taken path unproven -- discard.
+        // the kill leaves the taken path unproven -- downgrade to the
+        // branch-only rebind if one is stashed, else discard.
         if (state->pending_tb_target >= state->pending_tb_ft
                 && state->pending_tb_target <= offset) {
+            state->pending_tb_has_fallback = false;
             *out = state->pending_tb_finding;
             return true;
         }
-        return false;
+        return emit_pending_tb_fallback(state, out);
     case LIV_READ:
     case LIV_TERM_SAFE:
     case LIV_TERM_UNSAFE:
         state->pending_tb_active = false;
-        return false;
+        return emit_pending_tb_fallback(state, out);
     case LIV_UNKNOWN:
         if (state->pending_tb_window == 0
                 || --state->pending_tb_window == 0) {
             state->pending_tb_active = false;
+            return emit_pending_tb_fallback(state, out);
         }
         return false;
     }
@@ -4197,6 +4272,9 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                 state->pending_tb_reg = (int)state->tbf_rd;
                 state->pending_tb_ft = offset + 4u;
                 state->pending_tb_target = (size_t)t_off;
+                // The single-bit fold has no branch-only downgrade:
+                // the TBZ rewrite deletes the producer or is nothing.
+                state->pending_tb_has_fallback = false;
             }
         }
         // Strict adjacency: any non-matching instruction expires.
@@ -4356,32 +4434,76 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
         unsigned p_rd = state->cset_rd;
         unsigned p_cond = state->cset_cond;
 
-        // (a) CBZ/CBNZ of the temp: CBNZ branches exactly when the
-        // condition held, CBZ when it did not -- B.cond with the same
-        // target, deleting the CSET. The temp must then be dead on
-        // BOTH edges; defer through the two-edge scan exactly as the
-        // single-bit fold does (fall-through proven by forward scan,
-        // taken edge by containment in [fall-through, kill]). Backward
-        // targets can never satisfy containment, so they drop now.
+        // (a) CBZ/CBNZ or TBZ/TBNZ #0 of the temp: the branch tests
+        // exactly the materialized condition (the temp is 0 or 1, so
+        // bit 0 is its truth value) -- B.cond with the same target.
+        // Two grades: deleting the CSET requires the temp dead on
+        // BOTH edges, deferred through the two-edge scan exactly as
+        // the single-bit fold does (fall-through proven by forward
+        // scan, taken edge by containment in [fall-through, kill]).
+        // When that proof cannot hold -- backward or uncontained
+        // target, the temp read again, a control transfer, window
+        // expiry, end of region, or the B.cond displacement limit --
+        // the branch alone is still rebound to B.cond with the CSET
+        // kept: CSET preserves the flags, so the rebind is valid for
+        // the adjacent pair regardless of liveness. That downgrade is
+        // stashed as the pending fold's fallback (or emitted at once
+        // when the deleting grade is impossible on its face).
         unsigned c_sf, rt;
         bool is_cbnz;
         int32_t imm19;
-        if (decode_cbz_cbnz(op, &c_sf, &is_cbnz, &imm19, &rt)
-                && rt == p_rd) {
-            // The B.cond replaces the producer, 4 bytes before the
-            // CBZ, so its displacement is imm19 + 1 units -- still a
-            // signed 19-bit quantity except at imm19's positive limit.
-            int64_t t_off = (int64_t)offset + (int64_t)imm19 * 4;
-            if (t_off >= (int64_t)(offset + 4u)
-                    && (int64_t)imm19 + 1 <= 262143) {
-                unsigned bcond = is_cbnz ? p_cond : (p_cond ^ 1u);
-                uint64_t target = insn->address
-                    + (uint64_t)((int64_t)imm19 * 4);
-                char c_wx = c_sf ? 'x' : 'w';
-                const char *cb_mnem = is_cbnz ? "cbnz" : "cbz";
+        bool is_tbnz;
+        unsigned tb_bit;
+        int32_t imm14;
+        bool is_cb = decode_cbz_cbnz(op, &c_sf, &is_cbnz, &imm19, &rt);
+        bool is_tb = !is_cb
+            && decode_tbz_tbnz(op, &c_sf, &is_tbnz, &tb_bit, &imm14, &rt)
+            && tb_bit == 0;
+        if ((is_cb || is_tb) && rt == p_rd) {
+            bool branch_on_true = is_cb ? is_cbnz : is_tbnz;
+            int32_t units = is_cb ? imm19 : imm14;
+            unsigned bcond = branch_on_true ? p_cond : (p_cond ^ 1u);
+            uint64_t target = insn->address
+                + (uint64_t)((int64_t)units * 4);
+            int64_t t_off = (int64_t)offset + (int64_t)units * 4;
+            char c_wx = c_sf ? 'x' : 'w';
+            const char *cb_mnem = is_cb ? (is_cbnz ? "cbnz" : "cbz")
+                                        : (is_tbnz ? "tbnz" : "tbz");
 
+            // The branch-only rebind, complete at this consumer: the
+            // B.cond sits at the branch's own position, so the
+            // displacement is unchanged and always encodable.
+            armlint_finding fb;
+            fb.name = is_cb
+                ? "CBZ/CBNZ of a live CSET foldable to B.cond"
+                : "TBZ/TBNZ #0 of a live CSET foldable to B.cond";
+            fb.start_offset = state->cset_offset;
+            fb.insn_count = 2;
+            clear_finding_strings(&fb);
+            snprintf(fb.detail, sizeof(fb.detail),
+                "-> b.%s 0x%" PRIx64 " (CSET stays)",
+                a64_cond_names[bcond], target);
+            snprintf(fb.lines[0], sizeof(fb.lines[0]),
+                "%s", state->cset_disasm);
+            if (is_cb) {
+                snprintf(fb.lines[1], sizeof(fb.lines[1]),
+                    "%s %c%u, 0x%" PRIx64, cb_mnem, c_wx, rt, target);
+            } else {
+                snprintf(fb.lines[1], sizeof(fb.lines[1]),
+                    "%s %c%u, #0, 0x%" PRIx64, cb_mnem, c_wx, rt, target);
+            }
+
+            // The deleting grade: the B.cond replaces the producer, 4
+            // bytes before the branch, so its displacement is one unit
+            // longer -- within B.cond's signed 19 bits except at
+            // imm19's positive limit (a TBZ displacement always
+            // fits). Backward targets can never satisfy containment.
+            if (t_off >= (int64_t)(offset + 4u)
+                    && (int64_t)units + 1 <= 262143) {
                 armlint_finding *p = &state->pending_tb_finding;
-                p->name = "CSET + CBZ/CBNZ foldable into B.cond";
+                p->name = is_cb
+                    ? "CSET + CBZ/CBNZ foldable into B.cond"
+                    : "CSET + TBZ/TBNZ #0 foldable into B.cond";
                 p->start_offset = state->cset_offset;
                 p->insn_count = 2;
                 clear_finding_strings(p);
@@ -4390,18 +4512,21 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
                     "-> b.%s 0x%" PRIx64,
                     a64_cond_names[bcond], target);
                 snprintf(p->lines[0], sizeof(p->lines[0]),
-                    "%s", state->cset_disasm);
+                    "%s", fb.lines[0]);
                 snprintf(p->lines[1], sizeof(p->lines[1]),
-                    "%s %c%u, 0x%" PRIx64,
-                    cb_mnem, c_wx, rt, target);
+                    "%s", fb.lines[1]);
 
                 state->pending_tb_active = true;
                 state->pending_tb_window = LIVENESS_WINDOW;
                 state->pending_tb_reg = (int)p_rd;
                 state->pending_tb_ft = offset + 4u;
                 state->pending_tb_target = (size_t)t_off;
+                state->pending_tb_has_fallback = true;
+                state->pending_tb_fallback = fb;
+                return false;
             }
-            return false;
+            *out = fb;
+            return true;
         }
 
         // (b) EOR #1 of the temp inverts the boolean: the pair is the

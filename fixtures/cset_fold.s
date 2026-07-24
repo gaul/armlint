@@ -45,16 +45,16 @@ _main:
     cset    w14, mi
     neg     w14, w14
 
-    // Negative: the temp is read on the fall-through -- the CSET
-    // cannot be deleted.
+    // Downgrade: the temp is read on the fall-through -- the CSET
+    // cannot be deleted, but the branch alone rebinds to B.cond.
     cmp     w0, w1
     cset    w15, eq
     cbnz    w15, 4f
     add     w1, w15, w2
 4:  mov     w15, #0
 
-    // Negative: the branch target lies beyond the overwrite, so the
-    // taken path's liveness is unproven.
+    // Downgrade: the branch target lies beyond the overwrite, so the
+    // taken path's liveness is unproven -- the branch alone rebinds.
     cmp     w0, w1
     cset    w16, eq
     cbz     w16, 5f

@@ -1257,6 +1257,20 @@ static void mov_w_reg(uint8_t out[4], unsigned rd, unsigned rm)
     write_le32(out, op);
 }
 
+// TBZ (is_tbnz=false) / TBNZ (is_tbnz=true) Rt, #(b5:b40), label.
+// Base 0x36000000; imm14 in instruction units.
+static void tbz_tbnz(uint8_t out[4], unsigned b5, bool is_tbnz,
+                     unsigned b40, int imm14, unsigned rt)
+{
+    uint32_t op = 0x36000000u
+        | ((b5 & 1u) << 31)
+        | ((is_tbnz ? 1u : 0u) << 24)
+        | ((b40 & 0x1Fu) << 19)
+        | (((uint32_t)imm14 & 0x3FFFu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 // FMOV Sd, Sn (register). Base 0x1E204000.
 static void fmov_s_reg(uint8_t out[4], unsigned rd, unsigned rn)
 {
@@ -2471,44 +2485,79 @@ static void test_cset_fold(void)
     movz_w(&code[8], 8, 0);
     assert(run_helper_check(code, 12) == 1);
 
-    // -- Negative: the temp is read again before dying. --
+    // -- Downgrade: the temp is read again before dying, so the CSET
+    //    must stay -- the branch alone rebinds to B.cond. --
 
     cset_(&code[0], 0, 8, 0);
     cbz_cbnz(&code[4], 0, 1, 8, 2);
     add_w(&code[8], 1, 8, 2);            // reads w8
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
+    // (The EOR consumer has no branch-only variant: a live temp stays
+    // a negative.)
     cset_(&code[0], 0, 8, 0);
     eor_imm(&code[4], 0, 9, 8, 0, 0, 0);
     add_w(&code[8], 1, 8, 2);
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 0);
 
-    // -- Negative: branch target beyond the kill -- the taken edge is
-    //    unproven. --
+    // -- Downgrade: branch target beyond the kill -- the taken edge is
+    //    unproven, so only the branch rebinds. --
 
     cset_(&code[0], 0, 8, 0);
     cbz_cbnz(&code[4], 0, 0, 8, 4);      // target +16, kill at +8
     add_x(&code[8], 1, 2, 3);
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
-    // -- Negative: backward target. --
+    // -- Downgrade: backward target -- containment can never hold;
+    //    the branch-only rebind emits at the consumer. --
 
     movz_w(&code[0], 5, 1);
     cset_(&code[4], 0, 8, 0);
     cbz_cbnz(&code[8], 0, 0, 8, -2);     // target offset 0
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_helper_check(code, 16) == 1);
 
-    // -- Negative: a control transfer inside the span discards. --
+    // -- Downgrade: a control transfer inside the span leaves the
+    //    deleting proof unprovable. --
 
     cset_(&code[0], 0, 8, 0);
     cbz_cbnz(&code[4], 0, 1, 8, 3);
     ret_(&code[8]);
     movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // -- TBZ/TBNZ #0 of the temp folds like CBZ/CBNZ: bit 0 of a 0/1
+    //    value is its truth value. Deleting grade with a contained
+    //    kill; downgrade when the temp is read again. --
+
+    cset_(&code[0], 0, 8, 5);
+    tbz_tbnz(&code[4], 0, true, 0, 2, 8);    // tbnz w8, #0, +8
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    cset_(&code[0], 0, 8, 5);
+    tbz_tbnz(&code[4], 0, false, 0, 2, 8);   // tbz w8, #0, +8
+    add_w(&code[8], 1, 8, 2);                // reads w8 -> downgrade
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 1);
+
+    // A bit other than 0 tests a constant-zero bit of the temp -- not
+    // this fold.
+    cset_(&code[0], 0, 8, 5);
+    tbz_tbnz(&code[4], 0, true, 3, 2, 8);    // tbnz w8, #3
+    add_x(&code[8], 1, 2, 3);
+    movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 0);
+
+    // TBZ of a different register is not a consumer.
+    cset_(&code[0], 0, 8, 5);
+    tbz_tbnz(&code[4], 0, true, 0, 2, 5);
+    movz_w(&code[8], 8, 0);
+    assert(run_helper_check(code, 12) == 0);
 
     // -- Negative: the branch tests a different register. --
 
@@ -2546,13 +2595,14 @@ static void test_cset_fold(void)
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 0);
 
-    // -- Negative: no kill before end-of-region -- the pending is
-    //    discarded at flush. --
+    // -- Downgrade at flush: no kill before end-of-region leaves the
+    //    deleting grade unproven, but the branch-only rebind was
+    //    complete at the consumer and survives the flush. --
 
     cset_(&code[0], 0, 8, 0);
     cbz_cbnz(&code[4], 0, 1, 8, 2);
     add_x(&code[8], 1, 2, 3);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_helper_check(code, 12) == 1);
 }
 
 static void test_cmp_cset_sign(void)

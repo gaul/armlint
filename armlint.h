@@ -294,16 +294,28 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
 // 1, EOR writing SP (Rd = 31 in a logical immediate), shifted or
 // flag-setting NEG forms, and NEG/EOR discarding to ZR.
 //
+// The branch consumer also covers TBZ/TBNZ #0 of the temp (bit 0 of
+// a 0/1 value is its truth value) under its own finding names.
+//
 // Deleting the CSET requires the temp dead afterward. For the branch
 // consumer that means dead on BOTH edges: emission defers through the
 // two-edge scan (armlint_advance_pending_tb) built for the single-bit
 // fold -- the forward scan proves the fall-through path and the taken
-// edge is covered by containment in [fall-through, kill]; backward
-// targets are dropped at the consumer. B.cond's displacement (imm19 +
-// 1 units, replacing the producer) is range-checked at the positive
-// encoding limit. For EOR/NEG, a consumer overwriting the temp itself
-// kills it on the spot (emit immediately); otherwise emission defers
-// through the plain forward scan (defer_dead_mov).
+// edge is covered by containment in [fall-through, kill]. B.cond's
+// displacement (imm19 + 1 units, replacing the producer) is
+// range-checked at the positive encoding limit. When the deleting
+// proof cannot hold -- a backward or uncontained target, the temp
+// read again, a control transfer, scan-window expiry, end of region,
+// or the displacement limit -- the branch consumer downgrades instead
+// of dropping: the branch alone is rebound to B.cond and the CSET
+// kept ("... of a live CSET foldable to B.cond"), which is valid for
+// the adjacent pair regardless of liveness since CSET preserves the
+// flags. This is the shape a compiler emits for a multi-use condition
+// it must materialize anyway (ART's arm64 backend re-tested the CSET
+// output with CBNZ until its HIf codegen learned to branch on the
+// still-live flags). For EOR/NEG, a consumer overwriting the temp
+// itself kills it on the spot (emit immediately); otherwise emission
+// defers through the plain forward scan (defer_dead_mov).
 bool check_cset_fold(armlint_state *state, const cs_insn *insn,
                      size_t offset, armlint_finding *out);
 
