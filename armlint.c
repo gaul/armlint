@@ -29,6 +29,12 @@ typedef struct {
     uint8_t  opc;              // 0=MOVN, 2=MOVZ, 3=MOVK
 } mov_entry;
 
+// Longest run of flag-neutral instructions tolerated between a non-S
+// ALU and the zero test of its result (check_zero_cmp_to_s_variant);
+// bounded so the ALU, the gap, and the zero test fit a finding's
+// ARMLINT_FINDING_LINES.
+#define ZS_GAP_MAX 2u
+
 struct armlint_state {
     // MOV chain (MOVZ/MOVN followed by zero or more MOVKs).
     bool mov_active;
@@ -359,28 +365,32 @@ struct armlint_state {
 
     // Mirror of sv_* one S bit over: a non-flag-setting ALU whose
     // S-variant twin exists (ADD/SUB/AND/BIC) pending a CMP/TST-zero
-    // of its Rd. Converting the ALU to the S-variant reproduces the
-    // zero-test's N and Z exactly, making the CMP/TST droppable once
-    // the same NZCV scan proves C/V (which the S-variant sets
-    // differently) unobserved. zs_sdisasm holds the pre-rendered
-    // S-variant spelling (the producer's mnemonic + "s").
+    // of its Rd within ZS_GAP_MAX flag-neutral instructions.
+    // Converting the ALU to the S-variant reproduces the zero-test's
+    // N and Z exactly, making the CMP/TST droppable once the
+    // condition-aware NZCV scan proves the diverging bits (C, and V
+    // for the arithmetic family) unobserved. zs_sdisasm holds the
+    // pre-rendered S-variant spelling (the producer's mnemonic +
+    // "s"); zs_gap_lines the disassembly of the skipped-over gap.
     bool zs_active;
     bool zs_is_64bit;
+    bool zs_is_logical;
     unsigned zs_rd;
+    unsigned zs_gap;
     size_t zs_offset;
     char zs_disasm[ARMLINT_FINDING_LINE_LEN];
     char zs_sdisasm[ARMLINT_FINDING_LINE_LEN];
-
-    // CMP/TST-zero of zs_rd observed adjacent to the ALU, awaiting a
-    // B.EQ/B.NE consumer.
-    bool zs_cmp_active;
-    char zs_cmp_disasm[ARMLINT_FINDING_LINE_LEN];
+    char zs_gap_lines[ZS_GAP_MAX][ARMLINT_FINDING_LINE_LEN];
 
     // Deferred "ALU + zero-CMP -> S-variant" finding, parallel to
-    // pending_sv_*. Advanced by armlint_advance_pending_zs. A
-    // dedicated slot so an overlapping sv deferral cannot clobber it.
+    // pending_sv_*. Advanced by armlint_advance_pending_zs through
+    // the condition-aware NZCV scan; pending_zs_changed is the NZCV_*
+    // mask of flag bits the rewrite alters relative to the dropped
+    // zero test. A dedicated slot so an overlapping sv deferral
+    // cannot clobber it.
     bool pending_zs_active;
     unsigned pending_zs_window;
+    unsigned pending_zs_changed;
     armlint_finding pending_zs_finding;
 
     // Enabled ISA-extension features (ARMLINT_FEATURE_*); checks that
@@ -1250,7 +1260,6 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->sv_active = false;
     state->sv_cmp_active = false;
     state->zs_active = false;
-    state->zs_cmp_active = false;
     state->scp_sub_active = false;
     state->scp_cmp_active = false;
     state->rcs_active = false;
@@ -2812,6 +2821,95 @@ static bool advance_one_pending(uint32_t op, bool *active, unsigned *window,
     return false;
 }
 
+// NZCV bit masks for the condition-aware scan, in the architectural
+// N..V order.
+#define NZCV_N 0x8u
+#define NZCV_Z 0x4u
+#define NZCV_C 0x2u
+#define NZCV_V 0x1u
+
+// The NZCV bits a condition code tests. Inverted codes read the same
+// flags as their partners (NE tests Z like EQ, and so on); AL and its
+// NV spelling read none.
+static unsigned cond_nzcv_reads(unsigned cond)
+{
+    switch (cond >> 1) {
+    case 0: return NZCV_Z;                      // EQ / NE
+    case 1: return NZCV_C;                      // CS / CC
+    case 2: return NZCV_N;                      // MI / PL
+    case 3: return NZCV_V;                      // VS / VC
+    case 4: return NZCV_C | NZCV_Z;             // HI / LS
+    case 5: return NZCV_N | NZCV_V;             // GE / LT
+    case 6: return NZCV_N | NZCV_Z | NZCV_V;    // GT / LE
+    default: return 0;                          // AL / NV
+    }
+}
+
+// Variant of advance_one_pending for a rewrite that alters only the
+// NZCV bits in `changed` and leaves the rest bit-identical: readers
+// that name their condition -- B.cond/BC.cond, the CSEL family,
+// FCSEL, and the conditional compares -- pass when the condition
+// provably ignores every altered bit, where the plain scan would
+// discard on any read. A passing CCMP/CCMN/FCCMP/FCCMPE moreover
+// rewrites all of NZCV after its read, which completes the proof on
+// the spot. Opaque flag readers (MRS NZCV, the flag-manipulation
+// MSRs, ADC/SBC and the RMIF/SETF space, MOPS) and unsafe conditions
+// discard through the plain scan's classification as before.
+//
+// A passing B.cond covers the read the branch itself performs, but
+// its taken edge leaves with the altered bits technically live --
+// exactly the exposure this check has always accepted for its
+// B.EQ/B.NE consumer (the scan follows the fall-through only).
+// Compiler output does not read C/V across a conditional edge it did
+// not just establish; hand-written assembly that does would be
+// misflagged, which the advisory framing accepts.
+static bool advance_one_pending_cond(uint32_t op, bool *active,
+                                     unsigned *window, unsigned changed,
+                                     const armlint_finding *finding,
+                                     armlint_finding *out)
+{
+    if (!*active) {
+        return false;
+    }
+    unsigned cond = 16;   // sentinel: no recognized condition field
+    bool full_rewrite_after_read = false;
+    if ((op & 0xFF000000u) == 0x54000000u) {
+        // B.cond / BC.cond.
+        cond = op & 0xFu;
+    } else if ((op & 0x3FE00800u) == 0x1A800000u) {
+        // CSEL/CSINC/CSINV/CSNEG (bits 11..10 = 00 or 01).
+        cond = (op >> 12) & 0xFu;
+    } else if ((op & 0xFF200C00u) == 0x1E200C00u) {
+        // FCSEL.
+        cond = (op >> 12) & 0xFu;
+    } else if ((op & 0x3FE00410u) == 0x3A400000u) {
+        // CCMP/CCMN, immediate or register (bit 11 free, bits 10 and
+        // 4 zero): a conditional read, then a full NZCV write.
+        cond = (op >> 12) & 0xFu;
+        full_rewrite_after_read = true;
+    } else if ((op & 0xFF200C00u) == 0x1E200400u) {
+        // FCCMP/FCCMPE: same read-then-full-write shape.
+        cond = (op >> 12) & 0xFu;
+        full_rewrite_after_read = true;
+    }
+    if (cond < 16) {
+        if ((cond_nzcv_reads(cond) & changed) != 0) {
+            *active = false;
+            return false;
+        }
+        if (full_rewrite_after_read) {
+            *out = *finding;
+            *active = false;
+            return true;
+        }
+        if (*window == 0 || --*window == 0) {
+            *active = false;
+        }
+        return false;
+    }
+    return advance_one_pending(op, active, window, finding, out);
+}
+
 // Map a Capstone AArch64 register operand to its 0..30 GPR encoding number,
 // or -1 for the zero register, SP, and non-GPRs (which carry no tracked
 // value). W0..W30 and X0..X28 are contiguous in the Capstone enum; X29/X30 are
@@ -3006,9 +3104,10 @@ bool armlint_advance_pending_zs(armlint_state *state, const cs_insn *insn,
         return false;
     }
     uint32_t op = insn_word(insn);
-    return advance_one_pending(op, &state->pending_zs_active,
-                               &state->pending_zs_window,
-                               &state->pending_zs_finding, out);
+    return advance_one_pending_cond(op, &state->pending_zs_active,
+                                    &state->pending_zs_window,
+                                    state->pending_zs_changed,
+                                    &state->pending_zs_finding, out);
 }
 
 bool armlint_advance_pending_cssc(armlint_state *state,
@@ -3594,7 +3693,7 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 // read the carry the surrounding code is testing; they are left out
 // of this fold's v1.
 static bool decode_non_s_alu(uint32_t op, unsigned *out_sf,
-                             unsigned *out_rd)
+                             unsigned *out_rd, bool *out_is_logical)
 {
     unsigned rd = op & 0x1Fu;
     if (rd == 31) {
@@ -3608,6 +3707,7 @@ static bool decode_non_s_alu(uint32_t op, unsigned *out_sf,
         }
         *out_sf = (op >> 31) & 1u;
         *out_rd = rd;
+        *out_is_logical = false;
         return true;
     }
     // ADD/SUB shifted-register and extended-register: bit 29 = 0,
@@ -3615,12 +3715,14 @@ static bool decode_non_s_alu(uint32_t op, unsigned *out_sf,
     if ((op & 0x3F000000u) == 0x0B000000u) {
         *out_sf = (op >> 31) & 1u;
         *out_rd = rd;
+        *out_is_logical = false;
         return true;
     }
     // AND immediate: bits 30..29 = opc = 00, bits 28..23 = 100100.
     if ((op & 0x7F800000u) == 0x12000000u) {
         *out_sf = (op >> 31) & 1u;
         *out_rd = rd;
+        *out_is_logical = true;
         return true;
     }
     // AND (N=0) / BIC (N=1) shifted-register: bits 30..29 = opc = 00,
@@ -3628,10 +3730,31 @@ static bool decode_non_s_alu(uint32_t op, unsigned *out_sf,
     if ((op & 0x7F000000u) == 0x0A000000u) {
         *out_sf = (op >> 31) & 1u;
         *out_rd = rd;
+        *out_is_logical = true;
         return true;
     }
 
     return false;
+}
+
+// MSR (register) writing NZCV: S3_3_C4_C2_0, i.e. 0xD51B4200 | Rt. A
+// hidden flags writer classify_liveness leaves at LIV_UNKNOWN -- safe
+// for the death scans (a hidden write only makes the flags deader),
+// but not for the ALU-to-CMP gap below, where a write between the
+// relocated flag-setting and the dropped zero test would be observed.
+static bool insn_is_msr_nzcv(uint32_t op)
+{
+    return (op & 0xFFFFFFE0u) == 0xD51B4200u;
+}
+
+// The SVE (bits 28..25 = 0010) and SME (bits 31..25 = 1000000x) major
+// encoding spaces. Their flag-setting members (PTEST, the WHILE
+// family, predicate logic) are not modeled by classify_liveness, so
+// the ALU-to-CMP gap refuses the whole space.
+static bool insn_in_sve_sme_space(uint32_t op)
+{
+    return (op & 0x1E000000u) == 0x04000000u
+        || (op & 0xFE000000u) == 0x80000000u;
 }
 
 bool check_zero_cmp_to_s_variant(armlint_state *state,
@@ -3639,81 +3762,103 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
                                  size_t offset,
                                  armlint_finding *out)
 {
-    (void)out;  // emission goes through armlint_advance_pending_zs
-
     if (insn->size != 4) {
         state->zs_active = false;
-        state->zs_cmp_active = false;
         return false;
     }
 
     uint32_t op = insn_word(insn);
 
-    // (1) Stage 3: B.EQ/B.NE consuming the alu+cmp chain? The branch
-    //     reads only Z, which the S-variant sets identically to the
-    //     zero-test (Z = Rd == 0); N agrees too (the sign of Rd under
-    //     every zero-test spelling). C and V differ -- CMP pins C = 1,
-    //     V = 0 and CMN/TST pin C = 0, V = 0, while the arithmetic
-    //     S-variants compute real carry/overflow -- so emission defers
-    //     through the same NZCV scan as the sibling check until they
-    //     are provably unobserved. (The logical S-forms pin C = V = 0,
-    //     making ANDS/BICS after TST exact; the scan is a uniform
-    //     conservative superset.)
-    if (state->zs_cmp_active) {
-        bool is_eq;
-        int32_t imm19;
-        if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
-            uint64_t target = insn->address
-                + (uint64_t)((int64_t)imm19 * 4);
-            const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
-
-            armlint_finding *p = &state->pending_zs_finding;
-            p->name = "ADD/SUB/AND/BIC + zero-CMP foldable to S-variant";
-            p->start_offset = state->zs_offset;
-            p->insn_count = 3;
-            clear_finding_strings(p);
-
-            snprintf(p->detail, sizeof(p->detail),
-                "-> %s (drop %s)",
-                state->zs_sdisasm, state->zs_cmp_disasm);
-            snprintf(p->lines[0], sizeof(p->lines[0]),
-                "%s", state->zs_disasm);
-            snprintf(p->lines[1], sizeof(p->lines[1]),
-                "%s", state->zs_cmp_disasm);
-            snprintf(p->lines[2], sizeof(p->lines[2]),
-                "%s 0x%" PRIx64, bcond_mnem, target);
-
-            state->pending_zs_active = true;
-            state->pending_zs_window = LIVENESS_WINDOW;
-        }
-        state->zs_cmp_active = false;
-    }
-
-    // (2) Stage 2: CMP/TST-zero of zs_rd consuming zs_active?
+    // (1) Close: CMP/TST-zero of zs_rd consuming the pending ALU?
+    //     The S-variant sets Z and N identically to every zero-test
+    //     spelling (Z = Rd == 0, N = sign of Rd). What diverges is
+    //     the fixed carry/overflow the spellings pin -- CMP pins
+    //     C = 1, V = 0; CMN/TST pin C = 0, V = 0 -- against what the
+    //     S-variant computes: the arithmetic forms produce the real
+    //     carry and overflow (changed = C|V), while ANDS/BICS pin
+    //     C = V = 0 (changed = C after CMP, and nothing at all after
+    //     CMN/TST -- a flag-exact rewrite that emits immediately).
+    //     Nonzero divergence defers through the condition-aware NZCV
+    //     scan until every reader of a changed bit is ruled out.
     if (state->zs_active) {
         unsigned cmp_sf, cmp_rn;
-        bool cmp_is_subs;   // unused: only the shared N/Z matter here
+        bool cmp_is_subs;
         if (decode_zero_test(op, &cmp_sf, &cmp_rn, &cmp_is_subs)
                 && cmp_rn == state->zs_rd
                 && cmp_sf == (state->zs_is_64bit ? 1u : 0u)) {
-            state->zs_cmp_active = true;
-            snprintf(state->zs_cmp_disasm,
-                sizeof(state->zs_cmp_disasm),
+            unsigned changed = state->zs_is_logical
+                ? (cmp_is_subs ? NZCV_C : 0u)
+                : (NZCV_C | NZCV_V);
+
+            armlint_finding f;
+            f.name = "ADD/SUB/AND/BIC + zero-CMP foldable to S-variant";
+            f.start_offset = state->zs_offset;
+            f.insn_count = 2 + state->zs_gap;
+            clear_finding_strings(&f);
+            snprintf(f.detail, sizeof(f.detail), "-> %s (drop %s %s)",
+                state->zs_sdisasm, insn->mnemonic, insn->op_str);
+            snprintf(f.lines[0], sizeof(f.lines[0]),
+                "%s", state->zs_disasm);
+            for (unsigned i = 0; i < state->zs_gap; i++) {
+                snprintf(f.lines[1 + i], sizeof(f.lines[1 + i]),
+                    "%s", state->zs_gap_lines[i]);
+            }
+            snprintf(f.lines[1 + state->zs_gap],
+                sizeof(f.lines[1 + state->zs_gap]),
                 "%s %s", insn->mnemonic, insn->op_str);
+
+            state->zs_active = false;
+            if (changed == 0) {
+                *out = f;
+                return true;
+            }
+            state->pending_zs_finding = f;
+            state->pending_zs_active = true;
+            state->pending_zs_window = LIVENESS_WINDOW;
+            state->pending_zs_changed = changed;
+            return false;
         }
-        state->zs_active = false;
+
+        // Gap: carry the pending ALU across up to ZS_GAP_MAX
+        // instructions that provably leave both the flags and Rd's
+        // value alone. classify_liveness == LIV_UNKNOWN excludes
+        // every branch and every modeled flags event; the MSR-NZCV
+        // and SVE/SME refusals cover the flag writers it does not
+        // model (a hidden write between the relocated flag-setting
+        // ALU and the dropped zero test would be observed).
+        // Reads of Rd are fine -- the rewrite does not change Rd.
+        bool keep = false;
+        if (state->zs_gap < ZS_GAP_MAX
+                && classify_liveness(op) == LIV_UNKNOWN
+                && !insn_is_msr_nzcv(op)
+                && !insn_in_sve_sme_space(op)) {
+            liveness_t rd_live =
+                classify_reg_liveness(insn, (int)state->zs_rd);
+            keep = rd_live == LIV_UNKNOWN || rd_live == LIV_READ;
+        }
+        if (keep) {
+            snprintf(state->zs_gap_lines[state->zs_gap],
+                sizeof(state->zs_gap_lines[state->zs_gap]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            state->zs_gap++;
+        } else {
+            state->zs_active = false;
+        }
     }
 
-    // (3) Stage 1: open non-S ALU pending state. The S-variant
-    //     spelling is the mnemonic plus "s" for every member --
-    //     add/sub/and/bic and the NEG alias (SUB from ZR), whose
-    //     flag-setting twin is spelled NEGS -- so it is pre-rendered
-    //     here from Capstone's disassembly.
+    // (2) Open non-S ALU pending state (newest producer wins the
+    //     single slot). The S-variant spelling is the mnemonic plus
+    //     "s" for every member -- add/sub/and/bic and the NEG alias
+    //     (SUB from ZR), whose flag-setting twin is spelled NEGS --
+    //     so it is pre-rendered here from Capstone's disassembly.
     unsigned sf, rd;
-    if (decode_non_s_alu(op, &sf, &rd)) {
+    bool is_logical;
+    if (decode_non_s_alu(op, &sf, &rd, &is_logical)) {
         state->zs_active = true;
         state->zs_is_64bit = (sf != 0);
+        state->zs_is_logical = is_logical;
         state->zs_rd = rd;
+        state->zs_gap = 0;
         state->zs_offset = offset;
         snprintf(state->zs_disasm, sizeof(state->zs_disasm),
             "%s %s", insn->mnemonic, insn->op_str);

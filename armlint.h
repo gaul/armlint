@@ -1812,19 +1812,33 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 // Mirror of check_redundant_cmp_after_s_variant one S bit over: a
 // NON-flag-setting ALU whose S-variant twin exists -- ADD/SUB
 // (immediate, shifted-register, extended-register) or AND/BIC --
-// writing Rd, followed immediately by a CMP/CMN/TST zero test of Rd,
-// followed immediately by B.EQ/B.NE. Converting the ALU to its
-// S-variant makes the zero test droppable:
+// writing Rd, followed by a CMP/CMN/TST zero test of Rd, with up to
+// ZS_GAP_MAX flag-neutral, non-branching instructions that leave
+// Rd's value alone in between. Converting the ALU to its S-variant
+// makes the zero test droppable:
 //   add w0, w1, w2 ; cmp w0, #0 ; b.eq L -> adds w0, w1, w2 ; b.eq L
+//   and w0, w0, #0x200 ; ldr w1, [x2] ; cmp w0, #0 ; csel ..., eq
+//     -> ands w0, w0, #0x200 ; ldr w1, [x2] ; csel ..., eq
 // Z is bit-identical (Rd == 0 either way) and so is N (the sign of
-// Rd under every zero-test spelling), but C and V differ: CMP pins
-// C = 1, V = 0 and CMN/TST pin C = 0, V = 0, while the arithmetic
-// S-variants compute the operation's real carry and overflow. The
-// B.EQ/B.NE itself reads only Z; emission defers through a dedicated
-// NZCV-liveness scan slot (armlint_advance_pending_zs) until any
-// later N/C/V read is ruled out -- conservative for N, which
-// actually agrees. (The logical S-forms pin C = V = 0, so ANDS/BICS
-// after TST is flag-exact; the scan is a uniform superset.)
+// Rd under every zero-test spelling), but the pinned carry/overflow
+// differ from the computed ones: CMP pins C = 1, V = 0 and CMN/TST
+// pin C = 0, V = 0, while the arithmetic S-variants produce the
+// operation's real carry and overflow (changed bits: C and V). The
+// logical S-forms pin C = V = 0 themselves, so only C diverges after
+// a CMP spelling, and nothing at all after CMN/TST -- that flag-exact
+// case emits immediately. Any other divergence defers through the
+// condition-aware NZCV scan (armlint_advance_pending_zs): readers
+// whose condition provably ignores every changed bit -- B.EQ/B.NE,
+// B.MI/B.PL and the same conditions on the CSEL family, plus
+// GE/LT/GT/LE/VS/VC after a logical producer -- keep the scan alive,
+// a conditional compare with a safe condition completes the proof
+// (it rewrites all of NZCV), and a full flags write or a PCS
+// boundary (BL/BLR/RET) emits. C-condition readers (CS/CC/HI/LS),
+// ADC/SBC, opaque flag readers, other branches, and window expiry
+// discard. A passing B.cond's taken edge technically leaves with the
+// changed bits live; the scan follows the fall-through only, the
+// same exposure this check has always accepted for its branch
+// consumer.
 //
 // The S-variant spelling is the producer's mnemonic plus "s" for
 // every member, including the NEG alias (SUB from ZR), whose twin is
@@ -1832,11 +1846,14 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 // extended forms, a dead ZR write for the shifted ones), as is
 // ADD/SUB immediate with imm == 0 (check_add_sub_zero's shape, whose
 // MOV-from-SP alias must not gain an "s"). ADC/SBC are left out of
-// v1. Combines with the CMP+B.cond -> CBZ check: both fire,
-// presenting alternative rewrites. Reported as "ADD/SUB/AND/BIC +
-// zero-CMP foldable to S-variant"; the shape is common in
-// hand-written assembly and naive codegen, which compute a value and
-// then test it in two steps.
+// v1, and a newer producer takes over the single pending slot. The
+// gap refuses the SVE/SME spaces and MSR-NZCV wholesale: hidden flag
+// writers there would sit between the relocated flag-setting and the
+// dropped test. Combines with the CMP+B.cond -> CBZ check: both
+// fire, presenting alternative rewrites. Reported as "ADD/SUB/AND/
+// BIC + zero-CMP foldable to S-variant"; the shape is common in
+// compiler output that materializes a value and separately tests it
+// (ART emits it for every masked-bit condition feeding a select).
 bool check_zero_cmp_to_s_variant(armlint_state *state,
                                  const cs_insn *insn,
                                  size_t offset,
@@ -1921,11 +1938,12 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
 // Advance the deferred "ALU + zero-CMP -> S-variant" finding's
-// flag-liveness scan by one instruction (see
-// check_zero_cmp_to_s_variant). Parallel to armlint_advance_pending;
-// call before per-instruction checks each step. The offset parameter
-// exists for compatibility with the shared armlint_check_fn
-// signature; it is unused.
+// condition-aware flag-liveness scan by one instruction (see
+// check_zero_cmp_to_s_variant: readers whose condition ignores the
+// rewrite's changed NZCV bits pass instead of discarding). Parallel
+// to armlint_advance_pending; call before per-instruction checks
+// each step. The offset parameter exists for compatibility with the
+// shared armlint_check_fn signature; it is unused.
 bool armlint_advance_pending_zs(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 

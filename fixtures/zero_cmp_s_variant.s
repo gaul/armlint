@@ -73,4 +73,49 @@ _main:
     b.eq    1f
     csel    x5, x6, x7, hs
 
+    // 9) A flag-neutral gap instruction between the ALU and the
+    //    zero test rides along; the CMP still folds away.
+    and     w0, w0, #0x200
+    ldr     w1, [x2]
+    cmp     w0, #0
+    b.eq    1f                      // -> ands w0, w0, #0x200
+
+    // 10) CSEL.EQ consumer: reads only Z, which the S-variant sets
+    //     identically; the next block's CMP kills the flags.
+    and     w0, w1, w2
+    cmp     w0, #0
+    csel    w3, w4, w5, eq          // -> ands w0, w1, w2
+
+    // 11) CCMP.EQ consumer: safe read, then a full NZCV rewrite --
+    //     the proof completes at the CCMP itself.
+    and     w0, w1, w2
+    cmp     w0, #0
+    ccmp    w3, w4, #0, eq          // -> ands w0, w1, w2
+
+    // 12) B.GE after a logical producer: ANDS pins V = 0 exactly
+    //     like the CMP, so GE (N,V) is safe. The sign-branch
+    //     TBZ/TBNZ fold fires alongside.
+    and     w0, w1, #0xff0
+    cmp     w0, #0
+    b.ge    1f                      // -> ands w0, w1, #0xff0
+
+    // N5) CSEL.HI consumer reads C, which the CMP-to-ANDS rewrite
+    //     flips from 1 to 0: discarded.
+    and     w0, w1, w2
+    cmp     w0, #0
+    csel    w3, w4, w5, hi
+
+    // N6) A flags writer in the gap would be observed between the
+    //     relocated flag-setting and the dropped test: discarded.
+    add     w0, w1, w2
+    cmp     w5, #0
+    cmp     w0, #0
+    b.eq    1f
+
+    // N7) A gap instruction overwriting Rd breaks the pattern.
+    add     w0, w1, w2
+    mov     w0, #7
+    cmp     w0, #0
+    b.eq    1f
+
 1:  ret

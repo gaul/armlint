@@ -4714,19 +4714,98 @@ static void test_zero_cmp_to_s_variant(void)
     ret_(&code[16]);
     assert(run_helper_check(code, 20) == 0);
 
-    // Intervening instruction between the ALU and the CMP.
+    // A flag-neutral instruction between the ALU and the CMP rides
+    // in the gap; the fold fires alongside the CBZ one.
     add_w(&code[0], 0, 1, 2);
     movz_w(&code[4], 5, 1);
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 1);
+    assert(run_helper_check(code, 20) == 2);
 
-    // CMP with no branch: nothing fires.
+    // CMP with no branch: RET is a PCS boundary, so the flags die
+    // and the fold fires on its own.
     add_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_helper_check(code, 12) == 1);
+
+    // CSEL.EQ consumer (reads Z only; a logical producer's CMP
+    // rewrite alters just C): the scan passes it and the RET emits.
+    and_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    csel_w(&code[8], 3, 4, 5, 0);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // CSEL.HI reads C, which the CMP-to-ANDS rewrite flips: discard.
+    and_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    csel_w(&code[8], 3, 4, 5, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // CSEL.GE reads V, real for an arithmetic S-variant: discard.
+    add_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    csel_w(&code[8], 3, 4, 5, 10);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+
+    // B.GE after a logical producer passes (ANDS pins V = 0 exactly
+    // like the CMP); the sign-branch TBZ fold fires too.
+    and_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 10, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 2);
+
+    // CCMP.EQ: a safe conditional read that then rewrites all of
+    // NZCV -- the proof completes at the CCMP itself.
+    and_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 0, 0);
+    ccmp_reg(&code[8], 0, 1, 3, 4, 0, 0);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // A flags writer in the gap kills the pending ALU (the relocated
+    // flag-setting would be observed): only the CBZ fold fires.
+    add_w(&code[0], 0, 1, 2);
+    cmp_w_imm(&code[4], 5, 0);
+    cmp_w_imm(&code[8], 0, 0);
+    b_cond(&code[12], 0, 8);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
+
+    // A gap instruction overwriting Rd breaks the pattern (the zero
+    // test reads the newer value).
+    add_w(&code[0], 0, 1, 2);
+    movz_w(&code[4], 0, 7);
+    cmp_w_imm(&code[8], 0, 0);
+    b_cond(&code[12], 0, 8);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
+
+    // Three gap instructions exceed ZS_GAP_MAX: only the CBZ fold.
+    {
+        uint8_t long_code[28];
+        add_w(&long_code[0], 0, 1, 2);
+        movz_w(&long_code[4], 5, 1);
+        movz_w(&long_code[8], 6, 1);
+        movz_w(&long_code[12], 7, 1);
+        cmp_w_imm(&long_code[16], 0, 0);
+        b_cond(&long_code[20], 0, 8);
+        ret_(&long_code[24]);
+        assert(run_helper_check(long_code, 28) == 1);
+    }
+
+    // Flag-exact spelling (AND + TST pins C = V = 0 on both sides)
+    // emits immediately, indifferent even to a C reader after it.
+    and_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0x6A00001Fu | (0u << 16) | (0u << 5));
+    csel_w(&code[8], 3, 4, 5, 8);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
 }
 
 // CMP Rn, Rm, LSL #amt (X-form): SUBS ZR with a non-zero inline
