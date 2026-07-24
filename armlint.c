@@ -204,6 +204,29 @@ struct armlint_state {
     size_t cset_offset;
     char cset_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // CSET Rd pending a CMP Rd, #0 (any zero-test form) whose flags
+    // are a pure function of the still-live original condition
+    // (Z = !cond) -- then a single adjacent EQ/NE CSEL-family
+    // consumer, after which the flags must die unread: the zero-test
+    // deletes and the consumer's condition remaps (EQ -> inverted
+    // cond, NE -> cond). The zero-test need not be adjacent to the
+    // CSET: the pending survives a bounded gap of instructions that
+    // neither write NZCV (the original comparison must still be in
+    // the flags at the consumer) nor overwrite the temp, tracked by
+    // crc_window. The no-further-reader proof after the consumer runs
+    // on the pending_crc NZCV scan.
+    bool crc_cset_active;
+    unsigned crc_cset_rd;
+    unsigned crc_cset_cond;
+    unsigned crc_window;
+    size_t crc_offset;
+    char crc_cset_disasm[ARMLINT_FINDING_LINE_LEN];
+    bool crc_cmp_active;
+    char crc_cmp_disasm[ARMLINT_FINDING_LINE_LEN];
+    bool pending_crc_active;
+    unsigned pending_crc_window;
+    armlint_finding pending_crc_finding;
+
     // Canonical register copy (ORR Rd, ZR, Rm for GPRs, FMOV Sd/Dd,
     // Sn/Dn for FP) pending an adjacent second copy that reads its
     // destination -- a chain whose second link can read the original
@@ -1203,6 +1226,9 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_tb_active = false;
     state->cset_active = false;
     state->rcc_active = false;
+    state->crc_cset_active = false;
+    state->crc_cmp_active = false;
+    state->pending_crc_active = false;
     state->xtc_active = false;
     state->wzx_active = false;
     state->sxt_active = false;
@@ -4666,6 +4692,158 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
     }
 
     return false;
+}
+
+// CSEL-family conditional select: CSEL / CSINC (base 0x1A800000, op2
+// bit 10 = 0/1) and CSINV / CSNEG (base 0x5A800000, same op2 split).
+// The mask leaves sf, bit 30 (INV/NEG half), op2's low bit, Rm, cond,
+// Rn and Rd free; bit 11 = 0 excludes the unallocated op2 values.
+static bool decode_csel_family(uint32_t op, unsigned *out_sf,
+                               unsigned *out_kind, unsigned *out_cond,
+                               unsigned *out_rd, unsigned *out_rn,
+                               unsigned *out_rm)
+{
+    if ((op & 0x1FE00800u) != 0x1A800000u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_kind = (((op >> 30) & 1u) << 1) | ((op >> 10) & 1u);
+    *out_cond = (op >> 12) & 0xFu;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    return true;
+}
+
+static const char *const csel_family_mnem[4] = {
+    "csel", "csinc", "csinv", "csneg"
+};
+
+bool check_cset_recompare(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    (void)out;  // emission goes through armlint_advance_pending_crc
+
+    if (insn->size != 4) {
+        state->crc_cset_active = false;
+        state->crc_cmp_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (3) Close: an EQ/NE CSEL-family consumer of the re-compared
+    // flags? After CMP Rd, #0 of the 0/1 temp, Z = (temp == 0) =
+    // NOT cond, so EQ remaps to the inverted CSET condition and NE to
+    // the condition itself; every other consumer condition reads the
+    // N/C/V bits the zero-test manufactured, and dropping the
+    // zero-test would change them -- not this fold. The zero-test
+    // deletes outright (no register dies, so no deadness proof), but
+    // the flags it produced must not have further readers: emission
+    // defers through the NZCV scan, which emits at the next flag
+    // write or safe terminator and discards on any further reader.
+    if (state->crc_cmp_active) {
+        state->crc_cmp_active = false;   // strict adjacency
+        unsigned c_sf, kind, cond, rd, rn, rm;
+        if (decode_csel_family(op, &c_sf, &kind, &cond, &rd, &rn, &rm)
+                && cond <= 1u) {
+            unsigned new_cond = (cond == 0u)
+                ? (state->crc_cset_cond ^ 1u)   // EQ: temp == 0 = !cond
+                : state->crc_cset_cond;         // NE: temp != 0 = cond
+            char wx = c_sf ? 'x' : 'w';
+
+            armlint_finding *p = &state->pending_crc_finding;
+            p->name = "CMP #0 of a live CSET is redundant";
+            p->start_offset = state->crc_offset;
+            // The span covers the (possibly non-adjacent) CSET through
+            // the consumer, so the side-entry gate checks the whole
+            // window the flags-validity argument relies on.
+            p->insn_count = (offset - state->crc_offset) / 4u + 1u;
+            clear_finding_strings(p);
+
+            snprintf(p->detail, sizeof(p->detail),
+                "-> drop the zero-test; %s %c%u, %c%u, %c%u, %s",
+                csel_family_mnem[kind], wx, rd, wx, rn, wx, rm,
+                a64_cond_names[new_cond]);
+            snprintf(p->lines[0], sizeof(p->lines[0]),
+                "%s", state->crc_cset_disasm);
+            snprintf(p->lines[1], sizeof(p->lines[1]),
+                "%s", state->crc_cmp_disasm);
+            snprintf(p->lines[2], sizeof(p->lines[2]),
+                "%s %s", insn->mnemonic, insn->op_str);
+
+            state->pending_crc_active = true;
+            state->pending_crc_window = LIVENESS_WINDOW;
+        }
+    } else if (state->crc_cset_active) {
+        // (2) A zero-test of the CSET temp? Any form works: only Z
+        // feeds the EQ/NE consumers, and Z = (temp == 0) under CMP,
+        // CMN and TST alike. Either width observes the whole
+        // zero-extended 0/1 temp.
+        unsigned z_sf, z_rn;
+        bool z_is_subs;
+        if (decode_zero_test(op, &z_sf, &z_rn, &z_is_subs)
+                && z_rn == state->crc_cset_rd) {
+            state->crc_cset_active = false;
+            state->crc_cmp_active = true;
+            snprintf(state->crc_cmp_disasm,
+                sizeof(state->crc_cmp_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        } else {
+            // Not the zero-test: the pending CSET survives while both
+            // resources it stands for stay intact -- NZCV must not be
+            // written (a flag reader is harmless) and the temp must
+            // not be overwritten (reads are harmless; branches and
+            // calls end the run via the flag classifier's terminator
+            // classes). Side entries inside the widened window are
+            // rejected by the central gate at emission, which sees the
+            // finding's full span.
+            switch (classify_liveness(op)) {
+            case LIV_OVERWRITE:
+            case LIV_TERM_SAFE:
+            case LIV_TERM_UNSAFE:
+                state->crc_cset_active = false;
+                break;
+            default:
+                if (classify_reg_liveness(insn,
+                        (int)state->crc_cset_rd) == LIV_OVERWRITE
+                        || state->crc_window == 0
+                        || --state->crc_window == 0) {
+                    state->crc_cset_active = false;
+                }
+                break;
+            }
+        }
+    }
+
+    // (1) Open: a CSET?
+    unsigned p_rd, p_cond;
+    if (decode_cset(op, &p_rd, &p_cond)) {
+        state->crc_cset_active = true;
+        state->crc_cset_rd = p_rd;
+        state->crc_cset_cond = p_cond;
+        state->crc_window = LIVENESS_WINDOW;
+        state->crc_offset = offset;
+        snprintf(state->crc_cset_disasm,
+            sizeof(state->crc_cset_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return false;
+}
+
+bool armlint_advance_pending_crc(armlint_state *state, const cs_insn *insn,
+                                 size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        state->pending_crc_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    return advance_one_pending(op, &state->pending_crc_active,
+                               &state->pending_crc_window,
+                               &state->pending_crc_finding, out);
 }
 
 bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
@@ -12524,6 +12702,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_fp,
     armlint_advance_pending_mz,
     armlint_advance_pending_tb,
+    armlint_advance_pending_crc,
     check_mul_strength_reduce,
     check_mneg_strength_reduce,
     check_udiv_strength_reduce,
@@ -12531,6 +12710,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_logic_imm_fold,
     check_cheap_const_copy,
     check_reg_copy_chain,
+    check_cset_recompare,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,
     check_mov_shift_fold,

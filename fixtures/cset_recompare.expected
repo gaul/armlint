@@ -1,0 +1,14 @@
+CMP #0 of a live CSET is redundant at offset: 0x4: -> drop the zero-test; csel w2, w3, w4, ge (3 instructions)
+  cset w8, lt
+  cmp w8, #0
+  csel w2, w3, w4, eq
+
+CMP #0 of a live CSET is redundant at offset: 0x14: -> drop the zero-test; csel x2, x3, x4, hi (3 instructions)
+  cset w9, hi
+  cmp w9, #0
+  csel x2, x3, x4, ne
+
+Optimization opportunities by type:
+       2  CMP #0 of a live CSET is redundant
+
+2 optimization opportunities in 18 instructions

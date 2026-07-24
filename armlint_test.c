@@ -2623,6 +2623,133 @@ static void test_cset_fold(void)
     assert(run_helper_check(code, 12) == 1);
 }
 
+static void test_cset_recompare(void)
+{
+    uint8_t code[20];
+
+    // -- Positive: the materialized-condition select shape. The
+    //    trailing CMP overwrites NZCV, proving the re-tested flags
+    //    die unread after the verified consumer. --
+
+    // cset w8, lt ; cmp w8, #0 ; csel w0, w1, w2, eq ; cmp w3, w4
+    // -> drop the zero-test, csel ..., ge.
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    csel_w(&code[8], 0, 1, 2, 0);
+    cmp_w_reg(&code[12], 3, 4);
+    assert(run_helper_check(code, 16) == 1);
+
+    // NE consumer keeps the original condition.
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    csel_w(&code[8], 0, 1, 2, 1);
+    cmp_w_reg(&code[12], 3, 4);
+    assert(run_helper_check(code, 16) == 1);
+
+    // A safe terminator (RET) also proves the flags dead.
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    csel_w(&code[8], 0, 1, 2, 0);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 1);
+
+    // An X-width zero-test observes the whole zero-extended temp.
+    cset_(&code[0], 0, 8, 11);
+    cmp_x_imm(&code[4], 8, 0);
+    csel_w(&code[8], 0, 1, 2, 0);
+    cmp_w_reg(&code[12], 3, 4);
+    assert(run_helper_check(code, 16) == 1);
+
+    // TST Rn, Rn zero-test form.
+    cset_(&code[0], 0, 8, 11);
+    write_le32(&code[4],
+        0x6A00001Fu | (8u << 16) | (8u << 5));   // tst w8, w8
+    csel_w(&code[8], 0, 1, 2, 0);
+    cmp_w_reg(&code[12], 3, 4);
+    assert(run_helper_check(code, 16) == 1);
+
+    // CSINC-family alias consumer: cset w9, eq re-materializes the
+    // negation -- still an EQ consumer of the re-tested flags.
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    cset_(&code[8], 0, 9, 0);              // csinc w9, wzr, wzr, ne
+    cmp_w_reg(&code[12], 3, 4);
+    assert(run_helper_check(code, 16) == 1);
+
+    // -- Negative: a consumer condition other than EQ/NE reads the
+    //    zero-test's manufactured N/C/V bits. --
+
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    csel_w(&code[8], 0, 1, 2, 11);         // lt
+    cmp_w_reg(&code[12], 3, 4);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: a further flag reader after the consumer. --
+
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    csel_w(&code[8], 0, 1, 2, 0);
+    csel_w(&code[12], 5, 6, 7, 0);         // reads the flags again
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: the zero-test reads a different register. --
+
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 9, 0);
+    csel_w(&code[8], 0, 1, 2, 0);
+    cmp_w_reg(&code[12], 3, 4);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Negative: an instruction between the zero-test and the
+    //    consumer breaks adjacency. --
+
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    add_x(&code[8], 1, 2, 3);
+    csel_w(&code[12], 0, 1, 2, 0);
+    cmp_w_reg(&code[16], 3, 4);
+    assert(run_helper_check(code, 20) == 0);
+
+    // -- Negative: no proof the flags die (end of region with the
+    //    scan unresolved). --
+
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_imm(&code[4], 8, 0);
+    csel_w(&code[8], 0, 1, 2, 0);
+    add_x(&code[12], 1, 2, 3);
+    assert(run_helper_check(code, 16) == 0);
+
+    // -- Positive: the zero-test may trail the CSET by instructions
+    //    that neither write the flags nor overwrite the temp. --
+
+    cset_(&code[0], 0, 8, 11);
+    add_x(&code[4], 1, 2, 3);
+    cmp_w_imm(&code[8], 8, 0);
+    csel_w(&code[12], 0, 1, 2, 0);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
+
+    // -- Negative: a flag write in the gap invalidates the original
+    //    comparison. --
+
+    cset_(&code[0], 0, 8, 11);
+    cmp_w_reg(&code[4], 5, 6);
+    cmp_w_imm(&code[8], 8, 0);
+    csel_w(&code[12], 0, 1, 2, 0);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // -- Negative: the temp is overwritten in the gap. --
+
+    cset_(&code[0], 0, 8, 11);
+    movz_w(&code[4], 8, 7);
+    cmp_w_imm(&code[8], 8, 0);
+    csel_w(&code[12], 0, 1, 2, 0);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+}
+
 static void test_cmp_cset_sign(void)
 {
     uint8_t code[16];
@@ -11817,6 +11944,7 @@ int main(void)
     test_tst_branch();
     test_single_bit_cbz();
     test_cset_fold();
+    test_cset_recompare();
     test_cmp_cset_sign();
     test_tst_cset();
     test_redundant_zext();

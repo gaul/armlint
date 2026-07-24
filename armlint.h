@@ -682,6 +682,36 @@ bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
 bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect a CSET whose 0/1 result is re-compared against zero for a
+// conditional select while the original comparison is still in the
+// flags -- the zero-test's flags are then a pure function of the
+// condition:
+//     cset w8, lt
+//     cmp  w8, #0
+//     csel w0, w1, w2, eq   -> drop the cmp; csel w0, w1, w2, ge
+// Z after the zero-test is (temp == 0) = NOT cond, so an EQ consumer
+// remaps to the inverted CSET condition and NE to the condition
+// itself; any other consumer condition reads the manufactured N/C/V
+// bits and is not foldable. All zero-test forms qualify (CMP #0,
+// CMP ZR, CMN #0, CMN ZR, TST Rn, Rn -- only Z feeds EQ/NE and it
+// agrees across them), at either width (the temp is zero-extended).
+// The consumer is the CSEL family (CSEL/CSINC/CSINV/CSNEG, which
+// includes the CSET/CINC/CINV/CNEG aliases) adjacent to the
+// zero-test; the zero-test itself may trail the CSET by a bounded gap
+// of instructions that neither write NZCV nor overwrite the temp
+// (reads of either are harmless), so the shape survives interleaved
+// scheduling. Deleting the zero-test kills no register, so no
+// register-deadness proof applies; instead the re-tested flags must
+// die unread after the verified consumer, proven by the pending_crc
+// NZCV scan, and the finding's span covers CSET through consumer so
+// the central gate rejects side entries anywhere inside. The CSET itself always stays
+// (its value fed the deleted compare and typically other uses). This
+// is the shape a compiler emits when a materialized condition feeds a
+// conditional select: it re-tests the boolean rather than reusing the
+// comparison's flags.
+bool check_cset_recompare(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materialising a constant C in [0, 31], immediately
 // followed by a register-form conditional compare whose Rm is the
 // constant. The compare folds to its immediate form, making the MOV
@@ -1886,6 +1916,13 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
 // the branch target's.
 bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
+
+// Resolve the pending CSET-recompare finding: the NZCV scan proving
+// the re-tested flags die unread after their single verified EQ/NE
+// consumer (emit at the next flag write or safe terminator, discard
+// on any further reader).
+bool armlint_advance_pending_crc(armlint_state *state, const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
 
 // Close any open sequence at end-of-region. Returns true and fills *out
 // if the closed sequence is reportable.
