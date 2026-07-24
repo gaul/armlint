@@ -111,8 +111,9 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
     return findings;
 }
 
-// Like run_check, but with the CSSC feature enabled.
-static int run_cssc_check(const uint8_t *code, size_t code_size)
+// Like run_check, but with the given ISA-extension features enabled.
+static int run_features_check(const uint8_t *code, size_t code_size,
+                              unsigned features)
 {
     cs_insn *insns = NULL;
     size_t count = cs_disasm(g_handle, code, code_size, 0, 0, &insns);
@@ -125,7 +126,7 @@ static int run_cssc_check(const uint8_t *code, size_t code_size)
 
     armlint_state *state = armlint_state_create();
     assert(state != NULL);
-    armlint_state_set_features(state, ARMLINT_FEATURE_CSSC);
+    armlint_state_set_features(state, features);
 
     int findings = 0;
     for (size_t i = 0; i < count; i++) {
@@ -148,6 +149,16 @@ static int run_cssc_check(const uint8_t *code, size_t code_size)
     armlint_state_destroy(state);
     cs_free(insns, count);
     return findings;
+}
+
+static int run_cssc_check(const uint8_t *code, size_t code_size)
+{
+    return run_features_check(code, code_size, ARMLINT_FEATURE_CSSC);
+}
+
+static int run_lrcpc2_check(const uint8_t *code, size_t code_size)
+{
+    return run_features_check(code, code_size, ARMLINT_FEATURE_LRCPC2);
 }
 
 #define EXPECT_FINDINGS(expected, ...) \
@@ -323,6 +334,14 @@ static int run_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
 static int run_x0_dead(uint8_t *bytes, size_t len)
 {
     return run_reg_dead(bytes, len, 0);
+}
+
+// run_reg_dead with the LRCPC2 feature enabled: the STLUR fold's
+// deleted ADD needs the same overwrite proof for its address temp.
+static int run_lrcpc2_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
+{
+    movz_x(&bytes[len], reg, 1, 0);
+    return run_lrcpc2_check(bytes, len + 4);
 }
 
 static void test_movz_movk_sequences(void)
@@ -9030,6 +9049,49 @@ static void ldrh_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn)
     write_le32(out, op);
 }
 
+// Encode STLR Wt, [Xn] (store-release, zero offset). Base 0x889FFC00;
+// size=11 lifts it to the X form, sizes 00/01 to STLRB/STLRH.
+static void stlr_w(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0x889FFC00u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void stlr_x(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0xC89FFC00u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void stlrb_w(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0x089FFC00u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void stlrh_w(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0x489FFC00u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Encode LDAR Wt, [Xn] (load-acquire, zero offset). Base 0x88DFFC00.
+static void ldar_w(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    uint32_t op = 0x88DFFC00u
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 // Encode LDR Xt, [Xn, #imm] (X-form, unsigned-offset, scaled imm). Base 0xF9400000.
 static void ldr_x_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
                             unsigned imm12)
@@ -11062,6 +11124,96 @@ static void test_add_ldr_imm_offset(void)
     assert(run_reg_dead(code, 12, 8) == 0);
 }
 
+static void test_add_stlr_fold(void)
+{
+    uint8_t code[16];
+
+    // Canonical volatile-store shape: add x16, x1, #8 ;
+    // stlr w0, [x16] -> stlur w0, [x1, #8]. The appended MOVZ
+    // overwrite proves the address temp dead.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+
+    // X-form data register.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_x(&code[4], 2, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+
+    // Byte and half-word forms -> STLURB/STLURH; the unscaled slot
+    // has no alignment requirement, so odd offsets fold too.
+    add_x_imm(&code[0], 16, 1, 3);
+    stlrb_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+    add_x_imm(&code[0], 16, 1, 3);
+    stlrh_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+
+    // Zero store: WZR data register.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_w(&code[4], 31, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+
+    // SP base and the MOV-from-SP alias.
+    add_x_imm(&code[0], 16, 31, 16);
+    stlr_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+    add_x_imm(&code[0], 16, 31, 0);
+    stlr_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+
+    // Boundary: #255 is the top of the positive unscaled range;
+    // #256 is out.
+    add_x_imm(&code[0], 16, 1, 255);
+    stlr_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 1);
+    add_x_imm(&code[0], 16, 1, 256);
+    stlr_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 0);
+
+    // Negative: store base is not the ADD's Rd.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_w(&code[4], 0, 17);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 0);
+
+    // Negative: the stored data register is the address temp -- the
+    // folded store would read the deleted sum.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_x(&code[4], 16, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 0);
+
+    // Negative: a read of the address temp before the kill keeps it
+    // live; the ADD cannot be deleted.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_w(&code[4], 0, 16);
+    add_x(&code[8], 5, 16, 6);
+    assert(run_lrcpc2_reg_dead(code, 12, 16) == 0);
+
+    // Negative: no deadness proof at all -- the deferred finding is
+    // discarded at flush.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_w(&code[4], 0, 16);
+    assert(run_lrcpc2_check(code, 8) == 0);
+
+    // Negative: not adjacent.
+    add_x_imm(&code[0], 16, 1, 8);
+    movz_x(&code[4], 9, 1, 0);
+    stlr_w(&code[8], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 12, 16) == 0);
+
+    // Negative: LDAR is deliberately not folded -- LDAPUR is
+    // acquire-RCpc, and weakening LDAR's RCsc breaks the SC mappings
+    // built on the STLR/LDAR pair.
+    add_x_imm(&code[0], 16, 1, 8);
+    ldar_w(&code[4], 0, 16);
+    assert(run_lrcpc2_reg_dead(code, 8, 16) == 0);
+
+    // Negative: silent without -m lrcpc2.
+    add_x_imm(&code[0], 16, 1, 8);
+    stlr_w(&code[4], 0, 16);
+    assert(run_reg_dead(code, 8, 16) == 0);
+}
+
 static void test_ldr_str_add_post_indexed(void)
 {
     uint8_t code[12];
@@ -12002,6 +12154,7 @@ int main(void)
     test_sxtw_ldr_fold();
     test_ldr_sext_fold();
     test_add_ldr_imm_offset();
+    test_add_stlr_fold();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();

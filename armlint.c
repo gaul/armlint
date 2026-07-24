@@ -663,6 +663,21 @@ struct armlint_state {
     size_t addi_pending_offset;
     char addi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Pending X-form ADD-immediate (non-S-variant) awaiting an
+    // adjacent STLR/STLRB/STLRH consumer whose base register equals
+    // Rd of the ADD. With FEAT_LRCPC2 the pair folds to a single
+    // STLUR-family store-release carrying the ADD's byte immediate
+    // (0..255; the unscaled slot is alignment-free). asl_pending_imm
+    // is the actual byte immediate (sh=1 already expanded). Strict
+    // adjacency: any non-matching instruction expires the state.
+    // Opened only under ARMLINT_FEATURE_LRCPC2.
+    bool asl_pending;
+    unsigned asl_pending_rd;
+    unsigned asl_pending_rn;
+    uint32_t asl_pending_imm;
+    size_t asl_pending_offset;
+    char asl_pending_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending zero-offset load/store -- a single LDR/STR or an
     // LDP/STP/LDPSW pair -- awaiting an adjacent X-form ADD-immediate
     // that self-updates the base register (Rd == Rn == the access's
@@ -1257,6 +1272,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lsx_active = false;
     state->add_pending = false;
     state->addi_pending = false;
+    state->asl_pending = false;
     state->lspi_pending = false;
     state->lspr_pending = false;
     state->lspr_adr_recent = false;
@@ -12046,6 +12062,128 @@ bool check_add_ldr_imm_offset(armlint_state *state,
     return produced;
 }
 
+// Decode STLR/STLRB/STLRH (zero-offset store-release): size(2)
+// 001000 100 11111 o0(1) 11111 Rn Rt with o0 = 1 (o0 = 0 is STLLR,
+// the LORegions variant, which has no unscaled counterpart). Sizes
+// 00/01/10/11 select B/H/W/X; the B and H forms take a W data
+// register. LDAR flips the L bit (base 0x08DFFC00) and is
+// deliberately not matched -- see check_add_stlr_fold.
+static bool decode_stlr(uint32_t op, unsigned *out_size,
+                        unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0x3FFFFC00u) != 0x089FFC00u) {
+        return false;
+    }
+    *out_size = (op >> 30) & 0x3u;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+bool check_add_stlr_fold(armlint_state *state,
+                         const cs_insn *insn,
+                         size_t offset,
+                         armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_LRCPC2)) {
+        state->asl_pending = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Try to close: is this a zero-offset STLR-family store whose
+    //     base is the pending ADD's Rd? STLUR takes the ADD's byte
+    //     immediate in its signed 9-bit unscaled slot (positive side
+    //     only: an ADD cannot produce a negative offset), with no
+    //     alignment requirement. The rewrite deletes the ADD, and a
+    //     store never overwrites the address register on the spot, so
+    //     the finding always defers through the forward
+    //     register-liveness scan until Rd is provably overwritten
+    //     before any read. A store whose data register is Rd cannot
+    //     fold (the rewritten store would read the deleted sum), and
+    //     neither can a store that is itself a direct-branch target
+    //     (the side entry skips the ADD).
+    if (state->asl_pending) {
+        unsigned size, st_rn, st_rt;
+        if (decode_stlr(op, &size, &st_rn, &st_rt)
+                && st_rn == state->asl_pending_rd
+                && st_rt != state->asl_pending_rd
+                && !offset_is_branch_target(state, offset)
+                && state->asl_pending_imm <= 255u) {
+            static const char *const stlr_mnem[4] = {
+                "stlrb", "stlrh", "stlr", "stlr"
+            };
+            static const char *const stlur_mnem[4] = {
+                "stlurb", "stlurh", "stlur", "stlur"
+            };
+            char rt_buf[8];
+            format_reg(rt_buf, sizeof(rt_buf), size == 3u ? 'x' : 'w',
+                       st_rt);
+            out->name = "ADD + STLR foldable to STLUR (LRCPC2)";
+            out->start_offset = state->asl_pending_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            if (state->asl_pending_imm == 0) {
+                // Reachable only via the MOV-from-SP alias.
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, [sp]", stlur_mnem[size], rt_buf);
+            } else if (state->asl_pending_rn == 31) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, [sp, #0x%x]",
+                    stlur_mnem[size], rt_buf, state->asl_pending_imm);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %s, [x%u, #0x%x]",
+                    stlur_mnem[size], rt_buf,
+                    state->asl_pending_rn, state->asl_pending_imm);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->asl_pending_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s, [x%u]", stlr_mnem[size], rt_buf, st_rn);
+            defer_dead_mov(state, out, state->asl_pending_rd);
+        }
+        // Strict adjacency: clear regardless of match.
+        state->asl_pending = false;
+    }
+
+    // (2) Try to open: is this an X-form ADD-immediate? Mirrors the
+    //     unsigned-offset fold's opener: Rd = 31 writes SP, not a
+    //     GPR -- excluded; imm == 0 is admitted only through the
+    //     MOV-from-SP alias (Rn = 31), whose base copy folds the same
+    //     way. The 9-bit range is enforced at close so the opener
+    //     stays in lockstep with its sibling checks.
+    unsigned a_rd, a_rn;
+    uint32_t a_imm;
+    if (decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)) {
+        if (a_rd != 31 && (a_imm != 0 || a_rn == 31)) {
+            state->asl_pending = true;
+            state->asl_pending_rd = a_rd;
+            state->asl_pending_rn = a_rn;
+            state->asl_pending_imm = a_imm;
+            state->asl_pending_offset = offset;
+            if (a_rn == 31 && a_imm == 0) {
+                snprintf(state->asl_pending_disasm,
+                    sizeof(state->asl_pending_disasm),
+                    "mov x%u, sp", a_rd);
+            } else if (a_rn == 31) {
+                snprintf(state->asl_pending_disasm,
+                    sizeof(state->asl_pending_disasm),
+                    "add x%u, sp, #0x%x", a_rd, a_imm);
+            } else {
+                snprintf(state->asl_pending_disasm,
+                    sizeof(state->asl_pending_disasm),
+                    "add x%u, x%u, #0x%x", a_rd, a_rn, a_imm);
+            }
+        }
+    }
+
+    // Every finding defers through the liveness scan; nothing is
+    // produced on the spot.
+    return false;
+}
+
 // Decode a load/store pair, signed-offset (no-writeback) form:
 // opc(2) 101 V(1) 010 L(1) imm7 Rt2 Rn Rt. Accepts exactly the
 // combinations that have pre-/post-indexed counterparts: integer W
@@ -12767,6 +12905,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_sxtw_ldr_fold,
     check_ldr_sext_fold,
     check_add_ldr_imm_offset,
+    check_add_stlr_fold,
     check_ldr_str_add_post_indexed,
     check_add_ldr_str_pre_indexed,
 };

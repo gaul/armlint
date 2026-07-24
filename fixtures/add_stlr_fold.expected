@@ -1,0 +1,28 @@
+ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x0: -> stlur w1, [x0, #0x8] (2 instructions)
+  add x16, x0, #0x8
+  stlr w1, [x16]
+
+ADD + STLR foldable to STLUR (LRCPC2) at offset: 0xc: -> stlur x3, [x2, #0xf8] (2 instructions)
+  add x16, x2, #0xf8
+  stlr x3, [x16]
+
+ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x18: -> stlurb w1, [x0, #0x3] (2 instructions)
+  add x16, x0, #0x3
+  stlrb w1, [x16]
+
+ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x24: -> stlurh w1, [x0, #0x3] (2 instructions)
+  add x16, x0, #0x3
+  stlrh w1, [x16]
+
+ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x30: -> stlur wzr, [x0, #0xc] (2 instructions)
+  add x16, x0, #0xc
+  stlr wzr, [x16]
+
+ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x3c: -> stlur w1, [sp, #0x10] (2 instructions)
+  add x16, sp, #0x10
+  stlr w1, [x16]
+
+Optimization opportunities by type:
+       6  ADD + STLR foldable to STLUR (LRCPC2)
+
+6 optimization opportunities in 36 instructions

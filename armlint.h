@@ -70,6 +70,7 @@ void armlint_state_reset(armlint_state *state);
 // that suggest extension instructions stay silent unless their
 // feature is enabled (the CLI maps -m cssc etc. onto these).
 #define ARMLINT_FEATURE_CSSC (1u << 0)
+#define ARMLINT_FEATURE_LRCPC2 (1u << 1)
 
 // Enable ISA-extension-gated checks (a bitmask of ARMLINT_FEATURE_*).
 void armlint_state_set_features(armlint_state *state, unsigned features);
@@ -1599,6 +1600,42 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
 bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset, armlint_finding *out);
+
+// Detect an X-form ADD-immediate immediately followed by a
+// zero-offset STLR/STLRB/STLRH whose base register is the ADD's Rd.
+// With FEAT_LRCPC2's unscaled store-release the pair folds to a
+// single instruction carrying the ADD's byte immediate:
+//   add x16, x1, #8  ; stlr w0, [x16]  -> stlur w0, [x1, #8]
+//   add x16, x0, #1  ; stlrb w1, [x16] -> stlurb w1, [x0, #1]
+//   add x16, sp, #16 ; stlr w1, [x16]  -> stlur w1, [sp, #16]
+// STLUR is a store-release of the same ordering strength as STLR:
+// the rewrite moves the address computation, not the ordering. The
+// acquire side is deliberately NOT flagged -- FEAT_LRCPC2's only
+// offset-form acquire is LDAPUR, an acquire-RCpc that admits the
+// STLR -> load reordering LDAR's RCsc forbids, so LDAR -> LDAPUR
+// would break the sequentially-consistent mappings built on the
+// STLR/LDAR pair (a Java volatile, a C++ seq_cst atomic).
+// LDAPR -> LDAPUR would be sound but no scanned compiler output
+// emits base-register LDAPR.
+//
+// Encoding constraint: the unscaled slot is a signed 9-bit byte
+// offset with no alignment requirement, so the ADD immediate must
+// be 0..255 after sh expansion. An ADD contributes only positive
+// offsets; the SUB form (negative offsets down to -256) is omitted
+// for lack of evidence. imm == 0 arises only through the MOV-from-SP
+// alias, mirroring the unsigned-offset fold's opener.
+//
+// Soundness: the rewrite deletes the ADD, so its Rd must be dead
+// after the store. Rd is the address, never the data (a store whose
+// data register is Rd is excluded: the folded form would read the
+// deleted sum), and a store never overwrites Rd on the spot, so the
+// proof always defers through the forward register-liveness scan
+// until Rd is overwritten before any read. A store that is itself a
+// direct-branch target cannot fold: the side entry skips the ADD.
+// Gated on ARMLINT_FEATURE_LRCPC2 (-m lrcpc2); silent otherwise.
+bool check_add_stlr_fold(armlint_state *state,
+                         const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
 
 // Detect a zero-offset load/store -- an unsigned-offset LDR/STR or a
 // signed-offset LDP/STP/LDPSW pair -- immediately followed by an
