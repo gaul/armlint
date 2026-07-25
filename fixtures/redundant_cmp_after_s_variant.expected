@@ -33,10 +33,9 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0x34: -> cbz x13, 0x3c (2 
   cmp x13, #0
   b.eq 0x3c
 
-ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x30: -> adds x13, x14, x15 (drop cmp x13, #0) (3 instructions)
+ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x30: -> adds x13, x14, x15 (drop cmp x13, #0) (2 instructions)
   add x13, x14, x15
   cmp x13, #0
-  b.eq 0x3c
 
 Optimization opportunities by type:
        5  compare-zero branch foldable into CBZ/CBNZ
