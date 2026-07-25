@@ -205,6 +205,19 @@ arm64 toolchain. After an intentional output change, regenerate the
 snapshots with `make integration-test-regen` and review the diff
 before committing.
 
+Setting `ARMLINT_LIVENESS_SWEEP=1` extends the unit tests'
+NZCV-liveness cross-check against Capstone to the entire 2^32 encoding
+space -- minutes of single-threaded CPU time, so CI runs it on pushes
+rather than PRs. `ARMLINT_LIVENESS_SWEEP_THREADS` divides the sweep
+across that many worker threads:
+
+```sh
+ARMLINT_LIVENESS_SWEEP=1 ARMLINT_LIVENESS_SWEEP_THREADS="$(sysctl -n hw.ncpu)" \
+    make test
+```
+
+(`nproc` on Linux.)
+
 ### Testing against Capstone 6
 
 Capstone 6 (in alpha as of mid-2026) rewrote the AArch64 module from

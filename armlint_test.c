@@ -16,7 +16,12 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#ifdef __APPLE__
+#include <xlocale.h>    // uselocale: private per-sweep-worker locales
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -11876,18 +11881,21 @@ static void test_add_ldr_str_pre_indexed(void)
 // Neither property consults Capstone's (unreliable) write set. Words
 // Capstone cannot decode are skipped (they never reach the scan).
 // Returns 1 if a property is violated (and prints the offender), else 0.
-static int liveness_check_word(cs_insn *insn, uint32_t word)
+// The handle (and the insn cs_malloc'd from it) is a parameter so the
+// sweep workers below can pass private ones: Capstone handles are not
+// safe for concurrent use.
+static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
 {
     const uint8_t *code = (const uint8_t *)&word;   // host is little-endian
     size_t size = sizeof(word);
     uint64_t addr = 0;
-    if (!cs_disasm_iter(g_handle, &code, &size, &addr, insn)) {
+    if (!cs_disasm_iter(handle, &code, &size, &addr, insn)) {
         return 0;
     }
     bool reads = false, writes = false;
     cs_regs regs_read, regs_write;
     uint8_t nread, nwrite;
-    if (cs_regs_access(g_handle, insn, regs_read, &nread,
+    if (cs_regs_access(handle, insn, regs_read, &nread,
                        regs_write, &nwrite) == CS_ERR_OK) {
         for (uint8_t i = 0; i < nread; i++) {
             if (regs_read[i] == ARM64_REG_NZCV) {
@@ -11918,6 +11926,88 @@ static int liveness_check_word(cs_insn *insn, uint32_t word)
     return bad ? 1 : 0;
 }
 
+// Worker context for the exhaustive sweep. Each worker owns a private
+// Capstone handle (handles carry mutable per-handle state -- the error
+// slot at minimum -- and are not safe for concurrent use); everything
+// else is shared and atomic.
+typedef struct {
+    csh handle;
+    atomic_uint_fast64_t *next;     // chunk-claim cursor, in words
+    atomic_uint_fast64_t *done;     // words completed across all workers
+    atomic_ulong *violations;
+} sweep_worker_t;
+
+// One sweep worker: claim contiguous 2^24-word chunks from the shared
+// cursor until it runs past the 2^32 space. Dynamic claiming keeps
+// every core busy whatever the worker count or core asymmetry
+// (performance vs efficiency cores); a chunk is 1/256 of the space, so
+// the end-of-sweep straggler tail is short. The done-counter advances
+// in whole chunks, so exactly one worker carries it across each 1/16
+// boundary and prints that progress line -- with one worker the output
+// is identical to the historical sequential sweep's.
+static void *sweep_worker(void *arg)
+{
+    const uint64_t chunk = (uint64_t)1 << 24;
+    const uint64_t step = (uint64_t)1 << 28;    // 16 progress lines
+    sweep_worker_t *self = arg;
+#ifdef __APPLE__
+    // Apple's vfprintf consults localeconv_l() on every conversion, and
+    // that takes an unfair lock in the locale object. With every worker
+    // sharing the global locale, Capstone's per-operand snprintf turns
+    // the lock into a process-wide convoy (measured 5x wall clock at 14
+    // workers); a private per-worker locale keeps it uncontended.
+    // glibc's printf has no such shared per-call lock.
+    locale_t loc = newlocale(LC_ALL_MASK, "C", (locale_t)0);
+    assert(loc != (locale_t)0);
+    uselocale(loc);
+#endif
+    cs_insn *insn = cs_malloc(self->handle);
+    assert(insn != NULL);
+    for (;;) {
+        uint64_t begin = atomic_fetch_add(self->next, chunk);
+        if (begin > 0xFFFFFFFFu) {
+            break;
+        }
+        unsigned long bad = 0;
+        for (uint64_t w = begin; w < begin + chunk; w++) {
+            bad += (unsigned long)liveness_check_word(self->handle, insn,
+                                                      (uint32_t)w);
+        }
+        if (bad > 0) {
+            atomic_fetch_add(self->violations, bad);
+        }
+        uint64_t done = atomic_fetch_add(self->done, chunk) + chunk;
+        if ((done - chunk) / step != done / step) {
+            fprintf(stderr, "  liveness sweep %2.0f%%  (%lu violations)\n",
+                    100.0 * (double)done / 4294967296.0,
+                    atomic_load(self->violations));
+        }
+    }
+    cs_free(insn, 1);
+#ifdef __APPLE__
+    uselocale(LC_GLOBAL_LOCALE);
+    freelocale(loc);
+#endif
+    return NULL;
+}
+
+// Sweep worker-thread count: ARMLINT_LIVENESS_SWEEP_THREADS, default 1
+// (unset or empty). CI passes the runner's core count. The variable is
+// only ever set deliberately, so a malformed value fails loudly here
+// rather than silently serializing a multi-minute job.
+static unsigned long sweep_worker_count(void)
+{
+    const char *env = getenv("ARMLINT_LIVENESS_SWEEP_THREADS");
+    if (env == NULL || *env == '\0') {
+        return 1;
+    }
+    char *end = NULL;
+    unsigned long n = strtoul(env, &end, 10);
+    assert(end != env && *end == '\0');
+    assert(n >= 1 && n <= 1024);
+    return n;
+}
+
 // Verify classify_liveness against Capstone. The curated table below
 // pins one representative of every NZCV family (readers, writers,
 // terminators, and neutral instructions), including the blind spots
@@ -11926,7 +12016,9 @@ static int liveness_check_word(cs_insn *insn, uint32_t word)
 // for the readers that must never be dropped, e.g. MRS NZCV / BC.cond).
 // Setting ARMLINT_LIVENESS_SWEEP additionally sweeps the entire
 // 2^32 encoding space (minutes) to catch any family neither the table nor
-// the current masks anticipate.
+// the current masks anticipate; ARMLINT_LIVENESS_SWEEP_THREADS splits
+// the sweep across that many worker threads (default 1 -- CI passes
+// the runner's core count).
 static void test_liveness_matches_capstone(void)
 {
     static const struct { uint32_t word; liveness_t want; const char *name; }
@@ -12025,19 +12117,41 @@ static void test_liveness_matches_capstone(void)
                     (int)classify_liveness(cases[i].word), (int)cases[i].want);
             assert(0);
         }
-        assert(liveness_check_word(insn, cases[i].word) == 0);
+        assert(liveness_check_word(g_handle, insn, cases[i].word) == 0);
     }
 
     if (getenv("ARMLINT_LIVENESS_SWEEP") != NULL) {
-        unsigned long violations = 0;
-        for (uint64_t w = 0; w <= 0xFFFFFFFFu; w++) {
-            violations += (unsigned long)liveness_check_word(insn, (uint32_t)w);
-            if ((w & 0x0FFFFFFFu) == 0x0FFFFFFFu) {
-                fprintf(stderr, "  liveness sweep %2.0f%%  (%lu violations)\n",
-                        100.0 * (double)(w + 1) / 4294967296.0, violations);
-            }
+        unsigned long nworkers = sweep_worker_count();
+        atomic_uint_fast64_t next = 0;
+        atomic_uint_fast64_t done = 0;
+        atomic_ulong violations = 0;
+        sweep_worker_t *workers = calloc(nworkers, sizeof(*workers));
+        pthread_t *threads = calloc(nworkers, sizeof(*threads));
+        assert(workers != NULL && threads != NULL);
+        for (unsigned long t = 0; t < nworkers; t++) {
+            workers[t] = (sweep_worker_t){ .next = &next, .done = &done,
+                                           .violations = &violations };
+            // Mirror g_handle's configuration; all handles are opened
+            // before any worker starts, so cs_open never runs
+            // concurrently with decoding.
+            assert(cs_open(CS_ARCH_ARM64, CS_MODE_ARM,
+                           &workers[t].handle) == CS_ERR_OK);
+            assert(cs_option(workers[t].handle, CS_OPT_DETAIL,
+                             CS_OPT_ON) == CS_ERR_OK);
         }
-        assert(violations == 0);
+        for (unsigned long t = 0; t < nworkers; t++) {
+            assert(pthread_create(&threads[t], NULL, sweep_worker,
+                                  &workers[t]) == 0);
+        }
+        for (unsigned long t = 0; t < nworkers; t++) {
+            assert(pthread_join(threads[t], NULL) == 0);
+            assert(cs_close(&workers[t].handle) == CS_ERR_OK);
+        }
+        // Every chunk was claimed and completed exactly once.
+        assert(atomic_load(&done) == 4294967296ull);
+        assert(atomic_load(&violations) == 0);
+        free(threads);
+        free(workers);
     }
 
     cs_free(insn, 1);

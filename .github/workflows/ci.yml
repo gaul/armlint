@@ -117,12 +117,14 @@ jobs:
 
   liveness-sweep:
     # Exhaustive classify_liveness-vs-Capstone cross-check over the entire
-    # 2^32 encoding space (several minutes). Too slow for every PR, so it
-    # runs on pushes to master, on a weekly schedule, and on demand; the
-    # per-PR `make test` still runs the fast curated subset of this check.
-    # Runs in a Fedora 44 container for its newer Capstone: the cross-check
-    # treats Capstone's register-access model as the oracle, so a more
-    # complete model makes it more meaningful than Ubuntu 24.04's 4.0.2.
+    # 2^32 encoding space (several minutes single-threaded; split across
+    # the runner's cores via ARMLINT_LIVENESS_SWEEP_THREADS). Too slow
+    # for every PR, so it runs on pushes to master, on a weekly schedule,
+    # and on demand; the per-PR `make test` still runs the fast curated
+    # subset of this check. Runs in a Fedora 44 container for its newer
+    # Capstone: the cross-check treats Capstone's register-access model
+    # as the oracle, so a more complete model makes it more meaningful
+    # than Ubuntu 24.04's 4.0.2.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
     container: fedora:44
@@ -133,7 +135,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build and run the exhaustive NZCV liveness sweep
-        run: ARMLINT_LIVENESS_SWEEP=1 make test
+        run: >
+          ARMLINT_LIVENESS_SWEEP=1
+          ARMLINT_LIVENESS_SWEEP_THREADS="$(nproc)"
+          make test
 
   liveness-sweep-capstone6:
     # The exhaustive sweep again, but against Capstone 6: its LLVM-derived
@@ -141,7 +146,9 @@ jobs:
     # FEAT_MOPS main/epilogue stages plus BC.cond, CFINV/XAFLAG/AXFLAG,
     # RMIF, and SETF8/SETF16 -- so property A of the cross-check has real
     # teeth here (this configuration is what exposed the MOPS liveness
-    # gap). ~25 minutes locally; up to an hour on CI runners.
+    # gap). ~25 minutes locally single-threaded (up to an hour on CI
+    # runners); ARMLINT_LIVENESS_SWEEP_THREADS divides that across the
+    # cores.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04-arm
     env:
@@ -170,5 +177,7 @@ jobs:
 
       - name: Build and run the exhaustive NZCV liveness sweep
         run: >
-          ARMLINT_LIVENESS_SWEEP=1 make CAPSTONE_CFLAGS="$CAPSTONE6_CFLAGS"
+          ARMLINT_LIVENESS_SWEEP=1
+          ARMLINT_LIVENESS_SWEEP_THREADS="$(nproc)"
+          make CAPSTONE_CFLAGS="$CAPSTONE6_CFLAGS"
           CAPSTONE_LIBS="$CAPSTONE6_LIBS" test

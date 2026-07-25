@@ -20,7 +20,7 @@ armlint: armlint.o main.o
 	$(CC) $(CFLAGS) armlint.o main.o $(CAPSTONE_LIBS) -o armlint
 
 test: armlint.o armlint_test.o
-	$(CC) $(CFLAGS) armlint.o armlint_test.o $(CAPSTONE_LIBS) -o armlint_test
+	$(CC) $(CFLAGS) armlint.o armlint_test.o $(CAPSTONE_LIBS) -pthread -o armlint_test
 	./armlint_test
 
 # Snapshot-based integration suite under fixtures/. Each .s is
