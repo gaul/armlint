@@ -17,7 +17,7 @@ the existing checks.
 | zero-CMP→S-variant: `adc`/`sbc` producers | `adcs`/`sbcs` | Excluded in v1: they read the carry the deleted compare set; needs a separate flag argument |
 | sign CSET/CSETM: GE/PL complements | `lsr`+`eor #1` / `mvn`+`asr` | 2-for-2, no size win (frees NZCV only); v1 of the sign-shift fold flags LT/MI |
 | sign CSET/CSETM: `tst Rn, Rn` / `cmn Rn, #0` producers | `lsr`/`asr` | Same N/V pinning as `cmp Rn, #0`; rarer zero-test spellings |
-| `add x0, x0, #a ; add x0, x0, #b` | one `add`/`sub` | Coalesce adjacent same-register immediate adjustments; skip the canonical imm12 + imm12<<12 pair the assembler splits |
+| `add x0, x0, #a ; add x0, x0, #b` | one `add`/`sub` | Coalesce adjacent same-register immediate adjustments; skip the canonical imm12 + imm12<<12 pair the assembler splits. 2026-07 sweep: 15,350 adjacent dep pairs of this shape in librustc_driver (313 rustup, 12 go), many with a changed destination (`add x8, x8, #0xec0 ; add x0, x8, #0x28`) -- generalize via the dead-producer scan |
 
 ## Branches and dead code
 
@@ -57,7 +57,8 @@ The largest untouched family; none of these need liveness machinery.
 
 | Pattern | Rewrite | Notes |
 | --- | --- | --- |
-| `adrp` + `add` → `adr` (target within ±1MB) | shorter form | Actionability caveat: linker-resolved relocations make this a relink-level suggestion; likely opt-in |
+| `adrp` + `add` → `adr` (target within ±1MB) | shorter form | Actionability caveat: linker-resolved relocations make this a relink-level suggestion; likely opt-in. 2026-07 sweep: the most frequent dependent pair in every corpus -- 59.7k go, 42.5k rustup, 642k librustc_driver |
+| `adrp` + `ldr Sd/Dd/Qd` from a literal pool | `fmov #imm8` / `movi` when the pointed-to constant encodes | 24.3k `adrp`+`ldr d` pairs in librustc_driver; needs reading the target section's bytes at the resolved address -- same relink caveat and infrastructure as the rows above |
 | BR fold for general registers (`adr x8, L ; br x8`) | `b L` | v1 folds x16/x17 only (veneer-scratch ABI argument); the general case needs liveness at the TARGET, a new scan mode |
 | mov-wide address chains → `adr`/`adrp`+`add`; `mov`+`blr` → `bl` | shorter form | Same actionability caveat as adrp+add |
 
@@ -75,6 +76,20 @@ The largest untouched family; none of these need liveness machinery.
 | Split fusion pairs (cmp+b.cond, aese+aesmc same-dest, adrp+add) | Informational: "these should be adjacent"; per-core tables from the SOGs |
 | Render `mov xd, #0` (not `mov xd, xzr`) and `movi v0.2d, #0` (not `movi d0, #0`) | Apple eliminates only those spellings at rename; rendering tweaks to existing checks |
 | Loaded value as base not offset (`[x9, x8]` → `[x8, x9]` when x8 was just loaded) | Apple guide §4.6.7: 1 cycle of address-generation latency |
+| LDP/STP synthesized through a scratch ADD (`add x27, xN, #big ; ldp x3, x4, [x27]`) → two plain `ldr`/`str` with the offset folded in | Size-neutral 2-for-2 that drops the ADD from the address dependency chain and frees the scratch; gc emits it whenever a pair offset exceeds ±504 or is 8-misaligned (~13k in go), LLVM for big Q-register spill offsets (~9k in librustc_driver); requires the split offsets to encode (scaled imm12, or LDUR/STUR range) |
+
+## Window candidates (2026-07 corpus sweep)
+
+First `pairscan`/`defuse` sweep over macOS Mach-O binaries: `go` 1.26.5
+(1.47M insns), `rustup` (1.62M), and `librustc_driver` stable (25.9M).
+The defuse distance histograms show d1 dominating every sole-use
+producer family, confirming strict adjacency as the right default; the
+populations below are the real beyond-adjacency mass.
+
+| Pattern | Rewrite | Notes |
+| --- | --- | --- |
+| Same-address reload: second `ldr`/`ldrb`/`ldrh` of an untouched `[Rn, #d]` with no store/call/barrier between | reuse the first value (delete the reload, or copy the first destination) | ~18.2k in librustc_driver (d4-7 dominant), ~830 rustup, ~320 go. Signature shape: chained keyword-compare arms clobber the loaded register to materialize the next `ccmp` constant, then reload both fields. Deletion cannot meet the hard soundness bar -- a plain LDR may be a relaxed atomic, so a concurrent writer is architecturally visible -- so this is opt-in/informational class material |
+| Zero-CMP → S-variant with a 1-2 instruction gap | as the adjacent fold | go `cmp0\|and`: 72 at d2, 10 at d3 vs 42 at d1 -- gc's non-adjacent tail rivals the adjacent population; same flag-liveness scan, wider match |
 
 ## Infrastructure
 
