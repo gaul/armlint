@@ -491,6 +491,7 @@ static void scan_section(csh handle, const char *path, const uint8_t *code,
             int dest = a->operands[0].type == ARM64_OP_REG ?
                        reg_slot(a->operands[0].reg) : -1;
             if (bs >= 0) {
+                bool matched = false;
                 for (int k = 0; k < nloads; k++) {
                     loadrec *L = &loads[k];
                     if (L->live && L->base == bs && L->disp == a->operands[1].mem.disp &&
@@ -507,9 +508,11 @@ static void scan_section(csh handle, const char *path, const uint8_t *code,
                             example_printed++;
                         }
                         L->idx = idx;  // re-arm from the later load
+                        matched = true;
+                        break;  // records are unique per (base,disp,size)
                     }
                 }
-                if (nloads < 64) {
+                if (!matched && nloads < 64) {
                     loads[nloads++] = (loadrec){true, idx, bs,
                         a->operands[1].mem.disp, ldsize, dest};
                 }
