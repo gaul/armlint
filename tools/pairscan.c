@@ -1,5 +1,6 @@
-// pairscan: disassemble the AArch64 code in ELF files (ART OAT/odex) and
-// count adjacent-instruction pairs by normalized shape, to surface frequent
+// pairscan: disassemble the AArch64 code in ELF files (ART OAT/odex) or
+// Mach-O files (macOS binaries, thin or universal/fat) and count
+// adjacent-instruction pairs by normalized shape, to surface frequent
 // patterns worth new armlint checks.
 //
 // Normalization: mnemonic (b.<cc> folded to b.cc) + operand shapes.
@@ -14,13 +15,12 @@
 // when the first is an unconditional control transfer (b/br/ret), or across
 // undecodable words / section boundaries.
 //
-// Usage: pairscan [-e SUBSTR -n MAXPRINT] <elf-file>...
+// Usage: pairscan [-e SUBSTR -n MAXPRINT] <binary>...
 //   default: print "count<TAB>tokA || tokB || flags" for all pairs (unsorted)
 //   -e: additionally print example sites (file addr: textA ;; textB)
 
 #define _GNU_SOURCE
 #include <capstone/capstone.h>
-#include <elf.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -30,6 +30,137 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+// === Minimal ELF64 + Mach-O definitions (mirrors main.c) ===
+//
+// Darwin has no <elf.h> and Apple's <mach-o/*.h> pull in host-only
+// types; reproducing the on-disk layouts keeps the tool single-file
+// and buildable on both Linux and macOS.
+
+#define EI_NIDENT     16
+#define EI_CLASS      4
+#define ELFMAG        "\x7f""ELF"
+#define SELFMAG       4
+#define ELFCLASS64    2
+#define EM_AARCH64    183
+#define SHT_PROGBITS  1
+#define SHF_EXECINSTR 0x4
+
+typedef struct {
+    unsigned char e_ident[EI_NIDENT];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} Elf64_Ehdr;
+
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint64_t sh_flags;
+    uint64_t sh_addr;
+    uint64_t sh_offset;
+    uint64_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint64_t sh_addralign;
+    uint64_t sh_entsize;
+} Elf64_Shdr;
+
+#define MH_MAGIC_64        0xfeedfacfu       // little-endian Mach-O 64
+#define FAT_MAGIC          0xcafebabeu       // fat header, stored big-endian
+#define FAT_MAGIC_64       0xcafebabfu       // fat header with 64-bit offsets
+#define CPU_TYPE_ARM64     0x0100000cu       // includes arm64 and arm64e
+#define LC_SEGMENT_64      0x19u
+#define S_ATTR_PURE_INSTRUCTIONS 0x80000000u
+
+typedef struct {
+    uint32_t magic;
+    int32_t  cputype;
+    int32_t  cpusubtype;
+    uint32_t filetype;
+    uint32_t ncmds;
+    uint32_t sizeofcmds;
+    uint32_t flags;
+    uint32_t reserved;
+} mach_header_64;
+
+typedef struct {
+    uint32_t cmd;
+    uint32_t cmdsize;
+} load_command_hdr;
+
+typedef struct {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    char     segname[16];
+    uint64_t vmaddr;
+    uint64_t vmsize;
+    uint64_t fileoff;
+    uint64_t filesize;
+    int32_t  maxprot;
+    int32_t  initprot;
+    uint32_t nsects;
+    uint32_t flags;
+} segment_command_64;
+
+typedef struct {
+    char     sectname[16];
+    char     segname[16];
+    uint64_t addr;
+    uint64_t size;
+    uint32_t offset;
+    uint32_t align;
+    uint32_t reloff;
+    uint32_t nreloc;
+    uint32_t flags;
+    uint32_t reserved1;
+    uint32_t reserved2;
+    uint32_t reserved3;
+} section_64;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t nfat_arch;
+} fat_header;
+
+typedef struct {
+    uint32_t cputype;
+    uint32_t cpusubtype;
+    uint32_t offset;
+    uint32_t size;
+    uint32_t align;
+} fat_arch_32;
+
+typedef struct {
+    uint32_t cputype;
+    uint32_t cpusubtype;
+    uint64_t offset;
+    uint64_t size;
+    uint32_t align;
+    uint32_t reserved;
+} fat_arch_64;
+
+static uint32_t be32(uint32_t v)
+{
+    return ((v & 0xffu) << 24) | ((v & 0xff00u) << 8)
+        | ((v & 0xff0000u) >> 8) | ((v >> 24) & 0xffu);
+}
+
+static uint64_t be64(uint64_t v)
+{
+    return ((uint64_t)be32((uint32_t)(v & 0xffffffffu)) << 32)
+        | (uint64_t)be32((uint32_t)(v >> 32));
+}
 
 #define HASH_BITS 22
 #define HASH_SIZE (1u << HASH_BITS)
@@ -351,13 +482,144 @@ static void scan_section(csh handle, const char *path, const uint8_t *code,
     free(targets);
 }
 
+// ---- container walking: ELF64, thin Mach-O, universal/fat Mach-O ----
+
+static int scan_elf(csh handle, const char *path, const uint8_t *base,
+                    size_t map_len)
+{
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)base;
+    if (map_len < sizeof *eh || eh->e_ident[EI_CLASS] != ELFCLASS64 ||
+        eh->e_machine != EM_AARCH64) {
+        fprintf(stderr, "%s: not an AArch64 ELF64\n", path);
+        return -1;
+    }
+    if (eh->e_shoff > map_len ||
+        (uint64_t)eh->e_shnum * sizeof(Elf64_Shdr) > map_len - eh->e_shoff) {
+        fprintf(stderr, "%s: section headers out of bounds\n", path);
+        return -1;
+    }
+    const Elf64_Shdr *sh = (const Elf64_Shdr *)(base + eh->e_shoff);
+    for (unsigned i = 0; i < eh->e_shnum; i++) {
+        if ((sh[i].sh_flags & SHF_EXECINSTR) == 0 ||
+            sh[i].sh_type != SHT_PROGBITS || sh[i].sh_size == 0)
+            continue;
+        if (sh[i].sh_offset > map_len ||
+            sh[i].sh_size > map_len - sh[i].sh_offset)
+            continue;
+        scan_section(handle, path, base + sh[i].sh_offset, sh[i].sh_size,
+                     sh[i].sh_addr);
+    }
+    return 0;
+}
+
+static int scan_macho_slice(csh handle, const char *path, const uint8_t *base,
+                            size_t slice_off, uint64_t slice_size)
+{
+    const mach_header_64 *mh = (const mach_header_64 *)(base + slice_off);
+    if (slice_size < sizeof *mh || mh->magic != MH_MAGIC_64) {
+        fprintf(stderr, "%s: bad Mach-O header\n", path);
+        return -1;
+    }
+    if ((uint32_t)mh->cputype != CPU_TYPE_ARM64) {
+        fprintf(stderr, "%s: not an ARM64 Mach-O (cputype=0x%08x)\n", path,
+                (uint32_t)mh->cputype);
+        return -1;
+    }
+    if (mh->ncmds > 4096 ||
+        (uint64_t)mh->sizeofcmds > slice_size - sizeof *mh) {
+        fprintf(stderr, "%s: implausible load commands\n", path);
+        return -1;
+    }
+    size_t lc_off = slice_off + sizeof *mh;
+    size_t lc_end = lc_off + mh->sizeofcmds;
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        if (lc_off + sizeof(load_command_hdr) > lc_end) {
+            fprintf(stderr, "%s: load command %u truncated\n", path, i);
+            return -1;
+        }
+        const load_command_hdr *lc = (const load_command_hdr *)(base + lc_off);
+        if (lc->cmdsize < sizeof *lc || lc->cmdsize > lc_end - lc_off) {
+            fprintf(stderr, "%s: invalid cmdsize on load command %u\n",
+                    path, i);
+            return -1;
+        }
+        if (lc->cmd == LC_SEGMENT_64 &&
+            lc->cmdsize >= sizeof(segment_command_64)) {
+            const segment_command_64 *seg = (const segment_command_64 *)lc;
+            if (seg->nsects > 1024 ||
+                sizeof *seg + (uint64_t)seg->nsects * sizeof(section_64) >
+                    lc->cmdsize) {
+                fprintf(stderr, "%s: section headers overflow segment\n",
+                        path);
+                return -1;
+            }
+            const section_64 *sec =
+                (const section_64 *)(base + lc_off + sizeof *seg);
+            for (uint32_t j = 0; j < seg->nsects; j++) {
+                if (!(sec[j].flags & S_ATTR_PURE_INSTRUCTIONS) ||
+                    sec[j].size == 0)
+                    continue;
+                if ((uint64_t)sec[j].offset > slice_size ||
+                    sec[j].size > slice_size - sec[j].offset)
+                    continue;
+                scan_section(handle, path, base + slice_off + sec[j].offset,
+                             (size_t)sec[j].size, sec[j].addr);
+            }
+        }
+        lc_off += lc->cmdsize;
+    }
+    return 0;
+}
+
+static int scan_fat(csh handle, const char *path, const uint8_t *base,
+                    size_t map_len, bool is_fat_64)
+{
+    const fat_header *fh = (const fat_header *)base;
+    uint32_t nfat = be32(fh->nfat_arch);
+    size_t arch_size = is_fat_64 ? sizeof(fat_arch_64) : sizeof(fat_arch_32);
+    if (nfat > 256 || sizeof *fh + (uint64_t)nfat * arch_size > map_len) {
+        fprintf(stderr, "%s: implausible fat header\n", path);
+        return -1;
+    }
+    bool found = false;
+    for (uint32_t i = 0; i < nfat; i++) {
+        uint32_t cputype;
+        uint64_t off, size;
+        const uint8_t *entry = base + sizeof *fh + i * arch_size;
+        if (is_fat_64) {
+            const fat_arch_64 *a = (const fat_arch_64 *)entry;
+            cputype = be32(a->cputype);
+            off = be64(a->offset);
+            size = be64(a->size);
+        } else {
+            const fat_arch_32 *a = (const fat_arch_32 *)entry;
+            cputype = be32(a->cputype);
+            off = (uint64_t)be32(a->offset);
+            size = (uint64_t)be32(a->size);
+        }
+        if (cputype != CPU_TYPE_ARM64) continue;
+        found = true;
+        if (off > map_len || size > map_len - off) {
+            fprintf(stderr, "%s: fat arch %u out of bounds\n", path, i);
+            return -1;
+        }
+        if (scan_macho_slice(handle, path, base, (size_t)off, size) != 0)
+            return -1;
+    }
+    if (!found) {
+        fprintf(stderr, "%s: fat binary contains no ARM64 slice\n", path);
+        return -1;
+    }
+    return 0;
+}
+
 static int scan_file(csh handle, const char *path)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0) { perror(path); return -1; }
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(Elf64_Ehdr)) {
-        fprintf(stderr, "%s: not a readable ELF file\n", path);
+    if (fstat(fd, &st) != 0 || st.st_size < 4) {
+        fprintf(stderr, "%s: not a readable binary\n", path);
         close(fd);
         return -1;
     }
@@ -366,24 +628,27 @@ static int scan_file(csh handle, const char *path)
     close(fd);
     if (base == MAP_FAILED) { perror(path); return -1; }
 
-    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)base;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
-        eh->e_ident[EI_CLASS] != ELFCLASS64 || eh->e_machine != EM_AARCH64) {
-        fprintf(stderr, "%s: not an AArch64 ELF64\n", path);
-        munmap(base, map_len);
-        return -1;
-    }
-    const Elf64_Shdr *sh = (const Elf64_Shdr *)(base + eh->e_shoff);
-    for (unsigned i = 0; i < eh->e_shnum; i++) {
-        if ((sh[i].sh_flags & SHF_EXECINSTR) == 0 ||
-            sh[i].sh_type != SHT_PROGBITS || sh[i].sh_size == 0)
-            continue;
-        if (sh[i].sh_offset + sh[i].sh_size > map_len) continue;
-        scan_section(handle, path, base + sh[i].sh_offset, sh[i].sh_size,
-                     sh[i].sh_addr);
+    // Mach-O magic is stored host-endian (always little on ARM64); fat
+    // magic is stored big-endian on disk.
+    uint32_t m_le = (uint32_t)base[0] | ((uint32_t)base[1] << 8) |
+                    ((uint32_t)base[2] << 16) | ((uint32_t)base[3] << 24);
+    uint32_t m_be = ((uint32_t)base[0] << 24) | ((uint32_t)base[1] << 16) |
+                    ((uint32_t)base[2] << 8) | (uint32_t)base[3];
+    int rc;
+    if (memcmp(base, ELFMAG, SELFMAG) == 0) {
+        rc = scan_elf(handle, path, base, map_len);
+    } else if (m_le == MH_MAGIC_64) {
+        rc = scan_macho_slice(handle, path, base, 0, map_len);
+    } else if (m_be == FAT_MAGIC) {
+        rc = scan_fat(handle, path, base, map_len, false);
+    } else if (m_be == FAT_MAGIC_64) {
+        rc = scan_fat(handle, path, base, map_len, true);
+    } else {
+        fprintf(stderr, "%s: unsupported file format\n", path);
+        rc = -1;
     }
     munmap(base, map_len);
-    return 0;
+    return rc;
 }
 
 static int cmp_entry(const void *a, const void *b)
@@ -405,13 +670,13 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argi], "-n") == 0 && argi + 1 < argc) {
             example_max = atol(argv[++argi]);
         } else {
-            fprintf(stderr, "usage: %s [-e SUBSTR -n MAX] <elf>...\n", argv[0]);
+            fprintf(stderr, "usage: %s [-e SUBSTR -n MAX] <binary>...\n", argv[0]);
             return 2;
         }
         argi++;
     }
     if (argi >= argc) {
-        fprintf(stderr, "usage: %s [-e SUBSTR -n MAX] <elf>...\n", argv[0]);
+        fprintf(stderr, "usage: %s [-e SUBSTR -n MAX] <binary>...\n", argv[0]);
         return 2;
     }
     csh handle;

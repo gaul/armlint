@@ -314,9 +314,9 @@ backlog, built separately with `make tools`:
 
 * `tools/pairscan` counts adjacent-instruction pairs by normalized
   shape (registers collapsed to classes, immediates to `#0`/`#i`)
-  across the executable sections of ELF files, surfacing frequent
-  patterns worth a new check. `-e SUBSTR` prints example sites for
-  shapes matching a substring.
+  across the executable sections of ELF and Mach-O binaries,
+  surfacing frequent patterns worth a new check. `-e SUBSTR` prints
+  example sites for shapes matching a substring.
 * `tools/defuse` profiles block-local def-to-use distances (how far a
   value's sole consumer sits from its producer) and multi-instruction
   redundancies no pair statistic can see: dead definitions, redundant
