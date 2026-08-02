@@ -25,8 +25,7 @@ The largest untouched family; none of these need liveness machinery.
 
 | Pattern | Rewrite | Notes |
 | --- | --- | --- |
-| `b.cond +8` over `b L` | `b.!cond L` | Baseline-JIT shape; range-check the inverted form (same imm19) |
-| constant-condition `b.cond` after zero-test | `b` or delete | `cmp Rn, #0` pins C = 1, V = 0, so `b.hs` is always-taken and `b.lo`/`b.vs` never; `cbz wzr` always; `b.al` always; `cmp x, x` pins Z |
+| constant-condition `b.cond` after zero-test | `b` or delete | `cmp Rn, #0` pins C = 1, V = 0, so `b.hs` is always-taken and `b.lo`/`b.vs` never; `cbz wzr` always; `b.al` always; `cmp x, x` pins Z. The inverted-branch fold explicitly rejects register-31 CBZ/TBZ skips as this row's material |
 | side-effect-free write to ZR destination | delete | Non-S ALU, MADD family, CSEL family, bitfield ops with Rd = 31; loads excluded (memory side effects) |
 | pure write immediately clobbered | delete the first | Same destination written twice with no intervening read; covers duplicated instructions |
 

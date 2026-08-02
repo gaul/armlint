@@ -1,3 +1,7 @@
+conditional skip over B foldable into an inverted branch at offset: 0x1c: -> cbnz x8, 0x18 (2 instructions)
+  cbz x8, #0x24
+  b #0x18
+
 ADD + LDR foldable to pre-indexed LDR at offset: 0x24: -> ldrb w11, [x10, #0x1]! (2 instructions)
   add x10, x10, #0x1
   ldrb w11, [x10]
@@ -14,5 +18,6 @@ Optimization opportunities by type:
        1  ADD + LDR foldable to immediate-offset LDR
        1  ADD + LDR foldable to pre-indexed LDR
        1  MOV #0 + use foldable to ZR
+       1  conditional skip over B foldable into an inverted branch
 
-3 optimization opportunities in 30 instructions
+4 optimization opportunities in 30 instructions

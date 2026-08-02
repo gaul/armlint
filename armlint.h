@@ -434,6 +434,41 @@ bool check_br_x30(armlint_state *state, const cs_insn *insn,
 bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect a one-instruction conditional skip over an unconditional
+// branch and suggest the single inverted branch:
+//   b.eq .+8        cbz w3, .+8        tbnz x4, #63, .+8
+//   b    L          b   L              b    L
+//   -> b.ne L       -> cbnz w3, L      -> tbz x4, #63, L
+// Every skip kind inverts by flipping one bit: cond ^ 1 for B.cond,
+// the op bit for CBZ<->CBNZ and TBZ<->TBNZ. The pair and the inverted
+// branch transfer identically -- the skip's +8 target is exactly the
+// pair's fall-through, so condition-true reaches the next instruction
+// either way, and condition-false reaches L either way. Neither
+// instruction writes a register or a flag, so no liveness reasoning
+// is needed at all and the finding reports immediately, like the
+// LDP/STP coalescing whose rewrite also reproduces every
+// architectural effect. What is needed:
+// the merged branch sits one slot earlier than the B, so its
+// displacement is the B's plus one and must fit the conditional
+// form's narrower immediate -- B carries imm26 (+-128 MB) but
+// B.cond/CBZ/CBNZ only imm19 (+-1 MB) and TBZ/TBNZ imm14 (+-32 KB).
+// That gate carries the population: compilers emit this very pair as
+// the overflow spelling of a far conditional branch (98% of
+// librustc_driver's TBZ-over-B pairs are out of imm14 range), and
+// exactly those are unfoldable. Excluded: AL/NV conditions (nothing
+// to invert), register-31 CBZ/TBZ (WZR reads as zero -- a constant
+// condition, not an invertible one), BC.cond (the fold would drop its
+// Armv8.8 hint), a B whose displacement is +1, 0, or -1 (the no-op B
+// belongs to check_branch_to_next, and branch-to-self spins forever
+// on the fail path where the fold would fall through -- genuinely
+// unsound to invert), and a branch target on the B itself (the
+// central side-entry gate: that path expects an unconditional
+// transfer). In-place patching must NOP the freed slot, as with every
+// 2->1 fold. Reported as "conditional skip over B foldable into an
+// inverted branch".
+bool check_inverted_branch(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
+
 // Detect the Armv8.0 exclusive-monitor retry loop and suggest the
 // single Armv8.1 FEAT_LSE atomic (-m lse). Three shapes, matched
 // with strict adjacency plus exact branch targets:

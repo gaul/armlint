@@ -1702,9 +1702,11 @@ static void test_cmp_zero_branch(void)
 
     // -- Negative: unsafe terminator --
 
-    // cmp w0,#0 ; b.eq L ; b M (unconditional B; target may read NZCV).
+    // cmp w0,#0 ; b.eq L ; b M (unconditional B; target may read
+    // NZCV). L is away from the pair: a +8 skip over an unconditional
+    // B would be check_inverted_branch's finding, not a zero count.
     cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8);
+    b_cond(&code[4], 0, 16);
     b_(&code[8], 0x100);
     assert(run_helper_check(code, 12) == 0);
 
@@ -11606,6 +11608,180 @@ static void test_branch_to_next(void)
     assert(run_check(code, 8) == 0);
 }
 
+// check_inverted_branch: a one-instruction conditional skip over an
+// unconditional B folds to the single inverted branch. Nothing is
+// written, so findings report immediately -- no committer needed.
+static void test_inverted_branch(void)
+{
+    uint8_t code[16];
+
+    // b.eq +8 over a forward b -> b.ne L.
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    // b.lt over a backward b -> b.ge L.
+    b_cond(&code[0], 11, 8);
+    b_(&code[4], -64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    // The unsigned and signed alias pairs invert too: hs -> lo,
+    // le -> gt.
+    b_cond(&code[0], 2, 8);
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    b_cond(&code[0], 13, 8);
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    // CBZ/CBNZ and TBZ/TBNZ skips invert by the op bit.
+    cbz_cbnz(&code[0], 0, 0, 3, 2);         // cbz w3, +8
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    cbz_cbnz(&code[0], 1, 1, 5, 2);         // cbnz x5, +8
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    tbz_tbnz(&code[0], 1, true, 31, 2, 4);  // tbnz x4, #63, +8
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    tbz_tbnz(&code[0], 0, false, 5, 2, 1);  // tbz w1, #5, +8
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    // The merged branch sits one slot earlier than the B, so its
+    // displacement is the B's plus one. Forward: +262142 words is
+    // the last imm19 fit, +262143 overflows by the shift.
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], 262142 * 4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], 262143 * 4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // Backward the shift buys one extra word: -262145 lands exactly
+    // on imm19's minimum, -262146 is out.
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], -262145 * 4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], -262146 * 4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // TBZ's imm14 is far tighter -- the compiler's far-branch split
+    // lives beyond it.
+    tbz_tbnz(&code[0], 0, false, 5, 2, 1);
+    b_(&code[4], 8190 * 4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    tbz_tbnz(&code[0], 0, false, 5, 2, 1);
+    b_(&code[4], 8191 * 4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // AL and NV have no inverse.
+    write_le32(&code[0], 0x5400004Eu);      // b.al +8
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    write_le32(&code[0], 0x5400004Fu);      // b.nv +8
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // BC.cond keeps its Armv8.8 hint only as BC.
+    bc_cond(&code[0], 0, 8);
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // A skip of more than one instruction is real control flow.
+    b_cond(&code[0], 0, 12);
+    nop_insn(&code[4]);
+    b_(&code[8], 64);
+    ret_(&code[12]);
+    assert(run_check(code, 16) == 0);
+
+    // The second instruction must be the plain B: BL writes x30,
+    // and there is no conditional RET to invert to.
+    b_cond(&code[0], 0, 8);
+    bl_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    b_cond(&code[0], 0, 8);
+    ret_(&code[4]);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // A register-31 compare skip is a constant condition (WZR reads
+    // as zero), not an invertible one.
+    cbz_cbnz(&code[0], 0, 0, 31, 2);        // cbz wzr, +8
+    b_(&code[4], 64);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // Degenerate B displacements. +1 is the no-op B -- the single
+    // finding here is check_branch_to_next's, not this fold's; 0
+    // spins forever on the fail path where the fold would fall
+    // through past the freed slot; -1 re-tests unchanged flags.
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], 4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 1);
+
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], 0);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    b_cond(&code[0], 0, 8);
+    b_(&code[4], -4);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // A skip with nothing after it never closes.
+    b_cond(&code[0], 0, 8);
+    assert(run_check(code, 4) == 0);
+
+    // A branch target on the B is a side entry: that path expects an
+    // unconditional transfer, which the merged branch is not. The
+    // buffer-aware harness activates the central gate.
+    uint8_t entry[16];
+    b_cond(&entry[0], 0, 8);
+    b_(&entry[4], 64);
+    ret_(&entry[8]);
+    b_(&entry[12], -8);          // targets the B at offset 4
+    assert(run_buffer_check(entry, 16) == 0);
+
+    // Aimed at the skip itself -- the window's own top -- the extra
+    // branch is harmless and the finding stands.
+    b_cond(&entry[0], 0, 8);
+    b_(&entry[4], 64);
+    ret_(&entry[8]);
+    b_(&entry[12], -12);
+    assert(run_buffer_check(entry, 16) == 1);
+}
+
 // check_lse_rmw: the exclusive-monitor retry loop folds to a single
 // LSE atomic (-m lse) once the computed value and the status
 // register are proven dead.
@@ -13025,6 +13201,7 @@ int main(void)
     test_pac_audit();
     test_br_x30();
     test_branch_to_next();
+    test_inverted_branch();
     test_lse_rmw();
     test_lse_cas();
     test_ldr_str_add_post_indexed();
