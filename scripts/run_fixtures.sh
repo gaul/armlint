@@ -63,6 +63,7 @@ fi
 
 PASS=0
 FAIL=0
+SKIP=0
 FAILED_NAMES=()
 
 for s in "$ROOT"/fixtures/*.s; do
@@ -71,7 +72,30 @@ for s in "$ROOT"/fixtures/*.s; do
     obj="$PROBE/$name.o"
     actual="$PROBE/$name.actual"
 
-    clang "${CC_FLAGS[@]}" -c -o "$obj" "$s" 2>/dev/null
+    # A fixture may pin a Mach-O cpusubtype via a sidecar
+    # fixtures/<name>.arch (e.g. "arm64e" to exercise the PAC audit's
+    # arm64e auto-arm). cpusubtype is a Mach-O concept, so these run
+    # only on Darwin, and only when the toolchain can build that arch.
+    fixture_cc_flags=("${CC_FLAGS[@]}")
+    if [ -f "$ROOT/fixtures/$name.arch" ]; then
+        read -r fx_arch < "$ROOT/fixtures/$name.arch"
+        if [ "$(uname -s)" != "Darwin" ]; then
+            printf "  skip    %s  (arch %s: Mach-O slice test, Darwin only)\n" \
+                "$name" "$fx_arch"
+            SKIP=$((SKIP + 1))
+            continue
+        fi
+        fixture_cc_flags=(-arch "$fx_arch")
+        if ! clang "${fixture_cc_flags[@]}" -c -o "$PROBE/archprobe.o" \
+                "$PROBE/probe.s" >/dev/null 2>&1; then
+            printf "  skip    %s  (clang -arch %s unavailable)\n" \
+                "$name" "$fx_arch"
+            SKIP=$((SKIP + 1))
+            continue
+        fi
+    fi
+
+    clang "${fixture_cc_flags[@]}" -c -o "$obj" "$s" 2>/dev/null
     # Snapshot the verbose output: it is the superset (the one-line
     # opportunities plus their disassembled instructions plus the
     # by-type summary), so it exercises all of the report formatting.
@@ -113,10 +137,14 @@ for s in "$ROOT"/fixtures/*.s; do
 done
 
 echo
+SKIP_NOTE=""
+if [ "$SKIP" -gt 0 ]; then
+    SKIP_NOTE=", $SKIP skipped"
+fi
 if [ "$FAIL" -eq 0 ]; then
-    echo "integration: $PASS passed"
+    echo "integration: $PASS passed$SKIP_NOTE"
     exit 0
 else
-    echo "integration: $PASS passed, $FAIL failed (${FAILED_NAMES[*]})"
+    echo "integration: $PASS passed, $FAIL failed$SKIP_NOTE (${FAILED_NAMES[*]})"
     exit 1
 fi

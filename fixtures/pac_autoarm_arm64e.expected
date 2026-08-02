@@ -1,0 +1,14 @@
+LR spill without PACIASP/PACIBSP (PAC audit) at offset: 0x10: -> pacibsp before the spill (1 instructions)
+  stp x29, x30, [sp, #-0x10]!
+
+unauthenticated BR/BLR (PAC audit) at offset: 0x1c: -> blraaz x9 (verify the discriminator) (1 instructions)
+  blr x9
+
+unauthenticated BR/BLR (PAC audit) at offset: 0x20: -> braaz x8 (jump tables are benign) (1 instructions)
+  br x8
+
+Optimization opportunities by type:
+       2  unauthenticated BR/BLR (PAC audit)
+       1  LR spill without PACIASP/PACIBSP (PAC audit)
+
+3 optimization opportunities in 9 instructions

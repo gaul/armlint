@@ -81,6 +81,10 @@ typedef struct {
 #define FAT_MAGIC          0xcafebabeu       // fat header, stored big-endian
 #define FAT_MAGIC_64       0xcafebabfu       // fat header with 64-bit offsets
 #define CPU_TYPE_ARM64     0x0100000cu       // includes arm64 and arm64e
+// The cpusubtype's low 24 bits name the variant; the high byte holds
+// capability/feature bits (CPU_SUBTYPE_PTRAUTH_ABI etc.). arm64e is 2.
+#define CPU_SUBTYPE_MASK   0x00ffffffu
+#define CPU_SUBTYPE_ARM64E 0x00000002u
 #define LC_SEGMENT_64      0x19u
 #define S_ATTR_PURE_INSTRUCTIONS 0x80000000u
 
@@ -172,16 +176,21 @@ static bool read_at(FILE *f, long off, void *buf, size_t n)
 }
 
 // CLI-level reporting state, set once in main() and read by scan_code
-// (the only caller of check_instructions). Kept here rather than
-// threaded through scan_elf/scan_macho/scan_fat, which don't need it.
+// (the only caller of check_instructions). g_features is the baseline
+// feature/audit set from the command line; scan_macho augments it
+// per-slice (arm64e implies the PAC audit) and passes the result to
+// scan_code explicitly, so features -- unlike g_verbose/g_summary --
+// is threaded rather than read from the global.
 static bool g_verbose = false;
 static unsigned g_features = 0;
 static armlint_summary *g_summary = NULL;
 
-// Read `size` bytes at `base_offset` and run all checks. vmaddr is the
-// section's runtime base, reported back to the user in findings.
+// Read `size` bytes at `base_offset` and run all checks with the
+// given feature/audit set. vmaddr is the section's runtime base,
+// reported back to the user in findings.
 static int scan_code(FILE *f, const char *path, long base_offset,
-                     uint64_t size, uint64_t vmaddr, csh handle)
+                     uint64_t size, uint64_t vmaddr, csh handle,
+                     unsigned features)
 {
     // A64 instructions are 4 bytes. Truncate trailing slop (e.g.
     // section padding) rather than fail the whole binary.
@@ -202,7 +211,7 @@ static int scan_code(FILE *f, const char *path, long base_offset,
         return -1;
     }
     int n = check_instructions(handle, buf, aligned, vmaddr,
-                               g_verbose, g_summary, g_features);
+                               g_verbose, g_summary, features);
     free(buf);
     return n;
 }
@@ -247,8 +256,11 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
             fprintf(stderr, "%s: section %u out of bounds\n", path, i);
             return -1;
         }
+        // ELF has no arm64e slice concept: pac-ret/BTI on Linux is
+        // recorded in .note.gnu.property, not the cpusubtype, so the
+        // Mach-O auto-arm does not apply here -- pass the baseline.
         int n = scan_code(f, path, (long)shdr.sh_offset, shdr.sh_size,
-                          shdr.sh_addr, handle);
+                          shdr.sh_addr, handle, g_features);
         if (n < 0) {
             return -1;
         }
@@ -286,6 +298,18 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
     if ((uint64_t)mh.sizeofcmds > slice_size - sizeof(mh)) {
         fprintf(stderr, "%s: sizeofcmds exceeds slice\n", path);
         return -1;
+    }
+
+    // An arm64e slice has opted into the PAC ABI: every function
+    // signs its return address and routes indirect calls through the
+    // authenticated branches, which is exactly the contract the PAC
+    // audit assumes. So arm64e implicitly arms -a pac; a plain arm64
+    // slice never opted in, and arming there would flag every
+    // function's unsigned spill (the reason the audit is opt-in). An
+    // explicit -a pac still forces the audit on any slice.
+    unsigned features = g_features;
+    if (((uint32_t)mh.cpusubtype & CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) {
+        features |= ARMLINT_AUDIT_PAC;
     }
 
     int errors = 0;
@@ -347,7 +371,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                     return -1;
                 }
                 int n = scan_code(f, path, base_offset + (long)sec.offset,
-                                  sec.size, sec.addr, handle);
+                                  sec.size, sec.addr, handle, features);
                 if (n < 0) {
                     return -1;
                 }
@@ -450,7 +474,10 @@ int main(int argc, char **argv)
             }
         } else if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
             // Enable opt-in audit checks: informational findings
-            // about missing hardening rather than missed folds.
+            // about missing hardening rather than missed folds. The
+            // PAC audit also arms automatically on arm64e slices
+            // (see scan_macho); passing it here forces it on any
+            // slice, e.g. a plain arm64 binary built with pac-ret.
             i++;
             if (strcmp(argv[i], "pac") == 0) {
                 g_features |= ARMLINT_AUDIT_PAC;

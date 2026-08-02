@@ -524,7 +524,10 @@ bool armlint_advance_pending_lse(armlint_state *state, const cs_insn *insn,
 // bases (a jmp_buf in setjmp is a real PAC surface but a different
 // shape) and STP post-index (not a prologue store). The flag asserts
 // the full-PAC contract; over a binary that never opted into pac-ret
-// it reports every function's spill, by design. Reported as
+// it reports every function's spill, by design -- which is why the
+// driver arms this audit automatically only on arm64e Mach-O slices
+// (which did opt in) and leaves plain arm64 to an explicit -a pac
+// (see scan_macho in main.c). Reported as
 // "LR spill without PACIASP/PACIBSP (PAC audit)".
 bool check_pac_lr_spill(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);

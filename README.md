@@ -157,7 +157,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
 | [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`) |
-| [unsigned LR spill; raw `br`/`blr`](analyses.md#pac-hygiene-audit-opt-in--a-pac) | audit-only review items (`-a pac`) |
+| [unsigned LR spill; raw `br`/`blr`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
 | [`ldxr`/`stxr` exchange retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `swp` (`-m lse`) |
 | [`ldxr` + `cmp` + `b.ne` + `stxr` CAS retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `mov` + `cas` + `cmp` (`-m lse`) |
@@ -306,7 +306,11 @@ hardening rather than missed folds; `pac` audits the binary against
 the arm64e-style full pointer-authentication contract (return
 addresses spilled unsigned, unauthenticated `br`/`blr`). Audit
 findings are review items: jump tables and linker veneers
-legitimately appear as raw `br`.
+legitimately appear as raw `br`. The PAC audit arms automatically on
+arm64e slices (whose ABI already assumes full signing), so macOS
+system binaries surface their worklist with no flag; a plain arm64
+slice never opted in, so it stays silent unless you pass `-a pac`
+explicitly.
 
 By default armlint prints only a summary: the opportunities grouped by
 type and sorted by prevalence, so it is clear which to look at first,

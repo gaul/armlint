@@ -1620,7 +1620,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   target` has no combined form, and `autiasp` + `br x30` is left to a
   future `br x30` -> `ret` canonicalization).
 
-## PAC hygiene audit (opt-in: `-a pac`)
+## PAC hygiene audit (`-a pac`; auto-armed on arm64e)
 
 * The `-a <audit>` class is different in kind from `-m`: `-m` asserts
   what the target supports so rewrites may use it, while `-a` opts
@@ -1631,6 +1631,17 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ride the regular reporting machinery (so they are counted in the
   same opportunities summary; the "(PAC audit)" suffix marks their
   kind).
+* The audit arms automatically on arm64e Mach-O slices. An arm64e
+  slice is one whose cpusubtype is CPU_SUBTYPE_ARM64E -- the ABI in
+  which every function signs its return address and routes indirect
+  calls through the authenticated branches -- so the audit's central
+  assumption (the binary opted into pac-ret) is exactly true there,
+  and the driver enables it with no flag. The gate is deliberately
+  narrow: a plain arm64 slice never opted in, so arming it would flag
+  every function's spill (the gh figures below). The detection is one
+  cpusubtype test in scan_macho; an explicit `-a pac` still forces
+  the audit on any slice, e.g. a plain arm64 binary hand-built with
+  `-mbranch-protection=pac-ret`.
 * "LR spill without PACIASP/PACIBSP (PAC audit)": pac-ret exists
   because a return address spilled to the stack is the classic ROP
   target -- sign it before it leaves the register file and a stack
@@ -1665,7 +1676,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   jumps). Over a binary that never opted into pac-ret the flag
   reports every function by design -- the assertion is simply false
   there (Homebrew's plain-arm64 gh: 31109 spills and 20129 raw
-  BLRs, Go emitting neither signing nor authenticated calls).
+  BLRs, Go emitting neither signing nor authenticated calls). That
+  gap is exactly why the auto-arm gates on cpusubtype rather than
+  firing everywhere: the four system binaries above are arm64e and
+  now surface their worklists with no flag, while gh and the other
+  Homebrew arm64 binaries stay silent unless `-a pac` is asked for
+  explicitly.
 
 ## exclusive-monitor retry loop foldable into an LSE atomic (feature-gated: `-m lse`)
 
