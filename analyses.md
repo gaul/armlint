@@ -1665,27 +1665,37 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * "unauthenticated BR/BLR (PAC audit)": in fully signed code,
   function-pointer transfers go through BRAA(Z)/BLRAA(Z), which
   authenticate the target register before branching; each raw BR/BLR
-  is a JOP hazard. Two benign shapes survive in honest arm64e
-  binaries and a peephole cannot tell them apart, so they appear in
-  the output for human review: jump tables (the target is computed
-  from a bounded index into read-only offsets, not a corruptible
-  pointer -- clang leaves these raw even on arm64e) and linker
-  long-branch veneers (static target, `br x16`). A raw BLR has no
-  benign class and deserves the closest look. The authenticated
+  is a JOP hazard. The dominant benign shape is compiler switch
+  dispatch, and a jump-table classifier keeps it off the worklist:
+  the clang idiom `adrp xB ; add xB,xB,#off ; ldrsw xE,[xB,xI,lsl #2]
+  ; adr xA,#. ; add xT,xA,xE ; br xT` computes its target as a
+  PC-relative base plus a signed offset read from a statically
+  addressed (read-only) table -- not a corruptible pointer -- so a BR
+  to exactly that `xT` is dismissed. The match is strict-adjacency and
+  deliberately narrow: for an audit the dangerous error is hiding a
+  real hazard, so only this exact five-producer shape is recognized.
+  What still surfaces: every BLR (a call has no jump-table form),
+  linker long-branch veneers (`adr`+`br`, no table load), the compact
+  `ldrb`-scaled table variant (a different idiom, left for a future
+  pass), and any genuinely unclassified branch. The authenticated
   variants and RET differ in encoding and never match.
 * Calibration on macOS 26 (Apple's arm64e system binaries): zero
   unsigned LR spills across ls, zsh, ssh, and sshd -- Apple's signing
   is complete, and the window produces no false positives over
-  thousands of signed prologues -- with tiny indirect worklists (ssh:
-  exactly its 3 `br x16` veneer-class branches, address-verified
-  against the disassembly; zsh: 22, the interpreter's computed
-  jumps). Over a binary that never opted into pac-ret the flag
-  reports every function by design -- the assertion is simply false
-  there (Homebrew's plain-arm64 gh: 31109 spills and 20129 raw
-  BLRs, Go emitting neither signing nor authenticated calls). That
-  gap is exactly why the auto-arm gates on cpusubtype rather than
-  firing everywhere: the four system binaries above are arm64e and
-  now surface their worklists with no flag, while gh and the other
+  thousands of signed prologues. Every raw BR in these four is the
+  clang jump-table idiom (ls 1, ssh 3, sshd 3, zsh 22, bash 18 --
+  each of the 47 byte-verified against the disassembly, zero
+  mismatches), so the classifier empties the raw-BR worklist
+  entirely; what would remain on other binaries is veneers, the
+  `ldrb` variant, or real hazards. Over a binary that never opted
+  into pac-ret the LR-spill flag reports every function by design --
+  the assertion is simply false there (Homebrew's plain-arm64 gh:
+  31109 spills and 20129 raw BLRs, Go emitting neither signing nor
+  authenticated calls; its jump-table BRs use a different idiom and
+  stay flagged too). That gap is exactly why the auto-arm gates on
+  cpusubtype rather than firing everywhere: the four system binaries
+  above are arm64e and now surface their worklists with no flag,
+  while gh and the other
   Homebrew arm64 binaries stay silent unless `-a pac` is asked for
   explicitly.
 

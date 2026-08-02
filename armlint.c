@@ -468,6 +468,22 @@ struct armlint_state {
     // x30 (check_pac_lr_spill; reset by any control transfer).
     unsigned pac_sign_recent;
 
+    // Jump-table recognizer for the PAC raw-BR audit
+    // (check_pac_raw_indirect). The clang switch idiom
+    //   adrp xB,#pg ; add xB,xB,#off ; ldrsw xE,[xB,xI,lsl #2] ;
+    //   adr xA,#. ; add xT,xA,xE ; br xT
+    // computes the branch target from a PC-relative base plus a
+    // signed offset read from a statically-addressed table, so it is
+    // not a corruptible-pointer transfer and is auto-dismissed.
+    // jt_stage counts matched producers (1..5) under strict
+    // adjacency; the *_reg fields carry the live registers between
+    // stages. jt_page_reg serves the adrp/add/ldrsw base.
+    unsigned jt_stage;
+    unsigned jt_page_reg;
+    unsigned jt_offset_reg;
+    unsigned jt_adr_reg;
+    unsigned jt_target_reg;
+
     // LDXR/STXR retry-loop progress for the LSE fold (-m lse):
     // stage 1 after the exclusive load, stage 2 after the middle ALU
     // op, stage 3 after the store-exclusive (lse_is_swp marks the
@@ -1353,6 +1369,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_sgn_active = false;
     state->aut_active = false;
     state->pac_sign_recent = 0;
+    state->jt_stage = 0;
     state->lse_stage = 0;
     state->pending_lse_active = false;
     state->pending_fp_active = false;
@@ -5788,21 +5805,107 @@ bool check_pac_lr_spill(armlint_state *state, const cs_insn *insn,
     return found;
 }
 
+// Defined below, near the addressing-mode folds; forward-declared for
+// the jump-table recognizer.
+static bool decode_add_imm_x(uint32_t op, unsigned *out_rd,
+                             unsigned *out_rn, uint32_t *out_imm);
+static bool decode_add_x_shifted_lsl(uint32_t op, unsigned *out_rd,
+                                     unsigned *out_rn, unsigned *out_rm,
+                                     unsigned *out_shift);
+
+// Advance the jump-table recognizer by one instruction. Each producer
+// of the clang switch idiom moves jt_stage forward under strict
+// adjacency; a fresh ADRP always restarts the match, and anything else
+// resets it. After the fifth producer (stage 5) jt_target_reg names
+// the register the BR will read. The BR is consulted before this runs,
+// so reaching stage 5 here and then seeing the branch is what closes
+// the match.
+static void jt_advance(armlint_state *state, uint32_t op)
+{
+    unsigned rd, rn, rm, shift;
+    uint32_t imm;
+    switch (state->jt_stage) {
+    case 1:
+        // add xB, xB, #off -- the table base, same register as the ADRP.
+        if (decode_add_imm_x(op, &rd, &rn, &imm)
+                && rd == state->jt_page_reg && rn == state->jt_page_reg) {
+            state->jt_stage = 2;
+            return;
+        }
+        break;
+    case 2:
+        // ldrsw xE, [xB, xI, lsl #2] off the table base: register
+        // offset (bit 21), option:S == 0b0111 (LSL #2, sign-extended
+        // word), base == jt_page_reg.
+        if ((op & 0xFFE00C00u) == 0xB8A00800u
+                && ((op >> 12) & 0xFu) == 0x7u
+                && ((op >> 5) & 0x1Fu) == state->jt_page_reg) {
+            state->jt_offset_reg = op & 0x1Fu;
+            state->jt_stage = 3;
+            return;
+        }
+        break;
+    case 3:
+        // adr xA, #. -- the PC-relative base the offsets are added to.
+        if ((op & 0x9F000000u) == 0x10000000u) {
+            state->jt_adr_reg = op & 0x1Fu;
+            state->jt_stage = 4;
+            return;
+        }
+        break;
+    case 4:
+        // add xT, xA, xE (either operand order): target = base + offset.
+        if (decode_add_x_shifted_lsl(op, &rd, &rn, &rm, &shift)
+                && shift == 0
+                && ((rn == state->jt_adr_reg && rm == state->jt_offset_reg)
+                 || (rn == state->jt_offset_reg && rm == state->jt_adr_reg))) {
+            state->jt_target_reg = rd;
+            state->jt_stage = 5;
+            return;
+        }
+        break;
+    default:
+        break;
+    }
+    // No advance from the current stage: a fresh ADRP starts a new
+    // candidate table, anything else (including the closing BR) resets.
+    if ((op & 0x9F000000u) == 0x90000000u) {
+        state->jt_page_reg = op & 0x1Fu;
+        state->jt_stage = 1;
+    } else {
+        state->jt_stage = 0;
+    }
+}
+
 bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
     if (insn->size != 4 || !(state->features & ARMLINT_AUDIT_PAC)) {
+        state->jt_stage = 0;
         return false;
     }
 
     uint32_t op = insn_word(insn);
     bool is_br = (op & 0xFFFFFC1Fu) == 0xD61F0000u;
     bool is_blr = (op & 0xFFFFFC1Fu) == 0xD63F0000u;
+    unsigned rn = (op >> 5) & 0x1Fu;
+
+    // A BR to exactly the register the jump-table idiom just computed
+    // is a read-only-table dispatch, not a corruptible-pointer
+    // transfer -- dismiss it. Consult the recognizer before advancing
+    // it past this instruction. Only BR is ever a jump table: a BLR is
+    // a call and has no benign class, so it is never suppressed.
+    bool benign_jt = is_br && state->jt_stage == 5u
+        && rn == state->jt_target_reg;
+    jt_advance(state, op);
+
     if (!is_br && !is_blr) {
         return false;
     }
+    if (benign_jt) {
+        return false;
+    }
 
-    unsigned rn = (op >> 5) & 0x1Fu;
     out->name = "unauthenticated BR/BLR (PAC audit)";
     out->start_offset = offset;
     out->insn_count = 1;
@@ -5812,7 +5915,7 @@ bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
             "-> blraaz x%u (verify the discriminator)", rn);
     } else {
         snprintf(out->detail, sizeof(out->detail),
-            "-> braaz x%u (jump tables are benign)", rn);
+            "-> braaz x%u (verify: not a recognized jump table)", rn);
     }
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);

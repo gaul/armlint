@@ -1,0 +1,10 @@
+unauthenticated BR/BLR (PAC audit) at offset: 0x18: -> braaz x9 (verify: not a recognized jump table) (1 instructions)
+  br x9
+
+unauthenticated BR/BLR (PAC audit) at offset: 0x1c: -> blraaz x10 (verify the discriminator) (1 instructions)
+  blr x10
+
+Optimization opportunities by type:
+       2  unauthenticated BR/BLR (PAC audit)
+
+2 optimization opportunities in 9 instructions

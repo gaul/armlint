@@ -10377,6 +10377,19 @@ static void blraaz_(uint8_t out[4], unsigned rn)
     write_le32(out, 0xD63F081Fu | ((rn & 0x1Fu) << 5));
 }
 
+// LDRSW Xt, [Xn, Xm, lsl #2] -- register offset, sign-extended word.
+// Base 0xB8A00800 with option=011 (UXTX/LSL), S=1: bits 15:12 = 0b0111.
+static void ldrsw_reg_lsl2(uint8_t out[4], unsigned rt, unsigned rn,
+                           unsigned rm)
+{
+    uint32_t op = 0xB8A00800u
+        | ((rm & 0x1Fu) << 16)
+        | (0x7u << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 static void test_cssc_minmax(void)
 {
     uint8_t code[12];
@@ -11524,6 +11537,88 @@ static void test_pac_audit(void)
     blr_(&code[4], 8);
     ret_(&code[8]);
     assert(run_pac_audit_check(code, 12) == 2);
+}
+
+// The raw-BR audit dismisses the clang jump-table idiom: adrp/add of a
+// table base, an ldrsw of a signed offset indexed off it, an adr for
+// the PC-relative base, an add combining them, then br. The target is
+// a read-only-table dispatch, not a corruptible pointer.
+static void test_pac_jump_table(void)
+{
+    uint8_t code[28];
+
+    // The canonical idiom -- suppressed, no finding.
+    adrp_x(&code[0], 17, 1);
+    add_x_imm(&code[4], 17, 17, 0x100);
+    ldrsw_reg_lsl2(&code[8], 16, 17, 16);   // ldrsw x16, [x17, x16, lsl #2]
+    adr_(&code[12], 17, 0);
+    add_x(&code[16], 16, 17, 16);           // add x16, x17, x16
+    br_(&code[20], 16);
+    assert(run_pac_audit_check(code, 24) == 0);
+
+    // The final add's operands commute: add x16, x16, x17 also folds.
+    adrp_x(&code[0], 17, 1);
+    add_x_imm(&code[4], 17, 17, 0x100);
+    ldrsw_reg_lsl2(&code[8], 16, 17, 16);
+    adr_(&code[12], 17, 0);
+    add_x(&code[16], 16, 16, 17);
+    br_(&code[20], 16);
+    assert(run_pac_audit_check(code, 24) == 0);
+
+    // Negative: a bare BR with no preceding idiom stays flagged.
+    br_(&code[0], 9);
+    assert(run_pac_audit_check(code, 4) == 1);
+
+    // Negative: a BLR after the full idiom is never a jump table --
+    // a call has no benign class, so it is still flagged.
+    adrp_x(&code[0], 17, 1);
+    add_x_imm(&code[4], 17, 17, 0x100);
+    ldrsw_reg_lsl2(&code[8], 16, 17, 16);
+    adr_(&code[12], 17, 0);
+    add_x(&code[16], 16, 17, 16);
+    blr_(&code[20], 16);
+    ret_(&code[24]);
+    assert(run_pac_audit_check(code, 28) == 1);
+
+    // Negative: the branch reads a register the idiom did not compute
+    // (the target is x16; branching x17 is a different value).
+    adrp_x(&code[0], 17, 1);
+    add_x_imm(&code[4], 17, 17, 0x100);
+    ldrsw_reg_lsl2(&code[8], 16, 17, 16);
+    adr_(&code[12], 17, 0);
+    add_x(&code[16], 16, 17, 16);
+    br_(&code[20], 17);
+    assert(run_pac_audit_check(code, 24) == 1);
+
+    // Negative: a gap breaks the strict adjacency the idiom requires.
+    adrp_x(&code[0], 17, 1);
+    add_x_imm(&code[4], 17, 17, 0x100);
+    ldrsw_reg_lsl2(&code[8], 16, 17, 16);
+    adr_(&code[12], 17, 0);
+    add_x(&code[16], 16, 17, 16);
+    nop_insn(&code[20]);
+    br_(&code[24], 16);
+    assert(run_pac_audit_check(code, 28) == 1);
+
+    // Negative: no ADRP anchoring the table base -- the sequence could
+    // load its offset off an attacker-controlled register, so it is
+    // not recognized and stays flagged.
+    add_x_imm(&code[0], 17, 17, 0x100);
+    ldrsw_reg_lsl2(&code[4], 16, 17, 16);
+    adr_(&code[8], 17, 0);
+    add_x(&code[12], 16, 17, 16);
+    br_(&code[16], 16);
+    assert(run_pac_audit_check(code, 20) == 1);
+
+    // Negative: the ADD base register is not the ADRP's, so the table
+    // base is unproven.
+    adrp_x(&code[0], 17, 1);
+    add_x_imm(&code[4], 17, 18, 0x100);     // add x17, x18, #.. (Rn != adrp)
+    ldrsw_reg_lsl2(&code[8], 16, 17, 16);
+    adr_(&code[12], 17, 0);
+    add_x(&code[16], 16, 17, 16);
+    br_(&code[20], 16);
+    assert(run_pac_audit_check(code, 24) == 1);
 }
 
 // check_br_x30: an indirect branch through the link register is a
@@ -13023,6 +13118,7 @@ int main(void)
     test_add_stlr_fold();
     test_aut_ret();
     test_pac_audit();
+    test_pac_jump_table();
     test_br_x30();
     test_branch_to_next();
     test_lse_rmw();

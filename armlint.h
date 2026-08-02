@@ -539,14 +539,22 @@ bool check_pac_lr_spill(armlint_state *state, const cs_insn *insn,
 // BLR. In fully signed code, function-pointer transfers go through
 // BRAA(Z)/BLRAA(Z), which authenticate the target register before
 // branching; each raw BR/BLR is a JOP hazard. The output is an
-// auditor's worklist, not an error list: two benign shapes survive
-// in honest arm64e binaries and a peephole cannot tell them apart --
-// jump tables (the target is computed from a bounded index into
-// read-only offsets, not a corruptible pointer; clang leaves these
-// raw even on arm64e) and linker long-branch veneers. A raw BLR has
-// no benign class and deserves the closest look. The authenticated
-// variants and RET differ in encoding and never match. Reported as
-// "unauthenticated BR/BLR (PAC audit)".
+// auditor's worklist, not an error list, and a jump-table classifier
+// keeps compiler switch dispatch off it: the clang idiom
+//   adrp xB,#pg ; add xB,xB,#off ; ldrsw xE,[xB,xI,lsl #2] ;
+//   adr xA,#. ; add xT,xA,xE ; br xT
+// computes its target as a PC-relative base plus a signed offset read
+// from a table at a statically materialized (read-only) address --
+// not a corruptible pointer -- so a BR to exactly that xT is
+// dismissed. The match is strict-adjacency and conservative: the
+// dangerous direction for an audit is hiding a real hazard, so only
+// this exact five-producer shape is recognized. A BLR is never
+// dismissed (a call has no jump-table form), nor is any BR whose
+// register was not just computed by the idiom -- so linker veneers
+// (adr+br, no table load) and the compact ldrb-scaled table variant
+// stay flagged, as does any genuinely unclassified branch. The
+// authenticated variants and RET differ in encoding and never match.
+// Reported as "unauthenticated BR/BLR (PAC audit)".
 bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 

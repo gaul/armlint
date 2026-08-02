@@ -10,7 +10,7 @@ LR spill without PACIASP/PACIBSP (PAC audit) at offset: 0x44: -> pacibsp before 
 unauthenticated BR/BLR (PAC audit) at offset: 0x58: -> blraaz x8 (verify the discriminator) (1 instructions)
   blr x8
 
-unauthenticated BR/BLR (PAC audit) at offset: 0x5c: -> braaz x9 (jump tables are benign) (1 instructions)
+unauthenticated BR/BLR (PAC audit) at offset: 0x5c: -> braaz x9 (verify: not a recognized jump table) (1 instructions)
   br x9
 
 Optimization opportunities by type:

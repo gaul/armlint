@@ -307,8 +307,9 @@ arms automatically on arm64e slices, whose ABI mandates FEAT_PAuth
 hardening rather than missed folds; `pac` audits the binary against
 the arm64e-style full pointer-authentication contract (return
 addresses spilled unsigned, unauthenticated `br`/`blr`). Audit
-findings are review items: jump tables and linker veneers
-legitimately appear as raw `br`. The PAC audit arms automatically on
+findings are review items; the raw-`br` check recognizes and
+auto-dismisses the clang jump-table idiom, so what remains is BLRs,
+linker veneers, and genuinely unclassified branches. The PAC audit arms automatically on
 arm64e slices (whose ABI already assumes full signing), so macOS
 system binaries surface their worklist with no flag; a plain arm64
 slice never opted in, so it stays silent unless you pass `-a pac`
