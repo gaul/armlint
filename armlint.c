@@ -454,6 +454,14 @@ struct armlint_state {
     unsigned pending_sgn_window;
     armlint_finding pending_sgn_finding;
 
+    // Pending AUTIASP/AUTIBSP awaiting an adjacent plain RET -- the
+    // split pointer-authentication epilogue that Armv8.3's RETAA/
+    // RETAB do in one instruction (check_aut_ret, -m pauth).
+    bool aut_active;
+    bool aut_is_b_key;
+    size_t aut_offset;
+    char aut_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Deferred finding gated on an FP/vector register's death,
     // advanced by armlint_advance_pending_fp -- the FP twin of the
     // pending_mz slot (single slot, same collision semantics).
@@ -1297,6 +1305,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_cssc_active = false;
     state->sgn_active = false;
     state->pending_sgn_active = false;
+    state->aut_active = false;
     state->pending_fp_active = false;
     if (have_fallback) {
         // Still run mov_close for its state reset; a MOV-chain finding
@@ -5072,6 +5081,61 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
             snprintf(state->sgn_disasm, sizeof(state->sgn_disasm),
                 "%s %s", insn->mnemonic, insn->op_str);
         }
+    }
+
+    return false;
+}
+
+bool check_aut_ret(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_PAUTH)) {
+        state->aut_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a plain RET? The combined Armv8.3 forms authenticate
+    //     the same register with the same key and modifier (x30, SP)
+    //     and return in one instruction: AUTIASP + RET is RETAA,
+    //     AUTIBSP + RET is RETAB. RET Xn with n != 30 returns through
+    //     another register, which the combined forms cannot name.
+    //     They also leave x30 holding the still-signed address where
+    //     the split form left the raw one -- unobservable, because
+    //     AAPCS64 makes x30 a plain temporary after the call returns
+    //     (the register twin of the BL-clobbers-NZCV liveness rule).
+    if (state->aut_active) {
+        if (op == 0xD65F03C0u) {
+            out->name =
+                "AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth)";
+            out->start_offset = state->aut_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail), "-> %s",
+                state->aut_is_b_key ? "retab" : "retaa");
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->aut_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s", insn->mnemonic);
+            state->aut_active = false;
+            return true;
+        }
+        // Strict adjacency: clear regardless of match.
+        state->aut_active = false;
+    }
+
+    // (2) Open: AUTIASP or AUTIBSP, the hint-space SP-modifier
+    //     authenticators (fixed words). The zero-modifier AUTIAZ and
+    //     AUTIBZ have no combined return form, and the general
+    //     encoding AUTIA x30, SP -- identical semantics -- is unseen
+    //     in compiler output; neither opens.
+    if (op == 0xD50323BFu || op == 0xD50323FFu) {
+        state->aut_active = true;
+        state->aut_is_b_key = op == 0xD50323FFu;
+        state->aut_offset = offset;
+        snprintf(state->aut_disasm, sizeof(state->aut_disasm),
+            "%s", insn->mnemonic);
     }
 
     return false;
@@ -13021,6 +13085,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_single_bit_cbz,
     check_cset_fold,
     check_cmp_cset_sign,
+    check_aut_ret,
     check_redundant_zext,
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,

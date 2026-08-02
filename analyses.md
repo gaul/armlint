@@ -1511,6 +1511,50 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   every control transfer; the realistic catch is the inlined chain
   whose vector register is reused shortly after.
 
+## split pointer-authentication return foldable into RETAA/RETAB (feature-gated: `-m pauth`)
+
+* A pac-ret epilogue restores the signed return address, authenticates
+  it, and returns. The authenticate-and-return steps take two
+  instructions in the portable spelling; Armv8.3's combined forms do
+  both in one -- same key (IA/IB), same modifier (SP), same register
+  (x30):
+  * `autiasp ; ret` -> `retaa`
+  * `autibsp ; ret` -> `retab`
+  ("AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth)"). Both
+  sides are fixed words, matched raw under strict adjacency.
+* The split spelling exists for portability, which is why the check is
+  opt-in: AUTIASP/AUTIBSP live in the hint space and execute as NOPs
+  on pre-Armv8.3 cores, so one binary hardens where the keys exist and
+  still runs everywhere -- while RETAA/RETAB are UNDEFINED there.
+  `-m pauth` asserts the target guarantees v8.3. Compilers already
+  emit the combined forms at a guaranteed-v8.3 baseline (arm64e,
+  `-march=armv8.3-a` and up); the check surfaces the residue, which is
+  real: macOS 26's arm64e `/usr/bin/ssh` carries 42 adjacent
+  `autibsp ; ret` pairs alongside its 762 `retab`s.
+* Soundness fine print: the combined forms do not write the
+  authenticated address back to x30, so after the return the register
+  holds the still-signed value where the split form left the raw one.
+  AAPCS64 makes x30 a plain temporary once the call returns -- no
+  conforming caller reads it -- the register twin of the
+  BL-clobbers-NZCV argument the flag-liveness scan makes. On a forged
+  return address both spellings deny the hijack; only the diagnosis
+  point differs: FEAT_FPAC faults the standalone AUT precisely, the
+  combined form faults given FEAT_FPACCOMBINE, and cores with neither
+  branch to a poisoned address in both spellings.
+* The side-entry gate is load-bearing here, not a formality. A shared
+  epilogue whose RET is a direct-branch target is reached by paths
+  that never signed x30 (shrink-wrapped fast paths), and the folded
+  RETAA/RETAB would authenticate a raw pointer there -- a fault, not
+  a slowdown. In that same `/usr/bin/ssh`, 18 of the 42 pairs are
+  exactly this shape (each one confirmed branch-targeted at the RET)
+  and are suppressed; the 24 clean pairs are reported.
+* Exclusions: `ret x17` (the combined forms are x30-only); the
+  zero-modifier AUTIAZ/AUTIBZ (no combined zero-modifier return
+  exists); the general-encoding `autia x30, sp` spelling (identical
+  semantics, unseen in compiler output); tail calls (`autibsp ; b
+  target` has no combined form, and `autiasp` + `br x30` is left to a
+  future `br x30` -> `ret` canonicalization).
+
 ## LDR literal foldable to MOV/FMOV immediate
 
 * `ldr w0, <literal>` where the pooled word is `0x2a` instead of

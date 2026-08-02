@@ -166,6 +166,11 @@ static int run_lrcpc2_check(const uint8_t *code, size_t code_size)
     return run_features_check(code, code_size, ARMLINT_FEATURE_LRCPC2);
 }
 
+static int run_pauth_check(const uint8_t *code, size_t code_size)
+{
+    return run_features_check(code, code_size, ARMLINT_FEATURE_PAUTH);
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -1095,6 +1100,23 @@ static void ret_(uint8_t out[4])
     out[2] = 0x5F;
     out[3] = 0xD6;
 }
+
+// RET Xn -- returning through a register other than x30.
+static void ret_rn(uint8_t out[4], unsigned rn)
+{
+    write_le32(out, 0xD65F0000u | ((rn & 0x1Fu) << 5));
+}
+
+// The pointer-authentication epilogue instructions, all fixed words:
+// the hint-space PACIxSP/AUTIxSP sign/authenticate x30 with SP as the
+// modifier, AUTIAZ authenticates with a zero modifier, and RETAB is
+// the Armv8.3 combined authenticate-and-return.
+static void paciasp_(uint8_t out[4]) { write_le32(out, 0xD503233Fu); }
+static void pacibsp_(uint8_t out[4]) { write_le32(out, 0xD503237Fu); }
+static void autiasp_(uint8_t out[4]) { write_le32(out, 0xD50323BFu); }
+static void autibsp_(uint8_t out[4]) { write_le32(out, 0xD50323FFu); }
+static void autiaz_(uint8_t out[4]) { write_le32(out, 0xD503239Fu); }
+static void retab_(uint8_t out[4]) { write_le32(out, 0xD65F0FFFu); }
 
 // BL with byte offset (function call -- LIV_TERM_SAFE).
 static void bl_(uint8_t out[4], int32_t byte_offset)
@@ -11298,6 +11320,65 @@ static void test_add_stlr_fold(void)
     assert(run_reg_dead(code, 8, 16) == 0);
 }
 
+// check_aut_ret: the split pointer-authentication epilogue,
+// AUTIASP/AUTIBSP + RET -> RETAA/RETAB (gated on -m pauth).
+static void test_aut_ret(void)
+{
+    uint8_t code[16];
+
+    // autiasp ; ret -- the split A-key epilogue (-> retaa).
+    autiasp_(&code[0]);
+    ret_(&code[4]);
+    assert(run_pauth_check(code, 8) == 1);
+
+    // The B-key twin (-> retab).
+    autibsp_(&code[0]);
+    ret_(&code[4]);
+    assert(run_pauth_check(code, 8) == 1);
+
+    // Without -m pauth the same bytes are silent: the combined forms
+    // are UNDEFINED before Armv8.3.
+    assert(run_check(code, 8) == 0);
+
+    // Back-to-back epilogues both fold.
+    autiasp_(&code[0]);
+    ret_(&code[4]);
+    autibsp_(&code[8]);
+    ret_(&code[12]);
+    assert(run_pauth_check(code, 16) == 2);
+
+    // RET x17 returns through another register; the combined forms
+    // are x30-only.
+    autiasp_(&code[0]);
+    ret_rn(&code[4], 17);
+    assert(run_pauth_check(code, 8) == 0);
+
+    // The zero-modifier AUTIAZ has no combined return form.
+    autiaz_(&code[0]);
+    ret_(&code[4]);
+    assert(run_pauth_check(code, 8) == 0);
+
+    // PACIASP signs rather than authenticates; only the AUTs open.
+    paciasp_(&code[0]);
+    ret_(&code[4]);
+    assert(run_pauth_check(code, 8) == 0);
+
+    // Strict adjacency: an intervening instruction breaks the pair.
+    autiasp_(&code[0]);
+    add_x_imm(&code[4], 0, 0, 4);
+    ret_(&code[8]);
+    assert(run_pauth_check(code, 12) == 0);
+
+    // Already folded: PACIBSP ... RETAB is the optimized form.
+    pacibsp_(&code[0]);
+    retab_(&code[4]);
+    assert(run_pauth_check(code, 8) == 0);
+
+    // An AUT at the end of the region has nothing to close it.
+    autiasp_(&code[0]);
+    assert(run_pauth_check(code, 4) == 0);
+}
+
 static void test_ldr_str_add_post_indexed(void)
 {
     uint8_t code[12];
@@ -12348,6 +12429,7 @@ int main(void)
     test_ldr_sext_fold();
     test_add_ldr_imm_offset();
     test_add_stlr_fold();
+    test_aut_ret();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();

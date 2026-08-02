@@ -71,6 +71,7 @@ void armlint_state_reset(armlint_state *state);
 // feature is enabled (the CLI maps -m cssc etc. onto these).
 #define ARMLINT_FEATURE_CSSC (1u << 0)
 #define ARMLINT_FEATURE_LRCPC2 (1u << 1)
+#define ARMLINT_FEATURE_PAUTH (1u << 2)
 
 // Enable ISA-extension-gated checks (a bitmask of ARMLINT_FEATURE_*).
 void armlint_state_set_features(armlint_state *state, unsigned features);
@@ -356,6 +357,34 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
 // CSET/CSETM foldable to LSR/ASR".
 bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out);
+
+// Detect the split pointer-authentication epilogue: AUTIASP or
+// AUTIBSP immediately followed by a plain RET. The Armv8.3 combined
+// forms do both steps in one instruction -- same key (IA/IB), same
+// modifier (SP), same register (x30):
+//   autiasp ; ret -> retaa
+//   autibsp ; ret -> retab
+// Compilers emit the split spelling when the binary must also run on
+// pre-Armv8.3 cores: the hint-space AUT executes as a NOP there,
+// while the combined forms are UNDEFINED -- which is also why the
+// check is gated on ARMLINT_FEATURE_PAUTH (-m pauth). Fine print:
+// the combined forms do not write the authenticated address back to
+// x30, so after the return it holds the still-signed value where the
+// split form left the raw one; AAPCS64 makes x30 a plain temporary
+// once the call returns, so no conforming caller observes the
+// difference (the register twin of the BL-clobbers-NZCV liveness
+// rule). On a forged return address both spellings deny the hijack;
+// only the diagnosis point differs (FEAT_FPAC faults the standalone
+// AUT, the combined form faults given FEAT_FPACCOMBINE, and earlier
+// cores branch to a poisoned address either way). RET Xn (n != 30),
+// the zero-modifier AUTIAZ/AUTIBZ (no combined return exists), and
+// the general-encoding AUTIA x30, SP spelling (unseen in compiler
+// output) do not fold. A RET that is itself a branch target -- a
+// shared epilogue whose other paths skip the AUT -- is suppressed by
+// the central side-entry gate. Reported as "AUTIASP/AUTIBSP + RET
+// foldable to RETAA/RETAB (PAuth)".
+bool check_aut_ret(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out);
 
 // Detect a producer that provably zeros bits 63..P of its destination,
 // immediately followed by an in-place zero-extension consumer that
