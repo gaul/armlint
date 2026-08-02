@@ -158,6 +158,8 @@ not yet implemented live in [TODO.md](TODO.md).
 | [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`) |
 | [unsigned LR spill; raw `br`/`blr`](analyses.md#pac-hygiene-audit-opt-in--a-pac) | audit-only review items (`-a pac`) |
+| [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
+| [`ldxr`/`stxr` exchange retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `swp` (`-m lse`) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
@@ -294,8 +296,9 @@ Mach-O, or universal/fat Mach-O) directly:
 `-m <feature>` enables checks whose rewrites use ISA-extension
 instructions the target must support: `cssc` (Armv8.9/9.4 Common
 Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,
-`ctz`), `lrcpc2` (Armv8.4 unscaled store-release: `stlur`), and
-`pauth` (Armv8.3 pointer authentication: `retaa`/`retab`).
+`ctz`), `lrcpc2` (Armv8.4 unscaled store-release: `stlur`), `pauth`
+(Armv8.3 pointer authentication: `retaa`/`retab`), and `lse`
+(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`).
 
 `-a <audit>` enables opt-in informational checks that flag missing
 hardening rather than missed folds; `pac` audits the binary against

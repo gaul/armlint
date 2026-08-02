@@ -72,6 +72,7 @@ void armlint_state_reset(armlint_state *state);
 #define ARMLINT_FEATURE_CSSC (1u << 0)
 #define ARMLINT_FEATURE_LRCPC2 (1u << 1)
 #define ARMLINT_FEATURE_PAUTH (1u << 2)
+#define ARMLINT_FEATURE_LSE (1u << 3)
 
 // Audit bits, kept in the high half of the same features word. They
 // are different in kind from the ISA bits above: -m asserts what the
@@ -432,6 +433,52 @@ bool check_br_x30(armlint_state *state, const cs_insn *insn,
 // "branch to the next instruction is a no-op".
 bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
+
+// Detect the Armv8.0 exclusive-monitor retry loop and suggest the
+// single Armv8.1 FEAT_LSE atomic (-m lse). Two shapes, matched with
+// strict adjacency plus an exact backward branch:
+//   L: ldxr  x8, [x0]                 L: ldxr x8, [x0]
+//      add   x9, x8, x1                  stxr w10, x1, [x0]
+//      stxr  w10, x9, [x0]               cbnz w10, L
+//      cbnz  w10, L                   -> swp x1, x8, [x0]
+//   -> ldadd x1, x8, [x0]
+// The middle op picks the atomic: ADD -> LDADD, ORR -> LDSET,
+// EOR -> LDEOR, BIC -> LDCLR (all direct), AND -> MVN + LDCLR,
+// SUB -> NEG + LDADD, and ADD/SUB #imm12 -> MOV #imm + LDADD; the
+// pre-op's scratch reuses the loop's computed-value register, which
+// the rewrite proves dead anyway. Commutative ops accept either
+// operand order; SUB/BIC need the loaded value on the left. The
+// exclusive pair's ordering carries over exactly: LDAXR contributes
+// the A suffix, STLXR the L. Both forms are the two official
+// compiler mappings of the same C11 atomic RMW (GCC and LLVM emit
+// the loop at -march=armv8-a and the LSE form at armv8.1+), which is
+// the equivalence argument; the LSE form is also wait-free where the
+// loop can livelock under contention. Soundness gates: the rewrite
+// writes neither the computed value nor the store-exclusive status,
+// so BOTH must be proven dead by the dual-register forward scan
+// (armlint_advance_pending_lse; the swap shape watches only the
+// status). The registers must be pairwise sane -- address and
+// operand loop-invariant (not written inside the loop), no SP base,
+// no ZR participants, in-place computation (Rnew == Rold) accepted
+// for the direct ops and excluded for the scratch-using ones (the
+// scratch would collide with the atomic's own destination, a
+// CONSTRAINED UNPREDICTABLE encoding). The CBNZ must be the W form
+// testing the status register with target exactly the LDXR; a
+// branch into the loop interior is suppressed by the central
+// side-entry gate (entry at the LDXR itself is fine -- that is the
+// loop's own back edge). CAS and MIN/MAX-shaped loops, ST-form
+// suggestions, and bitmask-immediate logic operands are recorded in
+// TODO.md. Reported as "LDXR/STXR loop foldable to LSE atomic
+// (LSE)".
+bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out);
+
+// Dual-register death advancer for the deferred LSE-loop finding:
+// commits once every watched register (the loop's computed value and
+// store-exclusive status) is overwritten, discards on any read or
+// control transfer, parallel to armlint_advance_pending_mz.
+bool armlint_advance_pending_lse(armlint_state *state, const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
 
 // PAC audit (opt-in, ARMLINT_AUDIT_PAC / -a pac): flag a return
 // address spilled to the stack unsigned. pac-ret exists because a

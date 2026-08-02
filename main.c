@@ -441,9 +441,11 @@ int main(int argc, char **argv)
                 g_features |= ARMLINT_FEATURE_LRCPC2;
             } else if (strcmp(argv[i], "pauth") == 0) {
                 g_features |= ARMLINT_FEATURE_PAUTH;
+            } else if (strcmp(argv[i], "lse") == 0) {
+                g_features |= ARMLINT_FEATURE_LSE;
             } else {
                 fprintf(stderr, "%s: unknown -m feature '%s' "
-                    "(known: cssc, lrcpc2, pauth)\n", argv[0], argv[i]);
+                    "(known: cssc, lrcpc2, pauth, lse)\n", argv[0], argv[i]);
                 return 1;
             }
         } else if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
@@ -460,13 +462,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth] [-a pac] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth|lse] [-a pac] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth] [-a pac] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth|lse] [-a pac] <FILE>\n",
             argv[0]);
         return 1;
     }

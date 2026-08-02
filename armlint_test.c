@@ -176,6 +176,11 @@ static int run_pac_audit_check(const uint8_t *code, size_t code_size)
     return run_features_check(code, code_size, ARMLINT_AUDIT_PAC);
 }
 
+static int run_lse_check(const uint8_t *code, size_t code_size)
+{
+    return run_features_check(code, code_size, ARMLINT_FEATURE_LSE);
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -1122,6 +1127,23 @@ static void autiasp_(uint8_t out[4]) { write_le32(out, 0xD50323BFu); }
 static void autibsp_(uint8_t out[4]) { write_le32(out, 0xD50323FFu); }
 static void autiaz_(uint8_t out[4]) { write_le32(out, 0xD503239Fu); }
 static void retab_(uint8_t out[4]) { write_le32(out, 0xD65F0FFFu); }
+
+// Exclusive load/store pair for the LSE-loop tests. size: 0 B, 1 H,
+// 2 W, 3 X; acq/rel set the o0 ordering bit (LDAXR/STLXR).
+static void ldxr_(uint8_t out[4], unsigned size, unsigned acq,
+                  unsigned rt, unsigned rn)
+{
+    write_le32(out, 0x085F7C00u | ((size & 3u) << 30)
+        | ((acq & 1u) << 15) | ((rn & 0x1Fu) << 5) | (rt & 0x1Fu));
+}
+
+static void stxr_(uint8_t out[4], unsigned size, unsigned rel,
+                  unsigned rs, unsigned rt, unsigned rn)
+{
+    write_le32(out, 0x08007C00u | ((size & 3u) << 30)
+        | ((rs & 0x1Fu) << 16) | ((rel & 1u) << 15)
+        | ((rn & 0x1Fu) << 5) | (rt & 0x1Fu));
+}
 
 // BL with byte offset (function call -- LIV_TERM_SAFE).
 static void bl_(uint8_t out[4], int32_t byte_offset)
@@ -11584,6 +11606,194 @@ static void test_branch_to_next(void)
     assert(run_check(code, 8) == 0);
 }
 
+// check_lse_rmw: the exclusive-monitor retry loop folds to a single
+// LSE atomic (-m lse) once the computed value and the status
+// register are proven dead.
+static void test_lse_rmw(void)
+{
+    uint8_t code[28];
+
+    // The canonical fetch-add: ldxr x8, [x0] ; add x9, x8, x1 ;
+    // stxr w10, x9, [x0] ; cbnz w10, -12 -- then both scratches die
+    // (-> ldadd x1, x8, [x0]).
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_x(&code[4], 9, 8, 1);
+    stxr_(&code[8], 3, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // Without -m lse the same bytes are silent: LSE atomics are
+    // undefined before Armv8.1.
+    assert(run_check(code, 24) == 0);
+
+    // Acquire + release exclusives carry over as the AL suffix.
+    ldxr_(&code[0], 3, 1, 8, 0);
+    add_x(&code[4], 9, 8, 1);
+    stxr_(&code[8], 3, 1, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // W form with the commutative operands swapped.
+    ldxr_(&code[0], 2, 0, 8, 0);
+    add_w(&code[4], 9, 1, 8);
+    stxr_(&code[8], 2, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_w(&code[16], 9, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // Byte-sized exclusives fold to the B-suffixed atomic.
+    ldxr_(&code[0], 0, 0, 8, 0);
+    add_w(&code[4], 9, 8, 1);
+    stxr_(&code[8], 0, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_w(&code[16], 9, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // ORR -> LDSET, EOR -> LDEOR, BIC -> LDCLR directly; AND and SUB
+    // through the scratch pre-op; ADD #imm through the scratch MOV.
+    orr_x(&code[4], 9, 8, 1);
+    ldxr_(&code[0], 3, 0, 8, 0);
+    stxr_(&code[8], 3, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    eor_x(&code[4], 9, 8, 1);
+    assert(run_lse_check(code, 24) == 1);
+
+    bic_x(&code[4], 9, 8, 1);
+    assert(run_lse_check(code, 24) == 1);
+
+    and_x(&code[4], 9, 8, 1);
+    assert(run_lse_check(code, 24) == 1);
+
+    sub_x(&code[4], 9, 8, 1);
+    assert(run_lse_check(code, 24) == 1);
+
+    add_x_imm(&code[4], 9, 8, 1);
+    assert(run_lse_check(code, 24) == 1);
+
+    // In-place computation (Rnew == Rold) works for the direct ops...
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_x(&code[4], 8, 8, 1);
+    stxr_(&code[8], 3, 0, 10, 8, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_x(&code[16], 8, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // ...but not for the scratch-using immediate form: the scratch
+    // would collide with the atomic's own destination.
+    add_x_imm(&code[4], 8, 8, 1);
+    assert(run_lse_check(code, 24) == 0);
+
+    // The swap shape: no middle op, a loop-invariant stored value
+    // (-> swp x1, x8, [x0]).
+    ldxr_(&code[0], 3, 0, 8, 0);
+    stxr_(&code[4], 3, 0, 10, 1, 0);
+    cbz_cbnz(&code[8], 0, 1, 10, -2);
+    movz_w(&code[12], 10, 0);
+    assert(run_lse_check(code, 16) == 1);
+
+    // Go's spellings: the X-form CBNZ reads the zero-extended
+    // status, and an X-form op between W exclusives stores the same
+    // low bits (its wider destination is in the death set anyway).
+    ldxr_(&code[0], 2, 1, 2, 0);
+    add_x(&code[4], 2, 2, 1);
+    stxr_(&code[8], 2, 1, 27, 2, 0);
+    cbz_cbnz(&code[12], 1, 1, 27, -3);
+    movz_x(&code[16], 2, 0, 0);
+    movz_x(&code[20], 27, 0, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // The converse -- a W op feeding X-size exclusives -- truncates
+    // and never matches.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_w(&code[4], 9, 8, 1);
+    stxr_(&code[8], 3, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // Negatives, all on the fetch-add skeleton:
+    // CBZ retries on success -- the wrong sense.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_x(&code[4], 9, 8, 1);
+    stxr_(&code[8], 3, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 0, 10, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // The back edge must target the exclusive load exactly.
+    cbz_cbnz(&code[12], 0, 1, 10, -4);
+    assert(run_lse_check(code, 24) == 0);
+
+    // The branch must test the store-exclusive's status register.
+    cbz_cbnz(&code[12], 0, 1, 11, -3);
+    assert(run_lse_check(code, 24) == 0);
+
+    // Load and store must name the same address register.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_x(&code[4], 9, 8, 1);
+    stxr_(&code[8], 3, 0, 10, 9, 2);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // The op must read the loaded value.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_x(&code[4], 9, 2, 1);
+    stxr_(&code[8], 3, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // Reversed SUB (m - old) has no LSE spelling.
+    sub_x(&code[4], 9, 1, 8);
+    assert(run_lse_check(code, 24) == 0);
+
+    // A status register aliasing the operand would clobber the next
+    // iteration.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_x(&code[4], 9, 8, 1);
+    stxr_(&code[8], 3, 0, 1, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 1, -3);
+    movz_x(&code[16], 9, 0, 0);
+    movz_x(&code[20], 1, 0, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // A read of the computed value after the loop keeps it live: the
+    // atomic does not produce it.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    add_x(&code[4], 9, 8, 1);
+    stxr_(&code[8], 3, 0, 10, 9, 0);
+    cbz_cbnz(&code[12], 0, 1, 10, -3);
+    add_x(&code[16], 5, 9, 1);
+    assert(run_lse_check(code, 20) == 0);
+
+    // A read of the status register does too.
+    add_x(&code[16], 5, 10, 1);
+    assert(run_lse_check(code, 20) == 0);
+
+    // No death proof before the end of the region: conservative.
+    assert(run_lse_check(code, 16) == 0);
+
+    // A control transfer before the proof discards.
+    ret_(&code[16]);
+    assert(run_lse_check(code, 20) == 0);
+}
+
 static void test_ldr_str_add_post_indexed(void)
 {
     uint8_t code[12];
@@ -12638,6 +12848,7 @@ int main(void)
     test_pac_audit();
     test_br_x30();
     test_branch_to_next();
+    test_lse_rmw();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();

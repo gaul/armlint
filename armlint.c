@@ -468,6 +468,39 @@ struct armlint_state {
     // x30 (check_pac_lr_spill; reset by any control transfer).
     unsigned pac_sign_recent;
 
+    // LDXR/STXR retry-loop progress for the LSE fold (-m lse):
+    // stage 1 after the exclusive load, stage 2 after the middle ALU
+    // op, stage 3 after the store-exclusive (lse_is_swp marks the
+    // 3-instruction swap shape, which reaches stage 3 without a
+    // middle op), closed by the backward CBNZ. lse_rm doubles as the
+    // swap shape's stored-value register; lse_lines accumulates the
+    // loop's disassembly for the finding.
+    unsigned lse_stage;
+    bool lse_is_swp;
+    unsigned lse_size;
+    bool lse_acq;
+    bool lse_rel;
+    unsigned lse_rn;
+    unsigned lse_rold;
+    unsigned lse_rnew;
+    unsigned lse_rs;
+    unsigned lse_rm;
+    unsigned lse_kind;
+    unsigned lse_imm;
+    size_t lse_offset;
+    char lse_lines[3][ARMLINT_FINDING_LINE_LEN];
+
+    // Deferred LSE-loop finding awaiting the dual-register death
+    // proof: the single atomic writes neither the loop's computed
+    // value nor the store-exclusive status, so both watched registers
+    // must be overwritten before any read or control transfer.
+    // watch[i] < 0 means that slot is already proven (the swap shape
+    // arms only the status register).
+    bool pending_lse_active;
+    unsigned pending_lse_window;
+    int pending_lse_watch[2];
+    armlint_finding pending_lse_finding;
+
     // Deferred finding gated on an FP/vector register's death,
     // advanced by armlint_advance_pending_fp -- the FP twin of the
     // pending_mz slot (single slot, same collision semantics).
@@ -1313,6 +1346,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_sgn_active = false;
     state->aut_active = false;
     state->pac_sign_recent = 0;
+    state->lse_stage = 0;
+    state->pending_lse_active = false;
     state->pending_fp_active = false;
     if (have_fallback) {
         // Still run mov_close for its state reset; a MOV-chain finding
@@ -3198,6 +3233,69 @@ static bool emit_pending_mz_fallback(armlint_state *state,
     state->pending_mz_has_fallback = false;
     *out = state->pending_mz_fallback;
     return true;
+}
+
+bool armlint_advance_pending_lse(armlint_state *state, const cs_insn *insn,
+                                 size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (!state->pending_lse_active) {
+        return false;
+    }
+    if (insn->size != 4) {
+        state->pending_lse_active = false;
+        return false;
+    }
+
+    // Classify every still-watched register before acting: one
+    // instruction can read one and overwrite the other, and the read
+    // must win (the register is live, so the loop's write of it was
+    // observable). A control transfer classifies the same for any
+    // register and discards.
+    liveness_t c[2] = { LIV_UNKNOWN, LIV_UNKNOWN };
+    for (unsigned i = 0; i < 2; i++) {
+        if (state->pending_lse_watch[i] >= 0) {
+            c[i] = classify_reg_liveness(insn, state->pending_lse_watch[i]);
+        }
+    }
+    for (unsigned i = 0; i < 2; i++) {
+        if (c[i] == LIV_READ || c[i] == LIV_TERM_SAFE
+                || c[i] == LIV_TERM_UNSAFE) {
+            state->pending_lse_active = false;
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < 2; i++) {
+        if (c[i] == LIV_OVERWRITE) {
+            state->pending_lse_watch[i] = -1;
+        }
+    }
+    if (state->pending_lse_watch[0] < 0 && state->pending_lse_watch[1] < 0) {
+        *out = state->pending_lse_finding;
+        state->pending_lse_active = false;
+        return true;
+    }
+    if (state->pending_lse_window == 0 || --state->pending_lse_window == 0) {
+        state->pending_lse_active = false;
+    }
+    return false;
+}
+
+// Stash an LSE-loop finding pending proof that the loop's scratch
+// outputs are dead: the single atomic writes neither the computed
+// new value nor the store-exclusive status, so emission waits for
+// armlint_advance_pending_lse's dual-register scan (reg_b < 0 arms
+// only one register -- the swap shape, whose exchanged old value the
+// SWP itself preserves).
+static bool defer_dead_lse(armlint_state *state, const armlint_finding *out,
+                           int reg_a, int reg_b)
+{
+    state->pending_lse_finding = *out;
+    state->pending_lse_watch[0] = reg_a;
+    state->pending_lse_watch[1] = reg_b;
+    state->pending_lse_active = true;
+    state->pending_lse_window = LIVENESS_WINDOW;
+    return false;
 }
 
 bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
@@ -5210,6 +5308,269 @@ bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
+}
+
+// The LSE-loop middle-op kinds, in the order of the mnemonic table
+// below: the reg-operand ALUs, then the scratch-needing immediates.
+#define LSE_KIND_ADD 0u
+#define LSE_KIND_SUB 1u
+#define LSE_KIND_AND 2u
+#define LSE_KIND_ORR 3u
+#define LSE_KIND_EOR 4u
+#define LSE_KIND_BIC 5u
+#define LSE_KIND_ADDI 6u
+#define LSE_KIND_SUBI 7u
+
+// Ordering suffix for the LSE mnemonics, indexed by acquire + 2 *
+// release (LDAXR contributes A, STLXR contributes L), and the size
+// suffix indexed by the exclusive pair's size field.
+static const char *const lse_ord_suffix[4] = { "", "a", "l", "al" };
+static const char *const lse_size_suffix[4] = { "b", "h", "", "" };
+
+bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_LSE)) {
+        state->lse_stage = 0;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    bool advanced = false;
+
+    // (1) Advance the loop-shape stages. Register sanity throughout:
+    //     the address and operand must be loop-invariant (written by
+    //     nothing inside the loop), ZR never participates, and the
+    //     status register must be fresh (a status alias of the
+    //     address, value, or operand would clobber the next
+    //     iteration -- and Rs == Rt or Rs == Rn is CONSTRAINED
+    //     UNPREDICTABLE for STXR anyway).
+    if (state->lse_stage == 1) {
+        // The op's width may exceed the exclusives': Go routinely
+        // emits an X-form ALU between W-size exclusives. The store
+        // keeps only the low bits, where add/sub and the logicals
+        // agree between widths, and the op's wider destination is in
+        // the death set regardless. The converse -- a W op feeding
+        // X-size exclusives -- truncates and never matches.
+        unsigned sf = (op >> 31) & 1u;
+        bool sf_ok = sf != 0 || state->lse_size <= 2u;
+        unsigned rd = op & 0x1Fu;
+        unsigned rn = (op >> 5) & 0x1Fu;
+        unsigned rm = (op >> 16) & 0x1Fu;
+        unsigned kind = 8u;
+        if ((op & 0x7FE0FC00u) == 0x0B000000u) {
+            kind = LSE_KIND_ADD;
+        } else if ((op & 0x7FE0FC00u) == 0x4B000000u) {
+            kind = LSE_KIND_SUB;
+        } else if ((op & 0x7FE0FC00u) == 0x0A000000u) {
+            kind = LSE_KIND_AND;
+        } else if ((op & 0x7FE0FC00u) == 0x2A000000u) {
+            kind = LSE_KIND_ORR;
+        } else if ((op & 0x7FE0FC00u) == 0x4A000000u) {
+            kind = LSE_KIND_EOR;
+        } else if ((op & 0x7FE0FC00u) == 0x0A200000u) {
+            kind = LSE_KIND_BIC;
+        }
+        if (kind != 8u && sf_ok) {
+            // Commutative kinds accept either operand order; SUB and
+            // BIC need the loaded value on the left (old - m and
+            // old AND NOT m are what LDADD/LDCLR can express).
+            unsigned other = 32u;
+            bool commutative = kind == LSE_KIND_ADD || kind == LSE_KIND_AND
+                || kind == LSE_KIND_ORR || kind == LSE_KIND_EOR;
+            if (rn == state->lse_rold) {
+                other = rm;
+            } else if (commutative && rm == state->lse_rold) {
+                other = rn;
+            }
+            if (other < 31u && other != state->lse_rold && other != rd
+                    && rd != 31u && rd != state->lse_rn) {
+                state->lse_stage = 2;
+                state->lse_kind = kind;
+                state->lse_rm = other;
+                state->lse_rnew = rd;
+                snprintf(state->lse_lines[1], sizeof(state->lse_lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                advanced = true;
+            }
+        } else if (sf_ok
+                && ((op & 0x7FC00000u) == 0x11000000u
+                    || (op & 0x7FC00000u) == 0x51000000u)) {
+            // ADD/SUB immediate, LSL #0 only. The rewrite needs the
+            // computed-value register as a scratch for the MOV, so
+            // the in-place spelling (Rd == Rold) is excluded: the
+            // scratch would collide with the atomic's destination.
+            unsigned imm = (op >> 10) & 0xFFFu;
+            if (rn == state->lse_rold && imm != 0 && rd != 31u
+                    && rd != state->lse_rn && rd != state->lse_rold) {
+                state->lse_stage = 2;
+                state->lse_kind = (op >> 30) & 1u ? LSE_KIND_SUBI
+                                                  : LSE_KIND_ADDI;
+                state->lse_imm = imm;
+                state->lse_rnew = rd;
+                snprintf(state->lse_lines[1], sizeof(state->lse_lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                advanced = true;
+            }
+        } else if ((op & 0x3FE07C00u) == 0x08007C00u
+                && ((op >> 30) & 3u) == state->lse_size
+                && ((op >> 5) & 0x1Fu) == state->lse_rn) {
+            // The swap shape: the store-exclusive follows the load
+            // directly, storing a loop-invariant value.
+            unsigned rval = op & 0x1Fu;
+            unsigned rs = (op >> 16) & 0x1Fu;
+            if (rval != 31u && rval != state->lse_rold
+                    && rs != 31u && rs != state->lse_rn
+                    && rs != state->lse_rold && rs != rval) {
+                state->lse_stage = 3;
+                state->lse_is_swp = true;
+                state->lse_rm = rval;
+                state->lse_rs = rs;
+                state->lse_rel = ((op >> 15) & 1u) != 0;
+                snprintf(state->lse_lines[1], sizeof(state->lse_lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                advanced = true;
+            }
+        }
+    } else if (state->lse_stage == 2) {
+        // The store-exclusive of the fetch-op shape: same size, same
+        // address, storing exactly the computed value.
+        if ((op & 0x3FE07C00u) == 0x08007C00u
+                && ((op >> 30) & 3u) == state->lse_size
+                && ((op >> 5) & 0x1Fu) == state->lse_rn
+                && (op & 0x1Fu) == state->lse_rnew) {
+            unsigned rs = (op >> 16) & 0x1Fu;
+            bool rs_vs_rm_ok = state->lse_kind >= LSE_KIND_ADDI
+                || rs != state->lse_rm;
+            if (rs != 31u && rs != state->lse_rn && rs != state->lse_rold
+                    && rs != state->lse_rnew && rs_vs_rm_ok) {
+                state->lse_stage = 3;
+                state->lse_is_swp = false;
+                state->lse_rs = rs;
+                state->lse_rel = ((op >> 15) & 1u) != 0;
+                snprintf(state->lse_lines[2], sizeof(state->lse_lines[2]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                advanced = true;
+            }
+        }
+    } else if (state->lse_stage == 3) {
+        // The back edge: a CBNZ of the status register whose target
+        // is exactly the exclusive load. Either width: the store-
+        // exclusive's W write zero-extends, so the X view Go likes
+        // to test reads the same 0-or-1.
+        uint32_t want_imm19 = state->lse_is_swp ? 0x7FFFEu : 0x7FFFDu;
+        if ((op & 0x7F000000u) == 0x35000000u
+                && (op & 0x1Fu) == state->lse_rs
+                && ((op >> 5) & 0x7FFFFu) == want_imm19) {
+            char w = state->lse_size == 3u ? 'x' : 'w';
+            const char *ord = lse_ord_suffix[(state->lse_acq ? 1 : 0)
+                                             + (state->lse_rel ? 2 : 0)];
+            const char *sz = lse_size_suffix[state->lse_size];
+
+            out->name = "LDXR/STXR loop foldable to LSE atomic (LSE)";
+            out->start_offset = state->lse_offset;
+            out->insn_count = state->lse_is_swp ? 3 : 4;
+            clear_finding_strings(out);
+            if (state->lse_is_swp) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> swp%s%s %c%u, %c%u, [x%u]",
+                    ord, sz, w, state->lse_rm, w, state->lse_rold,
+                    state->lse_rn);
+            } else {
+                switch (state->lse_kind) {
+                case LSE_KIND_ADD:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> ldadd%s%s %c%u, %c%u, [x%u]",
+                        ord, sz, w, state->lse_rm, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                case LSE_KIND_ORR:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> ldset%s%s %c%u, %c%u, [x%u]",
+                        ord, sz, w, state->lse_rm, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                case LSE_KIND_EOR:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> ldeor%s%s %c%u, %c%u, [x%u]",
+                        ord, sz, w, state->lse_rm, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                case LSE_KIND_BIC:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> ldclr%s%s %c%u, %c%u, [x%u]",
+                        ord, sz, w, state->lse_rm, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                case LSE_KIND_AND:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> mvn %c%u, %c%u ; ldclr%s%s %c%u, %c%u, [x%u]",
+                        w, state->lse_rnew, w, state->lse_rm, ord, sz,
+                        w, state->lse_rnew, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                case LSE_KIND_SUB:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> neg %c%u, %c%u ; ldadd%s%s %c%u, %c%u, [x%u]",
+                        w, state->lse_rnew, w, state->lse_rm, ord, sz,
+                        w, state->lse_rnew, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                case LSE_KIND_ADDI:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> mov %c%u, #%u ; ldadd%s%s %c%u, %c%u, [x%u]",
+                        w, state->lse_rnew, state->lse_imm, ord, sz,
+                        w, state->lse_rnew, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                default:
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> mov %c%u, #-%u ; ldadd%s%s %c%u, %c%u, [x%u]",
+                        w, state->lse_rnew, state->lse_imm, ord, sz,
+                        w, state->lse_rnew, w, state->lse_rold,
+                        state->lse_rn);
+                    break;
+                }
+            }
+            for (unsigned i = 0; i < (state->lse_is_swp ? 2u : 3u); i++) {
+                snprintf(out->lines[i], sizeof(out->lines[i]),
+                    "%s", state->lse_lines[i]);
+            }
+            snprintf(out->lines[state->lse_is_swp ? 2 : 3],
+                sizeof(out->lines[0]), "%s %s", insn->mnemonic,
+                insn->op_str);
+            defer_dead_lse(state, out,
+                state->lse_is_swp ? (int)state->lse_rs
+                                  : (int)state->lse_rnew,
+                state->lse_is_swp ? -1 : (int)state->lse_rs);
+            state->lse_stage = 0;
+            return false;
+        }
+    }
+
+    // (2) Open (and re-open after any mismatch): an exclusive load
+    //     with sane registers -- no ZR (the op must read the loaded
+    //     value; a discarded load is not a fetch), no SP base, and
+    //     the load must not clobber its own address.
+    if (!advanced) {
+        state->lse_stage = 0;
+        if ((op & 0x3FFF7C00u) == 0x085F7C00u) {
+            unsigned rt = op & 0x1Fu;
+            unsigned rn = (op >> 5) & 0x1Fu;
+            if (rt != 31u && rn != 31u && rt != rn) {
+                state->lse_stage = 1;
+                state->lse_size = (op >> 30) & 3u;
+                state->lse_acq = ((op >> 15) & 1u) != 0;
+                state->lse_rn = rn;
+                state->lse_rold = rt;
+                state->lse_offset = offset;
+                snprintf(state->lse_lines[0], sizeof(state->lse_lines[0]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+            }
+        }
+    }
+
+    return false;
 }
 
 // The PAC audit's prologue window: a PACIASP/PACIBSP vouches for an
@@ -13231,6 +13592,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_mz,
     armlint_advance_pending_tb,
     armlint_advance_pending_crc,
+    armlint_advance_pending_lse,
     check_mul_strength_reduce,
     check_mneg_strength_reduce,
     check_udiv_strength_reduce,
@@ -13269,6 +13631,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_aut_ret,
     check_br_x30,
     check_branch_to_next,
+    check_lse_rmw,
     check_pac_lr_spill,
     check_pac_raw_indirect,
     check_redundant_zext,

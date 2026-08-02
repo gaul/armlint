@@ -1,0 +1,39 @@
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x0: -> ldadd x1, x8, [x0] (4 instructions)
+  ldxr x8, [x0]
+  add x9, x8, x1
+  stxr w10, x9, [x0]
+  cbnz w10, #0
+
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x14: -> ldaddal x1, x8, [x0] (4 instructions)
+  ldaxr x8, [x0]
+  add x9, x8, x1
+  stlxr w10, x9, [x0]
+  cbnz w10, #0x14
+
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x28: -> ldset w1, w8, [x0] (4 instructions)
+  ldxr w8, [x0]
+  orr w9, w8, w1
+  stxr w10, w9, [x0]
+  cbnz w10, #0x28
+
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x3c: -> mvn w9, w1 ; ldclrb w9, w8, [x0] (4 instructions)
+  ldxrb w8, [x0]
+  and w9, w8, w1
+  stxrb w10, w9, [x0]
+  cbnz w10, #0x3c
+
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x50: -> mov x9, #1 ; ldadd x9, x8, [x0] (4 instructions)
+  ldxr x8, [x0]
+  add x9, x8, #1
+  stxr w10, x9, [x0]
+  cbnz w10, #0x50
+
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x64: -> swpal x2, x8, [x0] (3 instructions)
+  ldaxr x8, [x0]
+  stlxr w10, x2, [x0]
+  cbnz w10, #0x64
+
+Optimization opportunities by type:
+       6  LDXR/STXR loop foldable to LSE atomic (LSE)
+
+6 optimization opportunities in 46 instructions

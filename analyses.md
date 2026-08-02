@@ -1667,6 +1667,73 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   there (Homebrew's plain-arm64 gh: 31109 spills and 20129 raw
   BLRs, Go emitting neither signing nor authenticated calls).
 
+## exclusive-monitor retry loop foldable into an LSE atomic (feature-gated: `-m lse`)
+
+* The Armv8.0 atomic read-modify-write is a retry loop around the
+  exclusive monitor; Armv8.1 FEAT_LSE does the whole thing in one
+  wait-free instruction. Two shapes match, under strict adjacency
+  plus an exact backward branch -- the first check in the tree that
+  validates a cycle:
+  * `ldxr x8, [x0] ; add x9, x8, x1 ; stxr w10, x9, [x0] ;
+    cbnz w10, back` -> `ldadd x1, x8, [x0]`
+  * `ldxr x8, [x0] ; stxr w10, x1, [x0] ; cbnz w10, back` ->
+    `swp x1, x8, [x0]`
+  ("LDXR/STXR loop foldable to LSE atomic (LSE)").
+* The middle op picks the atomic: ADD -> LDADD, ORR -> LDSET, EOR ->
+  LDEOR, BIC -> LDCLR directly; AND -> MVN + LDCLR, SUB -> NEG +
+  LDADD, and ADD/SUB #imm12 -> MOV #imm + LDADD, where the pre-op's
+  scratch reuses the loop's computed-value register -- dead by the
+  same proof that justifies the fold (and excluded in-place, where
+  the scratch would collide with the atomic's own destination, a
+  CONSTRAINED UNPREDICTABLE encoding). Commutative ops accept either
+  operand order; SUB and BIC need the loaded value on the left. All
+  four sizes match, and the exclusive pair's ordering carries over
+  exactly: LDAXR contributes the A suffix, STLXR the L.
+* Equivalence rests on the architecture's own terms: both forms are
+  the two official compiler mappings of the same C11 atomic RMW (GCC
+  and LLVM emit the loop at `-march=armv8-a` and the single atomic
+  at armv8.1+), and the LSE form is wait-free where the loop can
+  livelock under contention. What the rewrite does NOT produce are
+  the loop's scratches -- the computed new value and the
+  store-exclusive status -- so emission defers until BOTH are
+  overwritten before any read or control transfer: the tree's first
+  dual-register death scan (armlint_advance_pending_lse; the swap
+  shape watches only the status, since SWP itself preserves the
+  exchanged old value).
+* Real spellings, from Go: the status test is often the X-form CBNZ
+  (the store-exclusive's W write zero-extends, so the wide view
+  reads the same 0-or-1), and an X-form ALU between W-size
+  exclusives is routine (the store keeps only the low bits, where
+  add/sub and the logicals agree between widths; the wider
+  destination is in the death set regardless). Both are accepted;
+  the converse W-op-feeding-X-exclusives truncates and never
+  matches.
+* Register sanity throughout: the address and operand must be
+  loop-invariant, ZR participates nowhere, SP is no base, and the
+  status register must be fresh (an alias of the address, value, or
+  operand would clobber the next iteration -- and Rs == Rn or
+  Rs == Rt is CONSTRAINED UNPREDICTABLE for STXR anyway). A branch
+  into the loop interior is suppressed by the central side-entry
+  gate; entry at the LDXR itself is the loop's own back edge and is
+  fine.
+* On the reference corpus the check is a Go-binary instrument: the
+  macOS system binaries are all-LSE already (Apple's baseline is
+  v8.1), while Homebrew's gh -- Go still targeting Armv8.0 --
+  carries 2,255 exclusive loads. 1,398 of them sit in matching
+  skeletons (the rest are CAS loops, deliberately out of scope), and
+  16 survive the death scan: inlined fetch-adds whose scratches
+  provably die, each byte-verified (`c85ffc03 8b020063 c81bfc03
+  b5ffffbb` at `__text+0x139ac` is an in-place `ldaxr x3 ;
+  add x3, x3, x2 ; stlxr w27, x3 ; cbnz x27`, with x3 overwritten
+  two instructions after the loop and w27 shortly after). The
+  conservative discard of the other ~1,380 is the design working:
+  Go's standalone atomic functions return the loop's computed value,
+  which the single LD-atomic does not produce.
+* Deliberately out of scope, recorded in TODO.md: CAS loops (`cas`),
+  the compare-and-select MIN/MAX loops (`ldsmax` family), ST-form
+  suggestions for unused results, and bitmask-immediate logic
+  operands (the complemented constant is not always one MOV).
+
 ## LDR literal foldable to MOV/FMOV immediate
 
 * `ldr w0, <literal>` where the pooled word is `0x2a` instead of
