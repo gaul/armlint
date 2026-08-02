@@ -2248,11 +2248,13 @@ static void test_single_bit_cbz(void)
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 1);
 
-    // Branch-to-next: target == fall-through == the kill.
+    // Branch-to-next: target == fall-through == the kill. The
+    // degenerate branch also draws the branch-to-next deletion
+    // finding -- the better suggestion for this shape.
     and_w_bit(&code[0], 8, 9, 4);
     cbz_cbnz(&code[4], 0, 1, 8, 1);      // cbnz w8, +4 -> tbnz
     movz_w(&code[8], 8, 0);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_helper_check(code, 12) == 2);
 
     // Bool test of bit 0: and w8, w9, #1 ; cbnz w8 -> tbnz w9, #0.
     and_w_bit(&code[0], 8, 9, 0);
@@ -2386,14 +2388,14 @@ static void test_single_bit_cbz(void)
 
     and_w_bit(&code[0], 8, 9, 4);
     add_x(&code[4], 1, 2, 3);
-    cbz_cbnz(&code[8], 0, 0, 8, 1);
+    cbz_cbnz(&code[8], 0, 0, 8, 2);
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 0);
 
     // -- Negative: a ZR source is a constant branch, not a bit test. --
 
     and_w_bit(&code[0], 8, 31, 4);
-    cbz_cbnz(&code[4], 0, 0, 8, 1);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
     movz_w(&code[8], 8, 0);
     assert(run_helper_check(code, 12) == 0);
 }
@@ -2498,11 +2500,13 @@ static void test_cset_fold(void)
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 1);
 
-    // Branch-to-next: target == fall-through == the kill.
+    // Branch-to-next: target == fall-through == the kill. The
+    // degenerate branch also draws the branch-to-next deletion
+    // finding -- the better suggestion for this shape.
     cset_(&code[0], 0, 8, 0);
     cbz_cbnz(&code[4], 0, 1, 8, 1);
     movz_w(&code[8], 8, 0);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_helper_check(code, 12) == 2);
 
     // -- Positive EOR #1 / NEG folds. --
 
@@ -2632,7 +2636,7 @@ static void test_cset_fold(void)
     // -- Negative: the branch tests a different register. --
 
     cset_(&code[0], 0, 8, 0);
-    cbz_cbnz(&code[4], 0, 1, 5, 1);
+    cbz_cbnz(&code[4], 0, 1, 5, 2);
     movz_w(&code[8], 8, 0);
     assert(run_helper_check(code, 12) == 0);
 
@@ -2653,7 +2657,7 @@ static void test_cset_fold(void)
     //    conditional (cond = 15 here encodes raw field 14 = AL). --
 
     cset_(&code[0], 0, 8, 15);
-    cbz_cbnz(&code[4], 0, 1, 8, 1);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
     movz_w(&code[8], 8, 0);
     assert(run_helper_check(code, 12) == 0);
 
@@ -2661,7 +2665,7 @@ static void test_cset_fold(void)
 
     cset_(&code[0], 0, 8, 0);
     add_x(&code[4], 1, 2, 3);
-    cbz_cbnz(&code[8], 0, 1, 8, 1);
+    cbz_cbnz(&code[8], 0, 1, 8, 2);
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 0);
 
@@ -11533,6 +11537,53 @@ static void test_br_x30(void)
     assert(run_pac_audit_check(code, 4) == 2);
 }
 
+// check_branch_to_next: a direct branch to PC + 4 is a no-op --
+// both outcomes fall through.
+static void test_branch_to_next(void)
+{
+    uint8_t code[12];
+
+    // b +4 lands exactly where fallthrough goes.
+    b_(&code[0], 4);
+    ret_(&code[4]);
+    assert(run_check(code, 8) == 1);
+
+    // The conditional forms write nothing, so the condition's value
+    // is irrelevant.
+    b_cond(&code[0], 0, 4);
+    ret_(&code[4]);
+    assert(run_check(code, 8) == 1);
+
+    bc_cond(&code[0], 0, 4);
+    ret_(&code[4]);
+    assert(run_check(code, 8) == 1);
+
+    cbz_w(&code[0], 3, 4);
+    ret_(&code[4]);
+    assert(run_check(code, 8) == 1);
+
+    tbz_w(&code[0], 5, 3, 4);
+    ret_(&code[4]);
+    assert(run_check(code, 8) == 1);
+
+    // BL writes x30 even over a zero-length span (the get-the-PC
+    // idiom).
+    bl_(&code[0], 4);
+    ret_(&code[4]);
+    assert(run_check(code, 8) == 0);
+
+    // A branch that skips an instruction is real control flow.
+    b_(&code[0], 8);
+    nop_insn(&code[4]);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // Branch-to-self is a spin loop, not a no-op.
+    b_(&code[0], 0);
+    ret_(&code[4]);
+    assert(run_check(code, 8) == 0);
+}
+
 static void test_ldr_str_add_post_indexed(void)
 {
     uint8_t code[12];
@@ -12586,6 +12637,7 @@ int main(void)
     test_aut_ret();
     test_pac_audit();
     test_br_x30();
+    test_branch_to_next();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();

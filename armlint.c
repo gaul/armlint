@@ -5170,6 +5170,48 @@ bool check_br_x30(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    // A direct branch to PC + 4 transfers exactly where fallthrough
+    // goes, and none of these forms write a register or a flag, so
+    // the condition's value is irrelevant. The linking BL is
+    // excluded by the B mask: it writes x30 even over a zero-length
+    // span (`bl .+4` is the get-the-PC idiom). imm == 0 would be
+    // branch-to-self -- a spin, not a no-op.
+    uint32_t op = insn_word(insn);
+    bool to_next;
+    if ((op & 0xFC000000u) == 0x14000000u) {
+        to_next = (op & 0x03FFFFFFu) == 1u;         // B
+    } else if ((op & 0xFF000000u) == 0x54000000u
+            || (op & 0x7E000000u) == 0x34000000u) {
+        to_next = ((op >> 5) & 0x7FFFFu) == 1u;     // B.cond/BC.cond,
+    } else if ((op & 0x7E000000u) == 0x36000000u) { // CBZ/CBNZ
+        to_next = ((op >> 5) & 0x3FFFu) == 1u;      // TBZ/TBNZ
+    } else {
+        return false;
+    }
+    if (!to_next) {
+        return false;
+    }
+
+    out->name = "branch to the next instruction is a no-op";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail),
+        "-> delete: control falls through either way");
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 // The PAC audit's prologue window: a PACIASP/PACIBSP vouches for an
 // LR spill only within the same straight-line run, and compiler
 // prologues sign within a few instructions of the save (interposed
@@ -13226,6 +13268,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cmp_cset_sign,
     check_aut_ret,
     check_br_x30,
+    check_branch_to_next,
     check_pac_lr_spill,
     check_pac_raw_indirect,
     check_redundant_zext,

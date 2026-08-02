@@ -415,6 +415,24 @@ bool check_aut_ret(armlint_state *state, const cs_insn *insn,
 bool check_br_x30(armlint_state *state, const cs_insn *insn,
                   size_t offset, armlint_finding *out);
 
+// Detect a direct branch whose target is the instruction immediately
+// after it: control arrives there whether or not the branch is
+// taken, so the instruction is a pure no-op. B, B.cond/BC.cond,
+// CBZ/CBNZ, and TBZ/TBNZ write no register and no flags, which makes
+// deletion sound with no condition or liveness reasoning at all --
+// both outcomes fall through. BL is the one deliberate exclusion: it
+// writes x30 even over a zero-length span, and `bl .+4` is the
+// classic get-the-PC idiom, so deleting it would break its actual
+// purpose. The distance test is exactly imm == 1 (in instruction
+// units); imm == 0 is branch-to-self, a spin loop, not a no-op.
+// Deleting a branch that is itself a branch target is sound -- the
+// entering path falls through to the same successor. The shape
+// survives in binaries through JIT emitters and patchers,
+// empty-block artifacts, and refactored hand assembly. Reported as
+// "branch to the next instruction is a no-op".
+bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // PAC audit (opt-in, ARMLINT_AUDIT_PAC / -a pac): flag a return
 // address spilled to the stack unsigned. pac-ret exists because a
 // spilled x30 is the classic ROP target -- sign it before it leaves

@@ -103,6 +103,9 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0xdc: -> cbz w0, 0xf4 (2 i
   cmp w0, #0
   b.eq 0xf4
 
+branch to the next instruction is a no-op at offset: 0xf0: -> delete: control falls through either way (1 instructions)
+  b.eq #0xf4
+
 compare-zero branch foldable into CBZ/CBNZ at offset: 0xec: -> cbz w0, 0xf4 (2 instructions)
   cmp w0, #0
   b.eq 0xf4
@@ -110,6 +113,7 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0xec: -> cbz w0, 0xf4 (2 i
 Optimization opportunities by type:
       14  compare-zero branch foldable into CBZ/CBNZ
       12  ADD/SUB/AND/BIC + zero-CMP foldable to S-variant
+       1  branch to the next instruction is a no-op
        1  compare-zero signed-branch foldable into TBZ/TBNZ
 
-27 optimization opportunities in 62 instructions
+28 optimization opportunities in 62 instructions

@@ -390,6 +390,39 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   assembly -- contain a single instance. The catch population is
   hand-written assembly, mechanical ports, and JIT emitters.
 
+## branch to the next instruction is a no-op
+
+* A direct branch whose target is the instruction immediately after
+  it transfers control exactly where fallthrough would have: taken
+  or not taken, execution arrives at the same place. B, B.cond and
+  BC.cond, CBZ/CBNZ, and TBZ/TBNZ write no register and no flags,
+  so the instruction is a pure no-op regardless of the condition's
+  value -- deletable with no condition or liveness reasoning at all,
+  while it costs fetch bandwidth, a predictor slot, and (for the
+  conditional forms) a possible misprediction. ("branch to the next
+  instruction is a no-op", `-> delete: control falls through either
+  way`.)
+* BL is the one deliberate exclusion: it writes x30 even over a
+  zero-length span, and `bl .+4` is the classic get-the-PC idiom in
+  old position-independent code -- deleting it would break its
+  actual purpose. The distance test is exactly imm == 1 in
+  instruction units; imm == 0 is branch-to-self, a spin loop with
+  entirely different semantics. Deleting a branch that is itself a
+  branch target is sound: the entering path falls through to the
+  same successor.
+* Composition: a degenerate `cbz`/`tbz` to the next instruction can
+  simultaneously draw a fold suggestion from the branch-shape checks
+  (a CBZ-to-next of a masked temp is still "foldable to TBZ") --
+  both findings are individually true, and the deletion is the
+  better rewrite for that shape.
+* Unlike the BR x30 canonicalization, this shape is genuinely
+  present in compiler output: 37 instances across five of the six
+  reference binaries (10 in ssh, 9 in gh, 8 in libcapstone, 5 each
+  in zsh and sshd; ls has none). Every ssh instance is an
+  unconditional `b .+4` (raw word 0x14000001, each byte-verified) --
+  empty-basic-block and merged-tail artifacts the compilers never
+  cleaned up.
+
 ## bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
 
 * `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the

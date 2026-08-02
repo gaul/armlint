@@ -20,10 +20,14 @@ NEON popcount foldable to CNT (CSSC) at offset: 0x2c: -> cnt x0, x1 (4 instructi
   addv b0, v0.8b
   fmov w0, s0
 
+branch to the next instruction is a no-op at offset: 0x48: -> delete: control falls through either way (1 instructions)
+  b.eq #0x4c
+
 Optimization opportunities by type:
        2  CMP + CSEL foldable to MAX/MIN (CSSC)
        1  CMP #0 + CNEG foldable to ABS (CSSC)
        1  NEON popcount foldable to CNT (CSSC)
        1  RBIT + CLZ foldable to CTZ (CSSC)
+       1  branch to the next instruction is a no-op
 
-5 optimization opportunities in 23 instructions
+6 optimization opportunities in 23 instructions

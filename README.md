@@ -113,6 +113,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`cset` + `eor #1`](analyses.md#cset--cbzcbnz-foldable-into-bcond) | `cset <inverse cond>` |
 | [`cset` + `neg`](analyses.md#cset--cbzcbnz-foldable-into-bcond) | `csetm` |
 | [`br x30`](analyses.md#br-x30-foldable-to-ret) | `ret` (engages the return-address predictor) |
+| [branch to the next instruction](analyses.md#branch-to-the-next-instruction-is-a-no-op) | delete (both outcomes fall through; `bl` excluded) |
 | [`lsl` + `lsr`/`asr`](analyses.md#bitfield-op-via-two-shifts-foldable-into-ubfxsbfx-or-ubfizsbfiz) | `ubfx`/`sbfx`/`ubfiz`/`sbfiz` |
 | [`lsr` + `and #mask`](analyses.md#shift-and-mask-bitfield-extraction-foldable-into-ubfx) | `ubfx` |
 | [`and #mask` + `lsr`](analyses.md#mask-and-shift-bitfield-extraction-foldable-into-ubfx) | `ubfx` |

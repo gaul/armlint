@@ -34,8 +34,12 @@ compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0x58: -> tbnz x11, 
   cmn x11, xzr
   b.lt 0x68
 
+branch to the next instruction is a no-op at offset: 0x64: -> delete: control falls through either way (1 instructions)
+  b.hi #0x68
+
 Optimization opportunities by type:
        7  compare-zero branch foldable into CBZ/CBNZ
        2  compare-zero signed-branch foldable into TBZ/TBNZ
+       1  branch to the next instruction is a no-op
 
-9 optimization opportunities in 27 instructions
+10 optimization opportunities in 27 instructions

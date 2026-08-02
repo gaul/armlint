@@ -14,8 +14,12 @@ TST single-bit + CSETM foldable into SBFX at offset: 0x24: -> sbfx w11, w3, #0, 
   tst w3, #0x1
   csetm w11, ne
 
+branch to the next instruction is a no-op at offset: 0x44: -> delete: control falls through either way (1 instructions)
+  b.eq #0x48
+
 Optimization opportunities by type:
        3  TST single-bit + CSET foldable into UBFX
        1  TST single-bit + CSETM foldable into SBFX
+       1  branch to the next instruction is a no-op
 
-4 optimization opportunities in 19 instructions
+5 optimization opportunities in 19 instructions
