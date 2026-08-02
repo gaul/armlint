@@ -65,7 +65,7 @@ The largest untouched family; none of these need liveness machinery.
 | Item | Notes |
 | --- | --- |
 | FP16 lift | `-m fp16`: relax the `type <= 1` gates in the fmov/fcsel/fmul/cvtf checks |
-| LSE leftovers | v1 of `-m lse` folds the fetch-op and exchange retry loops; CAS loops (`cas`/`casa`/`casal`), cmp+csel MIN/MAX loops (`ldsmax` family), ST-forms for unused results, and bitmask-immediate logic operands remain |
+| LSE leftovers | `-m lse` folds the fetch-op, exchange, and converging CAS retry loops; remaining: diverging-exit CAS (LLVM's CLREX tail -- needs a second suggested branch and a two-path death argument), immediate-comparand and CBNZ-as-compare zero-expected shapes (zero of each in gh), byte/half CAS via the extended-register compare (`cmp w8, w1, uxtb`), cmp+csel MIN/MAX loops (`ldsmax` family), ST-forms for unused results, bitmask-immediate logic operands |
 | PAuth epilogue leftovers | v1 of `-m pauth` folds `autiasp`/`autibsp` + `ret` only; the general-encoding `autia x30, sp` producer and the one-shot `autiasp` + `br x30` → `retaa` (its first step now lands via the `br x30` → `ret` fold) remain |
 
 ## Microarch/informational (candidates for the `-a` audit class)

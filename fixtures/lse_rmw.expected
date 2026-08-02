@@ -33,7 +33,28 @@ LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x64: -> swpal x2, x8, [x
   stlxr w10, x2, [x0]
   cbnz w10, #0x64
 
-Optimization opportunities by type:
-       6  LDXR/STXR loop foldable to LSE atomic (LSE)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xb4: -> mov x8, x1 ; cas x8, x2, [x0] ; cmp x8, x1 (5 instructions)
+  ldxr x8, [x0]
+  cmp x8, x1
+  b.ne #0xc8
+  stxr w10, x2, [x0]
+  cbnz w10, #0xb4
 
-6 optimization opportunities in 46 instructions
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xcc: -> mov w27, wzr ; casal w27, w2, [x0] ; cmp w27, wzr (5 instructions)
+  ldaxr w27, [x0]
+  cmp w27, wzr
+  b.ne #0xe0
+  stlxr w27, w2, [x0]
+  cbnz x27, #0xcc
+
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xe4: -> mov x8, x1 ; casal x8, xzr, [x0] ; cmp x8, x1 (5 instructions)
+  ldaxr x8, [x0]
+  cmp x8, x1
+  b.ne #0xf8
+  stlxr w10, xzr, [x0]
+  cbnz w10, #0xe4
+
+Optimization opportunities by type:
+       9  LDXR/STXR loop foldable to LSE atomic (LSE)
+
+9 optimization opportunities in 84 instructions

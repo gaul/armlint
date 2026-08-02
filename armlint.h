@@ -106,7 +106,7 @@ void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
 // Checks own the formatting of their detail and lines so that reporting
 // does not need to retain the original cs_insn array (cs_disasm_iter
 // recycles a single cs_insn slot).
-#define ARMLINT_FINDING_LINES      4
+#define ARMLINT_FINDING_LINES      5
 #define ARMLINT_FINDING_LINE_LEN   96
 #define ARMLINT_FINDING_DETAIL_LEN 128
 
@@ -435,48 +435,76 @@ bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
 // Detect the Armv8.0 exclusive-monitor retry loop and suggest the
-// single Armv8.1 FEAT_LSE atomic (-m lse). Two shapes, matched with
-// strict adjacency plus an exact backward branch:
-//   L: ldxr  x8, [x0]                 L: ldxr x8, [x0]
-//      add   x9, x8, x1                  stxr w10, x1, [x0]
-//      stxr  w10, x9, [x0]               cbnz w10, L
-//      cbnz  w10, L                   -> swp x1, x8, [x0]
+// single Armv8.1 FEAT_LSE atomic (-m lse). Three shapes, matched
+// with strict adjacency plus exact branch targets:
+//   L: ldxr  x8, [x0]              L: ldxr x8, [x0]
+//      add   x9, x8, x1               stxr w10, x1, [x0]
+//      stxr  w10, x9, [x0]            cbnz w10, L
+//      cbnz  w10, L                -> swp x1, x8, [x0]
 //   -> ldadd x1, x8, [x0]
-// The middle op picks the atomic: ADD -> LDADD, ORR -> LDSET,
-// EOR -> LDEOR, BIC -> LDCLR (all direct), AND -> MVN + LDCLR,
-// SUB -> NEG + LDADD, and ADD/SUB #imm12 -> MOV #imm + LDADD; the
-// pre-op's scratch reuses the loop's computed-value register, which
-// the rewrite proves dead anyway. Commutative ops accept either
-// operand order; SUB/BIC need the loaded value on the left. The
-// exclusive pair's ordering carries over exactly: LDAXR contributes
-// the A suffix, STLXR the L. Both forms are the two official
-// compiler mappings of the same C11 atomic RMW (GCC and LLVM emit
-// the loop at -march=armv8-a and the LSE form at armv8.1+), which is
-// the equivalence argument; the LSE form is also wait-free where the
-// loop can livelock under contention. Soundness gates: the rewrite
-// writes neither the computed value nor the store-exclusive status,
-// so BOTH must be proven dead by the dual-register forward scan
-// (armlint_advance_pending_lse; the swap shape watches only the
-// status). The registers must be pairwise sane -- address and
-// operand loop-invariant (not written inside the loop), no SP base,
-// no ZR participants, in-place computation (Rnew == Rold) accepted
-// for the direct ops and excluded for the scratch-using ones (the
+//   L: ldxr  x8, [x0]
+//      cmp   x8, x1
+//      b.ne  E                     -> mov x8, x1
+//      stxr  w10, x2, [x0]            cas x8, x2, [x0]
+//      cbnz  w10, L                   cmp x8, x1
+//   E:
+// The fetch-op's middle op picks the atomic: ADD -> LDADD,
+// ORR -> LDSET, EOR -> LDEOR, BIC -> LDCLR (all direct),
+// AND -> MVN + LDCLR, SUB -> NEG + LDADD, and ADD/SUB #imm12 ->
+// MOV #imm + LDADD; the pre-op's scratch reuses the loop's
+// computed-value register, which the rewrite proves dead anyway.
+// Commutative ops accept either operand order; SUB/BIC need the
+// loaded value on the left. The exclusive pair's ordering carries
+// over exactly: LDAXR contributes the A suffix, STLXR the L. Every
+// form is the official compiler mapping of the same C11 atomic op
+// (GCC and LLVM emit the loop at -march=armv8-a and the LSE form at
+// armv8.1+), which is the equivalence argument; the LSE forms are
+// also wait-free where the loop can livelock under contention.
+// Soundness gates: the fetch-op rewrite writes neither the computed
+// value nor the store-exclusive status, so BOTH must be proven dead
+// by the dual-register forward scan (armlint_advance_pending_lse);
+// the swap and CAS shapes watch only the status, since SWP and CAS
+// themselves produce the old value. The registers must be pairwise
+// sane -- address and operand loop-invariant (not written inside
+// the loop), no SP base, no ZR participants except the CAS shape's
+// comparand and stored value (gc compares against WZR and stores
+// WZR routinely), in-place computation (Rnew == Rold) accepted for
+// the direct ops and excluded for the scratch-using ones (the
 // scratch would collide with the atomic's own destination, a
-// CONSTRAINED UNPREDICTABLE encoding). The CBNZ must be the W form
-// testing the status register with target exactly the LDXR; a
-// branch into the loop interior is suppressed by the central
-// side-entry gate (entry at the LDXR itself is fine -- that is the
-// loop's own back edge). CAS and MIN/MAX-shaped loops, ST-form
-// suggestions, and bitmask-immediate logic operands are recorded in
-// TODO.md. Reported as "LDXR/STXR loop foldable to LSE atomic
-// (LSE)".
+// CONSTRAINED UNPREDICTABLE encoding). The CBNZ tests the status
+// register at either width (the status write zero-extends) with
+// target exactly the LDXR; a branch into the loop interior is
+// suppressed by the central side-entry gate (entry at the LDXR
+// itself is fine -- that is the loop's own back edge).
+// CAS specifics: the CMP must be the shifted-register form at the
+// exclusives' width (W compare over W exclusives is exact; an X
+// compare over W exclusives would let the comparand's high bits
+// veto a store that CAS would perform, and byte/half loops compare
+// through a zero-extended 32-bit CMP that CASB/CASH cannot express,
+// so only word and doubleword sizes match), the B.NE must exit to
+// exactly the instruction after the CBNZ (both paths converge
+// there, so one death scan covers both), and the status register
+// may alias the loaded register (gc reuses REGTMP for both). The
+// three-instruction rewrite MOV + CAS + CMP preserves the loop's
+// entire visible exit state: CAS leaves the old value in the MOV'd
+// scratch exactly where the loop left it, and the trailing CMP
+// (operand order mirrored from the original) recomputes the same
+// NZCV, so only the status register needs a death proof. The
+// early-exit path also leaves the exclusive monitor armed where the
+// rewrite does not, which well-formed code cannot observe (a STXR
+// without a paired LDXR is CONSTRAINED UNPREDICTABLE). Diverging
+// early exits (LLVM's CLREX tail), immediate-form comparands, the
+// CBNZ-as-compare zero-expected shape, and MIN/MAX-shaped loops
+// are recorded in TODO.md. Reported as "LDXR/STXR loop foldable to
+// LSE atomic (LSE)".
 bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out);
 
 // Dual-register death advancer for the deferred LSE-loop finding:
 // commits once every watched register (the loop's computed value and
-// store-exclusive status) is overwritten, discards on any read or
-// control transfer, parallel to armlint_advance_pending_mz.
+// store-exclusive status; the swap and CAS shapes watch the status
+// only) is overwritten, discards on any read or control transfer,
+// parallel to armlint_advance_pending_mz.
 bool armlint_advance_pending_lse(armlint_state *state, const cs_insn *insn,
                                  size_t offset, armlint_finding *out);
 

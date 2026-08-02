@@ -11794,6 +11794,183 @@ static void test_lse_rmw(void)
     assert(run_lse_check(code, 20) == 0);
 }
 
+static void test_lse_cas(void)
+{
+    uint8_t code[28];
+
+    // The canonical converging CAS loop: ldxr x8, [x0] ; cmp x8, x1 ;
+    // b.ne loop-end ; stxr w10, x2, [x0] ; cbnz w10, loop -- then the
+    // status dies (-> mov x8, x1 ; cas x8, x2, [x0] ; cmp x8, x1).
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // Without -m lse the same bytes are silent.
+    assert(run_check(code, 24) == 0);
+
+    // gc's exact spelling: acquire+release W exclusives, the status
+    // register reusing the loaded register (REGTMP serves as both),
+    // the X-form CBNZ, and a WZR comparand (zero-expected CAS)
+    // (-> mov w27, wzr ; casal w27, w2, [x0] ; cmp w27, wzr).
+    ldxr_(&code[0], 2, 1, 27, 0);
+    subs_w(&code[4], 31, 27, 31);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 2, 1, 27, 2, 0);
+    cbz_cbnz(&code[16], 1, 1, 27, -4);
+    movz_x(&code[20], 27, 0, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // A reversed compare (cmp x1, x8) still matches; the suggested
+    // trailing CMP mirrors the operand order to keep N/C/V faithful.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 1, 8);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // Acquire-only exclusives carry over as CASA.
+    ldxr_(&code[0], 3, 1, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // Storing WZR (CAS-to-zero) is a real gc shape.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 31, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 1);
+
+    // Negatives, each a small mutation of the canonical loop:
+    // B.EQ exits on match -- store-if-different is not a CAS.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 0, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // The early exit must land exactly at loop-end: further is a
+    // diverging exit (LLVM's CLREX tail) whose path the death scan
+    // never sees...
+    b_cond(&code[8], 1, 16);
+    assert(run_lse_check(code, 24) == 0);
+
+    // ...and shorter re-enters the loop.
+    b_cond(&code[8], 1, 8);
+    assert(run_lse_check(code, 24) == 0);
+
+    // An X-width CMP over W exclusives lets the comparand's high
+    // bits veto a store CAS would perform.
+    ldxr_(&code[0], 2, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 2, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // Byte/half loops compare zero-extended through a 32-bit CMP
+    // that CASB/CASH cannot express.
+    ldxr_(&code[0], 0, 0, 8, 0);
+    subs_w(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 0, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // The CMP must involve the loaded value...
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 5, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // ...and comparing it against itself is degenerate.
+    subs_x(&code[4], 31, 8, 8);
+    assert(run_lse_check(code, 24) == 0);
+
+    // Load and store must name the same address register...
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 3);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // ...and the same size.
+    stxr_(&code[12], 2, 0, 10, 2, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // A status register aliasing the comparand would break the retry
+    // path's compare.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 1, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 1, -4);
+    movz_w(&code[20], 1, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // Storing the just-loaded value back is not a CAS.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 8, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // The back edge must target the exclusive load exactly...
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -3);
+    movz_w(&code[20], 10, 0);
+    assert(run_lse_check(code, 24) == 0);
+
+    // ...and must test the status register.
+    cbz_cbnz(&code[16], 0, 1, 11, -4);
+    assert(run_lse_check(code, 24) == 0);
+
+    // A read of the status register after the loop keeps it live:
+    // the rewrite does not produce it.
+    ldxr_(&code[0], 3, 0, 8, 0);
+    subs_x(&code[4], 31, 8, 1);
+    b_cond(&code[8], 1, 12);
+    stxr_(&code[12], 3, 0, 10, 2, 0);
+    cbz_cbnz(&code[16], 0, 1, 10, -4);
+    add_x(&code[20], 5, 10, 1);
+    assert(run_lse_check(code, 24) == 0);
+
+    // No death proof before end-of-region: conservative.
+    assert(run_lse_check(code, 20) == 0);
+
+    // A control transfer before the proof discards -- gc's
+    // out-of-line atomic.Cas bodies end CSET ; RET with the scratch
+    // never rewritten, and Go's register ABI forbids assuming
+    // caller-saved death at RET.
+    ret_(&code[20]);
+    assert(run_lse_check(code, 24) == 0);
+}
+
 static void test_ldr_str_add_post_indexed(void)
 {
     uint8_t code[12];
@@ -12849,6 +13026,7 @@ int main(void)
     test_br_x30();
     test_branch_to_next();
     test_lse_rmw();
+    test_lse_cas();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();

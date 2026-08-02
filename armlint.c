@@ -472,9 +472,14 @@ struct armlint_state {
     // stage 1 after the exclusive load, stage 2 after the middle ALU
     // op, stage 3 after the store-exclusive (lse_is_swp marks the
     // 3-instruction swap shape, which reaches stage 3 without a
-    // middle op), closed by the backward CBNZ. lse_rm doubles as the
-    // swap shape's stored-value register; lse_lines accumulates the
-    // loop's disassembly for the finding.
+    // middle op), closed by the backward CBNZ. The CAS shape forks
+    // at stage 1 instead: stage 4 after CMP of the loaded value,
+    // stage 5 after the B.NE to exactly loop-end, stage 6 after the
+    // store-exclusive, closed by the same backward CBNZ. lse_rm
+    // doubles as the swap shape's stored-value register; lse_rexp is
+    // the CAS comparand (lse_rold_first records the CMP operand
+    // order, mirrored in the suggested trailing CMP); lse_lines
+    // accumulates the loop's disassembly for the finding.
     unsigned lse_stage;
     bool lse_is_swp;
     unsigned lse_size;
@@ -485,17 +490,19 @@ struct armlint_state {
     unsigned lse_rnew;
     unsigned lse_rs;
     unsigned lse_rm;
+    unsigned lse_rexp;
+    bool lse_rold_first;
     unsigned lse_kind;
     unsigned lse_imm;
     size_t lse_offset;
-    char lse_lines[3][ARMLINT_FINDING_LINE_LEN];
+    char lse_lines[4][ARMLINT_FINDING_LINE_LEN];
 
     // Deferred LSE-loop finding awaiting the dual-register death
     // proof: the single atomic writes neither the loop's computed
     // value nor the store-exclusive status, so both watched registers
     // must be overwritten before any read or control transfer.
-    // watch[i] < 0 means that slot is already proven (the swap shape
-    // arms only the status register).
+    // watch[i] < 0 means that slot is already proven (the swap and
+    // CAS shapes arm only the status register).
     bool pending_lse_active;
     unsigned pending_lse_window;
     int pending_lse_watch[2];
@@ -1238,8 +1245,8 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
             }
 
             unsigned n = state->mov_insn_count;
-            if (n > ARMLINT_FINDING_LINES) {
-                n = ARMLINT_FINDING_LINES;
+            if (n > MOV_CHAIN_MAX) {
+                n = MOV_CHAIN_MAX;
             }
             for (unsigned i = 0; i < n; i++) {
                 const mov_entry *e = &state->mov_entries[i];
@@ -3285,8 +3292,8 @@ bool armlint_advance_pending_lse(armlint_state *state, const cs_insn *insn,
 // outputs are dead: the single atomic writes neither the computed
 // new value nor the store-exclusive status, so emission waits for
 // armlint_advance_pending_lse's dual-register scan (reg_b < 0 arms
-// only one register -- the swap shape, whose exchanged old value the
-// SWP itself preserves).
+// only one register -- the swap and CAS shapes, whose old value the
+// SWP or CAS itself preserves).
 static bool defer_dead_lse(armlint_state *state, const armlint_finding *out,
                            int reg_a, int reg_b)
 {
@@ -5327,6 +5334,20 @@ bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
 static const char *const lse_ord_suffix[4] = { "", "a", "l", "al" };
 static const char *const lse_size_suffix[4] = { "b", "h", "", "" };
 
+// GPR operand name at the exclusive pair's width. The CAS shape is
+// the one caller that can name register 31: gc compares against WZR
+// (zero-expected CAS) and stores WZR (CAS-to-zero) routinely.
+static void lse_reg_name(char *buf, size_t len, unsigned size,
+                         unsigned reg)
+{
+    char w = size == 3u ? 'x' : 'w';
+    if (reg == 31u) {
+        snprintf(buf, len, "%czr", w);
+    } else {
+        snprintf(buf, len, "%c%u", w, reg);
+    }
+}
+
 bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out)
 {
@@ -5427,6 +5448,36 @@ bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
                 state->lse_rm = rval;
                 state->lse_rs = rs;
                 state->lse_rel = ((op >> 15) & 1u) != 0;
+                snprintf(state->lse_lines[1], sizeof(state->lse_lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                advanced = true;
+            }
+        } else if ((op & 0x7FE0FC1Fu) == 0x6B00001Fu
+                && state->lse_size >= 2u
+                && ((op >> 31) != 0) == (state->lse_size == 3u)) {
+            // The CAS shape: CMP (SUBS to ZR, shifted register,
+            // shift #0) of the loaded value against a loop-invariant
+            // comparand, at exactly the exclusives' width. W over W
+            // compares the full loaded value; an X compare over W
+            // exclusives would let the comparand's high bits veto a
+            // store CAS would perform, and the byte/half loops
+            // compare through a zero-extended 32-bit CMP that
+            // CASB/CASH cannot express, so only sizes 2 and 3 match.
+            // The comparand may be ZR: gc spells zero-expected CAS
+            // as a register compare against WZR.
+            unsigned cn = (op >> 5) & 0x1Fu;
+            unsigned cm = (op >> 16) & 0x1Fu;
+            unsigned rexp = 32u;
+            if (cn == state->lse_rold && cm != state->lse_rold) {
+                rexp = cm;
+                state->lse_rold_first = true;
+            } else if (cm == state->lse_rold && cn != state->lse_rold) {
+                rexp = cn;
+                state->lse_rold_first = false;
+            }
+            if (rexp < 32u) {
+                state->lse_stage = 4;
+                state->lse_rexp = rexp;
                 snprintf(state->lse_lines[1], sizeof(state->lse_lines[1]),
                     "%s %s", insn->mnemonic, insn->op_str);
                 advanced = true;
@@ -5543,6 +5594,91 @@ bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
                 state->lse_is_swp ? (int)state->lse_rs
                                   : (int)state->lse_rnew,
                 state->lse_is_swp ? -1 : (int)state->lse_rs);
+            state->lse_stage = 0;
+            return false;
+        }
+    } else if (state->lse_stage == 4) {
+        // The CAS early exit: B.NE to exactly the instruction after
+        // the closing CBNZ, so the compare-fail and store-success
+        // paths converge there and one death scan covers both. Any
+        // other target (LLVM parks a CLREX block out of line)
+        // diverges and never matches.
+        if ((op & 0xFF00001Fu) == 0x54000001u
+                && ((op >> 5) & 0x7FFFFu) == 3u) {
+            state->lse_stage = 5;
+            snprintf(state->lse_lines[2], sizeof(state->lse_lines[2]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            advanced = true;
+        }
+    } else if (state->lse_stage == 5) {
+        // The CAS store-exclusive: same size, same address, storing
+        // a loop-invariant value (ZR allowed: CAS-to-zero). The
+        // status register may alias the loaded register -- gc reuses
+        // REGTMP for both, and the single watched register covers
+        // the mismatch either way -- but not the comparand (a retry
+        // would compare against the clobbered value) and not the
+        // data or address (CONSTRAINED UNPREDICTABLE for STXR).
+        if ((op & 0x3FE07C00u) == 0x08007C00u
+                && ((op >> 30) & 3u) == state->lse_size
+                && ((op >> 5) & 0x1Fu) == state->lse_rn) {
+            unsigned rval = op & 0x1Fu;
+            unsigned rs = (op >> 16) & 0x1Fu;
+            if (rval != state->lse_rold && rs != 31u
+                    && rs != state->lse_rn && rs != rval
+                    && rs != state->lse_rexp) {
+                state->lse_stage = 6;
+                state->lse_rnew = rval;
+                state->lse_rs = rs;
+                state->lse_rel = ((op >> 15) & 1u) != 0;
+                snprintf(state->lse_lines[3], sizeof(state->lse_lines[3]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                advanced = true;
+            }
+        }
+    } else if (state->lse_stage == 6) {
+        // The CAS back edge: five instructions, so the CBNZ targets
+        // -4. The rewrite re-materializes the comparand into the
+        // loaded register (CAS returns the old value there, exactly
+        // where the loop left it) and recomputes the flags with a
+        // trailing CMP in the original operand order, so the status
+        // register is the only unproduced loop output.
+        if ((op & 0x7F000000u) == 0x35000000u
+                && (op & 0x1Fu) == state->lse_rs
+                && ((op >> 5) & 0x7FFFFu) == 0x7FFFCu) {
+            char w = state->lse_size == 3u ? 'x' : 'w';
+            const char *ord = lse_ord_suffix[(state->lse_acq ? 1 : 0)
+                                             + (state->lse_rel ? 2 : 0)];
+            char exp[8];
+            char val[8];
+            lse_reg_name(exp, sizeof(exp), state->lse_size,
+                state->lse_rexp);
+            lse_reg_name(val, sizeof(val), state->lse_size,
+                state->lse_rnew);
+
+            out->name = "LDXR/STXR loop foldable to LSE atomic (LSE)";
+            out->start_offset = state->lse_offset;
+            out->insn_count = 5;
+            clear_finding_strings(out);
+            if (state->lse_rold_first) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> mov %c%u, %s ; cas%s %c%u, %s, [x%u] ; "
+                    "cmp %c%u, %s",
+                    w, state->lse_rold, exp, ord, w, state->lse_rold,
+                    val, state->lse_rn, w, state->lse_rold, exp);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> mov %c%u, %s ; cas%s %c%u, %s, [x%u] ; "
+                    "cmp %s, %c%u",
+                    w, state->lse_rold, exp, ord, w, state->lse_rold,
+                    val, state->lse_rn, exp, w, state->lse_rold);
+            }
+            for (unsigned i = 0; i < 4; i++) {
+                snprintf(out->lines[i], sizeof(out->lines[i]),
+                    "%s", state->lse_lines[i]);
+            }
+            snprintf(out->lines[4], sizeof(out->lines[4]), "%s %s",
+                insn->mnemonic, insn->op_str);
+            defer_dead_lse(state, out, (int)state->lse_rs, -1);
             state->lse_stage = 0;
             return false;
         }

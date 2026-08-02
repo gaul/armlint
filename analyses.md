@@ -1671,13 +1671,16 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * The Armv8.0 atomic read-modify-write is a retry loop around the
   exclusive monitor; Armv8.1 FEAT_LSE does the whole thing in one
-  wait-free instruction. Two shapes match, under strict adjacency
-  plus an exact backward branch -- the first check in the tree that
+  wait-free instruction. Three shapes match, under strict adjacency
+  plus exact branch targets -- the first check in the tree that
   validates a cycle:
   * `ldxr x8, [x0] ; add x9, x8, x1 ; stxr w10, x9, [x0] ;
     cbnz w10, back` -> `ldadd x1, x8, [x0]`
   * `ldxr x8, [x0] ; stxr w10, x1, [x0] ; cbnz w10, back` ->
     `swp x1, x8, [x0]`
+  * `ldxr x8, [x0] ; cmp x8, x1 ; b.ne end ; stxr w10, x2, [x0] ;
+    cbnz w10, back ; end:` -> `mov x8, x1 ; cas x8, x2, [x0] ;
+    cmp x8, x1`
   ("LDXR/STXR loop foldable to LSE atomic (LSE)").
 * The middle op picks the atomic: ADD -> LDADD, ORR -> LDSET, EOR ->
   LDEOR, BIC -> LDCLR directly; AND -> MVN + LDCLR, SUB -> NEG +
@@ -1698,8 +1701,8 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   store-exclusive status -- so emission defers until BOTH are
   overwritten before any read or control transfer: the tree's first
   dual-register death scan (armlint_advance_pending_lse; the swap
-  shape watches only the status, since SWP itself preserves the
-  exchanged old value).
+  and CAS shapes watch only the status, since SWP and CAS themselves
+  preserve the old value).
 * Real spellings, from Go: the status test is often the X-form CBNZ
   (the store-exclusive's W write zero-extends, so the wide view
   reads the same 0-or-1), and an X-form ALU between W-size
@@ -1708,6 +1711,35 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   destination is in the death set regardless). Both are accepted;
   the converse W-op-feeding-X-exclusives truncates and never
   matches.
+* The CAS shape has its own contract. CAS compares its first operand
+  against memory, stores the second on a match, and returns the old
+  value in the first either way -- so the three-instruction rewrite
+  re-materializes the comparand into the loaded register with a MOV,
+  lets CAS deposit the old value exactly where the loop left it, and
+  recomputes the flags with a trailing CMP whose operand order
+  mirrors the original (Z alone is order-blind, N/C/V are not).
+  Unlike the fetch-op shape, the only loop output the rewrite does
+  not produce is the store-exclusive status, so the swap-style
+  single-register watch covers it -- including gc's spelling where
+  the status register IS the loaded register (REGTMP serves as
+  both), in which case that one register's death covers the
+  divergence on the success path (status 0 vs old value).
+* Two CAS-only gates. First, the early exit must be `b.ne` to
+  exactly the instruction after the closing CBNZ -- the tree's first
+  forward branch-target validation -- so the compare-fail and
+  store-success paths converge and one death scan covers both; the
+  diverging shape (LLVM parks a CLREX block out of line) never
+  matches. The compare-fail path also leaves the exclusive monitor
+  armed where CAS does not, which well-formed code cannot observe (a
+  STXR without its paired LDXR is CONSTRAINED UNPREDICTABLE).
+  Second, the CMP must be the shifted-register form at exactly the
+  exclusives' width, and only word/doubleword sizes match: an X
+  compare over W exclusives would let the comparand's high bits veto
+  a store CAS would perform, and byte/half loops compare through a
+  zero-extended 32-bit CMP that byte-wide CASB/CASH cannot express.
+  ZR passes where it never does elsewhere in the check: gc spells
+  zero-expected CAS as `cmp w27, wzr` and CAS-to-zero stores WZR
+  (698 of gh's 857 loops carry one or the other).
 * Register sanity throughout: the address and operand must be
   loop-invariant, ZR participates nowhere, SP is no base, and the
   status register must be fresh (an alias of the address, value, or
@@ -1720,19 +1752,40 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   macOS system binaries are all-LSE already (Apple's baseline is
   v8.1), while Homebrew's gh -- Go still targeting Armv8.0 --
   carries 2,255 exclusive loads. 1,398 of them sit in matching
-  skeletons (the rest are CAS loops, deliberately out of scope), and
-  16 survive the death scan: inlined fetch-adds whose scratches
-  provably die, each byte-verified (`c85ffc03 8b020063 c81bfc03
-  b5ffffbb` at `__text+0x139ac` is an in-place `ldaxr x3 ;
-  add x3, x3, x2 ; stlxr w27, x3 ; cbnz x27`, with x3 overwritten
-  two instructions after the loop and w27 shortly after). The
-  conservative discard of the other ~1,380 is the design working:
-  Go's standalone atomic functions return the loop's computed value,
-  which the single LD-atomic does not produce.
-* Deliberately out of scope, recorded in TODO.md: CAS loops (`cas`),
-  the compare-and-select MIN/MAX loops (`ldsmax` family), ST-form
-  suggestions for unused results, and bitmask-immediate logic
-  operands (the complemented constant is not always one MOV).
+  fetch-op skeletons, and 16 survive the death scan: inlined
+  fetch-adds whose scratches provably die, each byte-verified
+  (`c85ffc03 8b020063 c81bfc03 b5ffffbb` at `__text+0x139ac` is an
+  in-place `ldaxr x3 ; add x3, x3, x2 ; stlxr w27, x3 ; cbnz x27`,
+  with x3 overwritten two instructions after the loop and w27
+  shortly after). The conservative discard of the other ~1,380 is
+  the design working: Go's standalone atomic functions return the
+  loop's computed value, which the single LD-atomic does not
+  produce.
+* The CAS side of the same census: 857 converging CAS skeletons,
+  every one gc's intrinsic shape (acquire+release exclusives, REGTMP
+  as both loaded and status register, the X-form CBNZ; zero
+  diverging exits, zero immediate-comparand or CBNZ-as-compare
+  variants). One survives the death scan, byte-verified at
+  `__text+0x9b3d34`: `885ffcbb 6b1f037f 54000061 881bfca6 b5ffff9b`
+  is `ldaxr w27, [x5] ; cmp w27, wzr ; b.ne +3 ; stlxr w27, w6,
+  [x5] ; cbnz x27, -4` -> `mov w27, wzr ; casal w27, w6, [x5] ;
+  cmp w27, wzr`, committed because gc happens to recycle REGTMP for
+  an `adrp x27` page-address materialization one instruction after
+  the loop's CSET. The ~856 discards are again the conservatism
+  working: the CSET itself is fine (it reads the flags the trailing
+  CMP reproduces), but gc then branches on the bool (inline sites)
+  or returns (the out-of-line `atomic.Cas` bodies end `cset ; mov ;
+  ret`) before REGTMP is rewritten -- and Go's register ABI returns
+  results in R0+, so assuming caller-saved death at RET would be
+  unsound there.
+* Deliberately out of scope, recorded in TODO.md: diverging-exit
+  CAS loops (the CLREX tail needs a second suggested branch and a
+  two-path death argument), immediate-form comparands and the
+  CBNZ-as-compare zero-expected shape (zero of each in gh),
+  byte/half CAS via the extended-register compare (`cmp w8, w1,
+  uxtb`), the compare-and-select MIN/MAX loops (`ldsmax` family),
+  ST-form suggestions for unused results, and bitmask-immediate
+  logic operands (the complemented constant is not always one MOV).
 
 ## LDR literal foldable to MOV/FMOV immediate
 
