@@ -302,14 +302,22 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
 
     // An arm64e slice has opted into the PAC ABI: every function
     // signs its return address and routes indirect calls through the
-    // authenticated branches, which is exactly the contract the PAC
-    // audit assumes. So arm64e implicitly arms -a pac; a plain arm64
-    // slice never opted in, and arming there would flag every
-    // function's unsigned spill (the reason the audit is opt-in). An
-    // explicit -a pac still forces the audit on any slice.
+    // authenticated branches. Two things follow, and arm64e arms
+    // both. First, the PAC audit (-a pac): its central assumption
+    // (the binary opted into pac-ret) is exactly true here, whereas a
+    // plain arm64 slice never opted in and arming there would flag
+    // every function's unsigned spill (the reason the audit is
+    // opt-in). Second, the PAuth fold (-m pauth): arm64e mandates
+    // Armv8.3 FEAT_PAuth, so the combined RETAA/RETAB it suggests are
+    // guaranteed to decode and run -- which is what an -m feature
+    // flag asserts -- and the split autibsp+ret epilogues it folds
+    // are exactly what arm64e code emits. Neither of the other -m
+    // features is implied: arm64e is a statement about pointer auth,
+    // not about CSSC/LRCPC2/LSE. Explicit flags still force any of
+    // these on any slice.
     unsigned features = g_features;
     if (((uint32_t)mh.cpusubtype & CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) {
-        features |= ARMLINT_AUDIT_PAC;
+        features |= ARMLINT_AUDIT_PAC | ARMLINT_FEATURE_PAUTH;
     }
 
     int errors = 0;
@@ -457,7 +465,9 @@ int main(int argc, char **argv)
             g_verbose = true;
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             // Enable ISA-extension-gated checks; suggestions may then
-            // use instructions the target must support.
+            // use instructions the target must support. pauth also
+            // arms automatically on arm64e slices (see scan_macho),
+            // whose ABI mandates FEAT_PAuth; the rest stay opt-in.
             i++;
             if (strcmp(argv[i], "cssc") == 0) {
                 g_features |= ARMLINT_FEATURE_CSSC;

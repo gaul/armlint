@@ -156,7 +156,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`cmp #0` + `cneg`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `abs` (`-m cssc`) |
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
 | [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
-| [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`) |
+| [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`; auto-armed on arm64e) |
 | [unsigned LR spill; raw `br`/`blr`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
 | [`ldxr`/`stxr` exchange retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `swp` (`-m lse`) |
@@ -299,7 +299,9 @@ instructions the target must support: `cssc` (Armv8.9/9.4 Common
 Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,
 `ctz`), `lrcpc2` (Armv8.4 unscaled store-release: `stlur`), `pauth`
 (Armv8.3 pointer authentication: `retaa`/`retab`), and `lse`
-(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`).
+(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`). `pauth`
+arms automatically on arm64e slices, whose ABI mandates FEAT_PAuth
+(the same auto-arm as the PAC audit); the rest stay opt-in.
 
 `-a <audit>` enables opt-in informational checks that flag missing
 hardening rather than missed folds; `pac` audits the binary against

@@ -1588,14 +1588,20 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ("AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth)"). Both
   sides are fixed words, matched raw under strict adjacency.
 * The split spelling exists for portability, which is why the check is
-  opt-in: AUTIASP/AUTIBSP live in the hint space and execute as NOPs
-  on pre-Armv8.3 cores, so one binary hardens where the keys exist and
-  still runs everywhere -- while RETAA/RETAB are UNDEFINED there.
-  `-m pauth` asserts the target guarantees v8.3. Compilers already
+  opt-in on a general target: AUTIASP/AUTIBSP live in the hint space
+  and execute as NOPs on pre-Armv8.3 cores, so one binary hardens
+  where the keys exist and still runs everywhere -- while RETAA/RETAB
+  are UNDEFINED there. `-m pauth` asserts the target guarantees v8.3.
+  An arm64e slice does guarantee it -- FEAT_PAuth is the ABI's whole
+  premise -- so the driver arms `-m pauth` automatically there (the
+  same cpusubtype gate that auto-arms the PAC audit; see the PAC
+  hygiene audit section and scan_macho). A plain arm64 slice keeps the
+  flag opt-in, since it may target a pre-v8.3 core. Compilers already
   emit the combined forms at a guaranteed-v8.3 baseline (arm64e,
   `-march=armv8.3-a` and up); the check surfaces the residue, which is
   real: macOS 26's arm64e `/usr/bin/ssh` carries 42 adjacent
-  `autibsp ; ret` pairs alongside its 762 `retab`s.
+  `autibsp ; ret` pairs alongside its 762 `retab`s -- and now reports
+  them with no flag.
 * Soundness fine print: the combined forms do not write the
   authenticated address back to x30, so after the return the register
   holds the still-signed value where the split form left the raw one.

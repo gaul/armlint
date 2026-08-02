@@ -1,0 +1,12 @@
+AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth) at offset: 0x0: -> retab (2 instructions)
+  autibsp
+  ret
+
+AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth) at offset: 0x8: -> retaa (2 instructions)
+  autiasp
+  ret
+
+Optimization opportunities by type:
+       2  AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth)
+
+2 optimization opportunities in 4 instructions

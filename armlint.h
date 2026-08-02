@@ -376,7 +376,10 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
 // Compilers emit the split spelling when the binary must also run on
 // pre-Armv8.3 cores: the hint-space AUT executes as a NOP there,
 // while the combined forms are UNDEFINED -- which is also why the
-// check is gated on ARMLINT_FEATURE_PAUTH (-m pauth). Fine print:
+// check is gated on ARMLINT_FEATURE_PAUTH (-m pauth). arm64e mandates
+// FEAT_PAuth, so the driver arms that flag automatically on arm64e
+// Mach-O slices (see scan_macho in main.c); plain arm64 keeps it
+// opt-in. Fine print:
 // the combined forms do not write the authenticated address back to
 // x30, so after the return it holds the still-signed value where the
 // split form left the raw one; AAPCS64 makes x30 a plain temporary
