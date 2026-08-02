@@ -423,56 +423,6 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   empty-basic-block and merged-tail artifacts the compilers never
   cleaned up.
 
-## conditional skip over B foldable into an inverted branch
-
-* A one-instruction conditional skip over an unconditional branch --
-  `b.eq .+8 ; b L` -- is a conditional branch to L spelled in two
-  instructions: condition true skips the B and falls into the code
-  after the pair, condition false takes the B. The single inverted
-  branch `b.ne L` transfers identically on both outcomes, and every
-  skip kind inverts by flipping one encoding bit: cond ^ 1 for
-  B.cond (EQ/NE, HS/LO, MI/PL, VS/VC, HI/LS, GE/LT, GT/LE), the op
-  bit for CBZ/CBNZ and TBZ/TBNZ. Neither instruction writes a
-  register or a flag, so the fold needs no liveness reasoning at
-  all: the finding reports immediately, with no deferral.
-  ("conditional skip over B foldable into an inverted branch",
-  `-> b.ne 0x...` / `-> cbnz w3, 0x...` / `-> tbz x4, #63, 0x...`.)
-* The range gate carries the population. The merged branch sits one
-  slot earlier than the B, so its displacement is the B's plus one
-  -- and it must fit the conditional form's narrower immediate: B
-  carries imm26 (+-128 MB), B.cond and CBZ/CBNZ imm19 (+-1 MB),
-  TBZ/TBNZ imm14 (+-32 KB). Out-of-range pairs are not noise; they
-  are the compilers' own overflow spelling for a far conditional
-  branch -- invert the condition, skip an unconditional B with the
-  reach -- so much of the wild population is exactly the unfoldable
-  form: 1759 of librustc_driver's 1787 TBZ-over-B pairs (98%) are
-  beyond imm14, plus 93 B.cond and 47 CBZ/CBNZ pairs beyond imm19,
-  and rustup carries 5 and 15 of its own. What the gate passes is
-  the residue whose target was near all along.
-* Exclusions: AL and NV have no inverse. BC.cond (bit 4) would lose
-  its Armv8.8 branch-consistency hint under the fold. A register-31
-  CBZ/CBNZ or TBZ/TBNZ reads WZR/XZR as zero -- a constant
-  condition, TODO.md's dead-branch material, not an invertible one.
-  A B whose displacement is +1, 0, or -1 is degenerate: +1 is the
-  no-op B (check_branch_to_next's finding, and the whole pair
-  reduces to nothing), -1 re-tests unchanged flags, and 0 --
-  branch-to-self -- is the one genuinely unsound corner, spinning
-  forever on the fail path exactly where the fold would fall
-  through past the freed slot. A branch target on the B itself is a
-  side entry (central gate): that path expects an unconditional
-  transfer, which the merged branch is not -- real, not
-  theoretical: librustc_driver alone has 49 such pairs (27 B.cond,
-  19 CBZ/CBNZ, 3 TBZ/TBNZ). Patching in place must NOP the freed
-  slot, as with every 2->1 fold.
-* Corpus: present in every reference binary -- 89 in gh (36 B.cond,
-  21 CBZ/CBNZ, 32 TBZ/TBNZ), 4 in libcapstone (all TBZ/TBNZ), 3
-  each in ls and zsh, 2 each in ssh and sshd -- and go 58, rustup
-  62, librustc_driver 322. The surviving shapes are rotated-loop
-  exit tests (`cbz Rn, .+8` over the back edge, the
-  while-list-walk spelling), fixed-size template code, and hand
-  assembly; the observed conditions are overwhelmingly EQ/NE and
-  HS/LO.
-
 ## bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
 
 * `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the

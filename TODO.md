@@ -25,7 +25,8 @@ The largest untouched family; none of these need liveness machinery.
 
 | Pattern | Rewrite | Notes |
 | --- | --- | --- |
-| constant-condition `b.cond` after zero-test | `b` or delete | `cmp Rn, #0` pins C = 1, V = 0, so `b.hs` is always-taken and `b.lo`/`b.vs` never; `cbz wzr` always; `b.al` always; `cmp x, x` pins Z. The inverted-branch fold explicitly rejects register-31 CBZ/TBZ skips as this row's material |
+| `b.cond`/`cbz`/`tbz` `+8` over `b L` | `b.!cond L` | Implemented in 119c22e and reverted: sound (103/103 byte-verified), but clang/Mach-O emits the pair for conditional tail calls -- Mach-O has no conditional-branch relocation, so the spelling is forced and unfixable by recompiling. Issue #7 has the /bin/bash census (12/12 tail calls) and reinstatement options: opt-in/informational class, or suppress cross-symbol transfers via LC_FUNCTION_STARTS and keep only intra-function pairs |
+| constant-condition `b.cond` after zero-test | `b` or delete | `cmp Rn, #0` pins C = 1, V = 0, so `b.hs` is always-taken and `b.lo`/`b.vs` never; `cbz wzr` always; `b.al` always; `cmp x, x` pins Z |
 | side-effect-free write to ZR destination | delete | Non-S ALU, MADD family, CSEL family, bitfield ops with Rd = 31; loads excluded (memory side effects) |
 | pure write immediately clobbered | delete the first | Same destination written twice with no intervening read; covers duplicated instructions |
 

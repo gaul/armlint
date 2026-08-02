@@ -5,12 +5,10 @@
 // close-side gates in check_add_ldr_imm_offset and
 // check_add_ldr_str_pre_indexed; N3-N5 exercise the central emission
 // gate (armlint_finding_has_side_entry) on checks with no gate of
-// their own. The N-cases must produce no findings from the folds
-// they gate (N2's exit test over the back edge is genuinely
-// check_inverted_branch's shape and carries that finding); the
-// P-cases keep the same shapes without a side entry (or with the
-// branch landing on the window's first instruction, which runs the
-// whole pattern) and must still be flagged.
+// their own. The N-cases must produce no findings; the P-cases keep
+// the same shapes without a side entry (or with the branch landing on
+// the window's first instruction, which runs the whole pattern) and
+// must still be flagged.
 
     .text
     .globl  _main

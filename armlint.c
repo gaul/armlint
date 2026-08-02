@@ -254,16 +254,6 @@ struct armlint_state {
     size_t sgn_offset;
     char sgn_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // Pending one-instruction conditional skip (B.cond/CBZ/CBNZ/
-    // TBZ/TBNZ targeting PC + 8) awaiting an adjacent unconditional
-    // B: the pair folds to one inverted branch. The opener's raw
-    // word carries everything the close needs (kind, condition or
-    // register and bit).
-    bool invb_active;
-    uint32_t invb_op;
-    size_t invb_offset;
-    char invb_disasm[ARMLINT_FINDING_LINE_LEN];
-
     // Widening-extend producer (SXTW Xd, Wn, or the zero-extending
     // MOV Wd, Wm) pending a 64-bit-source SCVTF/UCVTF consumer for
     // the narrower-conversion fold. xtc_signed distinguishes the
@@ -1361,7 +1351,6 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_cssc_active = false;
     state->sgn_active = false;
     state->pending_sgn_active = false;
-    state->invb_active = false;
     state->aut_active = false;
     state->pac_sign_recent = 0;
     state->lse_stage = 0;
@@ -5326,107 +5315,6 @@ bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
-}
-
-// Condition-code names indexed by the B.cond field, through LE. AL
-// and NV are rejected at open (nothing to invert); below them the
-// inverse of condition c is always c ^ 1, and 2 and 3 render as the
-// preferred aliases HS/LO.
-static const char *const bcond_names[14] = {
-    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
-    "hi", "ls", "ge", "lt", "gt", "le",
-};
-
-bool check_inverted_branch(armlint_state *state, const cs_insn *insn,
-                           size_t offset, armlint_finding *out)
-{
-    if (insn->size != 4) {
-        state->invb_active = false;
-        return false;
-    }
-
-    uint32_t op = insn_word(insn);
-
-    // (1) Close: the adjacent unconditional B (BL is outside the
-    //     mask: it writes x30). The merged branch replaces the skip
-    //     one slot earlier, so its displacement is the B's plus one,
-    //     and it must fit the conditional form's narrower immediate:
-    //     B carries imm26 but B.cond/CBZ/CBNZ only imm19 and
-    //     TBZ/TBNZ imm14. Out-of-range pairs are the compilers' own
-    //     overflow spelling of a far conditional branch -- most of
-    //     the wild population -- and are exactly the unfoldable ones.
-    if (state->invb_active) {
-        state->invb_active = false;
-        if ((op & 0xFC000000u) == 0x14000000u) {
-            int32_t imm26 = (int32_t)(op & 0x3FFFFFFu);
-            imm26 = (imm26 ^ 0x2000000) - 0x2000000;
-            uint32_t skip = state->invb_op;
-            int64_t disp = (int64_t)imm26 + 1;
-            int64_t limit = (skip & 0x7E000000u) == 0x36000000u
-                ? 8192 : 262144;
-            // A B landing on or beside the pair is degenerate, not
-            // invertible: +1 is the no-op B (check_branch_to_next's
-            // finding), 0 spins forever on the fail path where the
-            // fold would fall through past the freed slot -- the one
-            // genuinely unsound corner -- and -1 re-tests unchanged
-            // flags, another spin.
-            if ((imm26 > 1 || imm26 < -1)
-                    && disp >= -limit && disp < limit) {
-                uint64_t target = insn->address
-                    + (uint64_t)((int64_t)imm26 * 4);
-                out->name = "conditional skip over B foldable into "
-                    "an inverted branch";
-                out->start_offset = state->invb_offset;
-                out->insn_count = 2;
-                clear_finding_strings(out);
-                if ((skip & 0xFF000010u) == 0x54000000u) {
-                    snprintf(out->detail, sizeof(out->detail),
-                        "-> b.%s 0x%" PRIx64,
-                        bcond_names[(skip & 0xFu) ^ 1u], target);
-                } else if ((skip & 0x7E000000u) == 0x34000000u) {
-                    snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, 0x%" PRIx64,
-                        ((skip >> 24) & 1u) != 0 ? "cbz" : "cbnz",
-                        (skip >> 31) != 0 ? 'x' : 'w',
-                        skip & 0x1Fu, target);
-                } else {
-                    unsigned bit = ((skip >> 26) & 0x20u)
-                        | ((skip >> 19) & 0x1Fu);
-                    snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, #%u, 0x%" PRIx64,
-                        ((skip >> 24) & 1u) != 0 ? "tbz" : "tbnz",
-                        (skip >> 31) != 0 ? 'x' : 'w',
-                        skip & 0x1Fu, bit, target);
-                }
-                snprintf(out->lines[0], sizeof(out->lines[0]),
-                    "%s", state->invb_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %s", insn->mnemonic, insn->op_str);
-                return true;
-            }
-        }
-    }
-
-    // (2) Open: an invertible one-instruction skip targeting PC + 8.
-    //     Every kind inverts by flipping one bit: cond ^ 1, or the
-    //     CBZ<->CBNZ / TBZ<->TBNZ op bit. AL and NV have no inverse;
-    //     BC.cond (bit 4) is excluded because the fold would drop
-    //     its Armv8.8 branch-consistency hint; a register-31
-    //     CBZ/CBNZ or TBZ/TBNZ reads WZR/XZR as zero -- a constant
-    //     condition, not an invertible one.
-    if (((op & 0xFF000010u) == 0x54000000u && (op & 0xFu) < 14u
-                && ((op >> 5) & 0x7FFFFu) == 2u)
-            || ((op & 0x7E000000u) == 0x34000000u && (op & 0x1Fu) != 31u
-                && ((op >> 5) & 0x7FFFFu) == 2u)
-            || ((op & 0x7E000000u) == 0x36000000u && (op & 0x1Fu) != 31u
-                && ((op >> 5) & 0x3FFFu) == 2u)) {
-        state->invb_active = true;
-        state->invb_op = op;
-        state->invb_offset = offset;
-        snprintf(state->invb_disasm, sizeof(state->invb_disasm),
-            "%s %s", insn->mnemonic, insn->op_str);
-    }
-    return false;
 }
 
 // The LSE-loop middle-op kinds, in the order of the mnemonic table
@@ -13879,7 +13767,6 @@ const armlint_check_fn armlint_check_registry[] = {
     check_aut_ret,
     check_br_x30,
     check_branch_to_next,
-    check_inverted_branch,
     check_lse_rmw,
     check_pac_lr_spill,
     check_pac_raw_indirect,
