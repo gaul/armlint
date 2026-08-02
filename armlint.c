@@ -5148,6 +5148,28 @@ bool check_aut_ret(armlint_state *state, const cs_insn *insn,
     return false;
 }
 
+bool check_br_x30(armlint_state *state, const cs_insn *insn,
+                  size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    // BR x30 branches exactly where RET branches; only the
+    // branch-type hint differs, and the return-address predictor
+    // keys on it.
+    if (insn->size != 4 || insn_word(insn) != 0xD61F03C0u) {
+        return false;
+    }
+
+    out->name = "BR x30 foldable to RET";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail), "-> ret");
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 // The PAC audit's prologue window: a PACIASP/PACIBSP vouches for an
 // LR spill only within the same straight-line run, and compiler
 // prologues sign within a few instructions of the save (interposed
@@ -13203,6 +13225,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cset_fold,
     check_cmp_cset_sign,
     check_aut_ret,
+    check_br_x30,
     check_pac_lr_spill,
     check_pac_raw_indirect,
     check_redundant_zext,

@@ -28,7 +28,6 @@ The largest untouched family; none of these need liveness machinery.
 | `b.cond +8` over `b L` | `b.!cond L` | Baseline-JIT shape; range-check the inverted form (same imm19) |
 | any branch to the next instruction | delete | Sound even for conditionals: both outcomes fall through |
 | constant-condition `b.cond` after zero-test | `b` or delete | `cmp Rn, #0` pins C = 1, V = 0, so `b.hs` is always-taken and `b.lo`/`b.vs` never; `cbz wzr` always; `b.al` always; `cmp x, x` pins Z |
-| `br x30` | `ret` | Architecturally identical transfer; `ret` engages the return-address predictor |
 | side-effect-free write to ZR destination | delete | Non-S ALU, MADD family, CSEL family, bitfield ops with Rd = 31; loads excluded (memory side effects) |
 | pure write immediately clobbered | delete the first | Same destination written twice with no intervening read; covers duplicated instructions |
 
@@ -68,7 +67,7 @@ The largest untouched family; none of these need liveness machinery.
 | --- | --- |
 | LDXR/STXR loop → LSE (`ldadd`, `swp`, `cas`, ST-forms for unused results) | The flagship; `-m lse`. Needs backward-branch loop-shape matching (the retry loop), the first check to reason about a cycle |
 | FP16 lift | `-m fp16`: relax the `type <= 1` gates in the fmov/fcsel/fmul/cvtf checks |
-| PAuth epilogue leftovers | v1 of `-m pauth` folds `autiasp`/`autibsp` + `ret` only; the general-encoding `autia x30, sp` producer and `autiasp` + `br x30` (wants the `br x30` → `ret` fold first) remain |
+| PAuth epilogue leftovers | v1 of `-m pauth` folds `autiasp`/`autibsp` + `ret` only; the general-encoding `autia x30, sp` producer and the one-shot `autiasp` + `br x30` → `retaa` (its first step now lands via the `br x30` → `ret` fold) remain |
 
 ## Microarch/informational (candidates for the `-a` audit class)
 

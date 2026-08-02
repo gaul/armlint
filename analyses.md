@@ -358,6 +358,38 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `cset`+`cbnz` form appears when a boolean materialised for one
   purpose is then only branched on.
 
+## `BR x30` foldable to RET
+
+* An indirect branch through the link register is a spelled-out
+  return: `br x30` and `ret` transfer to the same address, set no
+  flags, and write no registers. The one bit of daylight is the
+  branch-type hint, and the return-address predictor keys on it --
+  RET pops the prediction stack that the matching BL pushed, while
+  BR is predicted as an ordinary indirect branch, so a `br x30`
+  return both mispredicts itself and desynchronizes the stack for
+  the returns around it. The Neoverse software optimization guides
+  and the Apple Silicon guide state the rule directly: returns use
+  RET. ("BR x30 foldable to RET", `-> ret`.)
+* A 1-for-1 canonicalization with nothing to prove: no flags, no
+  liveness, and a single-instruction finding is sound from any
+  entry. Under BTI the rewrite only relaxes the target's requirement
+  (an indirect BR needs a landing pad; RET is exempt). On FEAT_GCS
+  hardware (Armv9.4 shadow stacks) the two genuinely diverge -- RET
+  pops and checks the guarded stack, BR x30 bypasses it -- which is
+  an argument for the rewrite, not against: a genuine return must be
+  RET there, and code bypassing the pop deliberately (context
+  switchers, unusual trampolines) is exactly what a reviewer wants
+  surfaced.
+* Composition: applying the rewrite turns `autiasp ; br x30` into
+  the split epilogue that the `-m pauth` fold then takes to `retaa`,
+  and under `-a pac` the same word also appears in the
+  unauthenticated-indirect audit. The authenticated BRAA/BRAAZ forms
+  differ in encoding and never match.
+* Where the shape lives: compilers emit `ret`, and none of the six
+  reference binaries -- nor dyld or libobjc, both rich in hand
+  assembly -- contain a single instance. The catch population is
+  hand-written assembly, mechanical ports, and JIT emitters.
+
 ## bitfield op via two shifts foldable into UBFX/SBFX or UBFIZ/SBFIZ
 
 * `lsl wd, ws, #a ; lsr wd, wd, #b` folds depending on the

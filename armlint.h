@@ -394,6 +394,27 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
 bool check_aut_ret(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out);
 
+// Detect BR x30: an indirect branch through the link register is a
+// spelled-out return. The transfer is architecturally identical to
+// RET -- same target, no flags, no writes -- and the sole difference
+// is the branch-type hint, which the return-address predictor keys
+// on: RET pops the prediction stack the matching BL pushed, while BR
+// is predicted as an ordinary indirect branch and desynchronizes
+// that stack for the surrounding call tree (the Neoverse and Apple
+// optimization guides both state the rule directly: returns use
+// RET). A 1-for-1 rewrite with nothing to prove -- no flags, no
+// liveness, and a single-instruction finding is sound from any
+// entry. Under BTI the rewrite only relaxes the target's landing-pad
+// requirement (RET is exempt); on FEAT_GCS hardware a genuine return
+// must be RET anyway (BR x30 bypasses the shadow-stack pop, and code
+// doing that deliberately deserves the reviewer's eye this finding
+// draws). The authenticated BRAA/BRAAZ forms differ in encoding and
+// never match; applying the rewrite turns `autiasp ; br x30` into
+// the split epilogue the -m pauth fold then takes to RETAA. Reported
+// as "BR x30 foldable to RET".
+bool check_br_x30(armlint_state *state, const cs_insn *insn,
+                  size_t offset, armlint_finding *out);
+
 // PAC audit (opt-in, ARMLINT_AUDIT_PAC / -a pac): flag a return
 // address spilled to the stack unsigned. pac-ret exists because a
 // spilled x30 is the classic ROP target -- sign it before it leaves

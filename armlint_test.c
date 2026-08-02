@@ -11483,8 +11483,9 @@ static void test_pac_audit(void)
     br_(&code[0], 9);
     assert(run_pac_audit_check(code, 4) == 1);
 
+    // br x30 additionally draws the BR-x30-to-RET canonicalization.
     br_(&code[0], 30);
-    assert(run_pac_audit_check(code, 4) == 1);
+    assert(run_pac_audit_check(code, 4) == 2);
 
     // The authenticated variants differ in encoding: silent.
     braaz_(&code[0], 16);
@@ -11497,6 +11498,39 @@ static void test_pac_audit(void)
     blr_(&code[4], 8);
     ret_(&code[8]);
     assert(run_pac_audit_check(code, 12) == 2);
+}
+
+// check_br_x30: an indirect branch through the link register is a
+// spelled-out RET.
+static void test_br_x30(void)
+{
+    uint8_t code[4];
+
+    // br x30 -- the identical transfer with the wrong predictor
+    // hint (-> ret).
+    br_(&code[0], 30);
+    assert(run_check(code, 4) == 1);
+
+    // An ordinary indirect branch is not a return.
+    br_(&code[0], 17);
+    assert(run_check(code, 4) == 0);
+
+    // A call through x30 is not a return.
+    blr_(&code[0], 30);
+    assert(run_check(code, 4) == 0);
+
+    // RET is already canonical.
+    ret_(&code[0]);
+    assert(run_check(code, 4) == 0);
+
+    // The authenticated variant differs in encoding.
+    braaz_(&code[0], 30);
+    assert(run_check(code, 4) == 0);
+
+    // Under -a pac the same word is also an unauthenticated
+    // indirect: the canonicalization and the audit compose.
+    br_(&code[0], 30);
+    assert(run_pac_audit_check(code, 4) == 2);
 }
 
 static void test_ldr_str_add_post_indexed(void)
@@ -12551,6 +12585,7 @@ int main(void)
     test_add_stlr_fold();
     test_aut_ret();
     test_pac_audit();
+    test_br_x30();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();
