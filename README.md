@@ -155,6 +155,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
 | [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`) |
+| [unsigned LR spill; raw `br`/`blr`](analyses.md#pac-hygiene-audit-opt-in--a-pac) | audit-only review items (`-a pac`) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
@@ -293,6 +294,13 @@ instructions the target must support: `cssc` (Armv8.9/9.4 Common
 Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,
 `ctz`), `lrcpc2` (Armv8.4 unscaled store-release: `stlur`), and
 `pauth` (Armv8.3 pointer authentication: `retaa`/`retab`).
+
+`-a <audit>` enables opt-in informational checks that flag missing
+hardening rather than missed folds; `pac` audits the binary against
+the arm64e-style full pointer-authentication contract (return
+addresses spilled unsigned, unauthenticated `br`/`blr`). Audit
+findings are review items: jump tables and linker veneers
+legitimately appear as raw `br`.
 
 By default armlint prints only a summary: the opportunities grouped by
 type and sorted by prevalence, so it is clear which to look at first,

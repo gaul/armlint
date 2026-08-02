@@ -446,16 +446,27 @@ int main(int argc, char **argv)
                     "(known: cssc, lrcpc2, pauth)\n", argv[0], argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
+            // Enable opt-in audit checks: informational findings
+            // about missing hardening rather than missed folds.
+            i++;
+            if (strcmp(argv[i], "pac") == 0) {
+                g_features |= ARMLINT_AUDIT_PAC;
+            } else {
+                fprintf(stderr, "%s: unknown -a audit '%s' "
+                    "(known: pac)\n", argv[0], argv[i]);
+                return 1;
+            }
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth] [-a pac] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth] [-a pac] <FILE>\n",
             argv[0]);
         return 1;
     }

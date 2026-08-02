@@ -70,14 +70,14 @@ The largest untouched family; none of these need liveness machinery.
 | FP16 lift | `-m fp16`: relax the `type <= 1` gates in the fmov/fcsel/fmul/cvtf checks |
 | PAuth epilogue leftovers | v1 of `-m pauth` folds `autiasp`/`autibsp` + `ret` only; the general-encoding `autia x30, sp` producer and `autiasp` + `br x30` (wants the `br x30` → `ret` fold first) remain |
 
-## Microarch/informational (needs an opt-in check class)
+## Microarch/informational (candidates for the `-a` audit class)
 
 | Item | Notes |
 | --- | --- |
 | Split fusion pairs (cmp+b.cond, aese+aesmc same-dest, adrp+add) | Informational: "these should be adjacent"; per-core tables from the SOGs |
 | Render `mov xd, #0` (not `mov xd, xzr`) and `movi v0.2d, #0` (not `movi d0, #0`) | Apple eliminates only those spellings at rename; rendering tweaks to existing checks |
 | Loaded value as base not offset (`[x9, x8]` → `[x8, x9]` when x8 was just loaded) | Apple guide §4.6.7: 1 cycle of address-generation latency |
-| arm64e PAC-hygiene audit: LR-spilling prologue without `pacibsp`, raw `br`/`blr` in signed code | Security posture, not a peephole (macOS 26 ssh: 3 raw `br` beside 137 authenticated indirect branches) |
+| PAC audit v2: non-SP LR stores (jmp_buf/context saves), jump-table classification to auto-dismiss benign raw `br`, auto-arm on arm64e slices | v1 (`-a pac`) covers SP-based spills and flags every raw BR/BLR uniformly |
 | LDP/STP synthesized through a scratch ADD (`add x27, xN, #big ; ldp x3, x4, [x27]`) → two plain `ldr`/`str` with the offset folded in | Size-neutral 2-for-2 that drops the ADD from the address dependency chain and frees the scratch; gc emits it whenever a pair offset exceeds ±504 or is 8-misaligned (~13k in go), LLVM for big Q-register spill offsets (~9k in librustc_driver); requires the split offsets to encode (scaled imm12, or LDUR/STUR range) |
 
 ## Window candidates (2026-07 corpus sweep)

@@ -171,6 +171,11 @@ static int run_pauth_check(const uint8_t *code, size_t code_size)
     return run_features_check(code, code_size, ARMLINT_FEATURE_PAUTH);
 }
 
+static int run_pac_audit_check(const uint8_t *code, size_t code_size)
+{
+    return run_features_check(code, code_size, ARMLINT_AUDIT_PAC);
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -1541,6 +1546,7 @@ static void encode_pair_soff(uint8_t out[4], uint32_t base, unsigned rt,
 }
 static inline void ldp_x_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xA9400000u, rt, rt2, rn, imm7); }
 static inline void stp_x_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0xA9000000u, rt, rt2, rn, imm7); }
+static inline void stp_x_pre(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)   { encode_pair_soff(out, 0xA9800000u, rt, rt2, rn, imm7); }
 static inline void stp_w_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x29000000u, rt, rt2, rn, imm7); }
 static inline void ldp_w_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x29400000u, rt, rt2, rn, imm7); }
 static inline void ldpsw_soff(uint8_t out[4], unsigned rt, unsigned rt2, unsigned rn, int imm7)  { encode_pair_soff(out, 0x69400000u, rt, rt2, rn, imm7); }
@@ -10329,6 +10335,22 @@ static void br_(uint8_t out[4], unsigned rn)
     write_le32(out, 0xD61F0000u | ((rn & 0x1Fu) << 5));
 }
 
+static void blr_(uint8_t out[4], unsigned rn)
+{
+    write_le32(out, 0xD63F0000u | ((rn & 0x1Fu) << 5));
+}
+
+// The zero-modifier authenticated indirect branches (Armv8.3).
+static void braaz_(uint8_t out[4], unsigned rn)
+{
+    write_le32(out, 0xD61F081Fu | ((rn & 0x1Fu) << 5));
+}
+
+static void blraaz_(uint8_t out[4], unsigned rn)
+{
+    write_le32(out, 0xD63F081Fu | ((rn & 0x1Fu) << 5));
+}
+
 static void test_cssc_minmax(void)
 {
     uint8_t code[12];
@@ -11377,6 +11399,104 @@ static void test_aut_ret(void)
     // An AUT at the end of the region has nothing to close it.
     autiasp_(&code[0]);
     assert(run_pauth_check(code, 4) == 0);
+}
+
+// The -a pac audit: unsigned LR spills and unauthenticated indirect
+// branches (check_pac_lr_spill, check_pac_raw_indirect).
+static void test_pac_audit(void)
+{
+    uint8_t code[80];
+
+    // An unsigned prologue: STP of x29/x30 with no signing hint.
+    stp_x_pre(&code[0], 29, 30, 31, -2);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 1);
+
+    // Without -a pac the same bytes are silent.
+    assert(run_check(code, 8) == 0);
+
+    // PACIBSP right before the spill: signed, no finding.
+    pacibsp_(&code[0]);
+    stp_x_pre(&code[4], 29, 30, 31, -2);
+    ret_(&code[8]);
+    assert(run_pac_audit_check(code, 12) == 0);
+
+    // The A-key hint vouches too.
+    paciasp_(&code[0]);
+    stp_x_pre(&code[4], 29, 30, 31, -2);
+    ret_(&code[8]);
+    assert(run_pac_audit_check(code, 12) == 0);
+
+    // Interposed callee-saved pairs stay within the window.
+    pacibsp_(&code[0]);
+    stp_x_pre(&code[4], 20, 19, 31, -4);
+    stp_x_soff(&code[8], 29, 30, 31, 2);
+    ret_(&code[12]);
+    assert(run_pac_audit_check(code, 16) == 0);
+
+    // A control transfer between the signing and the spill resets
+    // the window: prologues are straight-line.
+    pacibsp_(&code[0]);
+    cbz_w(&code[4], 0, 8);
+    stp_x_pre(&code[8], 29, 30, 31, -2);
+    ret_(&code[12]);
+    assert(run_pac_audit_check(code, 16) == 1);
+
+    // The STR spelling of the spill.
+    str_x(&code[0], 30, 31, 2);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 1);
+
+    // A non-SP base is not a prologue save (jmp_buf-style).
+    stp_x_pre(&code[0], 29, 30, 19, -2);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 0);
+
+    // No x30 in the pair: nothing to protect.
+    stp_x_pre(&code[0], 29, 28, 31, -2);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 0);
+
+    // Window boundaries: 15 fillers keep the signing recent, 16 age
+    // it out.
+    pacibsp_(&code[0]);
+    for (unsigned i = 0; i < 15; i++) {
+        nop_insn(&code[4 + 4 * i]);
+    }
+    stp_x_pre(&code[64], 29, 30, 31, -2);
+    ret_(&code[68]);
+    assert(run_pac_audit_check(code, 72) == 0);
+
+    pacibsp_(&code[0]);
+    for (unsigned i = 0; i < 16; i++) {
+        nop_insn(&code[4 + 4 * i]);
+    }
+    stp_x_pre(&code[68], 29, 30, 31, -2);
+    ret_(&code[72]);
+    assert(run_pac_audit_check(code, 76) == 1);
+
+    // A raw indirect call, and a raw indirect branch (even of x30).
+    blr_(&code[0], 8);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 1);
+
+    br_(&code[0], 9);
+    assert(run_pac_audit_check(code, 4) == 1);
+
+    br_(&code[0], 30);
+    assert(run_pac_audit_check(code, 4) == 1);
+
+    // The authenticated variants differ in encoding: silent.
+    braaz_(&code[0], 16);
+    blraaz_(&code[4], 8);
+    ret_(&code[8]);
+    assert(run_pac_audit_check(code, 12) == 0);
+
+    // Both audit findings compose.
+    stp_x_pre(&code[0], 29, 30, 31, -2);
+    blr_(&code[4], 8);
+    ret_(&code[8]);
+    assert(run_pac_audit_check(code, 12) == 2);
 }
 
 static void test_ldr_str_add_post_indexed(void)
@@ -12430,6 +12550,7 @@ int main(void)
     test_add_ldr_imm_offset();
     test_add_stlr_fold();
     test_aut_ret();
+    test_pac_audit();
     test_ldr_str_add_post_indexed();
     test_add_ldr_str_pre_indexed();
     test_branch_target_side_entry();

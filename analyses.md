@@ -1555,6 +1555,53 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   target` has no combined form, and `autiasp` + `br x30` is left to a
   future `br x30` -> `ret` canonicalization).
 
+## PAC hygiene audit (opt-in: `-a pac`)
+
+* The `-a <audit>` class is different in kind from `-m`: `-m` asserts
+  what the target supports so rewrites may use it, while `-a` opts
+  into informational findings that flag missing hardening rather
+  than a missed fold. `-a pac` audits a binary against the full
+  pointer-authentication contract that arm64e code follows. Audit
+  findings are review items, a benign residue is expected, and they
+  ride the regular reporting machinery (so they are counted in the
+  same opportunities summary; the "(PAC audit)" suffix marks their
+  kind).
+* "LR spill without PACIASP/PACIBSP (PAC audit)": pac-ret exists
+  because a return address spilled to the stack is the classic ROP
+  target -- sign it before it leaves the register file and a stack
+  overwrite faults at authentication instead of steering the return.
+  The check flags any SP-based spill of x30 (STP pre-index or signed
+  offset with either data register x30; STR unsigned offset or
+  pre-index) with no PACIASP/PACIBSP in the same straight-line run: a
+  16-instruction window reset by any control transfer, because real
+  prologues sign first and never branch between the signing and the
+  save (interposed callee-saved pairs sit comfortably inside the
+  window). Leaf functions never spill x30, so they need no signing
+  and produce no findings. Out of scope: non-SP bases (a jmp_buf in
+  setjmp is a real PAC surface but a different shape) and STP
+  post-index (not a prologue store).
+* "unauthenticated BR/BLR (PAC audit)": in fully signed code,
+  function-pointer transfers go through BRAA(Z)/BLRAA(Z), which
+  authenticate the target register before branching; each raw BR/BLR
+  is a JOP hazard. Two benign shapes survive in honest arm64e
+  binaries and a peephole cannot tell them apart, so they appear in
+  the output for human review: jump tables (the target is computed
+  from a bounded index into read-only offsets, not a corruptible
+  pointer -- clang leaves these raw even on arm64e) and linker
+  long-branch veneers (static target, `br x16`). A raw BLR has no
+  benign class and deserves the closest look. The authenticated
+  variants and RET differ in encoding and never match.
+* Calibration on macOS 26 (Apple's arm64e system binaries): zero
+  unsigned LR spills across ls, zsh, ssh, and sshd -- Apple's signing
+  is complete, and the window produces no false positives over
+  thousands of signed prologues -- with tiny indirect worklists (ssh:
+  exactly its 3 `br x16` veneer-class branches, address-verified
+  against the disassembly; zsh: 22, the interpreter's computed
+  jumps). Over a binary that never opted into pac-ret the flag
+  reports every function by design -- the assertion is simply false
+  there (Homebrew's plain-arm64 gh: 31109 spills and 20129 raw
+  BLRs, Go emitting neither signing nor authenticated calls).
+
 ## LDR literal foldable to MOV/FMOV immediate
 
 * `ldr w0, <literal>` where the pooled word is `0x2a` instead of

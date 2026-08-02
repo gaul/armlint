@@ -462,6 +462,12 @@ struct armlint_state {
     size_t aut_offset;
     char aut_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Countdown from the last PACIASP/PACIBSP in the current
+    // straight-line run, for the PAC audit's LR-spill check: nonzero
+    // means a signing hint is recent enough to vouch for a spill of
+    // x30 (check_pac_lr_spill; reset by any control transfer).
+    unsigned pac_sign_recent;
+
     // Deferred finding gated on an FP/vector register's death,
     // advanced by armlint_advance_pending_fp -- the FP twin of the
     // pending_mz slot (single slot, same collision semantics).
@@ -1306,6 +1312,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->sgn_active = false;
     state->pending_sgn_active = false;
     state->aut_active = false;
+    state->pac_sign_recent = 0;
     state->pending_fp_active = false;
     if (have_fallback) {
         // Still run mov_close for its state reset; a MOV-chain finding
@@ -5139,6 +5146,116 @@ bool check_aut_ret(armlint_state *state, const cs_insn *insn,
     }
 
     return false;
+}
+
+// The PAC audit's prologue window: a PACIASP/PACIBSP vouches for an
+// LR spill only within the same straight-line run, and compiler
+// prologues sign within a few instructions of the save (interposed
+// callee-saved pairs at most). Any control transfer resets the
+// window -- prologues are straight-line, and letting the mark
+// survive a branch would let one function's signing vouch for the
+// next one's spill.
+#define PAC_SIGN_WINDOW 16
+
+// Any control transfer, direct or indirect: B/BL, B.cond/BC.cond,
+// CBZ/CBNZ, TBZ/TBNZ, and the whole unconditional register-branch
+// block (BR/BLR/RET with their authenticated variants, ERET, DRPS).
+static bool insn_is_control_transfer(uint32_t op)
+{
+    return (op & 0x7C000000u) == 0x14000000u
+        || (op & 0xFF000000u) == 0x54000000u
+        || (op & 0x7E000000u) == 0x34000000u
+        || (op & 0x7E000000u) == 0x36000000u
+        || (op & 0xFE000000u) == 0xD6000000u;
+}
+
+// An SP-based store that spills x30: STP (pre-index or signed
+// offset) with either data register x30, or STR (unsigned offset or
+// pre-index) of x30. STP post-index is not a prologue save and
+// non-SP bases are a different surface (jmp_buf-style context
+// saves); neither matches.
+static bool insn_spills_lr_to_sp(uint32_t op)
+{
+    if (((op >> 5) & 0x1Fu) != 31) {
+        return false;
+    }
+    if ((op & 0xFFC00000u) == 0xA9800000u
+            || (op & 0xFFC00000u) == 0xA9000000u) {
+        return (op & 0x1Fu) == 30 || ((op >> 10) & 0x1Fu) == 30;
+    }
+    if ((op & 0xFFC00000u) == 0xF9000000u
+            || (op & 0xFFE00C00u) == 0xF8000C00u) {
+        return (op & 0x1Fu) == 30;
+    }
+    return false;
+}
+
+bool check_pac_lr_spill(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_AUDIT_PAC)) {
+        state->pac_sign_recent = 0;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    bool found = false;
+
+    if (insn_spills_lr_to_sp(op) && state->pac_sign_recent == 0) {
+        out->name = "LR spill without PACIASP/PACIBSP (PAC audit)";
+        out->start_offset = offset;
+        out->insn_count = 1;
+        clear_finding_strings(out);
+        snprintf(out->detail, sizeof(out->detail),
+            "-> pacibsp before the spill");
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s %s", insn->mnemonic, insn->op_str);
+        found = true;
+    }
+
+    // Bookkeeping for the following instructions: a signing hint
+    // opens the window, any control transfer closes it, everything
+    // else ages it.
+    if (op == 0xD503233Fu || op == 0xD503237Fu) {
+        state->pac_sign_recent = PAC_SIGN_WINDOW;
+    } else if (insn_is_control_transfer(op)) {
+        state->pac_sign_recent = 0;
+    } else if (state->pac_sign_recent > 0) {
+        state->pac_sign_recent--;
+    }
+
+    return found;
+}
+
+bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_AUDIT_PAC)) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    bool is_br = (op & 0xFFFFFC1Fu) == 0xD61F0000u;
+    bool is_blr = (op & 0xFFFFFC1Fu) == 0xD63F0000u;
+    if (!is_br && !is_blr) {
+        return false;
+    }
+
+    unsigned rn = (op >> 5) & 0x1Fu;
+    out->name = "unauthenticated BR/BLR (PAC audit)";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    if (is_blr) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> blraaz x%u (verify the discriminator)", rn);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> braaz x%u (jump tables are benign)", rn);
+    }
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
 }
 
 bool check_tst_cset(armlint_state *state, const cs_insn *insn,
@@ -13086,6 +13203,8 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cset_fold,
     check_cmp_cset_sign,
     check_aut_ret,
+    check_pac_lr_spill,
+    check_pac_raw_indirect,
     check_redundant_zext,
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,

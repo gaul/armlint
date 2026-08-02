@@ -73,6 +73,14 @@ void armlint_state_reset(armlint_state *state);
 #define ARMLINT_FEATURE_LRCPC2 (1u << 1)
 #define ARMLINT_FEATURE_PAUTH (1u << 2)
 
+// Audit bits, kept in the high half of the same features word. They
+// are different in kind from the ISA bits above: -m asserts what the
+// target supports so rewrites may use it, while an audit opts into
+// informational checks that flag missing hardening rather than a
+// missed fold. Audit findings are review items -- a benign residue
+// (jump tables under the PAC audit) is expected in the output.
+#define ARMLINT_AUDIT_PAC (1u << 16)
+
 // Enable ISA-extension-gated checks (a bitmask of ARMLINT_FEATURE_*).
 void armlint_state_set_features(armlint_state *state, unsigned features);
 
@@ -385,6 +393,42 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
 // foldable to RETAA/RETAB (PAuth)".
 bool check_aut_ret(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out);
+
+// PAC audit (opt-in, ARMLINT_AUDIT_PAC / -a pac): flag a return
+// address spilled to the stack unsigned. pac-ret exists because a
+// spilled x30 is the classic ROP target -- sign it before it leaves
+// the register file and a stack overwrite faults at authentication
+// instead of steering the return. A signed prologue therefore opens
+// with PACIASP/PACIBSP before its save of x30; this check reports
+// any SP-based x30 spill (STP pre-index or signed offset with either
+// data register x30, STR unsigned offset or pre-index) with no
+// signing hint in the same straight-line run: a 16-instruction
+// window, reset by any control transfer, because real prologues sign
+// first and never branch between the signing and the save (interposed
+// callee-saved pairs are covered by the window). Leaf functions
+// never spill x30 and so produce no findings. Out of scope: non-SP
+// bases (a jmp_buf in setjmp is a real PAC surface but a different
+// shape) and STP post-index (not a prologue store). The flag asserts
+// the full-PAC contract; over a binary that never opted into pac-ret
+// it reports every function's spill, by design. Reported as
+// "LR spill without PACIASP/PACIBSP (PAC audit)".
+bool check_pac_lr_spill(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out);
+
+// PAC audit twin for indirect control flow: flag every plain BR and
+// BLR. In fully signed code, function-pointer transfers go through
+// BRAA(Z)/BLRAA(Z), which authenticate the target register before
+// branching; each raw BR/BLR is a JOP hazard. The output is an
+// auditor's worklist, not an error list: two benign shapes survive
+// in honest arm64e binaries and a peephole cannot tell them apart --
+// jump tables (the target is computed from a bounded index into
+// read-only offsets, not a corruptible pointer; clang leaves these
+// raw even on arm64e) and linker long-branch veneers. A raw BLR has
+// no benign class and deserves the closest look. The authenticated
+// variants and RET differ in encoding and never match. Reported as
+// "unauthenticated BR/BLR (PAC audit)".
+bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
 
 // Detect a producer that provably zeros bits 63..P of its destination,
 // immediately followed by an in-place zero-extension consumer that
