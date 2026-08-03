@@ -1,3 +1,9 @@
+# Bare `make` builds both shipped artifacts. Without this the first
+# target below (lib) would be the default, which builds libarmlint.a
+# and silently leaves a stale armlint executable behind -- the driver
+# in main.c is not part of the library.
+.DEFAULT_GOAL := build
+
 CFLAGS = -g -Wall -Wextra -fPIC -std=c11
 
 CAPSTONE_CFLAGS_RAW := $(shell pkg-config --cflags capstone 2>/dev/null)
@@ -13,8 +19,17 @@ endif
 %.o: %.c
 	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -c $< -o $@
 
-lib: armlint.o
-	ar -crs libarmlint.a $<
+# The pattern rule above sees only the .c file, so a change to the
+# shared header would otherwise not rebuild anything. Every object in
+# the project includes armlint.h; the tools/ programs do not.
+armlint.o main.o armlint_test.o: armlint.h
+
+# The real file is the target so make can date-stamp it; `lib` stays
+# as the phony alias the other targets and the docs refer to.
+libarmlint.a: armlint.o
+	ar -crs $@ $<
+
+lib: libarmlint.a
 
 armlint: armlint.o main.o
 	$(CC) $(CFLAGS) armlint.o main.o $(CAPSTONE_LIBS) -o armlint
@@ -45,6 +60,9 @@ tools/pairscan: tools/pairscan.c
 tools/defuse: tools/defuse.c
 	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) $< $(CAPSTONE_LIBS) -o $@
 
+# The default goal: everything that ships, without running the suites.
+build: lib armlint
+
 all: lib armlint test
 
 clean:
@@ -56,4 +74,4 @@ clean:
 		tools/defuse \
 		*.o
 
-.PHONY: all clean lib test integration-test integration-test-regen tools
+.PHONY: all build clean lib test integration-test integration-test-regen tools
