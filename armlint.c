@@ -5922,6 +5922,46 @@ bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+bool check_pac_zero_disc_indirect(armlint_state *state, const cs_insn *insn,
+                                  size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_AUDIT_PAC)) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    // The Z-suffixed authenticated register branches: op3 = 00001x
+    // selects authentication with key x (bit 10: 0 = A, 1 = B), and
+    // op4 = 11111 pins the modifier to the constant zero -- the
+    // zero-discriminator forms. Their diversified twins (BRAA/BLRAA
+    // with a live modifier register) set bit 24 (Z = 1) and never
+    // match here, including with Xm = SP.
+    bool is_br = (op & 0xFFFFF81Fu) == 0xD61F081Fu;     // braaz/brabz
+    bool is_blr = (op & 0xFFFFF81Fu) == 0xD63F081Fu;    // blraaz/blrabz
+    if (!is_br && !is_blr) {
+        return false;
+    }
+    char key = (op & 0x400u) != 0 ? 'b' : 'a';
+    unsigned rn = (op >> 5) & 0x1Fu;
+
+    out->name = "zero-discriminator authenticated BR/BLR (PAC audit)";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    // The upgrade is the diversified same-key form: braaz -> braa
+    // Xn, Xm with a modifier derived from the pointer's storage
+    // (address diversity), which shrinks the substitution class from
+    // every I{A,B}+0-signed pointer in the process to pointers signed
+    // for that one slot.
+    snprintf(out->detail, sizeof(out->detail),
+        "-> %s%c x%u, <disc> (zero discriminator: any I%c+0-signed "
+        "pointer substitutes)",
+        is_blr ? "blra" : "bra", key, rn, key == 'a' ? 'A' : 'B');
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 bool check_tst_cset(armlint_state *state, const cs_insn *insn,
                     size_t offset, armlint_finding *out)
 {
@@ -13923,6 +13963,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_lse_rmw,
     check_pac_lr_spill,
     check_pac_raw_indirect,
+    check_pac_zero_disc_indirect,
     check_redundant_zext,
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,

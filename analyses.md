@@ -1679,6 +1679,28 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `ldrb`-scaled table variant (a different idiom, left for a future
   pass), and any genuinely unclassified branch. The authenticated
   variants and RET differ in encoding and never match.
+* "zero-discriminator authenticated BR/BLR (PAC audit)": the next
+  rung of the same ladder. BRAAZ/BLRAAZ (and the B-key BRABZ/BLRABZ)
+  authenticate their target, but against the constant-zero modifier,
+  so a passing check proves only "some pointer signed with this key
+  and discriminator zero" -- and that class is enormous, because the
+  arm64e C ABI signs every plain function pointer IA with
+  discriminator zero. An attacker who can overwrite the slot swaps in
+  any other IA+0-signed pointer in the process; PAC then
+  authenticates the substitute happily. This is the weakest live PAC
+  form: above raw BR/BLR (which prove nothing) and below the
+  diversified BRAA/BLRAA `Xn, Xm` forms, whose modifier -- typically
+  the pointer's storage address, `__ptrauth`-style address diversity,
+  possibly blended with a constant discriminator -- narrows the
+  substitution class to pointers signed for that one slot. The
+  encodings differ in the Z bit (24) and the modifier field, so the
+  diversified forms never match, including the `Xm = SP` spelling;
+  RETAA/RETAB are SP-diversified by construction and are a different
+  encoding entirely. Findings are worklist items, not errors: IA+0 is
+  the ABI floor wherever C function pointers must stay
+  interchangeable across translation units, so each site is a
+  candidate for a `__ptrauth`-qualified upgrade rather than a bug --
+  which is exactly the audit-class framing.
 * Calibration on macOS 26 (Apple's arm64e system binaries): zero
   unsigned LR spills across ls, zsh, ssh, and sshd -- Apple's signing
   is complete, and the window produces no false positives over
@@ -1698,6 +1720,19 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   while gh and the other
   Homebrew arm64 binaries stay silent unless `-a pac` is asked for
   explicitly.
+* Zero-discriminator census over the same corpus (August 2026,
+  independently byte-verified with a mask scan): ssh 6 braaz + 103
+  blraaz, sshd 5 + 34, zsh 17 + 426, ls 1 + 1, bash 10 + 75, dyld
+  23 + 146; no B-key Z form anywhere. The sampled shapes are exactly
+  the ABI floor: a loaded function pointer, a CBZ NULL check, then
+  `blraaz x8` (a C callback invocation), and in zsh a fully signed
+  epilogue -- `autibsp` plus the auth-failure `brk` trap -- ending in
+  `braaz x2`, a tail call through a C function pointer. dyld is the
+  calibration for the rung above: alongside its 169 zero-discriminator
+  sites it makes 571 `blraa` + 79 `braa` diversified transfers, so
+  the upgrade the finding suggests is standard practice in the one
+  binary whose job is authenticated dispatch. libcapstone and gh
+  (plain arm64) contain none of these encodings at all.
 
 ## exclusive-monitor retry loop foldable into an LSE atomic (feature-gated: `-m lse`)
 

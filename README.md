@@ -157,7 +157,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
 | [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`; auto-armed on arm64e) |
-| [unsigned LR spill; raw `br`/`blr`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
+| [unsigned LR spill; raw `br`/`blr`; zero-discriminator `braaz`/`blraaz`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
 | [`ldxr`/`stxr` exchange retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `swp` (`-m lse`) |
 | [`ldxr` + `cmp` + `b.ne` + `stxr` CAS retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `mov` + `cas` + `cmp` (`-m lse`) |
@@ -310,10 +310,15 @@ arms automatically on arm64e slices, whose ABI mandates FEAT_PAuth
 `-a <audit>` enables opt-in informational checks that flag missing
 hardening rather than missed folds; `pac` audits the binary against
 the arm64e-style full pointer-authentication contract (return
-addresses spilled unsigned, unauthenticated `br`/`blr`). Audit
-findings are review items; the raw-`br` check recognizes and
-auto-dismisses the clang jump-table idiom, so what remains is BLRs,
-linker veneers, and genuinely unclassified branches. The PAC audit arms automatically on
+addresses spilled unsigned, unauthenticated `br`/`blr`, and
+zero-discriminator `braaz`/`blraaz` -- authenticated, but against a
+modifier of zero, so any same-key zero-discriminator pointer in the
+process substitutes). Audit findings are review items on a ladder:
+the raw-`br` check recognizes and auto-dismisses the clang jump-table
+idiom, so what remains is BLRs, linker veneers, and genuinely
+unclassified branches; the zero-discriminator rung marks where the
+C-ABI IA+0 signing floor could upgrade to `__ptrauth`-style
+diversified `braa`/`blraa`. The PAC audit arms automatically on
 arm64e slices (whose ABI already assumes full signing), so macOS
 system binaries surface their worklist with no flag; a plain arm64
 slice never opted in, so it stays silent unless you pass `-a pac`

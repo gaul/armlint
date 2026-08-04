@@ -558,6 +558,29 @@ bool check_pac_lr_spill(armlint_state *state, const cs_insn *insn,
 bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// The next rung of the same audit ladder: flag the zero-discriminator
+// authenticated branches BRAAZ/BRABZ and BLRAAZ/BLRABZ. These
+// authenticate their target, but against the constant-zero modifier,
+// so the signature proves only "some pointer signed with this key and
+// discriminator zero" -- and on arm64e that class is enormous, since
+// the C ABI signs every plain function pointer IA+0 (the census shape:
+// a loaded pointer, a NULL check, then BLRAAZ; or a signed epilogue
+// tail-calling through BRAAZ). An attacker who can write the slot
+// substitutes any other IA+0-signed pointer in the process, so this is
+// the weakest live PAC form: one rung above raw BR/BLR (which prove
+// nothing) and one below the diversified BRAA/BLRAA Xn, Xm forms,
+// whose modifier -- typically the pointer's storage address, per
+// __ptrauth address diversity -- narrows the substitution class to
+// pointers signed for that one slot. Those diversified forms set
+// Z = 1 (bit 24) and never match here, including with Xm = SP; RETAA/
+// RETAB (SP-diversified by construction) are a different encoding
+// entirely. Findings are worklist items, not errors: IA+0 is the ABI
+// floor for interchangeable C function pointers, and each site is a
+// candidate for a __ptrauth-qualified upgrade rather than a bug.
+// Reported as "zero-discriminator authenticated BR/BLR (PAC audit)".
+bool check_pac_zero_disc_indirect(armlint_state *state, const cs_insn *insn,
+                                  size_t offset, armlint_finding *out);
+
 // Detect a producer that provably zeros bits 63..P of its destination,
 // immediately followed by an in-place zero-extension consumer that
 // clears bits >= C with P <= C -- a no-op. Producers: any W-form

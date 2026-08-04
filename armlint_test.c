@@ -1126,6 +1126,7 @@ static void pacibsp_(uint8_t out[4]) { write_le32(out, 0xD503237Fu); }
 static void autiasp_(uint8_t out[4]) { write_le32(out, 0xD50323BFu); }
 static void autibsp_(uint8_t out[4]) { write_le32(out, 0xD50323FFu); }
 static void autiaz_(uint8_t out[4]) { write_le32(out, 0xD503239Fu); }
+static void retaa_(uint8_t out[4]) { write_le32(out, 0xD65F0BFFu); }
 static void retab_(uint8_t out[4]) { write_le32(out, 0xD65F0FFFu); }
 
 // Exclusive load/store pair for the LSE-loop tests. size: 0 B, 1 H,
@@ -10377,6 +10378,34 @@ static void blraaz_(uint8_t out[4], unsigned rn)
     write_le32(out, 0xD63F081Fu | ((rn & 0x1Fu) << 5));
 }
 
+// The B-key zero-discriminator twins (op3 bit 10 set)...
+static void brabz_(uint8_t out[4], unsigned rn)
+{
+    write_le32(out, 0xD61F0C1Fu | ((rn & 0x1Fu) << 5));
+}
+
+static void blrabz_(uint8_t out[4], unsigned rn)
+{
+    write_le32(out, 0xD63F0C1Fu | ((rn & 0x1Fu) << 5));
+}
+
+// ...and the register-diversified forms (Z = 1, bit 24; op4 = Rm, the
+// modifier, where 31 names SP).
+static void braa_(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    write_le32(out, 0xD71F0800u | ((rn & 0x1Fu) << 5) | (rm & 0x1Fu));
+}
+
+static void blraa_(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    write_le32(out, 0xD73F0800u | ((rn & 0x1Fu) << 5) | (rm & 0x1Fu));
+}
+
+static void blrab_(uint8_t out[4], unsigned rn, unsigned rm)
+{
+    write_le32(out, 0xD73F0C00u | ((rn & 0x1Fu) << 5) | (rm & 0x1Fu));
+}
+
 // LDRSW Xt, [Xn, Xm, lsl #2] -- register offset, sign-extended word.
 // Base 0xB8A00800 with option=011 (UXTX/LSL), S=1: bits 15:12 = 0b0111.
 static void ldrsw_reg_lsl2(uint8_t out[4], unsigned rt, unsigned rn,
@@ -11526,11 +11555,13 @@ static void test_pac_audit(void)
     br_(&code[0], 30);
     assert(run_pac_audit_check(code, 4) == 2);
 
-    // The authenticated variants differ in encoding: silent.
+    // The authenticated variants differ in encoding and are not raw
+    // BR/BLR findings -- they draw the zero-discriminator class
+    // instead (one finding each; test_pac_zero_disc has the matrix).
     braaz_(&code[0], 16);
     blraaz_(&code[4], 8);
     ret_(&code[8]);
-    assert(run_pac_audit_check(code, 12) == 0);
+    assert(run_pac_audit_check(code, 12) == 2);
 
     // Both audit findings compose.
     stp_x_pre(&code[0], 29, 30, 31, -2);
@@ -11619,6 +11650,65 @@ static void test_pac_jump_table(void)
     add_x(&code[16], 16, 17, 16);
     br_(&code[20], 16);
     assert(run_pac_audit_check(code, 24) == 1);
+}
+
+// The zero-discriminator rung of the PAC audit ladder: BRAAZ/BRABZ
+// and BLRAAZ/BLRABZ authenticate against the constant-zero modifier,
+// so any pointer signed with the same key and discriminator zero
+// substitutes. The diversified BRAA/BLRAA/BLRAB forms carry a live
+// modifier register and stay clean, as do RETAA/RETAB (SP-diversified
+// by construction).
+static void test_pac_zero_disc(void)
+{
+    uint8_t code[16];
+
+    // All four Z forms draw exactly one finding each.
+    braaz_(&code[0], 16);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 1);
+
+    blraaz_(&code[0], 8);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 1);
+
+    brabz_(&code[0], 0);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 1);
+
+    blrabz_(&code[0], 1);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 1);
+
+    // Without the audit the same bytes are silent.
+    braaz_(&code[0], 16);
+    blraaz_(&code[4], 8);
+    ret_(&code[8]);
+    assert(run_check(code, 12) == 0);
+
+    // The register-diversified forms are the upgrade target, not a
+    // finding -- including BRAA with Xm = SP, which is diversified by
+    // SP, not zero (op4 = 31 there names SP, unlike the Z encoding).
+    braa_(&code[0], 16, 17);
+    blraa_(&code[4], 2, 3);
+    blrab_(&code[8], 4, 5);
+    ret_(&code[12]);
+    assert(run_pac_audit_check(code, 16) == 0);
+
+    braa_(&code[0], 16, 31);
+    ret_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 0);
+
+    // Signed returns are a different class entirely.
+    retaa_(&code[0]);
+    retab_(&code[4]);
+    assert(run_pac_audit_check(code, 8) == 0);
+
+    // The ladder composes: a raw BR draws the unauthenticated
+    // finding, the BRAAZ next to it the zero-discriminator one.
+    br_(&code[0], 9);
+    braaz_(&code[4], 9);
+    ret_(&code[8]);
+    assert(run_pac_audit_check(code, 12) == 2);
 }
 
 // check_br_x30: an indirect branch through the link register is a
@@ -13214,6 +13304,7 @@ int main(void)
     test_aut_ret();
     test_pac_audit();
     test_pac_jump_table();
+    test_pac_zero_disc();
     test_br_x30();
     test_branch_to_next();
     test_lse_rmw();

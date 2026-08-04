@@ -1,7 +1,8 @@
 // Integration fixture for the -a pac audit checks
-// (check_pac_lr_spill, check_pac_raw_indirect). The .arch directive
-// is for GNU as, whose default -march rejects the v8.3 instructions
-// (retaa/retab, braaz/blraaz).
+// (check_pac_lr_spill, check_pac_raw_indirect,
+// check_pac_zero_disc_indirect). The .arch directive is for GNU as,
+// whose default -march rejects the v8.3 instructions (retaa/retab,
+// braaz/blraaz).
 
     .arch armv8.3-a
     .text
@@ -41,7 +42,9 @@ _main:
 1:
     ret
 
-    // Authenticated indirects: no findings.
+    // Authenticated indirects: not raw-BR findings, but their zero
+    // discriminator draws the next rung of the ladder
+    // (fixtures/pac_zero_disc.s has the full matrix).
     braaz   x16
     blraaz  x8
 

@@ -1,0 +1,20 @@
+zero-discriminator authenticated BR/BLR (PAC audit) at offset: 0x0 <_main>: -> braa x16, <disc> (zero discriminator: any IA+0-signed pointer substitutes) (1 instructions)
+  braaz x16
+
+zero-discriminator authenticated BR/BLR (PAC audit) at offset: 0x4 <_main+0x4>: -> blraa x8, <disc> (zero discriminator: any IA+0-signed pointer substitutes) (1 instructions)
+  blraaz x8
+
+zero-discriminator authenticated BR/BLR (PAC audit) at offset: 0x8 <_main+0x8>: -> brab x0, <disc> (zero discriminator: any IB+0-signed pointer substitutes) (1 instructions)
+  brabz x0
+
+zero-discriminator authenticated BR/BLR (PAC audit) at offset: 0xc <_main+0xc>: -> blrab x1, <disc> (zero discriminator: any IB+0-signed pointer substitutes) (1 instructions)
+  blrabz x1
+
+unauthenticated BR/BLR (PAC audit) at offset: 0x28 <_main+0x28>: -> braaz x9 (verify: not a recognized jump table) (1 instructions)
+  br x9
+
+Optimization opportunities by type:
+       4  zero-discriminator authenticated BR/BLR (PAC audit)
+       1  unauthenticated BR/BLR (PAC audit)
+
+5 optimization opportunities in 12 instructions

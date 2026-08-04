@@ -7,6 +7,12 @@ LR spill without PACIASP/PACIBSP (PAC audit) at offset: 0x34 <_main+0x34>: -> pa
 LR spill without PACIASP/PACIBSP (PAC audit) at offset: 0x44 <_main+0x44>: -> pacibsp before the spill (1 instructions)
   stp x29, x30, [sp, #-0x10]!
 
+zero-discriminator authenticated BR/BLR (PAC audit) at offset: 0x50 <_main+0x50>: -> braa x16, <disc> (zero discriminator: any IA+0-signed pointer substitutes) (1 instructions)
+  braaz x16
+
+zero-discriminator authenticated BR/BLR (PAC audit) at offset: 0x54 <_main+0x54>: -> blraa x8, <disc> (zero discriminator: any IA+0-signed pointer substitutes) (1 instructions)
+  blraaz x8
+
 unauthenticated BR/BLR (PAC audit) at offset: 0x58 <_main+0x58>: -> blraaz x8 (verify the discriminator) (1 instructions)
   blr x8
 
@@ -16,5 +22,6 @@ unauthenticated BR/BLR (PAC audit) at offset: 0x5c <_main+0x5c>: -> braaz x9 (ve
 Optimization opportunities by type:
        3  LR spill without PACIASP/PACIBSP (PAC audit)
        2  unauthenticated BR/BLR (PAC audit)
+       2  zero-discriminator authenticated BR/BLR (PAC audit)
 
-5 optimization opportunities in 24 instructions
+7 optimization opportunities in 24 instructions
