@@ -346,6 +346,50 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x60: -> ldr w8, [x8, #0x2
 The process exits non-zero when any opportunity is found, so armlint
 can gate a compiler test suite.
 
+## ISA census (`-i`)
+
+`armlint -i` replaces the lint scan with a census: every instruction in
+the binary's executable sections, attributed to the FEAT_* group it
+requires, each group carrying the architecture version it became
+*mandatory* at -- LSE and CRC32 at Armv8.1, LRCPC/FCMA/JSCVT and the
+register-form PAC at 8.3, DotProd/LRCPC2/FlagM at 8.4, up through the
+MOPS memcpy instructions at 8.8. The resulting ladder answers "what was
+this binary compiled for": a `-march=armv8.1-a` build shows LSE atomics
+woven through every mutex, a baseline build shows LDXR/STXR loops with
+LSE only inside runtime-dispatched thunks (glibc's outline atomics).
+
+```console
+$ ./armlint -i libc.so.6
+ISA census: 275103 instructions, 1 undecodable words skipped
+  Armv8.0 baseline: 275043
+  mandatory from Armv8.1: LSE (21)
+  mandatory from Armv8.3: none
+  ...
+  optional features: none
+  branch protection (hint space): BTI (21), PAC (18)
+  highest mandatory-from level: Armv8.1
+```
+
+Three groups never raise the ladder, each for a soundness reason of its
+own. Features that never become mandatory in the v8 line (the crypto
+extensions, FP16, SVE, MTE) are listed as *optional*: any of them can
+be bolted onto an old target with a single `+feature` flag, so their
+presence says nothing about `-march`. The hint-space branch-protection
+forms (PACIASP/AUTIASP/BTI/XPACLRI) execute as NOPs on cores without
+the extension -- `-mbranch-protection=standard` emits them precisely so
+the binary stays v8.0-compatible -- so they get their own line and no
+version claim; only the register-form PAC instructions (PACIA, RETAA,
+BRAA, ...) evidence a real Armv8.3 target. And an undecodable word is
+either data in text or an extension this Capstone build cannot decode,
+so the skipped count bounds what the census could have missed.
+
+The census reports presence, not requirement: dispatched fast paths
+count even though the binary runs without them. Treat small exotic
+tallies in a binary with many skipped words with suspicion -- string
+pools embedded in text sometimes decode as valid SVE or atomics -- and
+use `-v`, which prints up to four sample addresses per feature, to
+check a surprising tally in a disassembler before believing it.
+
 ## Mining tools
 
 `tools/` holds the research utilities that feed armlint's check

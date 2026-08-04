@@ -184,6 +184,9 @@ static bool read_at(FILE *f, long off, void *buf, size_t n)
 static bool g_verbose = false;
 static unsigned g_features = 0;
 static armlint_summary *g_summary = NULL;
+// Non-NULL in -i census mode: scan_code then tallies instead of
+// linting, and main prints the census in place of the findings report.
+static armlint_census *g_census = NULL;
 
 // Read `size` bytes at `base_offset` and run all checks with the
 // given feature/audit set. vmaddr is the section's runtime base,
@@ -210,8 +213,16 @@ static int scan_code(FILE *f, const char *path, long base_offset,
         free(buf);
         return -1;
     }
-    int n = check_instructions(handle, buf, aligned, vmaddr,
+    int n;
+    if (g_census != NULL) {
+        // Census mode: tally only. The report prints once, after every
+        // section of every slice has been scanned.
+        armlint_census_scan(g_census, handle, buf, aligned, vmaddr);
+        n = 0;
+    } else {
+        n = check_instructions(handle, buf, aligned, vmaddr,
                                g_verbose, g_summary, features);
+    }
     free(buf);
     return n;
 }
@@ -460,9 +471,12 @@ static int scan_fat(FILE *f, const char *path, bool is_fat_64,
 int main(int argc, char **argv)
 {
     const char *path = NULL;
+    bool census = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) {
             g_verbose = true;
+        } else if (strcmp(argv[i], "-i") == 0) {
+            census = true;
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             // Enable ISA-extension-gated checks; suggestions may then
             // use instructions the target must support. pauth also
@@ -499,13 +513,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth|lse] [-a pac] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse] [-a pac] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-m cssc|lrcpc2|pauth|lse] [-a pac] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse] [-a pac] <FILE>\n",
             argv[0]);
         return 1;
     }
@@ -551,6 +565,17 @@ int main(int argc, char **argv)
     // NULL is tolerated by the summary API (tallying is simply skipped).
     g_summary = armlint_summary_create();
 
+    // The census, by contrast, IS the whole report of a -i run, so a
+    // NULL from allocation failure would degrade to printing nothing;
+    // fail hard instead.
+    if (census) {
+        g_census = armlint_census_create();
+        if (g_census == NULL) {
+            fprintf(stderr, "%s: failed to allocate the ISA census\n", path);
+            goto out;
+        }
+    }
+
     int errors = -1;
     if (memcmp(magic, ELFMAG, SELFMAG) == 0) {
         errors = scan_elf(f, path, file_size, handle);
@@ -578,12 +603,18 @@ int main(int argc, char **argv)
     if (errors < 0) {
         goto out;
     }
-    armlint_summary_print(g_summary);
-    printf("%d optimization opportunities in %zu instructions\n",
-        errors, armlint_summary_instructions(g_summary));
-    rc = errors != 0;
+    if (census) {
+        armlint_census_print(g_census, g_verbose);
+        rc = 0;
+    } else {
+        armlint_summary_print(g_summary);
+        printf("%d optimization opportunities in %zu instructions\n",
+            errors, armlint_summary_instructions(g_summary));
+        rc = errors != 0;
+    }
 
 out:
+    armlint_census_destroy(g_census);
     armlint_summary_destroy(g_summary);
     if (capstone_open) {
         cs_close(&handle);

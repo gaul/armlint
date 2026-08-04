@@ -13040,6 +13040,52 @@ static void test_branch_target_side_entry(void)
     assert(run_buffer_check(code, 12) == 1);
 }
 
+static void test_census(void)
+{
+    armlint_census *census = armlint_census_create();
+    assert(census != NULL);
+
+    uint8_t code[7 * 4];
+    add_w(&code[0], 0, 0, 1);          // add w0, w0, w1 (Armv8.0 baseline)
+    write_le32(&code[4], 0xB8210002);  // ldadd w1, w2, [x0] (LSE, 8.1)
+    write_le32(&code[8], 0x4E829420);  // sdot v0.4s, v1.16b, v2.16b (8.4)
+    write_le32(&code[12], 0xD503233F); // paciasp (hint space)
+    write_le32(&code[16], 0xD503245F); // bti c (hint space)
+    write_le32(&code[20], 0x4E284820); // aese v0.16b, v1.16b (optional)
+    write_le32(&code[24], 0xFFFFFFFF); // permanently undefined
+    armlint_census_scan(census, g_handle, code, sizeof(code), 0x1000);
+
+    assert(armlint_census_instructions(census) == 6);
+    assert(armlint_census_skipped(census) == 1);
+    assert(armlint_census_feature_count(census, "LSE") == 1);
+    assert(armlint_census_feature_count(census, "DotProd") == 1);
+    assert(armlint_census_feature_count(census, "AES+PMULL") == 1);
+    assert(armlint_census_feature_count(census, "BTI") == 1);
+    assert(armlint_census_feature_count(census, "PAC") == 1);
+    // The hint-space PACIASP must not leak into the real Armv8.3 PAuth
+    // tally, and neither hint may raise the mandatory-from ladder past
+    // DotProd's 8.4.
+    assert(armlint_census_feature_count(census, "PAuth") == 0);
+    assert(armlint_census_highest_mandatory(census) == 84);
+
+    // Tallies accumulate across scans, as the driver's section loop
+    // relies on.
+    write_le32(&code[0], 0xB8210002);
+    armlint_census_scan(census, g_handle, code, 4, 0x2000);
+    assert(armlint_census_instructions(census) == 7);
+    assert(armlint_census_feature_count(census, "LSE") == 2);
+
+    armlint_census_destroy(census);
+
+    // NULL is accepted everywhere.
+    armlint_census_scan(NULL, g_handle, code, 4, 0);
+    assert(armlint_census_instructions(NULL) == 0);
+    assert(armlint_census_skipped(NULL) == 0);
+    assert(armlint_census_feature_count(NULL, "LSE") == 0);
+    assert(armlint_census_highest_mandatory(NULL) == 80);
+    armlint_census_destroy(NULL);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -13129,6 +13175,7 @@ int main(void)
     test_central_side_entry_gate();
     test_liveness_matches_capstone();
     test_mops_flag_liveness();
+    test_census();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

@@ -2214,6 +2214,59 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
                        armlint_summary *summary, unsigned features);
 
+// A by-extension tally of every instruction decoded, the AArch64 analog
+// of a psABI-level census: each instruction is attributed to the FEAT_*
+// group it requires, and each group carries the architecture version it
+// became MANDATORY at (LSE at Armv8.1, LRCPC at 8.3, DotProd at 8.4,
+// ...), yielding a "compiled at least for Armv8.x" ladder. Features that
+// never become mandatory (crypto, FP16, SVE, MTE) are tallied as
+// optional and never raise the ladder, since any of them can be bolted
+// onto an older target with a single +feature flag.
+//
+// Two AArch64-specific soundness rules. Hint-space PAC/BTI (PACIASP,
+// AUTIASP, BTI, XPACLRI, ...) execute as NOPs on cores without the
+// extension -- -mbranch-protection=standard emits them precisely so the
+// binary stays v8.0-compatible -- so they are reported on their own
+// branch-protection line and never raise the ladder; only the register
+// forms (PACIA, AUTDA, RETAA, BRAA, ...) evidence a real Armv8.3
+// target. And an undecodable word may be data in text OR an extension
+// this Capstone build cannot decode, so the skipped count bounds what
+// the census could have missed.
+//
+// The census reports presence, not requirement: glibc's LSE atomics sit
+// behind outline-atomics runtime dispatch and count all the same.
+// Opaque; NULL is accepted everywhere.
+typedef struct armlint_census armlint_census;
+
+armlint_census *armlint_census_create(void);
+void armlint_census_destroy(armlint_census *census);
+
+// Linear-sweep decode of len bytes at base_addr, tallying each
+// instruction's feature group. An undecodable word skips 4 bytes and
+// resyncs, counted as skipped.
+void armlint_census_scan(armlint_census *census, csh handle,
+                         const uint8_t *inst, size_t len,
+                         uint64_t base_addr);
+
+// Print the census: totals, the mandatory-from ladder by version, the
+// optional-feature and branch-protection lines, and the highest
+// mandatory-from version seen. Verbose adds up to four sample addresses
+// per feature, to tell real use from data decoded as code.
+void armlint_census_print(const armlint_census *census, bool verbose);
+
+size_t armlint_census_instructions(const armlint_census *census);
+size_t armlint_census_skipped(const armlint_census *census);
+
+// Tally for one feature by its display name ("LSE", "DotProd", "BTI",
+// ...); 0 for an unknown name or NULL census.
+size_t armlint_census_feature_count(const armlint_census *census,
+                                    const char *name);
+
+// Highest mandatory-from version with a nonzero tally, as minor-scaled
+// decimal (81 = Armv8.1, 84 = Armv8.4); 80 when only baseline, optional
+// or hint-space features were seen.
+int armlint_census_highest_mandatory(const armlint_census *census);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

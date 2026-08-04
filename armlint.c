@@ -13983,3 +13983,407 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     armlint_state_destroy(state);
     return errors;
 }
+
+// === ISA census ===
+
+#define ARMLINT_CENSUS_SAMPLES 4
+
+// The feature groups the census distinguishes. mandatory_from is the
+// architecture version the feature stops being optional at, minor-scaled
+// (81 = Armv8.1-A); 0 marks features that never become mandatory in the
+// v8 line (selectable via +feature on any target, so their presence
+// implies nothing about -march); -1 marks the hint-space
+// branch-protection forms that execute as NOP on cores without the
+// extension and therefore imply nothing at all about the target.
+enum {
+    CENSUS_LSE,      // Armv8.1: LDADD/LDCLR/../SWP/CAS atomics
+    CENSUS_RDM,      // Armv8.1: SQRDMLAH/SQRDMLSH
+    CENSUS_CRC32,    // optional in 8.0, mandatory from 8.1
+    CENSUS_LRCPC,    // Armv8.3: LDAPR load-acquire-RCpc
+    CENSUS_FCMA,     // Armv8.3: FCADD/FCMLA complex arithmetic
+    CENSUS_JSCVT,    // Armv8.3: FJCVTZS
+    CENSUS_PAUTH,    // Armv8.3: register-form PAC/AUT, RETAA, BRAA, ...
+    CENSUS_LRCPC2,   // Armv8.4: LDAPUR/STLUR unscaled-offset forms
+    CENSUS_DOTPROD,  // optional in 8.2, mandatory from 8.4
+    CENSUS_FLAGM,    // Armv8.4: CFINV/SETF8/SETF16/RMIF
+    CENSUS_FLAGM2,   // Armv8.5: AXFLAG/XAFLAG
+    CENSUS_FRINTTS,  // Armv8.5: FRINT32*/FRINT64*
+    CENSUS_SB,       // Armv8.5: speculation barrier
+    CENSUS_BF16,     // optional in 8.2, mandatory from 8.6
+    CENSUS_I8MM,     // optional in 8.2, mandatory from 8.6
+    CENSUS_LS64,     // Armv8.7: LD64B/ST64B
+    CENSUS_WFXT,     // Armv8.7: WFET/WFIT
+    CENSUS_MOPS,     // Armv8.8: CPY*/SET* memcpy instructions
+    CENSUS_HBC,      // Armv8.8: BC.cond
+    CENSUS_AES,      // never mandatory: AESE/AESD/.., PMULL on .1Q
+    CENSUS_SHA1,     // never mandatory
+    CENSUS_SHA256,   // never mandatory
+    CENSUS_SHA512,   // never mandatory
+    CENSUS_SHA3,     // never mandatory: EOR3/RAX1/XAR/BCAX
+    CENSUS_SM3SM4,   // never mandatory
+    CENSUS_FP16,     // never mandatory: FP arithmetic on H regs
+    CENSUS_FP16FML,  // never mandatory: FMLAL/FMLSL widening FP16
+    CENSUS_SVE,      // never mandatory in v8: Z/P register operands
+    CENSUS_MTE,      // never mandatory: STG/LDG/IRG/..
+    CENSUS_BTI,      // hint space: NOP without FEAT_BTI
+    CENSUS_PACHINT,  // hint space: PACIASP/AUTIASP/../XPACLRI
+    CENSUS_FEATURE_COUNT
+};
+
+static const struct {
+    const char *name;
+    int mandatory_from;
+} census_features[CENSUS_FEATURE_COUNT] = {
+    [CENSUS_LSE]     = {"LSE",      81},
+    [CENSUS_RDM]     = {"RDM",      81},
+    [CENSUS_CRC32]   = {"CRC32",    81},
+    [CENSUS_LRCPC]   = {"LRCPC",    83},
+    [CENSUS_FCMA]    = {"FCMA",     83},
+    [CENSUS_JSCVT]   = {"JSCVT",    83},
+    [CENSUS_PAUTH]   = {"PAuth",    83},
+    [CENSUS_LRCPC2]  = {"LRCPC2",   84},
+    [CENSUS_DOTPROD] = {"DotProd",  84},
+    [CENSUS_FLAGM]   = {"FlagM",    84},
+    [CENSUS_FLAGM2]  = {"FlagM2",   85},
+    [CENSUS_FRINTTS] = {"FRINTTS",  85},
+    [CENSUS_SB]      = {"SB",       85},
+    [CENSUS_BF16]    = {"BF16",     86},
+    [CENSUS_I8MM]    = {"I8MM",     86},
+    [CENSUS_LS64]    = {"LS64",     87},
+    [CENSUS_WFXT]    = {"WFxT",     87},
+    [CENSUS_MOPS]    = {"MOPS",     88},
+    [CENSUS_HBC]     = {"HBC",      88},
+    [CENSUS_AES]     = {"AES+PMULL", 0},
+    [CENSUS_SHA1]    = {"SHA1",      0},
+    [CENSUS_SHA256]  = {"SHA256",    0},
+    [CENSUS_SHA512]  = {"SHA512",    0},
+    [CENSUS_SHA3]    = {"SHA3",      0},
+    [CENSUS_SM3SM4]  = {"SM3+SM4",   0},
+    [CENSUS_FP16]    = {"FP16",      0},
+    [CENSUS_FP16FML] = {"FP16FML",   0},
+    [CENSUS_SVE]     = {"SVE",       0},
+    [CENSUS_MTE]     = {"MTE",       0},
+    [CENSUS_BTI]     = {"BTI",      -1},
+    [CENSUS_PACHINT] = {"PAC",      -1},
+};
+
+struct armlint_census {
+    size_t counts[CENSUS_FEATURE_COUNT];
+    // First few sites per feature so a surprising tally can be checked
+    // in a disassembler: real DotProd media code and a jump table
+    // misread as SDOT both count, and only the address tells them
+    // apart.
+    uint64_t samples[CENSUS_FEATURE_COUNT][ARMLINT_CENSUS_SAMPLES];
+    uint8_t nsamples[CENSUS_FEATURE_COUNT];
+    size_t baseline;
+    size_t instructions;
+    size_t skipped;
+};
+
+armlint_census *armlint_census_create(void)
+{
+    return calloc(1, sizeof(struct armlint_census));
+}
+
+void armlint_census_destroy(armlint_census *census)
+{
+    free(census);
+}
+
+size_t armlint_census_instructions(const armlint_census *census)
+{
+    return census == NULL ? 0 : census->instructions;
+}
+
+size_t armlint_census_skipped(const armlint_census *census)
+{
+    return census == NULL ? 0 : census->skipped;
+}
+
+size_t armlint_census_feature_count(const armlint_census *census,
+                                    const char *name)
+{
+    if (census == NULL || name == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < CENSUS_FEATURE_COUNT; i++) {
+        if (strcmp(census_features[i].name, name) == 0) {
+            return census->counts[i];
+        }
+    }
+    return 0;
+}
+
+int armlint_census_highest_mandatory(const armlint_census *census)
+{
+    int highest = 80;
+    if (census == NULL) {
+        return highest;
+    }
+    for (int i = 0; i < CENSUS_FEATURE_COUNT; i++) {
+        if (census->counts[i] != 0
+            && census_features[i].mandatory_from > highest) {
+            highest = census_features[i].mandatory_from;
+        }
+    }
+    return highest;
+}
+
+// Attribute one decoded instruction to a feature group, or -1 for the
+// Armv8.0 baseline. Matching is by mnemonic -- Capstone's mnemonics are
+// stable across versions where its numeric IDs are not -- with two
+// detail-based cases (SVE, FP16) where the mnemonic alone is ambiguous.
+//
+// Order matters twice. The hint-space forms are matched exactly first,
+// so the later "pac"/"aut" prefixes only ever see the register forms.
+// And every prefix below is chosen so no unrelated mnemonic shares it
+// (e.g. "subp" cannot match SUBS, "sb" is matched exactly so it cannot
+// swallow SBFX, "fcmla" cannot match FCMLE); a new entry must be
+// checked against the full A64 mnemonic set before landing here.
+static int census_classify(const cs_insn *insn)
+{
+    const char *m = insn->mnemonic;
+
+    static const char *const pac_hints[] = {
+        "paciasp", "pacibsp", "autiasp", "autibsp",
+        "paciaz", "pacibz", "autiaz", "autibz",
+        "pacia1716", "pacib1716", "autia1716", "autib1716",
+        "xpaclri",
+    };
+    for (size_t i = 0; i < sizeof(pac_hints) / sizeof(pac_hints[0]); i++) {
+        if (strcmp(m, pac_hints[i]) == 0) {
+            return CENSUS_PACHINT;
+        }
+    }
+    if (strcmp(m, "bti") == 0) {
+        return CENSUS_BTI;
+    }
+    if (strcmp(m, "sb") == 0) {
+        return CENSUS_SB;
+    }
+
+    static const struct {
+        const char *prefix;
+        int feature;
+    } prefixes[] = {
+        {"ldadd", CENSUS_LSE}, {"ldclr", CENSUS_LSE},
+        {"ldeor", CENSUS_LSE}, {"ldset", CENSUS_LSE},
+        {"ldsmax", CENSUS_LSE}, {"ldsmin", CENSUS_LSE},
+        {"ldumax", CENSUS_LSE}, {"ldumin", CENSUS_LSE},
+        {"swp", CENSUS_LSE}, {"cas", CENSUS_LSE},
+        {"sqrdmlah", CENSUS_RDM}, {"sqrdmlsh", CENSUS_RDM},
+        {"crc32", CENSUS_CRC32},
+        {"ldapur", CENSUS_LRCPC2}, {"stlur", CENSUS_LRCPC2},
+        {"ldapr", CENSUS_LRCPC},
+        {"fjcvtzs", CENSUS_JSCVT},
+        {"fcadd", CENSUS_FCMA}, {"fcmla", CENSUS_FCMA},
+        {"pac", CENSUS_PAUTH}, {"aut", CENSUS_PAUTH},
+        {"xpac", CENSUS_PAUTH},
+        {"retaa", CENSUS_PAUTH}, {"retab", CENSUS_PAUTH},
+        {"eretaa", CENSUS_PAUTH}, {"eretab", CENSUS_PAUTH},
+        {"braa", CENSUS_PAUTH}, {"brab", CENSUS_PAUTH},
+        {"blraa", CENSUS_PAUTH}, {"blrab", CENSUS_PAUTH},
+        {"ldraa", CENSUS_PAUTH}, {"ldrab", CENSUS_PAUTH},
+        {"sdot", CENSUS_DOTPROD}, {"udot", CENSUS_DOTPROD},
+        {"cfinv", CENSUS_FLAGM}, {"setf8", CENSUS_FLAGM},
+        {"setf16", CENSUS_FLAGM}, {"rmif", CENSUS_FLAGM},
+        {"axflag", CENSUS_FLAGM2}, {"xaflag", CENSUS_FLAGM2},
+        {"frint32", CENSUS_FRINTTS}, {"frint64", CENSUS_FRINTTS},
+        {"bfdot", CENSUS_BF16}, {"bfmmla", CENSUS_BF16},
+        {"bfmlal", CENSUS_BF16}, {"bfcvt", CENSUS_BF16},
+        {"smmla", CENSUS_I8MM}, {"ummla", CENSUS_I8MM},
+        {"usmmla", CENSUS_I8MM}, {"usdot", CENSUS_I8MM},
+        {"sudot", CENSUS_I8MM},
+        {"ld64b", CENSUS_LS64}, {"st64b", CENSUS_LS64},
+        {"wfet", CENSUS_WFXT}, {"wfit", CENSUS_WFXT},
+        {"cpyf", CENSUS_MOPS}, {"cpyp", CENSUS_MOPS},
+        {"cpym", CENSUS_MOPS}, {"cpye", CENSUS_MOPS},
+        {"setp", CENSUS_MOPS}, {"setm", CENSUS_MOPS},
+        {"sete", CENSUS_MOPS}, {"setg", CENSUS_MOPS},
+        {"bc.", CENSUS_HBC},
+        {"aes", CENSUS_AES},
+        {"sha1", CENSUS_SHA1}, {"sha256", CENSUS_SHA256},
+        {"sha512", CENSUS_SHA512},
+        {"eor3", CENSUS_SHA3}, {"rax1", CENSUS_SHA3},
+        {"xar", CENSUS_SHA3}, {"bcax", CENSUS_SHA3},
+        {"sm3", CENSUS_SM3SM4}, {"sm4", CENSUS_SM3SM4},
+        {"fmlal", CENSUS_FP16FML}, {"fmlsl", CENSUS_FP16FML},
+        {"stg", CENSUS_MTE}, {"st2g", CENSUS_MTE},
+        {"stzg", CENSUS_MTE}, {"stz2g", CENSUS_MTE},
+        {"ldg", CENSUS_MTE}, {"irg", CENSUS_MTE},
+        {"gmi", CENSUS_MTE}, {"subp", CENSUS_MTE},
+    };
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        if (strncmp(m, prefixes[i].prefix, strlen(prefixes[i].prefix)) == 0) {
+            return prefixes[i].feature;
+        }
+    }
+
+    // PMULL on the .1Q arrangement (64x64->128 polynomial multiply) is
+    // FEAT_PMULL, bundled with AES; the .8H-from-.8B forms are baseline
+    // NEON and share the mnemonic, so only the operand string decides.
+    if (strncmp(m, "pmull", 5) == 0 && strstr(insn->op_str, ".1q") != NULL) {
+        return CENSUS_AES;
+    }
+
+    if (insn->detail != NULL) {
+        const cs_arm64 *a64 = &insn->detail->arm64;
+
+        // Any Z or P register operand marks SVE, whatever the mnemonic
+        // (most SVE mnemonics shadow base NEON ones).
+        for (uint8_t i = 0; i < a64->op_count; i++) {
+            if (a64->operands[i].type == ARM64_OP_REG
+                && ((a64->operands[i].reg >= ARM64_REG_Z0
+                     && a64->operands[i].reg <= ARM64_REG_Z31)
+                    || (a64->operands[i].reg >= ARM64_REG_P0
+                        && a64->operands[i].reg <= ARM64_REG_P15))) {
+                return CENSUS_SVE;
+            }
+        }
+
+        // FP16 arithmetic: an FP mnemonic operating on H scalars or
+        // 4H/8H vectors. FCVT* is excluded -- half-precision *storage*
+        // conversions (FCVT h<->s, FCVTL/FCVTN through .4H) are Armv8.0
+        // baseline; only arithmetic in half precision needs FEAT_FP16.
+        if (m[0] == 'f' && strncmp(m, "fcvt", 4) != 0) {
+            for (uint8_t i = 0; i < a64->op_count; i++) {
+                if (a64->operands[i].type != ARM64_OP_REG) {
+                    continue;
+                }
+                if ((a64->operands[i].reg >= ARM64_REG_H0
+                     && a64->operands[i].reg <= ARM64_REG_H31)
+                    || a64->operands[i].vas == ARM64_VAS_4H
+                    || a64->operands[i].vas == ARM64_VAS_8H) {
+                    return CENSUS_FP16;
+                }
+            }
+        }
+    }
+
+    return -1;
+}
+
+void armlint_census_scan(armlint_census *census, csh handle,
+                         const uint8_t *inst, size_t len,
+                         uint64_t base_addr)
+{
+    if (census == NULL) {
+        return;
+    }
+    cs_insn *insn = cs_malloc(handle);
+    if (insn == NULL) {
+        return;
+    }
+
+    const uint8_t *code = inst;
+    size_t size = len;
+    uint64_t address = base_addr;
+    while (size >= 4) {
+        uint64_t insn_addr = address;
+        if (!cs_disasm_iter(handle, &code, &size, &address, insn)) {
+            code += 4;
+            size -= 4;
+            address += 4;
+            census->skipped++;
+            continue;
+        }
+        census->instructions++;
+        int feature = census_classify(insn);
+        if (feature < 0) {
+            census->baseline++;
+            continue;
+        }
+        census->counts[feature]++;
+        if (census->nsamples[feature] < ARMLINT_CENSUS_SAMPLES) {
+            census->samples[feature][census->nsamples[feature]++] =
+                insn_addr;
+        }
+    }
+
+    cs_free(insn, 1);
+}
+
+// One "  <label>: FEAT (n), ..." line for the features selected by
+// `want` (a mandatory_from value), by descending count with ties broken
+// by name, "none" when empty -- so two censuses diff line-for-line.
+static void census_print_group(const armlint_census *census, int want,
+                               const char *label)
+{
+    size_t order[CENSUS_FEATURE_COUNT];
+    size_t n = 0;
+    for (size_t i = 0; i < CENSUS_FEATURE_COUNT; i++) {
+        if (census->counts[i] != 0
+            && census_features[i].mandatory_from == want) {
+            order[n++] = i;
+        }
+    }
+    printf("  %s: ", label);
+    if (n == 0) {
+        printf("none\n");
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        size_t best = i;
+        for (size_t j = i + 1; j < n; j++) {
+            if (census->counts[order[j]] > census->counts[order[best]]
+                || (census->counts[order[j]] == census->counts[order[best]]
+                    && strcmp(census_features[order[j]].name,
+                              census_features[order[best]].name) < 0)) {
+                best = j;
+            }
+        }
+        size_t tmp = order[i];
+        order[i] = order[best];
+        order[best] = tmp;
+        printf("%s%s (%zu)", i == 0 ? "" : ", ",
+            census_features[order[i]].name, census->counts[order[i]]);
+    }
+    printf("\n");
+}
+
+void armlint_census_print(const armlint_census *census, bool verbose)
+{
+    if (census == NULL) {
+        return;
+    }
+
+    printf("ISA census: %zu instructions, %zu undecodable words skipped\n",
+        census->instructions, census->skipped);
+    printf("  Armv8.0 baseline: %zu\n", census->baseline);
+    // Only versions a table feature maps to appear as rungs; 8.2 adds
+    // no mandatory user-level instructions, so it has none.
+    census_print_group(census, 81, "mandatory from Armv8.1");
+    census_print_group(census, 83, "mandatory from Armv8.3");
+    census_print_group(census, 84, "mandatory from Armv8.4");
+    census_print_group(census, 85, "mandatory from Armv8.5");
+    census_print_group(census, 86, "mandatory from Armv8.6");
+    census_print_group(census, 87, "mandatory from Armv8.7");
+    census_print_group(census, 88, "mandatory from Armv8.8");
+    census_print_group(census, 0, "optional features");
+    census_print_group(census, -1, "branch protection (hint space)");
+
+    int highest = armlint_census_highest_mandatory(census);
+    if (highest > 80) {
+        printf("  highest mandatory-from level: Armv8.%d\n", highest - 80);
+    } else {
+        printf("  highest mandatory-from level: Armv8.0 baseline\n");
+    }
+
+    if (!verbose) {
+        return;
+    }
+    for (int i = 0; i < CENSUS_FEATURE_COUNT; i++) {
+        if (census->counts[i] == 0) {
+            continue;
+        }
+        printf("    %s at", census_features[i].name);
+        for (uint8_t k = 0; k < census->nsamples[i]; k++) {
+            printf("%s 0x%" PRIx64, k == 0 ? "" : ",",
+                census->samples[i][k]);
+        }
+        if (census->counts[i] > census->nsamples[i]) {
+            printf(" (+%zu more)", census->counts[i] - census->nsamples[i]);
+        }
+        printf("\n");
+    }
+}
