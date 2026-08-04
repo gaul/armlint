@@ -11,9 +11,13 @@
     .globl  _main
     .p2align 2
 _main:
-    // A recognized jump table: dismissed, no finding.
-    adrp    x17, _main@PAGE
-    add     x17, x17, _main@PAGEOFF
+    // A recognized jump table: dismissed, no finding. Emit ADRP via
+    // .long to avoid Mach-O/ELF relocation-syntax differences
+    // (`@PAGE` is Mach-O-only); the classifier keys on encodings, not
+    // relocations, so a literal page-0 ADRP plus a plain immediate
+    // ADD is the same idiom.
+    .long   0x90000011              // adrp x17, page0
+    add     x17, x17, #0x18
     ldrsw   x16, [x17, x16, lsl #2]
     adr     x17, .
     add     x16, x17, x16
