@@ -7,6 +7,11 @@
 # Set MODE=regen as the first argument to write the .expected files
 # from current armlint output instead of diffing -- use after an
 # intentional behavior change.
+#
+# Exit status: 0 all fixtures passed, 1 at least one failed, 2 the
+# suite could not run (no armlint binary, or no clang able to
+# assemble AArch64). It never exits 0 without having run the
+# fixtures.
 
 set -eu
 
@@ -29,20 +34,31 @@ fi
 # Output format differs: Mach-O .o on macOS, ELF .o on arm64 Linux.
 # armlint accepts both and reports section-relative offsets, so the
 # snapshot output is host-format-agnostic.
+#
+# The suite never skips itself on toolchain grounds. A skip that exits
+# 0 is indistinguishable from a pass to make and to CI, so a runner
+# missing clang would report success having run no fixture at all --
+# the failure mode is a suite that looks green precisely when it
+# tested nothing. Anything that stops the fixtures from being built is
+# an environment error and exits 2 (as a missing armlint binary
+# already does), leaving exit 1 to mean real test failures.
 case "$(uname -s)" in
     Darwin)
         CC_FLAGS=(-arch arm64)
         ;;
     Linux)
-        if [ "$(uname -m)" != "aarch64" ]; then
-            echo "skip: not an arm64 host (use ubuntu-*-arm runner or a cross-toolchain)" >&2
-            exit 0
+        if [ "$(uname -m)" = "aarch64" ]; then
+            CC_FLAGS=()
+        else
+            # clang ships every backend, and assembling .s into .o
+            # needs no sysroot or cross libc, so naming the target is
+            # enough to build the fixtures off an arm64 host.
+            CC_FLAGS=(--target=aarch64-linux-gnu)
         fi
-        CC_FLAGS=()
         ;;
     *)
-        echo "skip: unsupported OS $(uname -s)" >&2
-        exit 0
+        echo "run_fixtures: unsupported OS $(uname -s)" >&2
+        exit 2
         ;;
 esac
 
@@ -55,10 +71,12 @@ cat > "$PROBE/probe.s" <<'EOF'
 _main:
     ret
 EOF
-if ! clang "${CC_FLAGS[@]}" -c -o "$PROBE/probe.o" "$PROBE/probe.s" \
-        >/dev/null 2>&1; then
-    echo "skip: clang ${CC_FLAGS[*]} -c failed on this host" >&2
-    exit 0
+if ! probe_err="$(clang "${CC_FLAGS[@]}" -c -o "$PROBE/probe.o" \
+        "$PROBE/probe.s" 2>&1)"; then
+    echo "run_fixtures: clang ${CC_FLAGS[*]} -c cannot assemble AArch64" >&2
+    echo "run_fixtures: the integration suite requires it; install clang" >&2
+    printf '%s\n' "$probe_err" | sed 's/^/      /' >&2
+    exit 2
 fi
 
 PASS=0

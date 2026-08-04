@@ -24,11 +24,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # clang is named explicitly rather than assumed present in the
+      # runner image: the integration suite now fails without it
+      # instead of skipping, so an image that dropped it would break
+      # the job rather than quietly test nothing.
       - name: Install capstone (Ubuntu)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcapstone-dev pkg-config
+          sudo apt-get install -y libcapstone-dev pkg-config clang
 
       - name: Install capstone (macOS)
         if: matrix.os == 'macos-latest'

@@ -207,8 +207,11 @@ fabricated byte sequences, exercising the check registry directly.
 each `.s` is assembled with `clang -arch arm64` and `armlint`'s
 output is diffed against a checked-in `.expected` file. The
 integration suite covers the Mach-O parser and the report formatting,
-which the unit tests bypass; it skips cleanly on hosts without an
-arm64 toolchain. After an intentional output change, regenerate the
+which the unit tests bypass. It needs a clang that can assemble
+AArch64 and fails without one rather than reporting a pass it did not
+earn; off an arm64 host it names the target explicitly, so an x86-64
+Linux box runs the suite too. After an intentional output change,
+regenerate the
 snapshots with `make integration-test-regen` and review the diff
 before committing.
 
