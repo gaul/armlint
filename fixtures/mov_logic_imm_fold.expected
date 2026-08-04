@@ -1,60 +1,60 @@
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x0: -> and x3, x2, #0xff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x0 <_main>: -> and x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   and x3, x2, x0
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x8: -> and x3, x2, #0xff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x8 <_main+0x8>: -> and x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   and x3, x0, x2
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x10: -> and w3, w2, #0xff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x10 <_main+0x10>: -> and w3, w2, #0xff (2 instructions)
   movz w0, #0xff
   and w3, w2, w0
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x18: -> orr x3, x2, #0xff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x18 <_main+0x18>: -> orr x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   orr x3, x2, x0
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x20: -> eor x3, x2, #0xff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x20 <_main+0x20>: -> eor x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   eor x3, x2, x0
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x28: -> ands x3, x2, #0xff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x28 <_main+0x28>: -> ands x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   ands x3, x2, x0
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x30: -> tst x2, #0xff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x30 <_main+0x30>: -> tst x2, #0xff (2 instructions)
   movz x0, #0xff
   tst x2, x0
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x38: -> and x3, x2, #0xffff (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x38 <_main+0x38>: -> and x3, x2, #0xffff (2 instructions)
   movz x0, #0xffff
   and x3, x2, x0
 
-MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x40: -> and x3, x2, #0xffff0000 (2 instructions)
+MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x40 <_main+0x40>: -> and x3, x2, #0xffff0000 (2 instructions)
   movz x0, #0xffff, lsl #16
   and x3, x2, x0
 
-MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x48: -> and x3, x2, #0xffffffffffffff00 (2 instructions)
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x48 <_main+0x48>: -> and x3, x2, #0xffffffffffffff00 (2 instructions)
   movz x0, #0xff
   bic x3, x2, x0
 
-MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x50: -> orr w3, w2, #0xfffffffe (2 instructions)
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x50 <_main+0x50>: -> orr w3, w2, #0xfffffffe (2 instructions)
   movz w0, #0x1
   orn w3, w2, w0
 
-MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x58: -> eor x3, x2, #0xfffffffffffffffe (2 instructions)
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x58 <_main+0x58>: -> eor x3, x2, #0xfffffffffffffffe (2 instructions)
   movz x0, #0x1
   eon x3, x2, x0
 
-MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x60: -> ands w3, w2, #0xfffffffe (2 instructions)
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x60 <_main+0x60>: -> ands w3, w2, #0xfffffffe (2 instructions)
   movz w0, #0x1
   bics w3, w2, w0
 
-MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x68: -> tst w2, #0xfffffffe (2 instructions)
+MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x68 <_main+0x68>: -> tst w2, #0xfffffffe (2 instructions)
   movz w0, #0x1
   bics wzr, w2, w0
 
-self-op identity at offset: 0x94: and x3, x0, x0 -> mov x3, x0 (1 instructions)
+self-op identity at offset: 0x94 <_main+0x94>: and x3, x0, x0 -> mov x3, x0 (1 instructions)
   and x3, x0, x0
 
 Optimization opportunities by type:

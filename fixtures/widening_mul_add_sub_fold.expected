@@ -1,36 +1,36 @@
-SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x0: -> smaddl x8, w0, w1, x2 (2 instructions)
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x0 <_main>: -> smaddl x8, w0, w1, x2 (2 instructions)
   smull x8, w0, w1
   add x8, x8, x2
 
-SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x8: -> smaddl x8, w0, w1, x2 (2 instructions)
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x8 <_main+0x8>: -> smaddl x8, w0, w1, x2 (2 instructions)
   smull x8, w0, w1
   add x8, x2, x8
 
-SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x10: -> smsubl x8, w0, w1, x2 (2 instructions)
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x10 <_main+0x10>: -> smsubl x8, w0, w1, x2 (2 instructions)
   smull x8, w0, w1
   sub x8, x2, x8
 
-SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x18: -> umaddl x8, w0, w1, x2 (2 instructions)
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x18 <_main+0x18>: -> umaddl x8, w0, w1, x2 (2 instructions)
   umull x8, w0, w1
   add x8, x8, x2
 
-SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x20: -> umsubl x8, w0, w1, x2 (2 instructions)
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x20 <_main+0x20>: -> umsubl x8, w0, w1, x2 (2 instructions)
   umull x8, w0, w1
   sub x8, x2, x8
 
-SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x28: -> smaddl x8, w0, w1, x0 (2 instructions)
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x28 <_main+0x28>: -> smaddl x8, w0, w1, x0 (2 instructions)
   smull x8, w0, w1
   add x8, x8, x0
 
-SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL at offset: 0x30: -> smnegl x8, w0, w1 (2 instructions)
+SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL at offset: 0x30 <_main+0x30>: -> smnegl x8, w0, w1 (2 instructions)
   smull x8, w0, w1
   neg x8, x8
 
-SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL at offset: 0x38: -> umnegl x8, w0, w1 (2 instructions)
+SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL at offset: 0x38 <_main+0x38>: -> umnegl x8, w0, w1 (2 instructions)
   umull x8, w0, w1
   neg x8, x8
 
-SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x58: -> smaddl x9, w0, w1, x2 (2 instructions)
+SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x58 <_main+0x58>: -> smaddl x9, w0, w1, x2 (2 instructions)
   smull x8, w0, w1
   add x9, x8, x2
 

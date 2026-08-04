@@ -13791,7 +13791,50 @@ void armlint_summary_print(const armlint_summary *summary)
     printf("\n");
 }
 
-static void report_finding(const armlint_finding *finding, bool verbose)
+const char *armlint_symbol_annotation(char *buf, size_t cap,
+                                      const armlint_symbol *symbols,
+                                      size_t nsymbols, uint64_t vaddr)
+{
+    if (cap == 0) {
+        return buf;
+    }
+    buf[0] = '\0';
+    if (nsymbols == 0 || vaddr < symbols[0].vaddr) {
+        return buf;
+    }
+    // Greatest anchor at or below vaddr: binary search for the first
+    // anchor strictly above, then step back one.
+    size_t lo = 0, hi = nsymbols;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (symbols[mid].vaddr <= vaddr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    const armlint_symbol *sym = &symbols[lo - 1];
+    uint64_t delta = vaddr - sym->vaddr;
+    // The %.120s precision cap keeps a pathological mangled name from
+    // overrunning the buffer mid-token: with cap >=
+    // ARMLINT_SYMBOL_ANNOTATION_LEN the delta and closing '>' always
+    // fit after a truncated name.
+    if (sym->name != NULL && delta != 0) {
+        snprintf(buf, cap, "<%.120s+0x%" PRIx64 ">", sym->name, delta);
+    } else if (sym->name != NULL) {
+        snprintf(buf, cap, "<%.120s>", sym->name);
+    } else if (delta != 0) {
+        snprintf(buf, cap, "<0x%" PRIx64 "+0x%" PRIx64 ">",
+            sym->vaddr, delta);
+    } else {
+        snprintf(buf, cap, "<0x%" PRIx64 ">", sym->vaddr);
+    }
+    return buf;
+}
+
+static void report_finding(const armlint_finding *finding, bool verbose,
+                           const armlint_symbol *symbols, size_t nsymbols,
+                           uint64_t base_addr)
 {
     // The default output is the by-type summary only -- a large binary
     // can have tens of thousands of opportunities, so listing each one
@@ -13800,13 +13843,20 @@ static void report_finding(const armlint_finding *finding, bool verbose)
     if (!verbose) {
         return;
     }
+    // "<_containing_function+0xoff>" when a symbol table is available;
+    // empty (and unspaced) otherwise, preserving the historic format.
+    char ann[ARMLINT_SYMBOL_ANNOTATION_LEN];
+    armlint_symbol_annotation(ann, sizeof(ann), symbols, nsymbols,
+        base_addr + finding->start_offset);
+    const char *sep = ann[0] != '\0' ? " " : "";
     if (finding->detail[0] != '\0') {
-        printf("%s at offset: 0x%zx: %s (%u instructions)\n",
-            finding->name, finding->start_offset,
+        printf("%s at offset: 0x%zx%s%s: %s (%u instructions)\n",
+            finding->name, finding->start_offset, sep, ann,
             finding->detail, finding->insn_count);
     } else {
-        printf("%s at offset: 0x%zx (%u instructions)\n",
-            finding->name, finding->start_offset, finding->insn_count);
+        printf("%s at offset: 0x%zx%s%s (%u instructions)\n",
+            finding->name, finding->start_offset, sep, ann,
+            finding->insn_count);
     }
     for (unsigned i = 0; i < ARMLINT_FINDING_LINES; i++) {
         if (finding->lines[i][0] != '\0') {
@@ -13917,7 +13967,8 @@ const size_t armlint_check_registry_count =
 // skip past data-in-text by hand.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
-                       armlint_summary *summary, unsigned features)
+                       armlint_summary *summary, unsigned features,
+                       const armlint_symbol *symbols, size_t nsymbols)
 {
     armlint_state *state = armlint_state_create();
     if (state == NULL) {
@@ -13949,7 +14000,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                                               &finding)
                         && !armlint_finding_has_side_entry(state,
                                                            &finding)) {
-                    report_finding(&finding, verbose);
+                    report_finding(&finding, verbose, symbols,
+                        nsymbols, base_addr);
                     summary_add(summary, finding.name);
                     errors++;
                 }
@@ -13961,7 +14013,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             armlint_finding finding;
             if (armlint_flush(state, &finding)
                     && !armlint_finding_has_side_entry(state, &finding)) {
-                report_finding(&finding, verbose);
+                report_finding(&finding, verbose, symbols,
+                    nsymbols, base_addr);
                 summary_add(summary, finding.name);
                 errors++;
             }
@@ -13974,7 +14027,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     armlint_finding finding;
     if (armlint_flush(state, &finding)
             && !armlint_finding_has_side_entry(state, &finding)) {
-        report_finding(&finding, verbose);
+        report_finding(&finding, verbose, symbols,
+            nsymbols, base_addr);
         summary_add(summary, finding.name);
         errors++;
     }

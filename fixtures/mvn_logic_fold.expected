@@ -1,36 +1,36 @@
-MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x0: -> bic w0, w3, w1 (2 instructions)
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x0 <_main>: -> bic w0, w3, w1 (2 instructions)
   mvn w0, w1
   and w0, w3, w0
 
-MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x8: -> bic w0, w3, w1 (2 instructions)
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x8 <_main+0x8>: -> bic w0, w3, w1 (2 instructions)
   mvn w0, w1
   and w0, w0, w3
 
-MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x10: -> orn w0, w3, w1 (2 instructions)
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x10 <_main+0x10>: -> orn w0, w3, w1 (2 instructions)
   mvn w0, w1
   orr w0, w3, w0
 
-MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x18: -> eon w0, w3, w1 (2 instructions)
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x18 <_main+0x18>: -> eon w0, w3, w1 (2 instructions)
   mvn w0, w1
   eor w0, w3, w0
 
-MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x20: -> bics w0, w3, w1 (2 instructions)
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x20 <_main+0x20>: -> bics w0, w3, w1 (2 instructions)
   mvn w0, w1
   ands w0, w3, w0
 
-MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x28: -> bic x0, x3, x1 (2 instructions)
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x28 <_main+0x28>: -> bic x0, x3, x1 (2 instructions)
   mvn x0, x1
   and x0, x3, x0
 
-MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x30: -> bic w5, w3, w1 (2 instructions)
+MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x30 <_main+0x30>: -> bic w5, w3, w1 (2 instructions)
   mvn w0, w1
   and w5, w3, w0
 
-MVN + CSEL foldable to CSINV at offset: 0x58: -> csinv x3, x2, x1, lt (2 instructions)
+MVN + CSEL foldable to CSINV at offset: 0x58 <_main+0x58>: -> csinv x3, x2, x1, lt (2 instructions)
   mvn x3, x1
   csel x3, x2, x3, lt
 
-MVN + CSEL foldable to CSINV at offset: 0x60: -> csinv x3, x2, x1, ge (2 instructions)
+MVN + CSEL foldable to CSINV at offset: 0x60 <_main+0x60>: -> csinv x3, x2, x1, ge (2 instructions)
   mvn x3, x1
   csel x3, x3, x2, lt
 

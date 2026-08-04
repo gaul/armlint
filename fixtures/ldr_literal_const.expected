@@ -1,22 +1,22 @@
-LDR literal foldable to MOV/FMOV immediate at offset: 0x0: -> mov w0, #0x2a (1 instructions)
+LDR literal foldable to MOV/FMOV immediate at offset: 0x0 <_main>: -> mov w0, #0x2a (1 instructions)
   ldr w0, #0x70
 
-LDR literal foldable to MOV/FMOV immediate at offset: 0x4: -> mov x1, #0xaaaaaaaaaaaaaaaa (1 instructions)
+LDR literal foldable to MOV/FMOV immediate at offset: 0x4 <_main+0x4>: -> mov x1, #0xaaaaaaaaaaaaaaaa (1 instructions)
   ldr x1, #0x60
 
-LDR literal foldable to MOV/FMOV immediate at offset: 0x8: -> fmov s0, #1.0 (1 instructions)
+LDR literal foldable to MOV/FMOV immediate at offset: 0x8 <_main+0x8>: -> fmov s0, #1.0 (1 instructions)
   ldr s0, #0x74
 
-LDR literal foldable to MOV/FMOV immediate at offset: 0xc: -> fmov d1, #1.5 (1 instructions)
+LDR literal foldable to MOV/FMOV immediate at offset: 0xc <_main+0xc>: -> fmov d1, #1.5 (1 instructions)
   ldr d1, #0x68
 
-LDR literal foldable to MOV/FMOV immediate at offset: 0x10: -> mov x3, #0xfffffffffffffff6 (1 instructions)
+LDR literal foldable to MOV/FMOV immediate at offset: 0x10 <_main+0x10>: -> mov x3, #0xfffffffffffffff6 (1 instructions)
   ldrsw x3, #0x78
 
-LDR literal foldable to MOV/FMOV immediate at offset: 0x14: -> movi v0.16b, #0x2a (1 instructions)
+LDR literal foldable to MOV/FMOV immediate at offset: 0x14 <_main+0x14>: -> movi v0.16b, #0x2a (1 instructions)
   ldr q0, #0x30
 
-LDR literal foldable to MOV/FMOV immediate at offset: 0x18: -> movi v1.2d, #0xffffffff00000000 (1 instructions)
+LDR literal foldable to MOV/FMOV immediate at offset: 0x18 <_main+0x18>: -> movi v1.2d, #0xffffffff00000000 (1 instructions)
   ldr q1, #0x40
 
 Optimization opportunities by type:

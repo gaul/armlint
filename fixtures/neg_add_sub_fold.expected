@@ -1,40 +1,40 @@
-NEG + ADD/SUB foldable to SUB/ADD at offset: 0x0: -> sub x3, x2, x1 (2 instructions)
+NEG + ADD/SUB foldable to SUB/ADD at offset: 0x0 <_main>: -> sub x3, x2, x1 (2 instructions)
   neg x3, x1
   add x3, x2, x3
 
-NEG + ADD/SUB foldable to SUB/ADD at offset: 0x8: -> sub x3, x2, x1 (2 instructions)
+NEG + ADD/SUB foldable to SUB/ADD at offset: 0x8 <_main+0x8>: -> sub x3, x2, x1 (2 instructions)
   neg x3, x1
   add x3, x3, x2
 
-NEG + ADD/SUB foldable to SUB/ADD at offset: 0x10: -> sub w3, w2, w1 (2 instructions)
+NEG + ADD/SUB foldable to SUB/ADD at offset: 0x10 <_main+0x10>: -> sub w3, w2, w1 (2 instructions)
   neg w3, w1
   add w3, w2, w3
 
-NEG + ADD/SUB foldable to SUB/ADD at offset: 0x18: -> add x3, x2, x1 (2 instructions)
+NEG + ADD/SUB foldable to SUB/ADD at offset: 0x18 <_main+0x18>: -> add x3, x2, x1 (2 instructions)
   neg x3, x1
   sub x3, x2, x3
 
-NEG + ADD/SUB foldable to SUB/ADD at offset: 0x30: -> sub x5, x2, x1 (2 instructions)
+NEG + ADD/SUB foldable to SUB/ADD at offset: 0x30 <_main+0x30>: -> sub x5, x2, x1 (2 instructions)
   neg x3, x1
   add x5, x2, x3
 
-NEG + CSEL foldable to CSNEG at offset: 0x6c: -> csneg x3, x2, x1, lt (2 instructions)
+NEG + CSEL foldable to CSNEG at offset: 0x6c <_main+0x6c>: -> csneg x3, x2, x1, lt (2 instructions)
   neg x3, x1
   csel x3, x2, x3, lt
 
-NEG + CSEL foldable to CSNEG at offset: 0x74: -> csneg x3, x2, x1, ge (2 instructions)
+NEG + CSEL foldable to CSNEG at offset: 0x74 <_main+0x74>: -> csneg x3, x2, x1, ge (2 instructions)
   neg x3, x1
   csel x3, x3, x2, lt
 
-NEG + CSEL foldable to CSNEG at offset: 0x7c: -> csneg w3, w2, w1, hi (2 instructions)
+NEG + CSEL foldable to CSNEG at offset: 0x7c <_main+0x7c>: -> csneg w3, w2, w1, hi (2 instructions)
   neg w3, w1
   csel w3, w2, w3, hi
 
-NEG + CSEL foldable to CSNEG at offset: 0x84: -> csneg x5, x2, x1, ne (2 instructions)
+NEG + CSEL foldable to CSNEG at offset: 0x84 <_main+0x84>: -> csneg x5, x2, x1, ne (2 instructions)
   neg x3, x1
   csel x5, x2, x3, ne
 
-CSEL same-operand identity at offset: 0xa0: csel x5, x3, x3, lt -> mov x5, x3 (cond irrelevant: both branches = x3) (1 instructions)
+CSEL same-operand identity at offset: 0xa0 <_main+0xa0>: csel x5, x3, x3, lt -> mov x5, x3 (cond irrelevant: both branches = x3) (1 instructions)
   csel x5, x3, x3, lt
 
 Optimization opportunities by type:

@@ -1,8 +1,8 @@
-AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth) at offset: 0x8: -> retaa (2 instructions)
+AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth) at offset: 0x8 <_main+0x8>: -> retaa (2 instructions)
   autiasp
   ret
 
-AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth) at offset: 0x18: -> retab (2 instructions)
+AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth) at offset: 0x18 <_main+0x18>: -> retab (2 instructions)
   autibsp
   ret
 

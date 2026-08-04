@@ -13086,6 +13086,55 @@ static void test_census(void)
     armlint_census_destroy(NULL);
 }
 
+static void test_symbol_annotation(void)
+{
+    char buf[ARMLINT_SYMBOL_ANNOTATION_LEN];
+    const armlint_symbol syms[] = {
+        { 0x1000, "_alpha" },
+        { 0x1040, NULL },       // bare function start (stripped binary)
+        { 0x2000, "_omega" },
+    };
+    const size_t n = sizeof(syms) / sizeof(syms[0]);
+
+    // Interior of a named function, exactly at it, and interior of the
+    // nameless anchor between the named ones.
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), syms, n,
+        0x1018), "<_alpha+0x18>") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), syms, n,
+        0x1000), "<_alpha>") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), syms, n,
+        0x1048), "<0x1040+0x8>") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), syms, n,
+        0x1040), "<0x1040>") == 0);
+
+    // The last anchor extends to the end of the address space; the
+    // per-section tables the callers build bound the reach in
+    // practice.
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), syms, n,
+        0x2000), "<_omega>") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), syms, n,
+        0x5432), "<_omega+0x3432>") == 0);
+
+    // Below the first anchor (code before a section's first symbol)
+    // and the empty table both render nothing.
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), syms, n,
+        0xfff), "") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), NULL, 0,
+        0x1000), "") == 0);
+
+    // A pathological mangled name is truncated but the annotation
+    // stays well formed: the delta and '>' survive.
+    char longname[200];
+    memset(longname, 'q', sizeof(longname) - 1);
+    longname[sizeof(longname) - 1] = '\0';
+    const armlint_symbol big[] = { { 0x100, longname } };
+    const char *ann = armlint_symbol_annotation(buf, sizeof(buf), big, 1,
+        0x108);
+    assert(strncmp(ann, "<qqqq", 5) == 0);
+    assert(strlen(ann) == 1 + 120 + 5);     // '<' + capped name + "+0x8>"
+    assert(strcmp(ann + strlen(ann) - 5, "+0x8>") == 0);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -13176,6 +13225,7 @@ int main(void)
     test_liveness_matches_capstone();
     test_mops_flag_liveness();
     test_census();
+    test_symbol_annotation();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

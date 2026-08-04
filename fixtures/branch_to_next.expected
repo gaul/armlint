@@ -1,13 +1,13 @@
-branch to the next instruction is a no-op at offset: 0x0: -> delete: control falls through either way (1 instructions)
+branch to the next instruction is a no-op at offset: 0x0 <_main>: -> delete: control falls through either way (1 instructions)
   b #4
 
-branch to the next instruction is a no-op at offset: 0x4: -> delete: control falls through either way (1 instructions)
+branch to the next instruction is a no-op at offset: 0x4 <_main+0x4>: -> delete: control falls through either way (1 instructions)
   b.eq #8
 
-branch to the next instruction is a no-op at offset: 0x8: -> delete: control falls through either way (1 instructions)
+branch to the next instruction is a no-op at offset: 0x8 <_main+0x8>: -> delete: control falls through either way (1 instructions)
   cbz x0, #0xc
 
-branch to the next instruction is a no-op at offset: 0xc: -> delete: control falls through either way (1 instructions)
+branch to the next instruction is a no-op at offset: 0xc <_main+0xc>: -> delete: control falls through either way (1 instructions)
   tbnz w1, #5, #0x10
 
 Optimization opportunities by type:

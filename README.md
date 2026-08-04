@@ -277,7 +277,8 @@ int lint(const uint8_t *code, size_t code_len, uint64_t base_addr)
     armlint_summary *summary = armlint_summary_create();
     int findings = check_instructions(
         handle, code, code_len, base_addr, /*verbose=*/true, summary,
-        /*features=*/0);   // or ARMLINT_FEATURE_CSSC etc.
+        /*features=*/0,    // or ARMLINT_FEATURE_CSSC etc.
+        /*symbols=*/NULL, /*nsymbols=*/0);   // see armlint_symbol
     armlint_summary_print(summary);   // optional by-type tally
 
     armlint_summary_destroy(summary);
@@ -328,8 +329,10 @@ per-opportunity detail is suppressed unless requested:
 $ ./armlint /bin/ls
 Optimization opportunities by type:
       38  ADD + LDR foldable to immediate-offset LDR
+       2  AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth)
+       2  CBZ/CBNZ of a live single-bit test foldable to TBZ/TBNZ
 
-38 optimization opportunities in 4153 instructions
+42 optimization opportunities in 4153 instructions
 ```
 
 Pass `-v` to also print each opportunity -- its one-line summary plus
@@ -337,11 +340,20 @@ the offending instructions, as shown below -- ahead of the summary:
 
 ```console
 $ ./armlint -v /bin/ls
-ADD + LDR foldable to immediate-offset LDR at offset: 0x60: -> ldr w8, [x8, #0x2c] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0x60 <0x10000071c+0x44>: -> ldr w8, [x8, #0x2c] (2 instructions)
   add x8, x8, #0x2c
   ldr w8, [x8]
 ...
 ```
+
+The `<...>` names the containing function so findings can be triaged
+per function: `<_addhistnode+0x58>` when the symbol table carries a
+name (Mach-O `nlist`, or the ELF `.symtab` with a `.dynsym`
+fallback), or
+the function's start address as above when a stripped binary's
+`LC_FUNCTION_STARTS` still records its boundaries. A binary carrying
+neither -- Go's linker, for one, emits its runtime symtab instead of
+either structure -- prints the historic unannotated form.
 
 The process exits non-zero when any opportunity is found, so armlint
 can gate a compiler test suite.

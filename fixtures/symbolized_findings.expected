@@ -1,0 +1,10 @@
+branch to the next instruction is a no-op at offset: 0x4 <_first+0x4>: -> delete: control falls through either way (1 instructions)
+  b #8
+
+branch to the next instruction is a no-op at offset: 0x14 <_second+0x8>: -> delete: control falls through either way (1 instructions)
+  b #0x18
+
+Optimization opportunities by type:
+       2  branch to the next instruction is a no-op
+
+2 optimization opportunities in 7 instructions

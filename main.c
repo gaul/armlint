@@ -37,9 +37,15 @@
 #define SELFMAG       4
 #define ELFCLASS64    2
 #define ELFDATA2LSB   1
+#define ET_REL        1
 #define EM_AARCH64    183
 #define SHT_PROGBITS  1
+#define SHT_SYMTAB    2
+#define SHT_DYNSYM    11
 #define SHF_EXECINSTR 0x4
+#define STB_LOCAL     0
+#define STT_NOTYPE    0
+#define STT_FUNC      2
 
 typedef struct {
     unsigned char e_ident[EI_NIDENT];
@@ -71,6 +77,15 @@ typedef struct {
     uint64_t sh_entsize;
 } Elf64_Shdr;
 
+typedef struct {
+    uint32_t st_name;
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+} Elf64_Sym;
+
 // === Mach-O minimal definitions ===
 //
 // Apple's <mach-o/*.h> would do, but they pull in <mach/machine.h> and
@@ -85,8 +100,17 @@ typedef struct {
 // capability/feature bits (CPU_SUBTYPE_PTRAUTH_ABI etc.). arm64e is 2.
 #define CPU_SUBTYPE_MASK   0x00ffffffu
 #define CPU_SUBTYPE_ARM64E 0x00000002u
+#define LC_SYMTAB          0x2u
 #define LC_SEGMENT_64      0x19u
+#define LC_FUNCTION_STARTS 0x26u
 #define S_ATTR_PURE_INSTRUCTIONS 0x80000000u
+// nlist_64.n_type decomposition: any stab bit marks a debug entry,
+// N_SECT means defined in the section n_sect names (1-based ordinal
+// across every segment's sections), N_EXT marks nm-visible externals.
+#define N_STAB_MASK 0xe0u
+#define N_TYPE_MASK 0x0eu
+#define N_SECT      0x0eu
+#define N_EXT       0x01u
 
 typedef struct {
     uint32_t magic;
@@ -134,6 +158,31 @@ typedef struct {
 } section_64;
 
 typedef struct {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t symoff;
+    uint32_t nsyms;
+    uint32_t stroff;
+    uint32_t strsize;
+} symtab_command;
+
+// LC_FUNCTION_STARTS (among others) points at an opaque linkedit blob.
+typedef struct {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint32_t dataoff;
+    uint32_t datasize;
+} linkedit_data_command;
+
+typedef struct {
+    uint32_t n_strx;
+    uint8_t  n_type;
+    uint8_t  n_sect;
+    uint16_t n_desc;
+    uint64_t n_value;
+} nlist_64;
+
+typedef struct {
     uint32_t magic;
     uint32_t nfat_arch;
 } fat_header;
@@ -175,6 +224,63 @@ static bool read_at(FILE *f, long off, void *buf, size_t n)
     return fread(buf, 1, n, f) == n;
 }
 
+// === Symbolization ===
+//
+// Findings are annotated with the containing function
+// ("<_foo+0x18>"), resolved from whatever the container carries:
+// Mach-O nlist plus LC_FUNCTION_STARTS, or the ELF .symtab (falling
+// back to .dynsym). The parsing lives here because it is
+// container-format work; the library only consumes a finished, sorted
+// armlint_symbol table. Everything below is best-effort -- a stripped
+// binary or malformed symbol metadata degrades to unannotated
+// findings, never to a failed lint.
+
+// Working entry while assembling one code section's anchor table.
+typedef struct {
+    uint64_t vaddr;
+    const char *name;   // NULL for a bare function start
+    bool external;
+} anchor;
+
+static int anchor_cmp(const void *a, const void *b)
+{
+    const anchor *x = (const anchor *)a;
+    const anchor *y = (const anchor *)b;
+    if (x->vaddr != y->vaddr) {
+        return x->vaddr < y->vaddr ? -1 : 1;
+    }
+    // Same address: the preferred anchor sorts first and survives the
+    // dedupe. Named beats nameless (a function start usually
+    // duplicates some symbol's address), external beats local (_main
+    // beats the assembler's ltmp0), and the name itself breaks any
+    // remaining tie so the ordering is deterministic.
+    if ((x->name != NULL) != (y->name != NULL)) {
+        return x->name != NULL ? -1 : 1;
+    }
+    if (x->external != y->external) {
+        return x->external ? -1 : 1;
+    }
+    return x->name != NULL ? strcmp(x->name, y->name) : 0;
+}
+
+// Sort n working anchors, keep the preferred one per address, and lay
+// the survivors out in the armlint_symbol shape the library consumes.
+// out must have room for n entries; returns how many were written.
+static size_t anchors_finish(anchor *tmp, size_t n, armlint_symbol *out)
+{
+    qsort(tmp, n, sizeof(*tmp), anchor_cmp);
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (m > 0 && out[m - 1].vaddr == tmp[i].vaddr) {
+            continue;
+        }
+        out[m].vaddr = tmp[i].vaddr;
+        out[m].name = tmp[i].name;
+        m++;
+    }
+    return m;
+}
+
 // CLI-level reporting state, set once in main() and read by scan_code
 // (the only caller of check_instructions). g_features is the baseline
 // feature/audit set from the command line; scan_macho augments it
@@ -190,10 +296,12 @@ static armlint_census *g_census = NULL;
 
 // Read `size` bytes at `base_offset` and run all checks with the
 // given feature/audit set. vmaddr is the section's runtime base,
-// reported back to the user in findings.
+// reported back to the user in findings; symbols/nsymbols (possibly
+// NULL/0) annotate verbose findings with the containing function.
 static int scan_code(FILE *f, const char *path, long base_offset,
                      uint64_t size, uint64_t vmaddr, csh handle,
-                     unsigned features)
+                     unsigned features,
+                     const armlint_symbol *symbols, size_t nsymbols)
 {
     // A64 instructions are 4 bytes. Truncate trailing slop (e.g.
     // section padding) rather than fail the whole binary.
@@ -221,7 +329,8 @@ static int scan_code(FILE *f, const char *path, long base_offset,
         n = 0;
     } else {
         n = check_instructions(handle, buf, aligned, vmaddr,
-                               g_verbose, g_summary, features);
+                               g_verbose, g_summary, features,
+                               symbols, nsymbols);
     }
     free(buf);
     return n;
@@ -249,34 +358,152 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
         return -1;
     }
 
+    // Read the section header table whole: the scan wants the
+    // executable sections; symbolization wants .symtab (or .dynsym)
+    // and the string table it links to.
+    if (ehdr.e_shnum == 0) {
+        return 0;
+    }
+    Elf64_Shdr *shdrs = malloc((size_t)ehdr.e_shnum * sizeof(*shdrs));
+    if (shdrs == NULL) {
+        fprintf(stderr, "%s: failed to allocate section headers\n", path);
+        return -1;
+    }
+    for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
+        if (!read_at(f, ehdr.e_shoff + (long)i * (long)sizeof(Elf64_Shdr),
+                     &shdrs[i], sizeof(Elf64_Shdr))) {
+            fprintf(stderr, "%s: failed to read section header %u\n", path, i);
+            free(shdrs);
+            return -1;
+        }
+    }
+
+    // Load the symbol table whole, preferring the full .symtab over
+    // .dynsym (a stripped binary's exports still name the functions
+    // that matter most). Annotations render only on -v finding
+    // headers, so the other modes skip the IO entirely.
+    Elf64_Sym *syms = NULL;
+    size_t nsyms = 0;
+    char *strtab = NULL;
+    uint64_t strsize = 0;
+    if (g_verbose && g_census == NULL) {
+        uint16_t symidx = 0;    // section 0 is the null section: "none"
+        for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
+            if (shdrs[i].sh_type == SHT_SYMTAB) {
+                symidx = i;
+                break;
+            }
+            if (shdrs[i].sh_type == SHT_DYNSYM && symidx == 0) {
+                symidx = i;
+            }
+        }
+        if (symidx != 0
+                && shdrs[symidx].sh_link < ehdr.e_shnum
+                && shdrs[symidx].sh_offset <= file_size
+                && shdrs[symidx].sh_size <= file_size - shdrs[symidx].sh_offset) {
+            const Elf64_Shdr *str = &shdrs[shdrs[symidx].sh_link];
+            if (str->sh_size > 0
+                    && str->sh_offset <= file_size
+                    && str->sh_size <= file_size - str->sh_offset) {
+                nsyms = shdrs[symidx].sh_size / sizeof(Elf64_Sym);
+                syms = malloc(nsyms * sizeof(Elf64_Sym));
+                strtab = malloc(str->sh_size + 1);
+                if (syms != NULL && strtab != NULL
+                        && read_at(f, (long)shdrs[symidx].sh_offset, syms,
+                                   nsyms * sizeof(Elf64_Sym))
+                        && read_at(f, (long)str->sh_offset, strtab,
+                                   str->sh_size)) {
+                    strsize = str->sh_size;
+                    strtab[strsize] = '\0';
+                } else {
+                    free(syms);
+                    free(strtab);
+                    syms = NULL;
+                    strtab = NULL;
+                    nsyms = 0;
+                }
+            }
+        }
+    }
+
     int errors = 0;
     for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
-        Elf64_Shdr shdr;
-        if (!read_at(f, ehdr.e_shoff + (long)i * (long)sizeof(shdr),
-                     &shdr, sizeof(shdr))) {
-            fprintf(stderr, "%s: failed to read section header %u\n", path, i);
-            return -1;
-        }
-        if (shdr.sh_type != SHT_PROGBITS
-            || !(shdr.sh_flags & SHF_EXECINSTR)
-            || shdr.sh_size == 0) {
+        const Elf64_Shdr *shdr = &shdrs[i];
+        if (shdr->sh_type != SHT_PROGBITS
+            || !(shdr->sh_flags & SHF_EXECINSTR)
+            || shdr->sh_size == 0) {
             continue;
         }
-        if (shdr.sh_offset > file_size
-            || shdr.sh_size > file_size - shdr.sh_offset) {
+        if (shdr->sh_offset > file_size
+            || shdr->sh_size > file_size - shdr->sh_offset) {
             fprintf(stderr, "%s: section %u out of bounds\n", path, i);
-            return -1;
+            errors = -1;
+            break;
         }
+
+        // This section's anchors: defined symbols the table assigns to
+        // section i. st_value is absolute in linked binaries and
+        // section-relative in ET_REL objects (where sh_addr, normally
+        // 0, still offsets it) -- in both cases the same space as
+        // sh_addr + buffer offset, under which findings resolve.
+        // Three filters: mapping symbols ($x/$d mark code/data runs,
+        // not functions); STT_FUNC of any binding (a C or Go function,
+        // local or exported); STT_NOTYPE only when non-local --
+        // assembly functions carry no .type and surface as global
+        // NOTYPE, but *local* NOTYPE labels are inner jump targets
+        // that Mach-O assemblers never emit into the symtab, and
+        // admitting them would fork the fixture snapshots by host
+        // object format. STT_OBJECT is dropped so a data island inside
+        // .text cannot claim the code after it.
+        armlint_symbol *table = NULL;
+        anchor *tmp = NULL;
+        size_t ntable = 0;
+        if (nsyms > 0) {
+            tmp = malloc(nsyms * sizeof(*tmp));
+            table = malloc(nsyms * sizeof(*table));
+            if (tmp != NULL && table != NULL) {
+                size_t n = 0;
+                for (size_t s = 0; s < nsyms; ++s) {
+                    const Elf64_Sym *sym = &syms[s];
+                    unsigned type = sym->st_info & 0xfu;
+                    unsigned bind = sym->st_info >> 4;
+                    if (sym->st_shndx != i || sym->st_name >= strsize) {
+                        continue;
+                    }
+                    const char *name = strtab + sym->st_name;
+                    if (name[0] == '\0' || name[0] == '$') {
+                        continue;
+                    }
+                    if (type != STT_FUNC
+                        && !(type == STT_NOTYPE && bind != STB_LOCAL)) {
+                        continue;
+                    }
+                    tmp[n].vaddr = sym->st_value
+                        + (ehdr.e_type == ET_REL ? shdr->sh_addr : 0);
+                    tmp[n].name = name;
+                    tmp[n].external = bind != STB_LOCAL;
+                    n++;
+                }
+                ntable = anchors_finish(tmp, n, table);
+            }
+        }
+
         // ELF has no arm64e slice concept: pac-ret/BTI on Linux is
         // recorded in .note.gnu.property, not the cpusubtype, so the
         // Mach-O auto-arm does not apply here -- pass the baseline.
-        int n = scan_code(f, path, (long)shdr.sh_offset, shdr.sh_size,
-                          shdr.sh_addr, handle, g_features);
+        int n = scan_code(f, path, (long)shdr->sh_offset, shdr->sh_size,
+                          shdr->sh_addr, handle, g_features, table, ntable);
+        free(tmp);
+        free(table);
         if (n < 0) {
-            return -1;
+            errors = -1;
+            break;
         }
         errors += n;
     }
+    free(shdrs);
+    free(syms);
+    free(strtab);
     return errors;
 }
 
@@ -331,45 +558,66 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
         features |= ARMLINT_AUDIT_PAC | ARMLINT_FEATURE_PAUTH;
     }
 
-    int errors = 0;
+    // Walk the load commands, collecting rather than scanning: the
+    // code sections to lint, the __TEXT vmaddr (the base
+    // LC_FUNCTION_STARTS deltas accumulate from), and the two
+    // linkedit commands symbolization reads. Those sort after the
+    // segments, so scanning inline would annotate nothing.
     long lc_offset = base_offset + (long)sizeof(mh);
     long lc_end = lc_offset + (long)mh.sizeofcmds;
+
+    struct code_section {
+        uint64_t offset;    // slice-relative file offset
+        uint64_t size;
+        uint64_t addr;
+        uint32_t ordinal;   // 1-based across all segments, as n_sect counts
+    } *sections = NULL;
+    size_t nsections = 0, sections_cap = 0;
+    symtab_command st;
+    linkedit_data_command fs;
+    bool have_st = false, have_fs = false, have_text = false;
+    uint64_t text_vmaddr = 0;
+    uint32_t sect_ordinal = 0;
 
     for (uint32_t i = 0; i < mh.ncmds; ++i) {
         if (lc_offset + (long)sizeof(load_command_hdr) > lc_end) {
             fprintf(stderr, "%s: load command %u truncated\n", path, i);
-            return -1;
+            goto fail;
         }
         load_command_hdr lc;
         if (!read_at(f, lc_offset, &lc, sizeof(lc))) {
             fprintf(stderr, "%s: failed to read load command %u\n", path, i);
-            return -1;
+            goto fail;
         }
         if (lc.cmdsize < sizeof(lc)
                 || (long)lc.cmdsize > lc_end - lc_offset) {
             fprintf(stderr, "%s: invalid cmdsize on load command %u\n", path, i);
-            return -1;
+            goto fail;
         }
 
         if (lc.cmd == LC_SEGMENT_64) {
             if (lc.cmdsize < sizeof(segment_command_64)) {
                 fprintf(stderr, "%s: short LC_SEGMENT_64\n", path);
-                return -1;
+                goto fail;
             }
             segment_command_64 seg;
             if (!read_at(f, lc_offset, &seg, sizeof(seg))) {
                 fprintf(stderr, "%s: failed to read segment %u\n", path, i);
-                return -1;
+                goto fail;
             }
             if (seg.nsects > 1024) {
                 fprintf(stderr, "%s: implausible nsects=%u\n", path, seg.nsects);
-                return -1;
+                goto fail;
             }
             uint64_t need = (uint64_t)sizeof(seg)
                 + (uint64_t)seg.nsects * sizeof(section_64);
             if (need > lc.cmdsize) {
                 fprintf(stderr, "%s: section headers overflow segment\n", path);
-                return -1;
+                goto fail;
+            }
+            if (strncmp(seg.segname, "__TEXT", sizeof(seg.segname)) == 0) {
+                text_vmaddr = seg.vmaddr;
+                have_text = true;
             }
             long sects_off = lc_offset + (long)sizeof(seg);
             for (uint32_t j = 0; j < seg.nsects; ++j) {
@@ -378,8 +626,9 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                 if (!read_at(f, off, &sec, sizeof(sec))) {
                     fprintf(stderr, "%s: failed to read section %u of segment %u\n",
                         path, j, i);
-                    return -1;
+                    goto fail;
                 }
+                sect_ordinal++;     // n_sect counts every section
                 if (!(sec.flags & S_ATTR_PURE_INSTRUCTIONS) || sec.size == 0) {
                     continue;
                 }
@@ -387,19 +636,190 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                         || sec.size > slice_size - (uint64_t)sec.offset) {
                     fprintf(stderr, "%s: section %.16s,%.16s out of bounds\n",
                         path, sec.segname, sec.sectname);
-                    return -1;
+                    goto fail;
                 }
-                int n = scan_code(f, path, base_offset + (long)sec.offset,
-                                  sec.size, sec.addr, handle, features);
-                if (n < 0) {
-                    return -1;
+                if (nsections == sections_cap) {
+                    size_t cap = sections_cap == 0 ? 8 : sections_cap * 2;
+                    struct code_section *grown =
+                        realloc(sections, cap * sizeof(*sections));
+                    if (grown == NULL) {
+                        fprintf(stderr, "%s: failed to allocate section list\n",
+                            path);
+                        goto fail;
+                    }
+                    sections = grown;
+                    sections_cap = cap;
                 }
-                errors += n;
+                sections[nsections].offset = sec.offset;
+                sections[nsections].size = sec.size;
+                sections[nsections].addr = sec.addr;
+                sections[nsections].ordinal = sect_ordinal;
+                nsections++;
             }
+        } else if (lc.cmd == LC_SYMTAB
+                   && lc.cmdsize >= sizeof(symtab_command)) {
+            have_st = read_at(f, lc_offset, &st, sizeof(st));
+        } else if (lc.cmd == LC_FUNCTION_STARTS
+                   && lc.cmdsize >= sizeof(linkedit_data_command)) {
+            have_fs = read_at(f, lc_offset, &fs, sizeof(fs));
         }
         lc_offset += (long)lc.cmdsize;
     }
+
+    // Symbolization inputs, loaded whole per slice and shared by every
+    // code section: the nlist array with its string table, and the
+    // decoded function-start addresses. Best-effort throughout --
+    // absence (a stripped binary; Go's linker emits neither) or
+    // malformed metadata degrades to unannotated findings. All
+    // linkedit offsets are slice-relative. Annotations render only on
+    // -v finding headers, so the other modes skip the IO.
+    nlist_64 *nl = NULL;
+    size_t nsyms = 0;
+    char *strtab = NULL;
+    uint64_t strsize = 0;
+    uint64_t *fstarts = NULL;
+    size_t nfstarts = 0;
+    if (g_verbose && g_census == NULL && have_st && st.nsyms > 0
+            && st.nsyms < (1u << 24)
+            && (uint64_t)st.symoff <= slice_size
+            && (uint64_t)st.nsyms * sizeof(nlist_64)
+                <= slice_size - st.symoff
+            && st.strsize > 0
+            && (uint64_t)st.stroff <= slice_size
+            && (uint64_t)st.strsize <= slice_size - st.stroff) {
+        nl = malloc((size_t)st.nsyms * sizeof(nlist_64));
+        strtab = malloc((size_t)st.strsize + 1);
+        if (nl != NULL && strtab != NULL
+                && read_at(f, base_offset + (long)st.symoff, nl,
+                           (size_t)st.nsyms * sizeof(nlist_64))
+                && read_at(f, base_offset + (long)st.stroff, strtab,
+                           st.strsize)) {
+            nsyms = st.nsyms;
+            strsize = st.strsize;
+            strtab[strsize] = '\0';
+        } else {
+            free(nl);
+            free(strtab);
+            nl = NULL;
+            strtab = NULL;
+        }
+    }
+    if (g_verbose && g_census == NULL && have_fs && have_text
+            && fs.datasize > 0
+            && (uint64_t)fs.dataoff <= slice_size
+            && (uint64_t)fs.datasize <= slice_size - fs.dataoff) {
+        // The blob is a ULEB128 stream: deltas between successive
+        // function entries, the first relative to __TEXT's vmaddr; a
+        // zero where a new delta would begin terminates it (the tail
+        // is zero padding). Each entry consumes at least one byte, so
+        // datasize bounds the count.
+        uint8_t *blob = malloc(fs.datasize);
+        fstarts = malloc((size_t)fs.datasize * sizeof(uint64_t));
+        if (blob != NULL && fstarts != NULL
+                && read_at(f, base_offset + (long)fs.dataoff, blob,
+                           fs.datasize)) {
+            const uint8_t *p = blob;
+            const uint8_t *end = blob + fs.datasize;
+            uint64_t addr = text_vmaddr;
+            while (p < end && *p != 0) {
+                uint64_t delta = 0;
+                unsigned shift = 0;
+                bool malformed = false;
+                for (;;) {
+                    if (p == end || shift >= 64) {
+                        malformed = true;   // dangling continuation bit
+                        break;
+                    }
+                    uint8_t byte = *p++;
+                    delta |= (uint64_t)(byte & 0x7fu) << shift;
+                    shift += 7;
+                    if ((byte & 0x80u) == 0) {
+                        break;
+                    }
+                }
+                if (malformed) {
+                    break;      // keep the valid prefix
+                }
+                addr += delta;
+                fstarts[nfstarts++] = addr;
+            }
+        } else {
+            free(fstarts);
+            fstarts = NULL;
+        }
+        free(blob);
+    }
+
+    int errors = 0;
+    for (size_t sidx = 0; sidx < nsections; ++sidx) {
+        const struct code_section *cs = &sections[sidx];
+        // Assemble this section's anchor table: nlist definitions
+        // claiming its ordinal, plus function starts landing inside
+        // it. A function start usually duplicates some symbol's
+        // address; anchors_finish keeps the named external one. Stab
+        // entries are debug records, not definitions, and unlike ELF
+        // there is no type field to filter on -- any named definition
+        // in a code section anchors (which is also what keeps the
+        // Darwin-only fixtures' non-.globl labels annotating).
+        armlint_symbol *table = NULL;
+        anchor *tmp = NULL;
+        size_t ntable = 0;
+        size_t max = nsyms + nfstarts;
+        if (max > 0) {
+            tmp = malloc(max * sizeof(*tmp));
+            table = malloc(max * sizeof(*table));
+            if (tmp != NULL && table != NULL) {
+                size_t n = 0;
+                for (size_t s = 0; s < nsyms; ++s) {
+                    const nlist_64 *sym = &nl[s];
+                    if ((sym->n_type & N_STAB_MASK) != 0
+                            || (sym->n_type & N_TYPE_MASK) != N_SECT
+                            || sym->n_sect != cs->ordinal
+                            || sym->n_strx >= strsize) {
+                        continue;
+                    }
+                    const char *name = strtab + sym->n_strx;
+                    if (name[0] == '\0') {
+                        continue;
+                    }
+                    tmp[n].vaddr = sym->n_value;
+                    tmp[n].name = name;
+                    tmp[n].external = (sym->n_type & N_EXT) != 0;
+                    n++;
+                }
+                for (size_t s = 0; s < nfstarts; ++s) {
+                    if (fstarts[s] >= cs->addr
+                            && fstarts[s] - cs->addr < cs->size) {
+                        tmp[n].vaddr = fstarts[s];
+                        tmp[n].name = NULL;
+                        tmp[n].external = false;
+                        n++;
+                    }
+                }
+                ntable = anchors_finish(tmp, n, table);
+            }
+        }
+        int n = scan_code(f, path, base_offset + (long)cs->offset,
+                          cs->size, cs->addr, handle, features,
+                          table, ntable);
+        free(tmp);
+        free(table);
+        if (n < 0) {
+            errors = -1;
+            break;
+        }
+        errors += n;
+    }
+
+    free(sections);
+    free(nl);
+    free(strtab);
+    free(fstarts);
     return errors;
+
+fail:
+    free(sections);
+    return -1;
 }
 
 // Walk a fat binary and scan every ARM64-family slice. arm64 and

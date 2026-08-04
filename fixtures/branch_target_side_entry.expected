@@ -1,12 +1,12 @@
-ADD + LDR foldable to pre-indexed LDR at offset: 0x24: -> ldrb w11, [x10, #0x1]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x24 <_main+0x24>: -> ldrb w11, [x10, #0x1]! (2 instructions)
   add x10, x10, #0x1
   ldrb w11, [x10]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x2c: -> ldr x12, [x12, #0x10] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0x2c <_main+0x2c>: -> ldr x12, [x12, #0x10] (2 instructions)
   add x12, x12, #0x10
   ldr x12, [x12]
 
-MOV #0 + use foldable to ZR at offset: 0x68: -> orr x0, xzr, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x68 <_main+0x68>: -> orr x0, xzr, xzr (2 instructions)
   movz x8, #0x0
   orr x0, xzr, x8
 

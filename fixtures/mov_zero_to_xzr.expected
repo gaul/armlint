@@ -1,72 +1,72 @@
-MOV #0 + use foldable to ZR at offset: 0x0: -> str xzr, [x1] (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x0 <_main>: -> str xzr, [x1] (2 instructions)
   movz x0, #0x0
   str x0, [x1]
 
-MOV #0 + use foldable to ZR at offset: 0x8: -> str wzr, [x1] (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x8 <_main+0x8>: -> str wzr, [x1] (2 instructions)
   movz w0, #0x0
   str w0, [x1]
 
-MOV #0 + use foldable to ZR at offset: 0x10: -> strb wzr, [x1] (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x10 <_main+0x10>: -> strb wzr, [x1] (2 instructions)
   movz w0, #0x0
   strb w0, [x1]
 
-MOV #0 + use foldable to ZR at offset: 0x18: -> strh wzr, [x1] (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x18 <_main+0x18>: -> strh wzr, [x1] (2 instructions)
   movz w0, #0x0
   strh w0, [x1]
 
-MOV #0 + use foldable to ZR at offset: 0x20: -> str xzr, [x1, #0x10] (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x20 <_main+0x20>: -> str xzr, [x1, #0x10] (2 instructions)
   movz x0, #0x0
   str x0, [x1, #0x10]
 
-MOV #0 + use foldable to ZR at offset: 0x28: -> str xzr, [sp, #0x8] (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x28 <_main+0x28>: -> str xzr, [sp, #0x8] (2 instructions)
   movz x0, #0x0
   str x0, [sp, #0x8]
 
-MOV #0 + use foldable to ZR at offset: 0x30: -> add x3, x2, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x30 <_main+0x30>: -> add x3, x2, xzr (2 instructions)
   movz x0, #0x0
   add x3, x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0x38: -> sub x3, xzr, x2 (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x38 <_main+0x38>: -> sub x3, xzr, x2 (2 instructions)
   movz x0, #0x0
   sub x3, x0, x2
 
-MOV #0 + use foldable to ZR at offset: 0x40: -> cmp x2, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x40 <_main+0x40>: -> cmp x2, xzr (2 instructions)
   movz x0, #0x0
   cmp x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0x48: -> cmn x2, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x48 <_main+0x48>: -> cmn x2, xzr (2 instructions)
   movz x0, #0x0
   cmn x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0x50: -> and x3, x2, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x50 <_main+0x50>: -> and x3, x2, xzr (2 instructions)
   movz x0, #0x0
   and x3, x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0x58: -> orr x3, x2, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x58 <_main+0x58>: -> orr x3, x2, xzr (2 instructions)
   movz x0, #0x0
   orr x3, x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0x60: -> eor x3, x2, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x60 <_main+0x60>: -> eor x3, x2, xzr (2 instructions)
   movz x0, #0x0
   eor x3, x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0x68: -> tst x2, xzr (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x68 <_main+0x68>: -> tst x2, xzr (2 instructions)
   movz x0, #0x0
   tst x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0x90: -> csel x3, xzr, x2, ne (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x90 <_main+0x90>: -> csel x3, xzr, x2, ne (2 instructions)
   movz x0, #0x0
   csel x3, x0, x2, ne
 
-MOV #0 + use foldable to ZR at offset: 0x98: -> csneg w3, w2, wzr, lt (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x98 <_main+0x98>: -> csneg w3, w2, wzr, lt (2 instructions)
   movz w0, #0x0
   csneg w3, w2, w0, lt
 
-MOV #0 + use foldable to ZR at offset: 0xa0: -> ccmp xzr, x2, #0x4, ne (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0xa0 <_main+0xa0>: -> ccmp xzr, x2, #0x4, ne (2 instructions)
   movz x0, #0x0
   ccmp x0, x2, #0x4, ne
 
-CSEL same-operand identity at offset: 0xac: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
+CSEL same-operand identity at offset: 0xac <_main+0xac>: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
   csel x3, x0, x0, ne
 
 Optimization opportunities by type:

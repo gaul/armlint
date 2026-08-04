@@ -1,26 +1,26 @@
-CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0x0: -> smax x0, x1, x2 (2 instructions)
+CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0x0 <_main>: -> smax x0, x1, x2 (2 instructions)
   cmp x1, x2
   csel x0, x1, x2, gt
 
-CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0xc: -> umin w0, w1, w2 (2 instructions)
+CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0xc <_main+0xc>: -> umin w0, w1, w2 (2 instructions)
   cmp w1, w2
   csel w0, w2, w1, hi
 
-CMP #0 + CNEG foldable to ABS (CSSC) at offset: 0x18: -> abs x0, x1 (2 instructions)
+CMP #0 + CNEG foldable to ABS (CSSC) at offset: 0x18 <_main+0x18>: -> abs x0, x1 (2 instructions)
   cmp x1, #0
   cneg x0, x1, mi
 
-RBIT + CLZ foldable to CTZ (CSSC) at offset: 0x24: -> ctz x0, x1 (2 instructions)
+RBIT + CLZ foldable to CTZ (CSSC) at offset: 0x24 <_main+0x24>: -> ctz x0, x1 (2 instructions)
   rbit x0, x1
   clz x0, x0
 
-NEON popcount foldable to CNT (CSSC) at offset: 0x2c: -> cnt x0, x1 (4 instructions)
+NEON popcount foldable to CNT (CSSC) at offset: 0x2c <_main+0x2c>: -> cnt x0, x1 (4 instructions)
   fmov d0, x1
   cnt v0.8b, v0.8b
   addv b0, v0.8b
   fmov w0, s0
 
-branch to the next instruction is a no-op at offset: 0x48: -> delete: control falls through either way (1 instructions)
+branch to the next instruction is a no-op at offset: 0x48 <_main+0x48>: -> delete: control falls through either way (1 instructions)
   b.eq #0x4c
 
 Optimization opportunities by type:

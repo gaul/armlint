@@ -1,136 +1,136 @@
-ADD + LDR foldable to pre-indexed LDR at offset: 0x0: -> ldr x3, [x1, #0x10]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x0 <_main>: -> ldr x3, [x1, #0x10]! (2 instructions)
   add x1, x1, #0x10
   ldr x3, [x1]
 
-LDR + ADD foldable to post-indexed LDR at offset: 0x4: -> ldr x3, [x1], #0x10 (2 instructions)
+LDR + ADD foldable to post-indexed LDR at offset: 0x4 <_main+0x4>: -> ldr x3, [x1], #0x10 (2 instructions)
   ldr x3, [x1]
   add x1, x1, #0x10
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0x8: -> ldr w3, [x1, #0x10]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x8 <_main+0x8>: -> ldr w3, [x1, #0x10]! (2 instructions)
   add x1, x1, #0x10
   ldr w3, [x1]
 
-LDR + ADD foldable to post-indexed LDR at offset: 0xc: -> ldr w3, [x1], #0x5 (2 instructions)
+LDR + ADD foldable to post-indexed LDR at offset: 0xc <_main+0xc>: -> ldr w3, [x1], #0x5 (2 instructions)
   ldr w3, [x1]
   add x1, x1, #0x5
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0x10: -> ldrb w3, [x1, #0x5]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x10 <_main+0x10>: -> ldrb w3, [x1, #0x5]! (2 instructions)
   add x1, x1, #0x5
   ldrb w3, [x1]
 
-LDR + ADD foldable to post-indexed LDR at offset: 0x14: -> ldrb w3, [x1], #0x6 (2 instructions)
+LDR + ADD foldable to post-indexed LDR at offset: 0x14 <_main+0x14>: -> ldrb w3, [x1], #0x6 (2 instructions)
   ldrb w3, [x1]
   add x1, x1, #0x6
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0x18: -> ldrh w3, [x1, #0x6]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x18 <_main+0x18>: -> ldrh w3, [x1, #0x6]! (2 instructions)
   add x1, x1, #0x6
   ldrh w3, [x1]
 
-LDR + ADD foldable to post-indexed LDR at offset: 0x1c: -> ldrh w3, [x1], #0x10 (2 instructions)
+LDR + ADD foldable to post-indexed LDR at offset: 0x1c <_main+0x1c>: -> ldrh w3, [x1], #0x10 (2 instructions)
   ldrh w3, [x1]
   add x1, x1, #0x10
 
-ADD + STR foldable to pre-indexed STR at offset: 0x20: -> str x3, [x1, #0x10]! (2 instructions)
+ADD + STR foldable to pre-indexed STR at offset: 0x20 <_main+0x20>: -> str x3, [x1, #0x10]! (2 instructions)
   add x1, x1, #0x10
   str x3, [x1]
 
-STR + ADD foldable to post-indexed STR at offset: 0x24: -> str x3, [x1], #0x10 (2 instructions)
+STR + ADD foldable to post-indexed STR at offset: 0x24 <_main+0x24>: -> str x3, [x1], #0x10 (2 instructions)
   str x3, [x1]
   add x1, x1, #0x10
 
-ADD + STR foldable to pre-indexed STR at offset: 0x28: -> str w3, [x1, #0x10]! (2 instructions)
+ADD + STR foldable to pre-indexed STR at offset: 0x28 <_main+0x28>: -> str w3, [x1, #0x10]! (2 instructions)
   add x1, x1, #0x10
   str w3, [x1]
 
-STR + ADD foldable to post-indexed STR at offset: 0x2c: -> str w3, [x1], #0x5 (2 instructions)
+STR + ADD foldable to post-indexed STR at offset: 0x2c <_main+0x2c>: -> str w3, [x1], #0x5 (2 instructions)
   str w3, [x1]
   add x1, x1, #0x5
 
-ADD + STR foldable to pre-indexed STR at offset: 0x30: -> strb w3, [x1, #0x5]! (2 instructions)
+ADD + STR foldable to pre-indexed STR at offset: 0x30 <_main+0x30>: -> strb w3, [x1, #0x5]! (2 instructions)
   add x1, x1, #0x5
   strb w3, [x1]
 
-STR + ADD foldable to post-indexed STR at offset: 0x34: -> strb w3, [x1], #0x6 (2 instructions)
+STR + ADD foldable to post-indexed STR at offset: 0x34 <_main+0x34>: -> strb w3, [x1], #0x6 (2 instructions)
   strb w3, [x1]
   add x1, x1, #0x6
 
-ADD + STR foldable to pre-indexed STR at offset: 0x38: -> strh w3, [x1, #0x6]! (2 instructions)
+ADD + STR foldable to pre-indexed STR at offset: 0x38 <_main+0x38>: -> strh w3, [x1, #0x6]! (2 instructions)
   add x1, x1, #0x6
   strh w3, [x1]
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0x40: -> ldr x3, [sp, #0x10]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x40 <_main+0x40>: -> ldr x3, [sp, #0x10]! (2 instructions)
   add sp, sp, #0x10
   ldr x3, [sp]
 
-LDR + ADD foldable to post-indexed LDR at offset: 0x44: -> ldr x3, [sp], #0x8 (2 instructions)
+LDR + ADD foldable to post-indexed LDR at offset: 0x44 <_main+0x44>: -> ldr x3, [sp], #0x8 (2 instructions)
   ldr x3, [sp]
   add sp, sp, #0x8
 
-ADD + STR foldable to pre-indexed STR at offset: 0x48: -> str xzr, [sp, #0x8]! (2 instructions)
+ADD + STR foldable to pre-indexed STR at offset: 0x48 <_main+0x48>: -> str xzr, [sp, #0x8]! (2 instructions)
   add sp, sp, #0x8
   str xzr, [sp]
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0x50: -> ldr x3, [x1, #0xff]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x50 <_main+0x50>: -> ldr x3, [x1, #0xff]! (2 instructions)
   add x1, x1, #0xff
   ldr x3, [x1]
 
-LDR + ADD foldable to post-indexed LDR at offset: 0x54: -> ldr x3, [x1], #0x1 (2 instructions)
+LDR + ADD foldable to post-indexed LDR at offset: 0x54 <_main+0x54>: -> ldr x3, [x1], #0x1 (2 instructions)
   ldr x3, [x1]
   add x1, x1, #0x1
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0x58: -> ldr x3, [x1, #0x1]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0x58 <_main+0x58>: -> ldr x3, [x1, #0x1]! (2 instructions)
   add x1, x1, #0x1
   ldr x3, [x1]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x70: -> ldr x4, [x4, #0x10] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0x70 <_main+0x70>: -> ldr x4, [x4, #0x10] (2 instructions)
   add x4, x4, #0x10
   ldr x4, [x4]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x68: -> ldr x3, [x1, #0x1000] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0x68 <_main+0x68>: -> ldr x3, [x1, #0x1000] (2 instructions)
   add x1, x1, #0x1000
   ldr x3, [x1]
 
-LDR + SUB foldable to post-indexed LDR at offset: 0x84: -> ldr x3, [x1], #-0x10 (2 instructions)
+LDR + SUB foldable to post-indexed LDR at offset: 0x84 <_main+0x84>: -> ldr x3, [x1], #-0x10 (2 instructions)
   ldr x3, [x1]
   sub x1, x1, #0x10
 
-SUB + LDR foldable to pre-indexed LDR at offset: 0x88: -> ldr x3, [x1, #-0x10]! (2 instructions)
+SUB + LDR foldable to pre-indexed LDR at offset: 0x88 <_main+0x88>: -> ldr x3, [x1, #-0x10]! (2 instructions)
   sub x1, x1, #0x10
   ldr x3, [x1]
 
-LDR + ADD foldable to post-indexed LDR at offset: 0x94: -> ldr x3, [x1], #0x10 (2 instructions)
+LDR + ADD foldable to post-indexed LDR at offset: 0x94 <_main+0x94>: -> ldr x3, [x1], #0x10 (2 instructions)
   ldr x3, [x1]
   add x1, x1, #0x10
 
-ADD + LDR foldable to pre-indexed LDR at offset: 0xac: -> ldr q0, [x9, #0x10]! (2 instructions)
+ADD + LDR foldable to pre-indexed LDR at offset: 0xac <_main+0xac>: -> ldr q0, [x9, #0x10]! (2 instructions)
   add x9, x9, #0x10
   ldr q0, [x9]
 
-SUB + STR foldable to pre-indexed STR at offset: 0xb4: -> str d3, [x10, #-0x8]! (2 instructions)
+SUB + STR foldable to pre-indexed STR at offset: 0xb4 <_main+0xb4>: -> str d3, [x10, #-0x8]! (2 instructions)
   sub x10, x10, #0x8
   str d3, [x10]
 
-SUB + STP foldable to pre-indexed STP at offset: 0xbc: -> stp x29, x30, [sp, #-0x20]! (2 instructions)
+SUB + STP foldable to pre-indexed STP at offset: 0xbc <_main+0xbc>: -> stp x29, x30, [sp, #-0x20]! (2 instructions)
   sub sp, sp, #0x20
   stp x29, x30, [sp]
 
-ADD + LDP foldable to pre-indexed LDP at offset: 0xc4: -> ldp x2, x3, [x1, #0x10]! (2 instructions)
+ADD + LDP foldable to pre-indexed LDP at offset: 0xc4 <_main+0xc4>: -> ldp x2, x3, [x1, #0x10]! (2 instructions)
   add x1, x1, #0x10
   ldp x2, x3, [x1]
 
-ADD + LDP foldable to pre-indexed LDP at offset: 0xcc: -> ldp w2, w3, [x4, #0xc]! (2 instructions)
+ADD + LDP foldable to pre-indexed LDP at offset: 0xcc <_main+0xcc>: -> ldp w2, w3, [x4, #0xc]! (2 instructions)
   add x4, x4, #0xc
   ldp w2, w3, [x4]
 
-ADD + LDP foldable to pre-indexed LDP at offset: 0xd4: -> ldpsw x2, x3, [x5, #0x4]! (2 instructions)
+ADD + LDP foldable to pre-indexed LDP at offset: 0xd4 <_main+0xd4>: -> ldpsw x2, x3, [x5, #0x4]! (2 instructions)
   add x5, x5, #0x4
   ldpsw x2, x3, [x5]
 
-SUB + STP foldable to pre-indexed STP at offset: 0xdc: -> stp q0, q1, [x6, #-0x400]! (2 instructions)
+SUB + STP foldable to pre-indexed STP at offset: 0xdc <_main+0xdc>: -> stp q0, q1, [x6, #-0x400]! (2 instructions)
   sub x6, x6, #0x400
   stp q0, q1, [x6]
 
-ADD + LDP foldable to pre-indexed LDP at offset: 0xec: -> ldp x2, x3, [x8, #0x130]! (2 instructions)
+ADD + LDP foldable to pre-indexed LDP at offset: 0xec <_main+0xec>: -> ldp x2, x3, [x8, #0x130]! (2 instructions)
   add x8, x8, #0x130
   ldp x2, x3, [x8]
 

@@ -1,53 +1,53 @@
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x0: -> ldadd x1, x8, [x0] (4 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x0 <_main>: -> ldadd x1, x8, [x0] (4 instructions)
   ldxr x8, [x0]
   add x9, x8, x1
   stxr w10, x9, [x0]
   cbnz w10, #0
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x14: -> ldaddal x1, x8, [x0] (4 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x14 <_main+0x14>: -> ldaddal x1, x8, [x0] (4 instructions)
   ldaxr x8, [x0]
   add x9, x8, x1
   stlxr w10, x9, [x0]
   cbnz w10, #0x14
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x28: -> ldset w1, w8, [x0] (4 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x28 <_main+0x28>: -> ldset w1, w8, [x0] (4 instructions)
   ldxr w8, [x0]
   orr w9, w8, w1
   stxr w10, w9, [x0]
   cbnz w10, #0x28
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x3c: -> mvn w9, w1 ; ldclrb w9, w8, [x0] (4 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x3c <_main+0x3c>: -> mvn w9, w1 ; ldclrb w9, w8, [x0] (4 instructions)
   ldxrb w8, [x0]
   and w9, w8, w1
   stxrb w10, w9, [x0]
   cbnz w10, #0x3c
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x50: -> mov x9, #1 ; ldadd x9, x8, [x0] (4 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x50 <_main+0x50>: -> mov x9, #1 ; ldadd x9, x8, [x0] (4 instructions)
   ldxr x8, [x0]
   add x9, x8, #1
   stxr w10, x9, [x0]
   cbnz w10, #0x50
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x64: -> swpal x2, x8, [x0] (3 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x64 <_main+0x64>: -> swpal x2, x8, [x0] (3 instructions)
   ldaxr x8, [x0]
   stlxr w10, x2, [x0]
   cbnz w10, #0x64
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xb4: -> mov x8, x1 ; cas x8, x2, [x0] ; cmp x8, x1 (5 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xb4 <_main+0xb4>: -> mov x8, x1 ; cas x8, x2, [x0] ; cmp x8, x1 (5 instructions)
   ldxr x8, [x0]
   cmp x8, x1
   b.ne #0xc8
   stxr w10, x2, [x0]
   cbnz w10, #0xb4
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xcc: -> mov w27, wzr ; casal w27, w2, [x0] ; cmp w27, wzr (5 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xcc <_main+0xcc>: -> mov w27, wzr ; casal w27, w2, [x0] ; cmp w27, wzr (5 instructions)
   ldaxr w27, [x0]
   cmp w27, wzr
   b.ne #0xe0
   stlxr w27, w2, [x0]
   cbnz x27, #0xcc
 
-LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xe4: -> mov x8, x1 ; casal x8, xzr, [x0] ; cmp x8, x1 (5 instructions)
+LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xe4 <_main+0xe4>: -> mov x8, x1 ; casal x8, xzr, [x0] ; cmp x8, x1 (5 instructions)
   ldaxr x8, [x0]
   cmp x8, x1
   b.ne #0xf8

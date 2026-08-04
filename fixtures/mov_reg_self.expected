@@ -1,7 +1,7 @@
-redundant MOV to self at offset: 0x0: mov x0, x0 is a no-op (1 instructions)
+redundant MOV to self at offset: 0x0 <_main>: mov x0, x0 is a no-op (1 instructions)
   mov x0, x0
 
-redundant MOV to self at offset: 0x4: mov x5, x5 is a no-op (1 instructions)
+redundant MOV to self at offset: 0x4 <_main+0x4>: mov x5, x5 is a no-op (1 instructions)
   mov x5, x5
 
 Optimization opportunities by type:

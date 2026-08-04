@@ -1,26 +1,26 @@
-CBZ/CBNZ of a live CSET foldable to B.cond at offset: 0x4: -> b.lt 0x10 (CSET stays) (2 instructions)
+CBZ/CBNZ of a live CSET foldable to B.cond at offset: 0x4 <_main+0x4>: -> b.lt 0x10 (CSET stays) (2 instructions)
   cset w8, lt
   cbnz w8, 0x10
 
-branch to the next instruction is a no-op at offset: 0x18: -> delete: control falls through either way (1 instructions)
+branch to the next instruction is a no-op at offset: 0x18 <_main+0x18>: -> delete: control falls through either way (1 instructions)
   tbnz w9, #0, #0x1c
 
-CSET + TBZ/TBNZ #0 foldable into B.cond at offset: 0x14: -> b.gt 0x1c (2 instructions)
+CSET + TBZ/TBNZ #0 foldable into B.cond at offset: 0x14 <_main+0x14>: -> b.gt 0x1c (2 instructions)
   cset w9, gt
   tbnz w9, #0, 0x1c
 
-TBZ/TBNZ #0 of a live CSET foldable to B.cond at offset: 0x24: -> b.eq 0x30 (CSET stays) (2 instructions)
+TBZ/TBNZ #0 of a live CSET foldable to B.cond at offset: 0x24 <_main+0x24>: -> b.eq 0x30 (CSET stays) (2 instructions)
   cset w10, ne
   tbz w10, #0, 0x30
 
-branch to the next instruction is a no-op at offset: 0x3c: -> delete: control falls through either way (1 instructions)
+branch to the next instruction is a no-op at offset: 0x3c <_main+0x3c>: -> delete: control falls through either way (1 instructions)
   tbnz w11, #3, #0x40
 
-EOR #1 of a live CSET foldable to inverted CSET at offset: 0x48: -> cset w13, ls (CSET stays) (2 instructions)
+EOR #1 of a live CSET foldable to inverted CSET at offset: 0x48 <_main+0x48>: -> cset w13, ls (CSET stays) (2 instructions)
   cset w12, hi
   eor w13, w12, #1
 
-NEG of a live CSET foldable to CSETM at offset: 0x5c: -> csetm w15, mi (CSET stays) (2 instructions)
+NEG of a live CSET foldable to CSETM at offset: 0x5c <_main+0x5c>: -> csetm w15, mi (CSET stays) (2 instructions)
   cset w14, mi
   neg w15, w14
 

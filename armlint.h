@@ -2202,6 +2202,31 @@ void armlint_summary_print(const armlint_summary *summary);
 // a NULL summary.
 size_t armlint_summary_instructions(const armlint_summary *summary);
 
+// A code anchor for attributing findings to their containing
+// function: a defined text symbol, or a bare function start
+// (LC_FUNCTION_STARTS in a stripped Mach-O), in which case name is
+// NULL and the anchor renders by its address. The container-format
+// parsing that produces these lives in the caller (main.c reads
+// Mach-O nlist/function starts and ELF .symtab); the library only
+// consumes the finished table.
+typedef struct {
+    uint64_t vaddr;
+    const char *name;
+} armlint_symbol;
+
+// Format the annotation naming the function containing vaddr:
+// "<_foo+0x18>", "<_foo>" when vaddr is the anchor itself, or
+// "<0x100003f80+0x18>" for a nameless function start. symbols must be
+// sorted by ascending vaddr with no duplicates; the greatest anchor
+// at or below vaddr wins. Writes "" when the table is empty or vaddr
+// precedes every anchor (code before the first symbol of a section,
+// e.g. Mach-O stub islands). Very long names (mangled C++/Rust) are
+// truncated; the annotation stays well formed. Returns buf.
+#define ARMLINT_SYMBOL_ANNOTATION_LEN 160
+const char *armlint_symbol_annotation(char *buf, size_t cap,
+                                      const armlint_symbol *symbols,
+                                      size_t nsymbols, uint64_t vaddr);
+
 // Top-level driver: disassemble inst[0..len) at base_addr, run all
 // checks, and return the number of findings (or -1 on a decoding
 // error). In verbose mode each finding is printed -- its one-line
@@ -2210,9 +2235,16 @@ size_t armlint_summary_instructions(const armlint_summary *summary);
 // thousands); the caller's by-type summary is the whole report. If
 // summary is non-NULL, every finding is tallied into it by type and the
 // decoded-instruction total is accumulated, regardless of verbosity.
+//
+// symbols/nsymbols (see armlint_symbol; NULL/0 for none) annotate each
+// verbose finding header with the containing function, resolved at
+// base_addr + start_offset. Symbolization changes rendering only:
+// findings, counts, and summary tallies are identical with and without
+// a table.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
-                       armlint_summary *summary, unsigned features);
+                       armlint_summary *summary, unsigned features,
+                       const armlint_symbol *symbols, size_t nsymbols);
 
 // A by-extension tally of every instruction decoded, the AArch64 analog
 // of a psABI-level census: each instruction is attributed to the FEAT_*

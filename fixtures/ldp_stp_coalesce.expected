@@ -1,52 +1,52 @@
-adjacent LDRs foldable into LDP at offset: 0x0: -> ldp x0, x1, [x10, #0] (2 instructions)
+adjacent LDRs foldable into LDP at offset: 0x0 <_main>: -> ldp x0, x1, [x10, #0] (2 instructions)
   ldr x0, [x10]
   ldr x1, [x10, #8]
 
-adjacent LDRs foldable into LDP (reverse order) at offset: 0x8: -> ldp x2, x3, [x11, #8] (2 instructions)
+adjacent LDRs foldable into LDP (reverse order) at offset: 0x8 <_main+0x8>: -> ldp x2, x3, [x11, #8] (2 instructions)
   ldr x3, [x11, #0x10]
   ldr x2, [x11, #8]
 
-adjacent STRs foldable into STP at offset: 0x10: -> stp w4, w5, [x12, #0] (2 instructions)
+adjacent STRs foldable into STP at offset: 0x10 <_main+0x10>: -> stp w4, w5, [x12, #0] (2 instructions)
   str w4, [x12]
   str w5, [x12, #4]
 
-adjacent LDRSWs foldable into LDPSW at offset: 0x18: -> ldpsw x6, x7, [x13, #0] (2 instructions)
+adjacent LDRSWs foldable into LDPSW at offset: 0x18 <_main+0x18>: -> ldpsw x6, x7, [x13, #0] (2 instructions)
   ldrsw x6, [x13]
   ldrsw x7, [x13, #4]
 
-adjacent LDRs foldable into LDP at offset: 0x40: -> ldp d0, d1, [x2, #0] (2 instructions)
+adjacent LDRs foldable into LDP at offset: 0x40 <_main+0x40>: -> ldp d0, d1, [x2, #0] (2 instructions)
   ldr d0, [x2]
   ldr d1, [x2, #8]
 
-adjacent STRs foldable into STP at offset: 0x48: -> stp q2, q3, [x2, #0] (2 instructions)
+adjacent STRs foldable into STP at offset: 0x48 <_main+0x48>: -> stp q2, q3, [x2, #0] (2 instructions)
   str q2, [x2]
   str q3, [x2, #0x10]
 
-adjacent LDRs foldable into LDP (reverse order) at offset: 0x50: -> ldp s5, s4, [x2, #0] (2 instructions)
+adjacent LDRs foldable into LDP (reverse order) at offset: 0x50 <_main+0x50>: -> ldp s5, s4, [x2, #0] (2 instructions)
   ldr s4, [x2, #4]
   ldr s5, [x2]
 
-adjacent zero STRs foldable into STR xzr at offset: 0x68: -> str xzr, [x12, #8] (2 instructions)
+adjacent zero STRs foldable into STR xzr at offset: 0x68 <_main+0x68>: -> str xzr, [x12, #8] (2 instructions)
   str wzr, [x12, #8]
   str wzr, [x12, #0xc]
 
-adjacent zero STRs foldable into STR xzr at offset: 0x70: -> stur xzr, [x12, #4] (2 instructions)
+adjacent zero STRs foldable into STR xzr at offset: 0x70 <_main+0x70>: -> stur xzr, [x12, #4] (2 instructions)
   str wzr, [x12, #4]
   str wzr, [x12, #8]
 
-adjacent STRs foldable into STP at offset: 0x78: -> stp wzr, w5, [x12, #0] (2 instructions)
+adjacent STRs foldable into STP at offset: 0x78 <_main+0x78>: -> stp wzr, w5, [x12, #0] (2 instructions)
   str wzr, [x12]
   str w5, [x12, #4]
 
-adjacent STRs foldable into STP at offset: 0x80: -> stp x5, x5, [sp, #0] (2 instructions)
+adjacent STRs foldable into STP at offset: 0x80 <_main+0x80>: -> stp x5, x5, [sp, #0] (2 instructions)
   str x5, [sp]
   str x5, [sp, #8]
 
-adjacent STRs foldable into STP at offset: 0x88: -> stp d0, d0, [x2, #0] (2 instructions)
+adjacent STRs foldable into STP at offset: 0x88 <_main+0x88>: -> stp d0, d0, [x2, #0] (2 instructions)
   str d0, [x2]
   str d0, [x2, #8]
 
-adjacent STRs foldable into STP at offset: 0x90: -> stp xzr, xzr, [x12, #0] (2 instructions)
+adjacent STRs foldable into STP at offset: 0x90 <_main+0x90>: -> stp xzr, xzr, [x12, #0] (2 instructions)
   str xzr, [x12]
   str xzr, [x12, #8]
 
