@@ -6,6 +6,17 @@
 // pointer, so the audit auto-dismisses it. A bare br and a raw blr
 // carry no such provenance and stay on the worklist. No x30 spill
 // here, so the LR-spill half of the audit is silent.
+//
+// Darwin-only, via the arm64 .arch sidecar: the table base is
+// materialized with the Mach-O operand syntax _main@PAGE /
+// _main@PAGEOFF, which clang rejects when targeting ELF ("invalid
+// symbol kind for ADRP relocation"). The ELF spelling of the same
+// pair is adrp x17, sym + add x17, x17, :lo12:sym, and the two are
+// mutually exclusive in one source file. The classifier itself is
+// architecture-neutral -- it matches encodings, not relocations --
+// so nothing about it is Mach-O-specific; only this fixture's way of
+// writing the address is. Giving Linux its own coverage of the
+// classifier needs a second fixture in ELF syntax.
 
     .text
     .globl  _main

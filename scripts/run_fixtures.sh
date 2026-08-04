@@ -72,10 +72,14 @@ for s in "$ROOT"/fixtures/*.s; do
     obj="$PROBE/$name.o"
     actual="$PROBE/$name.actual"
 
-    # A fixture may pin a Mach-O cpusubtype via a sidecar
+    # A fixture may pin a Mach-O arch via a sidecar
     # fixtures/<name>.arch (e.g. "arm64e" to exercise the PAC audit's
-    # arm64e auto-arm). cpusubtype is a Mach-O concept, so these run
-    # only on Darwin, and only when the toolchain can build that arch.
+    # arm64e auto-arm). This marks the fixture Mach-O-only, so it runs
+    # on Darwin alone and only when the toolchain can build that arch.
+    # Two reasons to reach for it: the fixture depends on a Mach-O
+    # concept such as cpusubtype, or -- with a plain "arm64" -- its
+    # source uses Mach-O operand syntax (sym@PAGE/@PAGEOFF) that no
+    # ELF assembler accepts.
     fixture_cc_flags=("${CC_FLAGS[@]}")
     if [ -f "$ROOT/fixtures/$name.arch" ]; then
         read -r fx_arch < "$ROOT/fixtures/$name.arch"
