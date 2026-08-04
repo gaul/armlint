@@ -95,7 +95,19 @@ for s in "$ROOT"/fixtures/*.s; do
         fi
     fi
 
-    clang "${fixture_cc_flags[@]}" -c -o "$obj" "$s" 2>/dev/null
+    # A fixture that will not assemble is a bug in that fixture -- a
+    # missing .arch marker on Mach-O-only operand syntax, say -- not a
+    # reason to abandon the run. Under `set -e` an unguarded failure
+    # here killed the script mid-loop, with no FAIL line and no
+    # summary, so a single bad fixture silently hid every fixture
+    # sorting after it. Report it as a failure and keep going.
+    if ! asm_err="$(clang "${fixture_cc_flags[@]}" -c -o "$obj" "$s" 2>&1)"; then
+        printf "  FAIL    %s  (assembly failed)\n" "$name"
+        printf '%s\n' "$asm_err" | sed 's/^/      /'
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES+=("$name")
+        continue
+    fi
     # Snapshot the verbose output: it is the superset (the one-line
     # opportunities plus their disassembled instructions plus the
     # by-type summary), so it exercises all of the report formatting.
