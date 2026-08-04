@@ -2299,9 +2299,23 @@ void armlint_census_destroy(armlint_census *census);
 // Linear-sweep decode of len bytes at base_addr, tallying each
 // instruction's feature group. An undecodable word skips 4 bytes and
 // resyncs, counted as skipped.
+//
+// symbols/nsymbols (see armlint_symbol; NULL/0 for none) additionally
+// tally per-function pac-ret coverage: each boundary inside the range
+// delimits a function reaching to the next boundary (or the range
+// end), and a function counts as signed when any word in its span is
+// PACIASP/PACIBSP or the register-form PACIA/PACIB x30, sp.
+// "Contains" rather than "opens with" tolerates shrink-wrapped
+// prologues that sign only on the spilling path. The denominator is
+// the boundary count -- function starts in a stripped Mach-O, defined
+// text symbols otherwise -- and the ratio is a fingerprint, not a
+// target: leaf functions never spill the return address and
+// legitimately never sign, so even complete pac-ret coverage sits
+// below 100%.
 void armlint_census_scan(armlint_census *census, csh handle,
                          const uint8_t *inst, size_t len,
-                         uint64_t base_addr);
+                         uint64_t base_addr,
+                         const armlint_symbol *symbols, size_t nsymbols);
 
 // Print the census: totals, the mandatory-from ladder by version, the
 // optional-feature and branch-protection lines, and the highest
@@ -2311,6 +2325,13 @@ void armlint_census_print(const armlint_census *census, bool verbose);
 
 size_t armlint_census_instructions(const armlint_census *census);
 size_t armlint_census_skipped(const armlint_census *census);
+
+// Per-function pac-ret coverage accumulated across scans: boundaries
+// seen, and how many of those functions sign the return address. Both
+// 0 when no scan supplied boundaries (the print omits the coverage
+// line in that case, since 0-of-0 and "unknown" must not look alike).
+size_t armlint_census_functions(const armlint_census *census);
+size_t armlint_census_functions_signed(const armlint_census *census);
 
 // Tally for one feature by its display name ("LSE", "DotProd", "BTI",
 // ...); 0 for an unknown name or NULL census.

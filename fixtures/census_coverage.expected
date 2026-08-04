@@ -1,0 +1,14 @@
+ISA census: 6 instructions, 0 undecodable words skipped
+  Armv8.0 baseline: 4
+  mandatory from Armv8.1: none
+  mandatory from Armv8.3: none
+  mandatory from Armv8.4: none
+  mandatory from Armv8.5: none
+  mandatory from Armv8.6: none
+  mandatory from Armv8.7: none
+  mandatory from Armv8.8: none
+  optional features: none
+  branch protection (hint space): PAC (2)
+  pac-ret coverage: 1 of 2 functions sign the return address
+  highest mandatory-from level: Armv8.0 baseline
+    PAC at 0x0, 0x8

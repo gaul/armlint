@@ -14173,6 +14173,12 @@ struct armlint_census {
     size_t baseline;
     size_t instructions;
     size_t skipped;
+    // Per-function pac-ret coverage, tallied only when the caller
+    // supplies function boundaries: how many functions the boundaries
+    // delimit across the scanned ranges, and how many of them contain
+    // a return-address signing.
+    size_t functions;
+    size_t functions_signed;
 };
 
 armlint_census *armlint_census_create(void)
@@ -14193,6 +14199,16 @@ size_t armlint_census_instructions(const armlint_census *census)
 size_t armlint_census_skipped(const armlint_census *census)
 {
     return census == NULL ? 0 : census->skipped;
+}
+
+size_t armlint_census_functions(const armlint_census *census)
+{
+    return census == NULL ? 0 : census->functions;
+}
+
+size_t armlint_census_functions_signed(const armlint_census *census)
+{
+    return census == NULL ? 0 : census->functions_signed;
 }
 
 size_t armlint_census_feature_count(const armlint_census *census,
@@ -14358,13 +14374,54 @@ static int census_classify(const cs_insn *insn)
     return -1;
 }
 
+// The four spellings that sign the return address in a prologue: the
+// hint-space PACIASP/PACIBSP, and the register-form
+// PACIA/PACIB x30, sp with the same operands (rare, but semantically
+// identical). Exact words all.
+static bool census_word_signs_lr(uint32_t w)
+{
+    return w == 0xD503233Fu || w == 0xD503237Fu
+        || w == 0xDAC103FEu || w == 0xDAC107FEu;
+}
+
 void armlint_census_scan(armlint_census *census, csh handle,
                          const uint8_t *inst, size_t len,
-                         uint64_t base_addr)
+                         uint64_t base_addr,
+                         const armlint_symbol *symbols, size_t nsymbols)
 {
     if (census == NULL) {
         return;
     }
+
+    // Per-function pac-ret coverage. Each boundary inside the scanned
+    // range opens a function that runs to the next boundary (or the
+    // range's end); it counts as signed when any word in that span is
+    // a return-address signing. A plain word scan suffices -- all four
+    // spellings are exact words -- and unlike the decode loop below it
+    // costs nothing when no boundaries were supplied.
+    size_t si = 0;
+    while (si < nsymbols && symbols[si].vaddr < base_addr) {
+        si++;
+    }
+    for (; si < nsymbols && symbols[si].vaddr - base_addr < len; si++) {
+        size_t start = (size_t)(symbols[si].vaddr - base_addr);
+        size_t end = len;
+        if (si + 1 < nsymbols && symbols[si + 1].vaddr - base_addr < len) {
+            end = (size_t)(symbols[si + 1].vaddr - base_addr);
+        }
+        bool has_signing = false;
+        for (size_t o = (start + 3) & ~(size_t)3; o + 4 <= end; o += 4) {
+            if (census_word_signs_lr(buf_word_at(inst, o))) {
+                has_signing = true;
+                break;
+            }
+        }
+        census->functions++;
+        if (has_signing) {
+            census->functions_signed++;
+        }
+    }
+
     cs_insn *insn = cs_malloc(handle);
     if (insn == NULL) {
         return;
@@ -14456,6 +14513,15 @@ void armlint_census_print(const armlint_census *census, bool verbose)
     census_print_group(census, 88, "mandatory from Armv8.8");
     census_print_group(census, 0, "optional features");
     census_print_group(census, -1, "branch protection (hint space)");
+    // Coverage prints only when function boundaries were supplied --
+    // without them there is no denominator, and the line's absence
+    // (not a 0-of-0) says so. Unsigned functions are frequently
+    // legitimate leaves, so this is a fingerprint, not a target.
+    if (census->functions > 0) {
+        printf("  pac-ret coverage: %zu of %zu functions sign the "
+            "return address\n",
+            census->functions_signed, census->functions);
+    }
 
     int highest = armlint_census_highest_mandatory(census);
     if (highest > 80) {

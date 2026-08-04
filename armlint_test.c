@@ -13143,7 +13143,8 @@ static void test_census(void)
     write_le32(&code[16], 0xD503245F); // bti c (hint space)
     write_le32(&code[20], 0x4E284820); // aese v0.16b, v1.16b (optional)
     write_le32(&code[24], 0xFFFFFFFF); // permanently undefined
-    armlint_census_scan(census, g_handle, code, sizeof(code), 0x1000);
+    armlint_census_scan(census, g_handle, code, sizeof(code), 0x1000,
+        NULL, 0);
 
     assert(armlint_census_instructions(census) == 6);
     assert(armlint_census_skipped(census) == 1);
@@ -13161,19 +13162,77 @@ static void test_census(void)
     // Tallies accumulate across scans, as the driver's section loop
     // relies on.
     write_le32(&code[0], 0xB8210002);
-    armlint_census_scan(census, g_handle, code, 4, 0x2000);
+    armlint_census_scan(census, g_handle, code, 4, 0x2000, NULL, 0);
     assert(armlint_census_instructions(census) == 7);
     assert(armlint_census_feature_count(census, "LSE") == 2);
 
     armlint_census_destroy(census);
 
     // NULL is accepted everywhere.
-    armlint_census_scan(NULL, g_handle, code, 4, 0);
+    armlint_census_scan(NULL, g_handle, code, 4, 0, NULL, 0);
     assert(armlint_census_instructions(NULL) == 0);
     assert(armlint_census_skipped(NULL) == 0);
     assert(armlint_census_feature_count(NULL, "LSE") == 0);
     assert(armlint_census_highest_mandatory(NULL) == 80);
     armlint_census_destroy(NULL);
+}
+
+// Per-function pac-ret coverage: boundaries delimit functions, and a
+// function counts as signed when any word in its span is
+// PACIASP/PACIBSP or the register-form PACIA/PACIB x30, sp.
+static void test_census_coverage(void)
+{
+    uint8_t code[36];
+    // _a: paciasp ; nop ; ret          -- signed
+    // _b: nop ; ret                    -- leaf, unsigned
+    // (fn start, no name): pacib x30, sp ; ret  -- signed
+    // _d: ret                          -- unsigned
+    paciasp_(&code[0]);
+    nop_insn(&code[4]);
+    ret_(&code[8]);
+    nop_insn(&code[12]);
+    ret_(&code[16]);
+    write_le32(&code[20], 0xDAC107FEu);     // pacib x30, sp
+    ret_(&code[24]);
+    ret_(&code[28]);
+    const armlint_symbol syms[] = {
+        { 0x1000, "_a" },
+        { 0x100c, "_b" },
+        { 0x1014, NULL },
+        { 0x101c, "_d" },
+    };
+
+    armlint_census *census = armlint_census_create();
+    assert(census != NULL);
+    armlint_census_scan(census, g_handle, code, 32, 0x1000, syms, 4);
+    assert(armlint_census_functions(census) == 4);
+    assert(armlint_census_functions_signed(census) == 2);
+
+    // A boundary-less scan accumulates instructions but no functions.
+    armlint_census_scan(census, g_handle, code, 32, 0x1000, NULL, 0);
+    assert(armlint_census_functions(census) == 4);
+    assert(armlint_census_functions_signed(census) == 2);
+
+    // Boundaries outside the scanned range contribute nothing; one
+    // inside opens a function that runs to the range's end (0x2008
+    // falls before the scan, 0x2020 after it).
+    const armlint_symbol outside[] = {
+        { 0x2008, "_before" },
+        { 0x2010, "_in" },
+        { 0x2020, "_after" },
+    };
+    paciasp_(&code[0]);
+    ret_(&code[4]);
+    armlint_census_scan(census, g_handle, code, 8, 0x2010, outside, 3);
+    assert(armlint_census_functions(census) == 5);
+    assert(armlint_census_functions_signed(census) == 3);
+
+    // NULL census is accepted, and the accessors are NULL-safe.
+    armlint_census_scan(NULL, g_handle, code, 8, 0x2010, outside, 3);
+    assert(armlint_census_functions(NULL) == 0);
+    assert(armlint_census_functions_signed(NULL) == 0);
+
+    armlint_census_destroy(census);
 }
 
 static void test_symbol_annotation(void)
@@ -13316,6 +13375,7 @@ int main(void)
     test_liveness_matches_capstone();
     test_mops_flag_liveness();
     test_census();
+    test_census_coverage();
     test_symbol_annotation();
 
     cs_close(&g_handle);

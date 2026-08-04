@@ -324,8 +324,10 @@ static int scan_code(FILE *f, const char *path, long base_offset,
     int n;
     if (g_census != NULL) {
         // Census mode: tally only. The report prints once, after every
-        // section of every slice has been scanned.
-        armlint_census_scan(g_census, handle, buf, aligned, vmaddr);
+        // section of every slice has been scanned. Boundaries feed the
+        // per-function pac-ret coverage.
+        armlint_census_scan(g_census, handle, buf, aligned, vmaddr,
+                            symbols, nsymbols);
         n = 0;
     } else {
         n = check_instructions(handle, buf, aligned, vmaddr,
@@ -380,13 +382,14 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
 
     // Load the symbol table whole, preferring the full .symtab over
     // .dynsym (a stripped binary's exports still name the functions
-    // that matter most). Annotations render only on -v finding
-    // headers, so the other modes skip the IO entirely.
+    // that matter most). Two consumers want the boundaries -- -v
+    // finding annotations and the census's per-function pac-ret
+    // coverage -- so only the default summary mode skips the IO.
     Elf64_Sym *syms = NULL;
     size_t nsyms = 0;
     char *strtab = NULL;
     uint64_t strsize = 0;
-    if (g_verbose && g_census == NULL) {
+    if (g_verbose || g_census != NULL) {
         uint16_t symidx = 0;    // section 0 is the null section: "none"
         for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
             if (shdrs[i].sh_type == SHT_SYMTAB) {
@@ -671,15 +674,17 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
     // decoded function-start addresses. Best-effort throughout --
     // absence (a stripped binary; Go's linker emits neither) or
     // malformed metadata degrades to unannotated findings. All
-    // linkedit offsets are slice-relative. Annotations render only on
-    // -v finding headers, so the other modes skip the IO.
+    // linkedit offsets are slice-relative. Two consumers want the
+    // boundaries -- -v finding annotations and the census's
+    // per-function pac-ret coverage -- so only the default summary
+    // mode skips the IO.
     nlist_64 *nl = NULL;
     size_t nsyms = 0;
     char *strtab = NULL;
     uint64_t strsize = 0;
     uint64_t *fstarts = NULL;
     size_t nfstarts = 0;
-    if (g_verbose && g_census == NULL && have_st && st.nsyms > 0
+    if ((g_verbose || g_census != NULL) && have_st && st.nsyms > 0
             && st.nsyms < (1u << 24)
             && (uint64_t)st.symoff <= slice_size
             && (uint64_t)st.nsyms * sizeof(nlist_64)
@@ -704,7 +709,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
             strtab = NULL;
         }
     }
-    if (g_verbose && g_census == NULL && have_fs && have_text
+    if ((g_verbose || g_census != NULL) && have_fs && have_text
             && fs.datasize > 0
             && (uint64_t)fs.dataoff <= slice_size
             && (uint64_t)fs.datasize <= slice_size - fs.dataoff) {

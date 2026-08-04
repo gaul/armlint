@@ -407,6 +407,26 @@ pools embedded in text sometimes decode as valid SVE or atomics -- and
 use `-v`, which prints up to four sample addresses per feature, to
 check a surprising tally in a disassembler before believing it.
 
+When the binary carries function boundaries (Mach-O
+`LC_FUNCTION_STARTS`/`nlist`, ELF `.symtab`/`.dynsym` -- the same
+sources that symbolize `-v` findings), the census adds per-function
+pac-ret coverage:
+
+```
+  pac-ret coverage: 866 of 1113 functions sign the return address
+```
+
+A function counts as signed when its span contains PACIASP/PACIBSP or
+the register-form `pacia`/`pacib x30, sp`. The ratio is a fingerprint,
+not a target: leaf functions never spill the return address and
+legitimately never sign, so Apple's fully signed arm64e binaries sit
+around 78-85% (zsh 866/1113, ssh 912/1073, sshd 360/430) with the
+remainder leaves -- the `-a pac` audit separately confirms zero
+*unsigned spills* there, which is the claim that matters. The
+signature of never opting in looks entirely different: Homebrew's
+plain-arm64 libcapstone reads `0 of 1441`. The line is omitted when no
+boundary information exists (Go binaries carry neither structure).
+
 ## Mining tools
 
 `tools/` holds the research utilities that feed armlint's check
