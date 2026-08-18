@@ -32,3 +32,33 @@ _main:
     csel    w2, w3, w4, eq
     csel    w5, w6, w7, ne
     ret
+
+    // Negative: a read-modify-write of the temp in the gap (the
+    // boolean-XOR shape Rust's median3 emits) -- the zero-test
+    // observes the EOR's result, not the CSET's.
+    cmp     w0, w1
+    cset    w12, lo
+    eor     w12, w13, w12
+    cmp     w12, #0
+    csel    x2, x3, x4, ne
+    ret
+
+    // Negative: a CSEL merging over the temp (the three-way-compare
+    // materialization) rewrites it too, though it reads only the
+    // still-live flags.
+    cmp     w0, w1
+    cset    w12, mi
+    csel    w12, w13, w12, eq
+    cmp     w12, #0
+    csel    x2, x3, x4, ne
+    ret
+
+    // Positive: a gap instruction that merely reads the temp leaves
+    // it intact.
+    cmp     w0, w1
+    cset    w8, lt
+    add     x1, x8, x3
+    cmp     w8, #0
+    csel    w2, w3, w4, eq
+    cmp     w5, w6
+    ret

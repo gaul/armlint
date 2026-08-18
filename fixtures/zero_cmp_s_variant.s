@@ -118,4 +118,14 @@ _main:
     cmp     w0, #0
     b.eq    1f
 
+    // N8) A read-modify-write of Rd in the gap breaks it just the
+    //     same -- the zero test observes the rewritten value while
+    //     the S-variant would set flags from the old one. (EOR is
+    //     not itself a producer, so nothing reopens; the CBZ fold
+    //     still fires.)
+    add     w0, w1, w2
+    eor     w0, w3, w0
+    cmp     w0, #0
+    b.eq    1f
+
 1:  ret

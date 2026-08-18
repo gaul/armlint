@@ -3142,6 +3142,21 @@ static liveness_t classify_reg_liveness(const cs_insn *insn, int reg)
     return LIV_UNKNOWN;
 }
 
+// True when the instruction writes `reg` at all -- read-modify-write
+// forms included. classify_reg_liveness cannot answer this: it lets a
+// read outrank a same-instruction write, the priority a deadness
+// proof wants (the old value was observed, so the producer must
+// stay). The value-integrity scans -- a tracked register must still
+// hold a specific earlier result when it is finally consumed -- need
+// the opposite ranking: any write invalidates the tracked value,
+// read or no read.
+static bool insn_writes_reg(const cs_insn *insn, int reg)
+{
+    bool reads, writes;
+    insn_reg_access(insn, reg, &reads, &writes);
+    return writes;
+}
+
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out)
 {
@@ -3964,15 +3979,18 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
         // and SVE/SME refusals cover the flag writers it does not
         // model (a hidden write between the relocated flag-setting
         // ALU and the dropped zero test would be observed).
-        // Reads of Rd are fine -- the rewrite does not change Rd.
+        // Reads of Rd are fine -- the rewrite does not change Rd --
+        // but any write disqualifies, read-modify-write forms
+        // included: the zero test would observe the rewritten value
+        // while the S-variant sets flags from the old one. Within
+        // the flag-neutral guard no control transfer reaches the
+        // register test, so the write test alone is exact.
         bool keep = false;
         if (state->zs_gap < ZS_GAP_MAX
                 && classify_liveness(op) == LIV_UNKNOWN
                 && !insn_is_msr_nzcv(op)
                 && !insn_in_sve_sme_space(op)) {
-            liveness_t rd_live =
-                classify_reg_liveness(insn, (int)state->zs_rd);
-            keep = rd_live == LIV_UNKNOWN || rd_live == LIV_READ;
+            keep = !insn_writes_reg(insn, (int)state->zs_rd);
         }
         if (keep) {
             snprintf(state->zs_gap_lines[state->zs_gap],
@@ -5104,8 +5122,14 @@ bool check_cset_recompare(armlint_state *state, const cs_insn *insn,
                 state->crc_cset_active = false;
                 break;
             default:
-                if (classify_reg_liveness(insn,
-                        (int)state->crc_cset_rd) == LIV_OVERWRITE
+                // Any write to the temp invalidates it -- including
+                // the read-modify-write forms classify_reg_liveness
+                // ranks as LIV_READ (Rust's median3 EORs the boolean
+                // in place; its three-way compares merge over it
+                // with a CSEL of the same register): after either,
+                // the zero-test observes the rewritten value, not
+                // the CSET's.
+                if (insn_writes_reg(insn, (int)state->crc_cset_rd)
                         || state->crc_window == 0
                         || --state->crc_window == 0) {
                     state->crc_cset_active = false;

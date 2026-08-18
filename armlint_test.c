@@ -2827,6 +2827,39 @@ static void test_cset_recompare(void)
     csel_w(&code[12], 0, 1, 2, 0);
     ret_(&code[16]);
     assert(run_helper_check(code, 20) == 0);
+
+    // -- Negative: a read-modify-write of the temp in the gap (the
+    //    boolean-XOR shape Rust's median3 emits) leaves the zero-test
+    //    observing the EOR's result, not the CSET's. --
+
+    cset_(&code[0], 0, 8, 11);
+    write_le32(&code[4],
+        0x4A000000u | (8u << 16) | (13u << 5) | 8u);   // eor w8, w13, w8
+    cmp_w_imm(&code[8], 8, 0);
+    csel_w(&code[12], 0, 1, 2, 1);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // -- Negative: a CSEL merging over the temp (the three-way-
+    //    compare materialization) rewrites it too, though it reads
+    //    only the still-live flags. --
+
+    cset_(&code[0], 0, 8, 4);
+    csel_w(&code[4], 8, 9, 8, 0);          // csel w8, w9, w8, eq
+    cmp_w_imm(&code[8], 8, 0);
+    csel_w(&code[12], 0, 1, 2, 1);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 0);
+
+    // -- Positive: a gap instruction that merely reads the temp
+    //    leaves it intact. --
+
+    cset_(&code[0], 0, 8, 11);
+    add_x(&code[4], 1, 8, 3);              // reads x8, writes x1
+    cmp_w_imm(&code[8], 8, 0);
+    csel_w(&code[12], 0, 1, 2, 0);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
 }
 
 static void test_cmp_cset_sign(void)
@@ -4841,6 +4874,17 @@ static void test_zero_cmp_to_s_variant(void)
     // test reads the newer value).
     add_w(&code[0], 0, 1, 2);
     movz_w(&code[4], 0, 7);
+    cmp_w_imm(&code[8], 0, 0);
+    b_cond(&code[12], 0, 8);
+    ret_(&code[16]);
+    assert(run_helper_check(code, 20) == 1);
+
+    // A read-modify-write of Rd in the gap breaks it just the same
+    // (EOR is not itself a producer, so nothing reopens the slot):
+    // only the CBZ fold fires.
+    add_w(&code[0], 0, 1, 2);
+    write_le32(&code[4],
+        0x4A000000u | (3u << 16) | (0u << 5) | 0u);    // eor w0, w0, w3
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
