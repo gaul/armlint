@@ -1,0 +1,7 @@
+LDR literal foldable to MOV/FMOV immediate at offset: 0x0 <main>: -> mov w0, #0x2a (1 instructions)
+  ldr w0, #8
+
+Optimization opportunities by type:
+       1  LDR literal foldable to MOV/FMOV immediate
+
+1 optimization opportunities in 3 instructions

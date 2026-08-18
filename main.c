@@ -104,6 +104,11 @@ typedef struct {
 #define LC_SEGMENT_64      0x19u
 #define LC_FUNCTION_STARTS 0x26u
 #define S_ATTR_PURE_INSTRUCTIONS 0x80000000u
+// The low byte of section flags is the section *type* (the attribute
+// bits live above it); S_SYMBOL_STUBS marks the linker's dyld import
+// stubs (__stubs).
+#define SECTION_TYPE   0x000000ffu
+#define S_SYMBOL_STUBS 0x8u
 // nlist_64.n_type decomposition: any stab bit marks a debug entry,
 // N_SECT means defined in the section n_sect names (1-based ordinal
 // across every segment's sections), N_EXT marks nm-visible externals.
@@ -429,6 +434,31 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
         }
     }
 
+    // Section names live in the e_shstrndx string table; the scan
+    // needs them to recognize linker-synthesized PLT glue below.
+    // Best-effort: index 0 is SHN_UNDEF ("no table"), and a missing
+    // or malformed table just means no names to match, so every
+    // executable section is scanned as before.
+    char *shstr = NULL;
+    uint64_t shstrsize = 0;
+    if (ehdr.e_shstrndx != 0 && ehdr.e_shstrndx < ehdr.e_shnum) {
+        const Elf64_Shdr *str = &shdrs[ehdr.e_shstrndx];
+        if (str->sh_size > 0
+                && str->sh_offset <= file_size
+                && str->sh_size <= file_size - str->sh_offset) {
+            shstr = malloc(str->sh_size + 1);
+            if (shstr != NULL
+                    && read_at(f, (long)str->sh_offset, shstr,
+                               str->sh_size)) {
+                shstrsize = str->sh_size;
+                shstr[shstrsize] = '\0';
+            } else {
+                free(shstr);
+                shstr = NULL;
+            }
+        }
+    }
+
     int errors = 0;
     for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
         const Elf64_Shdr *shdr = &shdrs[i];
@@ -436,6 +466,19 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
             || !(shdr->sh_flags & SHF_EXECINSTR)
             || shdr->sh_size == 0) {
             continue;
+        }
+        // The ELF analogue of Mach-O stub glue: .plt, .iplt, and the
+        // CET/BTI-era .plt.* variants are fixed-format linker
+        // trampolines, not compiler output, so a finding there
+        // restates the psABI. The name is the only marker -- their
+        // sh_type is plain SHT_PROGBITS.
+        if (shstr != NULL && shdr->sh_name < shstrsize) {
+            const char *sname = shstr + shdr->sh_name;
+            if (strcmp(sname, ".plt") == 0
+                    || strcmp(sname, ".iplt") == 0
+                    || strncmp(sname, ".plt.", 5) == 0) {
+                continue;
+            }
         }
         if (shdr->sh_offset > file_size
             || shdr->sh_size > file_size - shdr->sh_offset) {
@@ -507,6 +550,7 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
     free(shdrs);
     free(syms);
     free(strtab);
+    free(shstr);
     return errors;
 }
 
@@ -633,6 +677,26 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                 }
                 sect_ordinal++;     // n_sect counts every section
                 if (!(sec.flags & S_ATTR_PURE_INSTRUCTIONS) || sec.size == 0) {
+                    continue;
+                }
+                // Linker-synthesized import glue is not compiler
+                // output, so a finding there restates the dyld ABI
+                // rather than a codegen miss. Three sections
+                // qualify: __stubs (type S_SYMBOL_STUBS), the
+                // classic lazy-binding __stub_helper -- each fixed
+                // 12-byte entry LDRs its lazy-bind-info offset into
+                // w16 from an inline literal, exactly the shape
+                // check_ldr_literal_const flags, so one minos<12
+                // binary can contribute hundreds of spurious
+                // findings -- and ld's __objc_stubs msgSend
+                // trampolines. Skipped before the bounds check, like
+                // any other unscanned section, and thereby excluded
+                // from the census too.
+                if ((sec.flags & SECTION_TYPE) == S_SYMBOL_STUBS
+                        || strncmp(sec.sectname, "__stub_helper",
+                                   sizeof(sec.sectname)) == 0
+                        || strncmp(sec.sectname, "__objc_stubs",
+                                   sizeof(sec.sectname)) == 0) {
                     continue;
                 }
                 if ((uint64_t)sec.offset > slice_size

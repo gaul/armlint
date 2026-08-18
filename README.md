@@ -298,6 +298,16 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -m cssc /bin/ls   # also suggest CSSC instructions
 ```
 
+Linker-synthesized import glue is excluded from both the scan and
+the census: Mach-O `__stubs`, `__stub_helper`, and `__objc_stubs`,
+and ELF `.plt`, `.iplt`, and the `.plt.*` variants. Their shape is
+the dynamic-linking ABI's business, not the compiler's -- the
+classic lazy-binding `__stub_helper` alone would otherwise
+contribute one spurious "LDR literal foldable" finding per imported
+symbol (each fixed entry LDRs its lazy-bind-info offset into `w16`
+from an inline literal), a couple of hundred lines of noise on a
+typical `minos < 12` Mach-O binary.
+
 `-m <feature>` enables checks whose rewrites use ISA-extension
 instructions the target must support: `cssc` (Armv8.9/9.4 Common
 Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,

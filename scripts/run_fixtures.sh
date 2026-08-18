@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Integration test harness: assemble each fixtures/*.s with clang
-# -arch arm64, run armlint on the resulting Mach-O, and compare the
-# output to the corresponding fixtures/*.expected file.
+# for the host object format (or one pinned by a sidecar), run
+# armlint on the resulting object, and compare the output to the
+# corresponding fixtures/*.expected file.
 #
 # Set MODE=regen as the first argument to write the .expected files
 # from current armlint output instead of diffing -- use after an
@@ -115,6 +116,25 @@ for s in "$ROOT"/fixtures/*.s; do
             SKIP=$((SKIP + 1))
             continue
         fi
+    fi
+
+    # The inverse pin: a sidecar fixtures/<name>.format of "elf"
+    # marks a fixture whose source uses ELF-only section syntax
+    # (.section .plt,"ax",@progbits) that the Mach-O assembler
+    # rejects. Unlike .arch this never skips: assembling for an
+    # explicit ELF triple needs no sysroot or cross libc -- the same
+    # argument the non-arm64 Linux case above makes -- so ELF
+    # fixtures build on every host.
+    if [ -f "$ROOT/fixtures/$name.format" ]; then
+        read -r fx_format < "$ROOT/fixtures/$name.format"
+        if [ "$fx_format" != "elf" ]; then
+            printf "  FAIL    %s  (unknown format '%s')\n" \
+                "$name" "$fx_format"
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES+=("$name")
+            continue
+        fi
+        fixture_cc_flags=(--target=aarch64-linux-gnu)
     fi
 
     # A fixture that will not assemble is a bug in that fixture -- a
