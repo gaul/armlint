@@ -1854,6 +1854,52 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ST-form suggestions for unused results, and bitmask-immediate
   logic operands (the complemented constant is not always one MOV).
 
+## MOV + cage-base ORR foldable to ADD immediate (feature-gated: `-m v8cage`)
+
+```asm
+movz x16, #0x11
+orr  x0, x28, x16
+```
+
+folds to
+
+```asm
+add  x0, x28, #0x11
+```
+
+V8 runs with pointer compression: heap pointers are stored as 32-bit
+offsets and rebuilt by merging them with a "cage base" kept in x28.
+The base is 4GB-aligned, so its low 32 bits are zero and `orr` and
+`add` compute the same result for any 32-bit offset -- which is why
+V8 uses `orr` for the merge in the first place. When the offset is a
+compile-time constant that fits an ADD immediate (12 bits, optionally
+`LSL #12`), the materialize-then-merge pair collapses to one `add`.
+The shape dominates V8 JIT output because every load of a read-only
+root (`undefined` = cage + 0x11, `null`, `true`, `false`, the empty
+string) is exactly this sequence: a JetStream 3 JIT dump carried
+276,922 adjacent pairs, all with imm12-encodable offsets, and the
+check reports the 95,864 of them whose scratch provably dies on the
+fall-through path.
+
+The match requires a direct 64-bit `ORR Rd, Rn, Rm` with `LSL #0`,
+one operand produced by the active MOV chain, and the other operand
+x28 exactly (either order); the chain's value must be at most 32 bits
+and ADD-immediate-encodable. Bitmask-immediate values are excluded --
+the sound MOV + ORR fold already owns them. The deleted MOV goes
+through the same deferred register-liveness proof as the other MOV
+folds.
+
+Unlike the `-m` ISA gates, `v8cage` asserts a *runtime invariant* of
+the scanned code rather than a hardware capability: nothing in the
+instruction stream proves x28's alignment, so for arbitrary code the
+rewrite is unsound (a set low bit in x28 makes `orr` and `add`
+disagree). The check therefore stays silent unless the caller asserts
+the invariant. It exists because the pattern pointed at a real V8
+bug: `MacroAssembler::DecompressTagged(Register, Tagged_t)` guarded
+on `IsImmAddSub(immediate)` -- the ADD encodability test -- and then
+emitted `Orr`, which needs a (rarely matching) logical immediate and
+so quietly materialized through a scratch register instead.
+
 ## LDR literal foldable to MOV/FMOV immediate
 
 * `ldr w0, <literal>` where the pooled word is `0x2a` instead of

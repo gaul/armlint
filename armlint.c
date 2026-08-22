@@ -8083,6 +8083,107 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+bool check_mov_cage_orr_add(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        return false;
+    }
+    if ((state->features & ARMLINT_FEATURE_V8CAGE) == 0) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    unsigned sf, opc, n_bit, rd, rn, rm;
+    if (!decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn, &rm)) {
+        return false;
+    }
+
+    // Direct 64-bit ORR only: the cage invariant is about full
+    // pointers, and only the plain form merges (no Rm inversion).
+    if (opc != 1 || n_bit != 0 || sf == 0 || !state->mov_is_64bit) {
+        return false;
+    }
+    if (rd == 31) {
+        return false;  // writes ZR: dead code, not this pattern
+    }
+
+    // One operand is the materialized constant, the other must be the
+    // cage base (x28). Either commuted spelling is accepted.
+    unsigned other;
+    if (rm == state->mov_rd) {
+        other = rn;
+    } else if (rn == state->mov_rd) {
+        other = rm;
+    } else {
+        return false;
+    }
+    if (other != 28 || state->mov_rd == 28) {
+        return false;
+    }
+
+    // The disjointness argument covers 32-bit offsets only, and the
+    // single-ADD rewrite needs the ADD immediate encoding: 12 bits,
+    // optionally LSL #12.
+    uint64_t c = state->mov_value;
+    if (c > 0xFFFFFFFFull) {
+        return false;
+    }
+    bool fits = (c <= 0xFFFu)
+        || ((c & 0xFFFu) == 0 && (c >> 12) <= 0xFFFu);
+    if (!fits) {
+        return false;
+    }
+    // A bitmask-immediate constant already folds through the sound,
+    // ungated MOV + ORR check above; stay out of its way.
+    if (is_bitmask_immediate(c, 64u)) {
+        return false;
+    }
+
+    out->name =
+        "MOV + ORR with the V8 cage base foldable to ADD immediate";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+
+    snprintf(out->detail, sizeof(out->detail),
+        "-> add x%u, x28, #0x%" PRIx64, rd, c);
+
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s x%u, #0x%x", mov_mnem, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s x%u, #0x%x, lsl #%u",
+                mov_mnem, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // The rewrite deletes the MOV: emit now if the ORR itself killed
+    // the constant register, else defer until it is proven dead.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 // Whether one instruction can materialize `value` at `reg_width`: a lone
 // MOVZ or MOVN, or a logical immediate moved with ORR from ZR.
 static bool is_one_instruction_constant(uint64_t value, unsigned reg_width)
@@ -13951,6 +14052,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_udiv_strength_reduce,
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
+    check_mov_cage_orr_add,
     check_cheap_const_copy,
     check_reg_copy_chain,
     check_cset_recompare,

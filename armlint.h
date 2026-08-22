@@ -73,6 +73,12 @@ void armlint_state_reset(armlint_state *state);
 #define ARMLINT_FEATURE_LRCPC2 (1u << 1)
 #define ARMLINT_FEATURE_PAUTH (1u << 2)
 #define ARMLINT_FEATURE_LSE (1u << 3)
+// V8CAGE differs in kind from the ISA bits above: it asserts a runtime
+// invariant of the scanned code rather than a hardware capability --
+// that x28 holds V8's pointer-compression cage base, which is 4GB
+// aligned so its low 32 bits are zero. The checks it gates are unsound
+// for arbitrary code and stay silent without it.
+#define ARMLINT_FEATURE_V8CAGE (1u << 4)
 
 // Audit bits, kept in the high half of the same features word. They
 // are different in kind from the ISA bits above: -m asserts what the
@@ -861,6 +867,21 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 // (degenerate). The two families report distinct finding names.
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
+
+// V8-cage fold (feature-gated: ARMLINT_FEATURE_V8CAGE / -m v8cage).
+// A MOV chain materialising a 32-bit constant C that is then merged
+// into the pointer-compression cage base with a direct 64-bit
+// ORR Rd, X28, X<C> folds to a single ADD Rd, X28, #C when C encodes
+// as an ADD immediate (12 bits, optionally LSL #12) -- the dominant
+// V8 JIT pattern for loading read-only roots (undefined = cage + 0x11
+// and friends). ORR equals ADD here only because the cage base is 4GB
+// aligned (operands share no set bits); nothing in the encoding proves
+// that, so the check stays off without the feature bit. Bitmask-
+// immediate constants are excluded (the sound MOV + ORR fold above
+// already reports them); the MOV chain must die, proven by the same
+// deferred liveness scan as the other MOV folds.
+bool check_mov_cage_orr_add(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
 
 // Detect a register MOV (ORR Rd, ZR, Rm) whose source was materialised
 // by the immediately preceding one-instruction MOV chain (a lone MOVZ

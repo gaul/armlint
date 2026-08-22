@@ -364,6 +364,15 @@ static int run_lrcpc2_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
     return run_lrcpc2_check(bytes, len + 4);
 }
 
+
+// run_reg_dead with the V8CAGE invariant asserted: the cage ORR->ADD
+// fold's deleted MOV needs the same overwrite proof for its scratch.
+static int run_v8cage_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
+{
+    movz_x(&bytes[len], reg, 1, 0);
+    return run_features_check(bytes, len + 4, ARMLINT_FEATURE_V8CAGE);
+}
+
 static void test_movz_movk_sequences(void)
 {
     uint8_t code[16];
@@ -6791,6 +6800,51 @@ static void cmn_x_reg_sr(uint8_t out[4], unsigned rn, unsigned rm)
         | ((rm & 0x1Fu) << 16)
         | ((rn & 0x1Fu) << 5);
     write_le32(out, op);
+}
+
+
+static void test_mov_cage_orr_add(void)
+{
+    uint8_t code[16];
+
+    // movz x16, #0x11 ; orr x0, x28, x16 -> add x0, x28, #0x11 (the V8
+    // undefined-root load). Only with -m v8cage; silent without it.
+    movz_x(&code[0], 16, 0x11, 0);
+    orr_x(&code[4], 0, 28, 16);
+    assert(run_v8cage_reg_dead(code, 8, 16) == 1);
+    assert(run_reg_dead(code, 8, 16) == 0);
+
+    // Commuted spelling: orr x0, x16, x28.
+    movz_x(&code[0], 16, 0x11, 0);
+    orr_x(&code[4], 0, 16, 28);
+    assert(run_v8cage_reg_dead(code, 8, 16) == 1);
+
+    // LSL #12-form immediate: 0x5000 encodes as add #0x5, lsl #12.
+    movz_x(&code[0], 16, 0x5000, 0);
+    orr_x(&code[4], 0, 28, 16);
+    assert(run_v8cage_reg_dead(code, 8, 16) == 1);
+
+    // Base is not the cage register (x27): silent even with the feature.
+    movz_x(&code[0], 16, 0x11, 0);
+    orr_x(&code[4], 0, 27, 16);
+    assert(run_v8cage_reg_dead(code, 8, 16) == 0);
+
+    // Offset outside the ADD immediate range (0x12340000): silent.
+    movz_x(&code[0], 16, 0x1234, 1);
+    orr_x(&code[4], 0, 28, 16);
+    assert(run_v8cage_reg_dead(code, 8, 16) == 0);
+
+    // 32-bit ORR form: the invariant argument is 64-bit only; silent.
+    movz_x(&code[0], 16, 0x11, 0);
+    orr_w(&code[4], 0, 28, 16);
+    assert(run_v8cage_reg_dead(code, 8, 16) == 0);
+
+    // The scratch stays live (read after the ORR): the deferred
+    // finding must not be emitted.
+    movz_x(&code[0], 16, 0x11, 0);
+    orr_x(&code[4], 0, 28, 16);
+    add_x(&code[8], 1, 2, 16);
+    assert(run_v8cage_reg_dead(code, 12, 16) == 0);
 }
 
 static void test_mov_add_sub_imm_fold(void)
@@ -13373,6 +13427,7 @@ int main(void)
     test_udiv_strength_reduce();
     test_mov_add_sub_imm_fold();
     test_mov_logic_imm_fold();
+    test_mov_cage_orr_add();
     test_cheap_const_copy();
     test_reg_copy_chain();
     test_mov_zero_to_xzr();
