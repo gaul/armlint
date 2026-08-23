@@ -79,6 +79,17 @@ void armlint_state_reset(armlint_state *state);
 // aligned so its low 32 bits are zero. The checks it gates are unsound
 // for arbitrary code and stay silent without it.
 #define ARMLINT_FEATURE_V8CAGE (1u << 4)
+// V8POOL is a knowledge bit like V8CAGE, but about the instruction
+// stream's shape rather than a register invariant: V8's JIT opens each
+// inline constant pool with a self-describing marker -- LDR XZR,
+// (literal) whose imm19 counts the 32-bit data words that follow
+// (guard, alignment, and constants; the marker itself is not counted).
+// Under this bit every scan loop skips the marker and its data instead
+// of decoding embedded constants as instructions, and the branch-target
+// map ignores them. Unsound for arbitrary code, where a literal load to
+// XZR is a legal (if pointless) discarded load followed by real
+// instructions; enable it only for V8 JIT dumps (v8dump2elf output).
+#define ARMLINT_FEATURE_V8POOL (1u << 5)
 
 // Audit bits, kept in the high half of the same features word. They
 // are different in kind from the ISA bits above: -m asserts what the
@@ -98,7 +109,9 @@ void armlint_state_set_features(armlint_state *state, unsigned features);
 // also runs a one-pass scan of its direct branches (B/BL, B.cond,
 // CBZ/CBNZ, TBZ/TBNZ) to build the branch-target map that gates the
 // 2->1 memory-op folds against side entries; without a buffer that
-// gate stays off. The pointer must outlive the scan.
+// gate stays off. The pointer must outlive the scan. That branch scan
+// honors the state's feature bits (ARMLINT_FEATURE_V8POOL skips V8
+// constant pools), so set features before setting the buffer.
 void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
                               size_t len);
 
@@ -2319,7 +2332,10 @@ void armlint_census_destroy(armlint_census *census);
 
 // Linear-sweep decode of len bytes at base_addr, tallying each
 // instruction's feature group. An undecodable word skips 4 bytes and
-// resyncs, counted as skipped.
+// resyncs, counted as skipped. features is the ARMLINT_FEATURE_* mask:
+// under ARMLINT_FEATURE_V8POOL, V8 constant pools (marker plus data
+// words) are stepped over without being tallied, decoded, or scanned
+// for pac-ret signing words -- they are data, not skipped code.
 //
 // symbols/nsymbols (see armlint_symbol; NULL/0 for none) additionally
 // tally per-function pac-ret coverage: each boundary inside the range
@@ -2335,7 +2351,7 @@ void armlint_census_destroy(armlint_census *census);
 // below 100%.
 void armlint_census_scan(armlint_census *census, csh handle,
                          const uint8_t *inst, size_t len,
-                         uint64_t base_addr,
+                         uint64_t base_addr, unsigned features,
                          const armlint_symbol *symbols, size_t nsymbols);
 
 // Print the census: totals, the mandatory-from ladder by version, the

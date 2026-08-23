@@ -932,6 +932,34 @@ static uint32_t buf_word_at(const uint8_t *buf, size_t offset)
         | ((uint32_t)buf[offset + 3] << 24);
 }
 
+// Bytes to step over when the next word opens a V8 constant pool, or 0
+// to decode it normally. V8's JIT marks each inline pool with LDR XZR,
+// (literal) -- 0x58 top byte, Rt = 31 -- whose imm19 counts the 32-bit
+// data words that follow (BLR XZR guard, alignment, constants; the
+// marker itself is not counted), exactly what V8's own disassembler
+// skips via ConstantPoolSizeAt. Gated on ARMLINT_FEATURE_V8POOL: in
+// arbitrary code a literal load to XZR is a legal discarded load and
+// the words after it are real instructions. The imm19 is unsigned here
+// on purpose -- a backward literal reference encodes as a huge word
+// count and fails the remaining-length bound, as does any pool that
+// would run off the buffer, so both fall through to normal decoding.
+static size_t v8pool_skip_bytes(unsigned features, const uint8_t *buf,
+                                size_t remaining)
+{
+    if ((features & ARMLINT_FEATURE_V8POOL) == 0 || remaining < 4) {
+        return 0;
+    }
+    uint32_t op = buf_word_at(buf, 0);
+    if ((op & 0xFF00001Fu) != 0x5800001Fu) {
+        return 0;
+    }
+    size_t words = (op >> 5) & 0x7FFFFu;
+    if (words == 0 || (words + 1) * 4u > remaining) {
+        return 0;
+    }
+    return (words + 1) * 4u;
+}
+
 // Scan the raw buffer once and mark every 4-byte slot that some
 // direct branch targets: B/BL (imm26), B.cond/BC.cond (imm19),
 // CBZ/CBNZ (imm19), TBZ/TBNZ (imm14). Returns a heap bitmap (one bit
@@ -944,9 +972,11 @@ static uint32_t buf_word_at(const uint8_t *buf, size_t offset)
 // object-file branch relocation (displacement 0) marks its own slot;
 // consumers use the map to suppress rewrites, so a spurious bit costs
 // at most a finding, never soundness -- and a branch word is never
-// itself a foldable memory op.
+// itself a foldable memory op. Under ARMLINT_FEATURE_V8POOL, V8
+// constant pools are stepped over so their data words cannot mint
+// spurious targets.
 static uint8_t *scan_branch_targets(const uint8_t *buf, size_t len,
-                                    size_t *out_slots)
+                                    unsigned features, size_t *out_slots)
 {
     *out_slots = 0;
     if (buf == NULL || len < 4) {
@@ -958,6 +988,11 @@ static uint8_t *scan_branch_targets(const uint8_t *buf, size_t len,
         return NULL;
     }
     for (size_t off = 0; off + 4 <= len; off += 4) {
+        size_t pool = v8pool_skip_bytes(features, buf + off, len - off);
+        if (pool != 0) {
+            off += pool - 4;    // the loop increment adds the last word
+            continue;
+        }
         uint32_t op = buf_word_at(buf, off);
         int64_t disp;
         if ((op & 0x7C000000u) == 0x14000000u) {
@@ -1040,7 +1075,7 @@ void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
     state->buf = buf;
     state->buf_len = len;
     free(state->branch_targets);
-    state->branch_targets = scan_branch_targets(buf, len,
+    state->branch_targets = scan_branch_targets(buf, len, state->features,
         &state->branch_target_slots);
 }
 
@@ -14141,8 +14176,10 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     if (state == NULL) {
         return -1;
     }
-    armlint_state_set_buffer(state, inst, len);
+    // Features first: the buffer's branch-target scan honors them
+    // (V8POOL steps over constant pools).
     armlint_state_set_features(state, features);
+    armlint_state_set_buffer(state, inst, len);
     cs_insn *insn = cs_malloc(handle);
     if (insn == NULL) {
         armlint_state_destroy(state);
@@ -14155,6 +14192,25 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     uint64_t address = base_addr;
 
     while (size >= 4) {
+        // A V8 constant pool is data, not a decode failure: step over
+        // the marker and its words in one move, flushing first exactly
+        // as the opaque-data path below does. (Silent when the V8POOL
+        // feature is off.)
+        size_t pool = v8pool_skip_bytes(features, code, size);
+        if (pool != 0) {
+            armlint_finding finding;
+            if (armlint_flush(state, &finding)
+                    && !armlint_finding_has_side_entry(state, &finding)) {
+                report_finding(&finding, verbose, symbols,
+                    nsymbols, base_addr);
+                summary_add(summary, finding.name);
+                errors++;
+            }
+            code += pool;
+            size -= pool;
+            address += pool;
+            continue;
+        }
         uint64_t insn_addr = address;
         if (cs_disasm_iter(handle, &code, &size, &address, insn)) {
             if (summary != NULL) {
@@ -14512,7 +14568,7 @@ static bool census_word_signs_lr(uint32_t w)
 
 void armlint_census_scan(armlint_census *census, csh handle,
                          const uint8_t *inst, size_t len,
-                         uint64_t base_addr,
+                         uint64_t base_addr, unsigned features,
                          const armlint_symbol *symbols, size_t nsymbols)
 {
     if (census == NULL) {
@@ -14537,6 +14593,11 @@ void armlint_census_scan(armlint_census *census, csh handle,
         }
         bool has_signing = false;
         for (size_t o = (start + 3) & ~(size_t)3; o + 4 <= end; o += 4) {
+            size_t pool = v8pool_skip_bytes(features, inst + o, len - o);
+            if (pool != 0) {
+                o += pool - 4;      // the loop increment adds the last word
+                continue;
+            }
             if (census_word_signs_lr(buf_word_at(inst, o))) {
                 has_signing = true;
                 break;
@@ -14557,6 +14618,16 @@ void armlint_census_scan(armlint_census *census, csh handle,
     size_t size = len;
     uint64_t address = base_addr;
     while (size >= 4) {
+        // V8 constant pools are data: step over them untallied rather
+        // than let their words inflate the skipped count or, worse,
+        // decode as extension instructions.
+        size_t pool = v8pool_skip_bytes(features, code, size);
+        if (pool != 0) {
+            code += pool;
+            size -= pool;
+            address += pool;
+            continue;
+        }
         uint64_t insn_addr = address;
         if (!cs_disasm_iter(handle, &code, &size, &address, insn)) {
             code += 4;

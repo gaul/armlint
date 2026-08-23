@@ -1930,6 +1930,16 @@ so quietly materialized through a scratch register instead.
   finding emits immediately with no liveness proof. What it saves:
   the memory access -- load-use latency and a cache line -- plus the
   pool slot when nothing else references it.
+* V8 JIT dumps: `tools/v8dump2elf.py` keeps each code object's inline
+  constant pool in the section, so this check can read the pooled
+  values; scan that output with `-m v8pool`, which recognizes V8's
+  self-describing pool marker (`LDR XZR, (literal)` whose imm19
+  counts the data words that follow) and steps over the pools rather
+  than decoding embedded constants as instructions. Like `v8cage`
+  the bit asserts knowledge about the scanned stream, not an ISA
+  capability: in arbitrary code a literal load to XZR is a legal
+  discarded load followed by real instructions, so the skip stays
+  off by default.
 
 ## ADR + single use of its target foldable to the direct form
 

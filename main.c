@@ -332,7 +332,7 @@ static int scan_code(FILE *f, const char *path, long base_offset,
         // section of every slice has been scanned. Boundaries feed the
         // per-function pac-ret coverage.
         armlint_census_scan(g_census, handle, buf, aligned, vmaddr,
-                            symbols, nsymbols);
+                            g_features, symbols, nsymbols);
         n = 0;
     } else {
         n = check_instructions(handle, buf, aligned, vmaddr,
@@ -985,9 +985,16 @@ int main(int argc, char **argv)
                 // that x28 is the 4GB-aligned pointer-compression cage
                 // base (see ARMLINT_FEATURE_V8CAGE).
                 g_features |= ARMLINT_FEATURE_V8CAGE;
+            } else if (strcmp(argv[i], "v8pool") == 0) {
+                // Also not an ISA extension: asserts that LDR XZR,
+                // (literal) words are V8's constant-pool markers, so
+                // every scan steps over the pools instead of decoding
+                // their data (see ARMLINT_FEATURE_V8POOL).
+                g_features |= ARMLINT_FEATURE_V8POOL;
             } else {
                 fprintf(stderr, "%s: unknown -m feature '%s' "
-                    "(known: cssc, lrcpc2, pauth, lse, v8cage)\n",
+                    "(known: cssc, lrcpc2, pauth, lse, v8cage, "
+                    "v8pool)\n",
                     argv[0], argv[i]);
                 return 1;
             }
@@ -1008,13 +1015,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|v8cage] [-a pac] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|v8cage|v8pool] [-a pac] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|v8cage] [-a pac] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|v8cage|v8pool] [-a pac] <FILE>\n",
             argv[0]);
         return 1;
     }

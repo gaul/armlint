@@ -156,6 +156,15 @@ static int run_features_check(const uint8_t *code, size_t code_size,
     return findings;
 }
 
+// Drive the real check_instructions loop -- the only place the V8POOL
+// constant-pool skip lives -- over a raw buffer.
+static int run_driver_check(const uint8_t *code, size_t code_size,
+                            unsigned features)
+{
+    return check_instructions(g_handle, code, code_size, 0, false, NULL,
+                              features, NULL, 0);
+}
+
 static int run_cssc_check(const uint8_t *code, size_t code_size)
 {
     return run_features_check(code, code_size, ARMLINT_FEATURE_CSSC);
@@ -10447,6 +10456,44 @@ static void test_ldr_literal_const(void)
     assert(run_buffer_check(qcode, 16) == 0);
 }
 
+static void test_v8pool_skip(void)
+{
+    uint8_t code[16];
+
+    // A V8 constant pool: LDR XZR, (literal) marker whose imm19 counts
+    // the data words after it. The two pool words decode as
+    // "mov x1, x1" / "mov x2, x2" -- guaranteed findings if the scan
+    // ever reads them as code -- and the self-MOV after the pool
+    // proves the scan resumes at the right word.
+    ldr_lit(&code[0], 1, 0, 2, 31);       // pool marker, 2 data words
+    write_le32(&code[4], 0xAA0103E1u);    // pool data ("mov x1, x1")
+    write_le32(&code[8], 0xAA0203E2u);    // pool data ("mov x2, x2")
+    write_le32(&code[12], 0xAA0303E3u);   // real code: mov x3, x3
+    assert(run_driver_check(code, 16, ARMLINT_FEATURE_V8POOL) == 1);
+
+    // Without the feature the same bytes decode as three self-MOVs:
+    // the marker is knowledge about V8's stream, not general AArch64.
+    assert(run_driver_check(code, 16, 0) == 3);
+
+    // The literal check reads THROUGH a skipped pool: the load's
+    // target is pool data, which stays readable in the buffer even
+    // though it is never decoded.
+    ldr_lit(&code[0], 1, 0, 2, 0);        // ldr x0, <literal at +8>
+    ldr_lit(&code[4], 1, 0, 2, 31);       // pool marker, 2 data words
+    write_le32(&code[8], 0x2Au);          // literal low word: 42
+    write_le32(&code[12], 0u);            // literal high word
+    assert(run_driver_check(code, 16, ARMLINT_FEATURE_V8POOL) == 1);
+
+    // A marker whose pool would run past the buffer is not a pool:
+    // it decodes as a discarded literal load and scanning continues
+    // with the real instructions after it.
+    ldr_lit(&code[0], 1, 0, 40, 31);      // claims 40 words; 3 remain
+    write_le32(&code[4], 0xAA0103E1u);    // mov x1, x1
+    write_le32(&code[8], 0xAA0203E2u);    // mov x2, x2
+    write_le32(&code[12], 0xAA0303E3u);   // mov x3, x3
+    assert(run_driver_check(code, 16, ARMLINT_FEATURE_V8POOL) == 3);
+}
+
 // ADR: op(31)=0 immlo(30:29) 10000 immhi(23:5) Rd; disp in bytes.
 static void adr_(uint8_t out[4], unsigned rd, int disp)
 {
@@ -13242,7 +13289,7 @@ static void test_census(void)
     write_le32(&code[20], 0x4E284820); // aese v0.16b, v1.16b (optional)
     write_le32(&code[24], 0xFFFFFFFF); // permanently undefined
     armlint_census_scan(census, g_handle, code, sizeof(code), 0x1000,
-        NULL, 0);
+        0, NULL, 0);
 
     assert(armlint_census_instructions(census) == 6);
     assert(armlint_census_skipped(census) == 1);
@@ -13260,14 +13307,14 @@ static void test_census(void)
     // Tallies accumulate across scans, as the driver's section loop
     // relies on.
     write_le32(&code[0], 0xB8210002);
-    armlint_census_scan(census, g_handle, code, 4, 0x2000, NULL, 0);
+    armlint_census_scan(census, g_handle, code, 4, 0x2000, 0, NULL, 0);
     assert(armlint_census_instructions(census) == 7);
     assert(armlint_census_feature_count(census, "LSE") == 2);
 
     armlint_census_destroy(census);
 
     // NULL is accepted everywhere.
-    armlint_census_scan(NULL, g_handle, code, 4, 0, NULL, 0);
+    armlint_census_scan(NULL, g_handle, code, 4, 0, 0, NULL, 0);
     assert(armlint_census_instructions(NULL) == 0);
     assert(armlint_census_skipped(NULL) == 0);
     assert(armlint_census_feature_count(NULL, "LSE") == 0);
@@ -13302,12 +13349,12 @@ static void test_census_coverage(void)
 
     armlint_census *census = armlint_census_create();
     assert(census != NULL);
-    armlint_census_scan(census, g_handle, code, 32, 0x1000, syms, 4);
+    armlint_census_scan(census, g_handle, code, 32, 0x1000, 0, syms, 4);
     assert(armlint_census_functions(census) == 4);
     assert(armlint_census_functions_signed(census) == 2);
 
     // A boundary-less scan accumulates instructions but no functions.
-    armlint_census_scan(census, g_handle, code, 32, 0x1000, NULL, 0);
+    armlint_census_scan(census, g_handle, code, 32, 0x1000, 0, NULL, 0);
     assert(armlint_census_functions(census) == 4);
     assert(armlint_census_functions_signed(census) == 2);
 
@@ -13321,12 +13368,12 @@ static void test_census_coverage(void)
     };
     paciasp_(&code[0]);
     ret_(&code[4]);
-    armlint_census_scan(census, g_handle, code, 8, 0x2010, outside, 3);
+    armlint_census_scan(census, g_handle, code, 8, 0x2010, 0, outside, 3);
     assert(armlint_census_functions(census) == 5);
     assert(armlint_census_functions_signed(census) == 3);
 
     // NULL census is accepted, and the accessors are NULL-safe.
-    armlint_census_scan(NULL, g_handle, code, 8, 0x2010, outside, 3);
+    armlint_census_scan(NULL, g_handle, code, 8, 0x2010, 0, outside, 3);
     assert(armlint_census_functions(NULL) == 0);
     assert(armlint_census_functions_signed(NULL) == 0);
 
@@ -13448,6 +13495,7 @@ int main(void)
     test_mvn_logic_fold();
     test_add_one_csel_fold();
     test_ldr_literal_const();
+    test_v8pool_skip();
     test_adr_fold();
     test_cssc_minmax();
     test_cssc_abs();
