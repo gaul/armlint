@@ -686,6 +686,53 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
 // the same Rd is also excluded: that's the linker-resolved
 // "page-relative addressing" pair where the offset happened to be 0,
 // removable only by re-linking.
+// Detect a non-flag-setting ADD/SUB (immediate) immediately followed
+// by a second one that reads its destination -- two adjustments of the
+// same register by constants, which one instruction can carry:
+//
+//   add x11, sp, #0x130 ; add x11, x11, #0x81 -> add x11, sp, #0x1b1
+//   sub x8, x29, #0x100 ; add x8, x8,   #0x30 -> sub x8, x29, #0xd0
+//
+// ("ADD/SUB immediate chain foldable to one"). The kinds mix freely:
+// each instruction contributes a signed amount and the fold renders
+// whichever of ADD/SUB carries the sum, or MOV when they cancel.
+//
+// The sum must encode as ADD/SUB's 12-bit field, optionally shifted
+// left by 12. That single gate also handles the compiler's own split
+// of a wide constant (`add x8, x8, #0x1, lsl #12 ; add x8, x8, #0x20`)
+// with no special case: the shifted form reaches only multiples of
+// 4096, so a sum of 0x1020 fails and the already-minimal pair stays
+// unflagged. Widths must agree -- a W-form producer zero-extends its
+// 32-bit sum before an X-form consumer reads it, which 64-bit
+// arithmetic on the original source does not reproduce.
+//
+// Both instructions must be non-flag-setting. An ADDS/SUBS producer
+// cannot be deleted without losing its NZCV write; an ADDS/SUBS
+// consumer is excluded for a subtler reason -- the folded instruction
+// computes the same result but not the same flags, because C and V
+// depend on the intermediate the fold erases.
+//
+// A zero adjustment on either side is not a chain but a redundant
+// instruction, and check_add_sub_zero already reports it on its own
+// terms; neither end opens or closes on one, so no window is reported
+// twice.
+//
+// The rewrite deletes the producer, so its destination must be dead
+// afterward: a consumer writing that same register kills it
+// structurally (the dominant shape), and a fresh destination defers
+// through the forward register-liveness scan. A producer writing SP
+// (Rd = 31 in this encoding) never opens -- the stack pointer is never
+// dead, since an asynchronous signal delivered between the two
+// instructions observes the intermediate value.
+//
+// The shape is stack-address arithmetic: an object's frame offset is
+// not a constant until the compiler assigns the frame layout, long
+// after a field offset was fixed at instruction selection, so the two
+// constants never meet a folding peephole. See TODO.md for the
+// mechanism and the corpus measurements.
+bool check_add_sub_imm_chain(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);
 

@@ -135,6 +135,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`csel Rd, Rn, Rn, cond`](analyses.md#csel-same-operand-identity-csel-rd-rn-rn-cond) | `mov Rd, Rn` |
 | [`fcsel Vd, Vn, Vn, cond`](analyses.md#fcsel-same-operand-identity-fcsel-vd-vn-vn-cond) | `fmov Vd, Vn` |
 | [`add`/`sub Rd, Rn, #0`](analyses.md#addsub-0-is-redundant) | `mov Rd, Rn`, or remove |
+| [`add`/`sub #a` + `add`/`sub #b` (same register)](analyses.md#addsub-immediate-chain-foldable-to-one) | one `add`/`sub` carrying the sum (or `mov`) |
 | [`adds`/`subs`/`ands` + `cmp #0` + `b.eq`/`b.ne`](analyses.md#redundant-zero-cmptst-after-a-flag-setting-alu) | drop the redundant `cmp`/`tst` |
 | [`add`/`sub`/`and`/`bic` + `cmp #0` + `b.eq`/`b.ne`](analyses.md#addsubandbic--zero-cmp-foldable-to-s-variant) | `adds`/`subs`/`ands`/`bics` (drop the `cmp`/`tst`) |
 | [`sub` + `cmp` / `add` + `cmn` of the same operands (either order)](analyses.md#sub--cmp-of-identical-operands-foldable-to-subs) | `subs`/`adds` (flag-exact; drop the compare) |

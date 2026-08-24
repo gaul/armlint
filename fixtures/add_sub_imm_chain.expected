@@ -1,0 +1,32 @@
+ADD/SUB immediate chain foldable to one at offset: 0x0 <_main>: -> add x11, sp, #0x1b1 (2 instructions)
+  add x11, sp, #0x130
+  add x11, x11, #0x81
+
+ADD/SUB immediate chain foldable to one at offset: 0x8 <_main+0x8>: -> sub x8, x29, #0xd0 (2 instructions)
+  sub x8, x29, #0x100
+  add x8, x8, #0x30
+
+ADD/SUB immediate chain foldable to one at offset: 0x10 <_main+0x10>: -> add x12, x13, #0x20 (2 instructions)
+  add x12, x13, #0x30
+  sub x12, x12, #0x10
+
+ADD/SUB immediate chain foldable to one at offset: 0x18 <_main+0x18>: -> mov x14, x15 (2 instructions)
+  add x14, x15, #0x40
+  sub x14, x14, #0x40
+
+ADD/SUB immediate chain foldable to one at offset: 0x20 <_main+0x20>: -> add w16, w17, #0xc (2 instructions)
+  add w16, w17, #4
+  add w16, w16, #8
+
+ADD/SUB immediate chain foldable to one at offset: 0x28 <_main+0x28>: -> add x18, x19, #0x2000 (2 instructions)
+  add x18, x19, #1, lsl #12
+  add x18, x18, #1, lsl #12
+
+ADD/SUB immediate chain foldable to one at offset: 0x30 <_main+0x30>: -> add x0, x10, #0xc (2 instructions)
+  add x9, x10, #4
+  add x0, x9, #8
+
+Optimization opportunities by type:
+       7  ADD/SUB immediate chain foldable to one
+
+7 optimization opportunities in 32 instructions

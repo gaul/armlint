@@ -933,6 +933,19 @@ struct armlint_state {
     size_t s3_offset;
     char s3_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Non-flag-setting ADD/SUB (immediate) pending an adjacent second
+    // ADD/SUB (immediate) that reads its destination -- the
+    // coalescible chain (check_add_sub_imm_chain). asc_imm is the
+    // signed immediate with the sh shift already applied, so the
+    // close half only has to add the two.
+    bool asc_active;
+    bool asc_is_64bit;
+    unsigned asc_rd;
+    unsigned asc_rn;
+    int32_t asc_imm;
+    size_t asc_offset;
+    char asc_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending scalar FMUL (S or D) awaiting an adjacent in-place FNEG
     // of its destination -- the pair is FNMUL, whose pseudocode
     // applies FPNeg to the already-rounded FPMul product, exactly
@@ -1433,6 +1446,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->rem_active = false;
     state->fmn_active = false;
     state->s3_active = false;
+    state->asc_active = false;
     state->lcv_active = false;
     state->adf_active = false;
     state->cmx_active = false;
@@ -6943,6 +6957,165 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
         state->sxt_offset = offset;
         snprintf(state->sxt_producer_disasm,
             sizeof(state->sxt_producer_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
+// Decode a non-flag-setting ADD/SUB (immediate):
+//   sf op 0 100010 sh imm12 Rn Rd     (op: 0 = ADD, 1 = SUB)
+// The S variants (ADDS/SUBS, bit 29) are excluded by the mask -- see
+// check_add_sub_imm_chain for why they cannot participate. *out_imm
+// is the signed contribution to the sum, sh shift already applied, so
+// SUB reports a negative value and the caller just adds.
+static bool decode_add_sub_imm(uint32_t op, unsigned *out_sf,
+                               unsigned *out_rd, unsigned *out_rn,
+                               int32_t *out_imm)
+{
+    bool is_sub;
+    if ((op & 0x7F800000u) == 0x11000000u) {
+        is_sub = false;
+    } else if ((op & 0x7F800000u) == 0x51000000u) {
+        is_sub = true;
+    } else {
+        return false;
+    }
+    int32_t imm = (int32_t)((op >> 10) & 0xFFFu);
+    if (((op >> 22) & 1u) != 0u) {
+        imm <<= 12;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_imm = is_sub ? -imm : imm;
+    return true;
+}
+
+// True when |value| fits ADD/SUB (immediate): a 12-bit unsigned field,
+// optionally shifted left by 12. The two ranges do not overlap above
+// 4095 -- the shifted form only reaches multiples of 4096 -- which is
+// exactly what makes the compiler's own split of a wide constant
+// (`add x8, x8, #0x1, lsl #12 ; add x8, x8, #0x20`, sum 0x1020)
+// fail this test and stay unflagged, with no special case for it.
+static bool add_sub_imm_encodable(int64_t value)
+{
+    uint64_t mag = value < 0 ? (uint64_t)-value : (uint64_t)value;
+    if (mag <= 0xFFFu) {
+        return true;
+    }
+    return (mag & 0xFFFu) == 0u && (mag >> 12) <= 0xFFFu;
+}
+
+bool check_add_sub_imm_chain(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->asc_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    bool produced = false;
+
+    // (1) Close: a second ADD/SUB immediate reading the pending one's
+    //     destination? Both adjustments are of the same register by
+    //     the same kind of constant, so the pair computes
+    //     Rn + imm1 + imm2 and one instruction can carry the sum --
+    //     provided it encodes, and provided the widths agree. A W-form
+    //     producer feeding an X-form consumer is NOT this fold: the
+    //     32-bit sum is zero-extended before the second add, which
+    //     64-bit arithmetic on the original source does not reproduce.
+    if (state->asc_active) {
+        unsigned c_sf, c_rd, c_rn;
+        int32_t c_imm;
+        if (decode_add_sub_imm(op, &c_sf, &c_rd, &c_rn, &c_imm)
+                && c_imm != 0
+                && c_rn == state->asc_rd
+                && ((c_sf != 0) == state->asc_is_64bit)) {
+            int64_t sum = (int64_t)state->asc_imm + (int64_t)c_imm;
+            if (add_sub_imm_encodable(sum)) {
+                char w_or_x = state->asc_is_64bit ? 'x' : 'w';
+                char rn_buf[8], rd_buf[8];
+                // Rn = 31 is SP here, not the zero register: these are
+                // the immediate forms, and a stack-slot address is the
+                // shape's whole reason for existing.
+                if (state->asc_rn == 31) {
+                    snprintf(rn_buf, sizeof(rn_buf), "%ssp",
+                        w_or_x == 'w' ? "w" : "");
+                } else {
+                    snprintf(rn_buf, sizeof(rn_buf), "%c%u",
+                        w_or_x, state->asc_rn);
+                }
+                if (c_rd == 31) {
+                    snprintf(rd_buf, sizeof(rd_buf), "%ssp",
+                        w_or_x == 'w' ? "w" : "");
+                } else {
+                    snprintf(rd_buf, sizeof(rd_buf), "%c%u", w_or_x, c_rd);
+                }
+
+                out->name = "ADD/SUB immediate chain foldable to one";
+                out->start_offset = state->asc_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                if (sum == 0) {
+                    // The adjustments cancel; what is left is a copy.
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> mov %s, %s", rd_buf, rn_buf);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %s %s, %s, #0x%llx",
+                        sum < 0 ? "sub" : "add", rd_buf, rn_buf,
+                        (unsigned long long)(sum < 0 ? -sum : sum));
+                }
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->asc_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+
+                // The rewrite deletes the first adjustment, so the
+                // intermediate must be dead. A consumer writing the
+                // same register kills it structurally -- the dominant
+                // shape, and the only one needing no proof; a fresh
+                // destination defers through the forward
+                // register-liveness scan.
+                if (c_rd == state->asc_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, state->asc_rd);
+                }
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->asc_active = false;
+    }
+
+    // (2) Open: a non-flag-setting ADD/SUB immediate whose destination
+    //     is a real register? Rd = 31 is SP in this encoding, and the
+    //     stack pointer is never dead -- an asynchronous signal
+    //     delivered between the two instructions observes the
+    //     intermediate value -- so a producer writing SP never opens.
+    //     An ADDS/SUBS producer is excluded by the decode: deleting it
+    //     would lose its NZCV write. An ADDS/SUBS *consumer* is
+    //     excluded for a subtler reason -- the sum has the same
+    //     result but not the same flags, since C and V depend on the
+    //     intermediate the fold erases.
+    //
+    //     A zero adjustment on either side is not a chain at all but a
+    //     redundant instruction, which check_add_sub_zero already
+    //     reports on its own terms; neither end opens or closes on
+    //     one, so a window is never reported twice.
+    unsigned p_sf, p_rd, p_rn;
+    int32_t p_imm;
+    if (decode_add_sub_imm(op, &p_sf, &p_rd, &p_rn, &p_imm)
+            && p_imm != 0 && p_rd != 31) {
+        state->asc_active = true;
+        state->asc_is_64bit = (p_sf != 0);
+        state->asc_rd = p_rd;
+        state->asc_rn = p_rn;
+        state->asc_imm = p_imm;
+        state->asc_offset = offset;
+        snprintf(state->asc_disasm, sizeof(state->asc_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
@@ -14522,6 +14695,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_and_lsr_to_ubfx,
     check_and_lsr_lsl_fold,
     check_mov_reg_self,
+    check_add_sub_imm_chain,
     check_add_sub_zero,
     check_self_op,
     check_csel_self,

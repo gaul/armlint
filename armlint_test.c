@@ -211,6 +211,13 @@ static int run_sha3_check(const uint8_t *code, size_t code_size)
     return run_driver_check(code, code_size, ARMLINT_FEATURE_SHA3);
 }
 
+// The ADD/SUB chain fold needs no feature bit, but the side-entry case
+// wants the branch-target map, so drive the real loop here too.
+static int run_chain_check(const uint8_t *code, size_t code_size)
+{
+    return run_driver_check(code, code_size, 0);
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -11212,6 +11219,151 @@ static void test_sha3_fold(void)
     assert(run_driver_check(code, 8, 0) == 0);
 }
 
+// ADD/SUB (immediate), non-flag-setting: sf op 0 100010 sh imm12 Rn Rd.
+static void addsub_imm(uint8_t out[4], unsigned sf, bool is_sub, unsigned rd,
+                       unsigned rn, unsigned imm12, unsigned sh)
+{
+    write_le32(out, (is_sub ? 0x51000000u : 0x11000000u)
+        | ((sf & 1u) << 31) | ((sh & 1u) << 22)
+        | ((imm12 & 0xFFFu) << 10) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_add_sub_imm_chain(void)
+{
+    uint8_t code[16];
+    // A trailing MOVZ of the producer's register commits a deferred
+    // finding; where the consumer overwrites it instead, the kill is
+    // structural and the pair emits on the spot.
+    const uint32_t movz_x9 = 0xD2800029u;       // movz x9, #1
+
+    // add x11, sp, #0x130 ; add x11, x11, #0x81 -> add x11, sp, #0x1b1.
+    addsub_imm(&code[0], 1, false, 11, 31, 0x130, 0);
+    addsub_imm(&code[4], 1, false, 11, 11, 0x81, 0);
+    assert(run_chain_check(code, 8) == 1);
+
+    // Kinds mix: sub then add renders whichever carries the sum.
+    addsub_imm(&code[0], 1, true, 8, 29, 0x100, 0);
+    addsub_imm(&code[4], 1, false, 8, 8, 0x30, 0);
+    assert(run_chain_check(code, 8) == 1);
+
+    // ... and add then sub, crossing back to a plain ADD.
+    addsub_imm(&code[0], 1, false, 8, 9, 0x30, 0);
+    addsub_imm(&code[4], 1, true, 8, 8, 0x10, 0);
+    assert(run_chain_check(code, 8) == 1);
+
+    // Cancelling adjustments leave a register copy.
+    addsub_imm(&code[0], 1, false, 8, 9, 0x40, 0);
+    addsub_imm(&code[4], 1, true, 8, 8, 0x40, 0);
+    assert(run_chain_check(code, 8) == 1);
+
+    // The W form folds the same way.
+    addsub_imm(&code[0], 0, false, 8, 9, 4, 0);
+    addsub_imm(&code[4], 0, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 8) == 1);
+
+    // A fresh destination leaves the producer's register live, so
+    // emission defers until something provably kills it.
+    addsub_imm(&code[0], 1, false, 9, 10, 4, 0);
+    addsub_imm(&code[4], 1, false, 0, 9, 8, 0);
+    write_le32(&code[8], movz_x9);
+    assert(run_chain_check(code, 12) == 1);
+
+    // ... and with the register still live afterward, nothing emits.
+    addsub_imm(&code[0], 1, false, 9, 10, 4, 0);
+    addsub_imm(&code[4], 1, false, 0, 9, 8, 0);
+    write_le32(&code[8], 0xD65F03C0u);          // ret
+    assert(run_chain_check(code, 12) == 0);
+
+    // Encodability of the SUM is the gate. 4095 fits the plain field;
+    // 4096 fits the shifted one; 4097 is neither.
+    addsub_imm(&code[0], 1, false, 8, 9, 4000, 0);
+    addsub_imm(&code[4], 1, false, 8, 8, 95, 0);
+    assert(run_chain_check(code, 8) == 1);
+    addsub_imm(&code[0], 1, false, 8, 9, 4000, 0);
+    addsub_imm(&code[4], 1, false, 8, 8, 96, 0);
+    assert(run_chain_check(code, 8) == 1);      // 4096 == 0x1000
+    addsub_imm(&code[0], 1, false, 8, 9, 4000, 0);
+    addsub_imm(&code[4], 1, false, 8, 8, 97, 0);
+    assert(run_chain_check(code, 8) == 0);      // 4097 encodes neither way
+
+    // The same three bounds on the negative side.
+    addsub_imm(&code[0], 1, true, 8, 9, 4000, 0);
+    addsub_imm(&code[4], 1, true, 8, 8, 95, 0);
+    assert(run_chain_check(code, 8) == 1);
+    addsub_imm(&code[0], 1, true, 8, 9, 4000, 0);
+    addsub_imm(&code[4], 1, true, 8, 8, 97, 0);
+    assert(run_chain_check(code, 8) == 0);
+
+    // Two shifted adjustments whose sum is still a multiple of 4096.
+    addsub_imm(&code[0], 1, false, 8, 9, 1, 1);
+    addsub_imm(&code[4], 1, false, 8, 8, 1, 1);
+    assert(run_chain_check(code, 8) == 1);
+
+    // The compiler's own split of a wide constant is already minimal:
+    // 0x1000 + 0x20 is neither an imm12 nor a multiple of 4096.
+    addsub_imm(&code[0], 1, false, 8, 8, 1, 1);
+    addsub_imm(&code[4], 1, false, 8, 8, 0x20, 0);
+    assert(run_chain_check(code, 8) == 0);
+
+    // Widths must agree: a W-form sum is zero-extended before an
+    // X-form consumer reads it.
+    addsub_imm(&code[0], 0, false, 8, 9, 4, 0);
+    addsub_imm(&code[4], 1, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 8) == 0);
+    addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
+    addsub_imm(&code[4], 0, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 8) == 0);
+
+    // Flag-setting forms never participate: an ADDS producer's NZCV
+    // write would be lost, and an ADDS consumer's flags depend on the
+    // intermediate the fold erases.
+    write_le32(&code[0], 0xB1001020u);          // adds x0, x1, #4
+    addsub_imm(&code[4], 1, false, 0, 0, 8, 0);
+    assert(run_chain_check(code, 8) == 0);
+    addsub_imm(&code[0], 1, false, 0, 1, 4, 0);
+    write_le32(&code[4], 0xB1002000u);          // adds x0, x0, #8
+    assert(run_chain_check(code, 8) == 0);
+
+    // A producer writing SP never opens: the stack pointer is never
+    // dead, so the first adjustment cannot be deleted.
+    addsub_imm(&code[0], 1, false, 31, 31, 0x10, 0);
+    addsub_imm(&code[4], 1, false, 31, 31, 0x20, 0);
+    assert(run_chain_check(code, 8) == 0);
+
+    // The consumer must read the producer's destination.
+    addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
+    addsub_imm(&code[4], 1, false, 0, 1, 8, 0);
+    assert(run_chain_check(code, 8) == 0);
+
+    // Strict adjacency.
+    addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
+    write_le32(&code[4], 0xD503201Fu);          // nop
+    addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 12) == 0);
+
+    // A run of three adjustments reports each adjacent pair; applying
+    // either rewrite alone is sound.
+    addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
+    addsub_imm(&code[4], 1, false, 8, 8, 8, 0);
+    addsub_imm(&code[8], 1, false, 8, 8, 16, 0);
+    assert(run_chain_check(code, 12) == 2);
+
+    // Side entry: a branch onto the consumer skips the first
+    // adjustment, so the folded constant would be wrong on that path.
+    write_le32(&code[0], 0x14000002u);          // b +8 -> the consumer
+    addsub_imm(&code[4], 1, false, 8, 9, 4, 0);
+    addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
+    write_le32(&code[12], 0xD65F03C0u);         // ret
+    assert(run_chain_check(code, 16) == 0);
+
+    // The same window without the branch does fold.
+    write_le32(&code[0], 0xD503201Fu);          // nop
+    addsub_imm(&code[4], 1, false, 8, 9, 4, 0);
+    addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
+    write_le32(&code[12], 0xD65F03C0u);         // ret
+    assert(run_chain_check(code, 16) == 1);
+}
+
 static void test_adr_fold(void)
 {
     uint8_t code[12];
@@ -13909,6 +14061,7 @@ int main(void)
     test_cssc_popcount();
     test_cmpbr_fold();
     test_sha3_fold();
+    test_add_sub_imm_chain();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();

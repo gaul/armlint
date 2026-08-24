@@ -29,36 +29,7 @@ counts by one to three orders of magnitude.
 | zero-CMP→S-variant: `adc`/`sbc` producers | `adcs`/`sbcs` | Excluded in v1: they read the carry the deleted compare set; needs a separate flag argument |
 | sign CSET/CSETM: GE/PL complements | `lsr`+`eor #1` / `mvn`+`asr` | 2-for-2, no size win (frees NZCV only); v1 of the sign-shift fold flags LT/MI |
 | sign CSET/CSETM: `tst Rn, Rn` / `cmn Rn, #0` producers | `lsr`/`asr` | Same N/V pinning as `cmp Rn, #0`; rarer zero-test spellings |
-| `add x0, x0, #a ; add x0, x0, #b` | one `add`/`sub` | **The strongest remaining candidate.** 2026-08 sweep: 77,681 adjacent dependent pairs; gating on the sum actually encoding (imm12, or a multiple of 4096 for the `lsl #12` form) leaves 47,754, of which **19,845 also kill the temp structurally** -- the consumer overwrites the register it read, so no liveness machinery is needed at all -- and 27,909 need the dead-producer scan. Per binary (structural / scan): librustc_driver 19,778 / 26,337, go 14 / 1,266, dyld 31 / 168, ssh 3 / 36, libcrypto 11 / 85, bash 8 / 17. Sign crossing falls out for free (`sub x8, x29, #0x100 ; add x8, x8, #0x30` -> `sub x8, x29, #0xd0`). Note the compiler's own split of a wide constant emits `lsl #12` **first** (`add x8, x8, #0x1, lsl #12 ; add x8, x8, #0x20`); the sum-encodability gate rejects those without needing a special case. These are interior pointers into stack objects -- 64% of the foldable chains are sp/x29-relative and the second immediate is a field offset (median 16 bytes, 97% under 256) -- so the two constants are born in different compiler phases and never meet a folding peephole: see the mechanism note below |
-
-### Why the add/sub immediate chains exist
-
-The two immediates are born in different compiler phases and never
-meet a folding peephole afterwards. The first (`add x8, sp, #0x320`)
-is a stack-object address: its offset is not a constant until
-`PrologEpilogInserter` assigns the frame layout, which happens after
-instruction selection and register allocation. The second
-(`add x8, x8, #0x8`) is a field offset from the IR's `getelementptr`,
-constant from the start. LLVM's `LocalStackSlotAllocation` deliberately
-materializes a frame base register so that later frame references can
-be a base-plus-delta pair -- and when a base register ends up with a
-single use, the pair collapses to one `add`, but nothing revisits it.
-
-Evidence: 64% of the foldable chains are sp/x29-relative, the second
-immediate is a field offset (median 16 bytes, 97% under 256), and in
-every instance inspected the result is stored straight into another
-stack slot -- an interior pointer being spilled. Reproduced with
-clang -O2: interior pointers into a stack array emit exactly
-`add x20, sp, #0x8 ; add x0, x20, #0x188`, while a plain
-`&local.field`, where both constants are visible at instruction
-selection, folds into a single `add`. That contrast is the direct
-evidence that it is the late frame-layout path that misses the fold.
-
-This also explains the distribution. rustc's frames are large and full
-of interior pointers (enum payloads, iterator and future state, `&mut`
-borrows into locals) that get spilled, which is exactly when frame
-base registers appear; go, bash and ssh have small frames and yield
-14, 8 and 3 chains respectively.
+| ADD/SUB immediate chain leftovers | wider match | The adjacent fold is **done** (check_add_sub_imm_chain; see [analyses.md](analyses.md#addsub-immediate-chain-foldable-to-one) for the mechanism and the corpus figures). Of librustc_driver's 46,115 candidate chains armlint reports 26,929; the remaining 18,585 are suppressed by the side-entry gate or by a liveness scan that cannot prove the intermediate dead. Still open: non-adjacent chains, and chains through a register copy |
 
 ## Branches and dead code
 

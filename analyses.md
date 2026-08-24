@@ -895,6 +895,76 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   Removing the `ADD` requires re-linking, not an assembler rewrite,
   so it's not actionable.
 
+## ADD/SUB immediate chain foldable to one
+
+* Two adjacent non-flag-setting `ADD`/`SUB` immediates adjusting the
+  same register are one instruction's worth of arithmetic:
+  * `add x11, sp, #0x130 ; add x11, x11, #0x81` -> `add x11, sp, #0x1b1`
+  * `sub x8, x29, #0x100 ; add x8, x8, #0x30` -> `sub x8, x29, #0xd0`
+  ("ADD/SUB immediate chain foldable to one"). The kinds mix freely:
+  each instruction contributes a signed amount, and the fold renders
+  whichever of `ADD`/`SUB` carries the sum -- or `MOV` when the two
+  cancel exactly.
+* **The sum must encode.** `ADD`/`SUB` immediate is a 12-bit unsigned
+  field, optionally shifted left by 12; the two ranges do not overlap
+  above 4095, since the shifted form reaches only multiples of 4096.
+  That single gate is also what keeps the compiler's own split of a
+  wide constant unflagged, with no special case for it: `add x8, x8,
+  #0x1, lsl #12 ; add x8, x8, #0x20` sums to 0x1020, which is neither
+  an imm12 nor a multiple of 4096, so the already-minimal pair fails
+  the test.
+* **Widths must agree.** A W-form producer zero-extends its 32-bit sum
+  into the full register before an X-form consumer reads it, which
+  64-bit arithmetic on the original source does not reproduce.
+* **Both instructions must be non-flag-setting.** An `ADDS`/`SUBS`
+  producer cannot be deleted without losing its NZCV write. An
+  `ADDS`/`SUBS` *consumer* is excluded for a subtler reason: the
+  folded instruction computes the same result but not the same flags,
+  because C and V depend on the intermediate the fold erases. With
+  `x9 = -1`, `add x8, x9, #1 ; adds x0, x8, #1` leaves C = 0 where
+  `adds x0, x9, #2` leaves C = 1.
+* Soundness otherwise: the rewrite deletes the producer, so its
+  destination must be dead afterward. A consumer writing that same
+  register kills it structurally and emits on the spot -- the dominant
+  shape; a fresh destination defers through the forward
+  register-liveness scan. A producer whose destination is SP (`Rd` =
+  31 in this encoding) never opens: the stack pointer is never dead,
+  because an asynchronous signal delivered between the two
+  instructions observes the intermediate value. A zero adjustment on
+  either side is not a chain but a redundant instruction, left to
+  [`ADD/SUB #0 is redundant`](#addsub-0-is-redundant) so no window is
+  reported twice.
+* **Where the shape comes from.** It is stack-address arithmetic, and
+  the two constants are born in different compiler phases. The first
+  (`add x8, sp, #0x320`) is a stack object's address: its offset is
+  not a constant until the compiler assigns the frame layout, which
+  happens after instruction selection and register allocation. The
+  second (`add x8, x8, #0x8`) is a field offset from the IR, constant
+  from the start. LLVM's `LocalStackSlotAllocation` deliberately
+  materializes a frame base register so later frame references can be
+  a base-plus-delta pair -- and when a base ends up with a single use,
+  the pair collapses to one `add`, but nothing revisits it. Under
+  `clang -O2`, interior pointers into a stack array emit exactly
+  `add x20, sp, #0x8 ; add x0, x20, #0x188`, while a plain
+  `&local.field`, where both constants are visible at instruction
+  selection, folds into a single `add`.
+* That mechanism explains the distribution. In the 2026-08 corpus
+  sweep the check reports 26,929 findings in `librustc_driver` (26.0M
+  instructions) against 37 in dyld, 11 in go, 11 in libcrypto, 5 in
+  ssh and 4 in bash: rustc's frames are large and full of interior
+  pointers -- enum payloads, iterator and future state, `&mut` borrows
+  into locals -- that get spilled, which is exactly when frame base
+  registers appear. 64% of the foldable chains are sp- or
+  frame-pointer-relative, and the second immediate is a field offset
+  (median 16 bytes, 97% under 256).
+* Verification: `tools/shapescan.py` independently identifies 46,115
+  candidate chains in `librustc_driver`; armlint reports a strict
+  subset of them, with no finding outside that set, the remainder
+  suppressed by the side-entry gate or an unproven liveness scan. A
+  random 400 of the reported folds were assembled and executed against
+  their original pairs over 5,000 random register states each: every
+  suggestion computes the identical value.
+
 ## redundant zero-CMP/TST after a flag-setting ALU
 
 * `adds/subs/ands/bics/adcs/sbcs Rd, ... ; cmp Rd, #0 ; b.eq/b.ne L`
