@@ -203,6 +203,14 @@ static int run_cmpbr_unarmed(const uint8_t *code, size_t code_size)
     return run_driver_check(code, code_size, 0);
 }
 
+// The SHA3 folds are gated by the central side-entry check, so these
+// also run through the driver loop (which builds the branch-target
+// map from the scanned buffer).
+static int run_sha3_check(const uint8_t *code, size_t code_size)
+{
+    return run_driver_check(code, code_size, ARMLINT_FEATURE_SHA3);
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -11065,6 +11073,145 @@ static void test_cmpbr_fold(void)
     assert(run_features_check(code, 16, ARMLINT_FEATURE_CMPBR) == 0);
 }
 
+// EOR / BIC (vector, three-same). q selects the 8B (0) or 16B (1)
+// form; BIC computes Vd = Vn AND NOT Vm.
+static void vec_eor(uint8_t out[4], unsigned q, unsigned rd,
+                    unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x2E201C00u | ((q & 1u) << 30)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void vec_bic(uint8_t out[4], unsigned q, unsigned rd,
+                    unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x0E601C00u | ((q & 1u) << 30)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// AND (vector, 16B) -- a different op in the same encoding class,
+// which must not open the fold.
+static void vec_and(uint8_t out[4], unsigned rd, unsigned rn,
+                    unsigned rm)
+{
+    write_le32(out, 0x4E201C00u
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_sha3_fold(void)
+{
+    uint8_t code[16];
+
+    // eor v0,v1,v2 ; eor v0,v0,v3 -> eor3 v0,v1,v2,v3. The consumer
+    // overwrites the temp, so it dies structurally and the finding
+    // emits at the pair.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 0, 0, 3);
+    assert(run_sha3_check(code, 8) == 1);
+
+    // The temp in the consumer's other source slot folds too: EOR3 is
+    // symmetric in its three sources.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 0, 3, 0);
+    assert(run_sha3_check(code, 8) == 1);
+
+    // The in-place spelling compilers actually emit -- deleting the
+    // producer leaves v8 holding the value the producer read.
+    vec_eor(&code[0], 1, 8, 8, 9);
+    vec_eor(&code[4], 1, 8, 8, 10);
+    assert(run_sha3_check(code, 8) == 1);
+
+    // bic v0,v2,v3 ; eor v0,v1,v0 -> bcax v0,v1,v2,v3.
+    vec_bic(&code[0], 1, 0, 2, 3);
+    vec_eor(&code[4], 1, 0, 1, 0);
+    assert(run_sha3_check(code, 8) == 1);
+
+    // The 8B forms have no EOR3/BCAX counterpart: the fused
+    // instruction would write the upper half the pair zeroes.
+    vec_eor(&code[0], 0, 0, 1, 2);
+    vec_eor(&code[4], 0, 0, 0, 3);
+    assert(run_sha3_check(code, 8) == 0);
+
+    // Mixed widths do not fold either, in either order.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 0, 0, 0, 3);
+    assert(run_sha3_check(code, 8) == 0);
+    vec_eor(&code[0], 0, 0, 1, 2);
+    vec_eor(&code[4], 1, 0, 0, 3);
+    assert(run_sha3_check(code, 8) == 0);
+
+    // Both consumer sources are the temp: the EOR cancels to zero,
+    // which no three-operand form reproduces.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 4, 0, 0);
+    assert(run_sha3_check(code, 8) == 0);
+
+    // The consumer must read the temp at all.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 4, 5, 6);
+    assert(run_sha3_check(code, 8) == 0);
+
+    // AND shares the encoding class but is a different op (as do
+    // ORR/ORN/BSL/BIT/BIF); it never opens.
+    vec_and(&code[0], 0, 1, 2);
+    vec_eor(&code[4], 1, 0, 0, 3);
+    assert(run_sha3_check(code, 8) == 0);
+
+    // The consumer must be an EOR: a BIC consumer is not a
+    // three-operand shape.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_bic(&code[4], 1, 0, 0, 3);
+    assert(run_sha3_check(code, 8) == 0);
+
+    // Strict adjacency.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    write_le32(&code[4], 0xD503201Fu);      // nop
+    vec_eor(&code[8], 1, 0, 0, 3);
+    assert(run_sha3_check(code, 12) == 0);
+
+    // A fresh destination leaves the temp live, so emission defers to
+    // the vector-register liveness scan: an FP load of v0 is a whole-
+    // register overwrite and commits it.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 4, 0, 3);
+    write_le32(&code[8], 0x3DC00000u);      // ldr q0, [x0]
+    assert(run_sha3_check(code, 12) == 1);
+
+    // ... and with nothing to kill the temp the scan never commits.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 4, 0, 3);
+    write_le32(&code[8], 0xD65F03C0u);      // ret
+    assert(run_sha3_check(code, 12) == 0);
+
+    // A run of XORs reports each adjacent pair: an EOR is both a
+    // valid producer and a valid consumer, and applying either
+    // rewrite alone is sound.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 0, 0, 3);
+    vec_eor(&code[8], 1, 0, 0, 4);
+    assert(run_sha3_check(code, 12) == 2);
+
+    // Side entry: a branch landing on the consumer skips the producer,
+    // so the fused instruction would compute a different value there.
+    write_le32(&code[0], 0x14000002u);      // b +8 -> the consumer
+    vec_eor(&code[4], 1, 0, 1, 2);
+    vec_eor(&code[8], 1, 0, 0, 3);
+    write_le32(&code[12], 0xD65F03C0u);     // ret
+    assert(run_sha3_check(code, 16) == 0);
+
+    // The same window without the branch does fold.
+    write_le32(&code[0], 0xD503201Fu);      // nop
+    vec_eor(&code[4], 1, 0, 1, 2);
+    vec_eor(&code[8], 1, 0, 0, 3);
+    write_le32(&code[12], 0xD65F03C0u);     // ret
+    assert(run_sha3_check(code, 16) == 1);
+
+    // Without -m sha3 the check is silent on the same bytes.
+    vec_eor(&code[0], 1, 0, 1, 2);
+    vec_eor(&code[4], 1, 0, 0, 3);
+    assert(run_driver_check(code, 8, 0) == 0);
+}
+
 static void test_adr_fold(void)
 {
     uint8_t code[12];
@@ -13761,6 +13908,7 @@ int main(void)
     test_cssc_ctz();
     test_cssc_popcount();
     test_cmpbr_fold();
+    test_sha3_fold();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();

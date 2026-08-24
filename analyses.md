@@ -1674,6 +1674,79 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   narrow values `CB` itself is the same one instruction. See
   [TODO.md](TODO.md).
 
+## three-operand SHA3 logic synthesis (feature-gated: `-m sha3`)
+
+* FEAT_SHA3 -- optional from Armv8.2, never mandatory -- carries four
+  instructions that are general bit-mixing rather than Keccak-specific.
+  Two of them collapse an adjacent pair:
+  * `eor v0.16b, v1.16b, v2.16b ; eor v0.16b, v0.16b, v3.16b` ->
+    `eor3 v0.16b, v1.16b, v2.16b, v3.16b`
+    ("EOR + EOR foldable to EOR3 (SHA3)")
+  * `bic v0.16b, v2.16b, v3.16b ; eor v0.16b, v1.16b, v0.16b` ->
+    `bcax v0.16b, v1.16b, v2.16b, v3.16b`
+    ("BIC + EOR foldable to BCAX (SHA3)")
+* Soundness is as simple as it gets in this tool. `EOR3` is
+  `Vn EOR Vm EOR Va` and `BCAX` is `Vn EOR (Vm AND NOT Va)`, which is
+  exactly what the pairs compute -- pure bitwise identities over the
+  same 128 bits, with no lane width, rounding, exception, or flag
+  behavior to preserve. Both were checked by execution as well as by
+  the pseudocode: 200,000 random vector triples through each spelling,
+  bit-identical.
+* Only the 16B forms open and close. Neither fused instruction has an
+  8B form, and an 8B pair zeroes the destination's upper half where
+  the fused one would write real data. The three-same logic ops share
+  one encoding class and are separated only by U (bit 29) and size
+  (bits 23..22), so `AND`/`ORR`/`ORN`/`BSL`/`BIT`/`BIF` are excluded by
+  pinning both.
+* The consumer must read the temp in exactly **one** source slot. With
+  both sources equal to it the `EOR` cancels to zero, which no
+  three-operand form reproduces. The producer's own sources may be the
+  temp: deleting the producer leaves them holding the value it read
+  itself, so the in-place `eor Vt, Vt, Vb ; eor Vt, Vt, Vc` spelling
+  -- the one compilers actually emit -- folds like any other.
+* The rewrite deletes the producer, so its destination must be dead
+  afterward. A consumer writing that same register kills it
+  structurally and emits on the spot; a fresh destination defers
+  through the vector-register liveness scan
+  (`armlint_advance_pending_fp`). In practice the structural path is
+  the whole population: of OpenSSL 3.6.3 libcrypto's 106 adjacent
+  dependent pairs of this shape, 71 have the in-place destination and
+  35 do not -- and none of the 35 commit, because that scan treats a
+  written vector operand as also read unless the writer is on the
+  pure-overwrite whitelist (loads and scalar FP), so a following
+  vector op merely fails to prove the temp dead. False negatives only.
+* **The side-entry gate is load-bearing here, not a formality.** 19 of
+  those 71 pairs are suppressed because the consumer is a direct
+  branch target -- in libcrypto's AES loops, two `b` instructions land
+  on the second `eor`:
+
+  ```asm
+  36f8: b        0x3704
+  36fc: aesd.16b v1, v17
+  3700: eor.16b  v1, v1, v18
+  3704: eor.16b  v1, v1, v31   ; <- branched to from 36c8 and 36f8
+  ```
+
+  A path entering at `3704` never ran the producer, so the fused
+  `eor3` would mix in `v18` where the original mixes in nothing. That
+  leaves 52 reported findings, every one of which re-assembles as a
+  real `EOR3` and, executed against its original pair over 20,000
+  random register states, computes the identical result.
+* Yield is narrow and concentrated: 52 in libcrypto (560349
+  instructions), 10 in `go`, 0 in `dyld`, 0 in librustc_driver. This
+  is a crypto-and-hashing fold, not a general one.
+* Actionability caveat, the same one `-m pauth` carries: FEAT_SHA3 is
+  never mandatory, so `-m sha3` is a real assertion about the target
+  rather than an architecture-version floor. A library that dispatches
+  on it at runtime keeps the two-instruction path on purpose -- and
+  libcrypto is exactly that library, already shipping 65 `xar`
+  instructions in a FEAT_SHA3 Keccak path alongside the portable code
+  these findings come from.
+* Not implemented: `XAR` (`(Vn EOR Vm)` rotated right per 64-bit lane)
+  and `RAX1` (`Vn EOR ROL(Vm, 1)`). Both fold three or more
+  instructions rather than two, since a NEON lane rotate is itself a
+  shift pair; see [TODO.md](TODO.md).
+
 ## split pointer-authentication return foldable into RETAA/RETAB (feature-gated: `-m pauth`)
 
 * A pac-ret epilogue restores the signed return address, authenticates

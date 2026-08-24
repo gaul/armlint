@@ -162,6 +162,8 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
 | [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
 | [`cmp` + `b.<cond>`](analyses.md#compare-and-branch-synthesis-feature-gated--m-cmpbr) | `cb<cond> Rn, Rm`/`#imm, label` (`-m cmpbr`) |
+| [`eor` + `eor` (16B vectors)](analyses.md#three-operand-sha3-logic-synthesis-feature-gated--m-sha3) | `eor3 Vd, Vn, Vm, Va` (`-m sha3`) |
+| [`bic` + `eor` (16B vectors)](analyses.md#three-operand-sha3-logic-synthesis-feature-gated--m-sha3) | `bcax Vd, Vn, Vm, Va` (`-m sha3`) |
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`; auto-armed on arm64e) |
 | [unsigned LR spill; raw `br`/`blr`; zero-discriminator `braaz`/`blraaz`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
@@ -319,10 +321,14 @@ instructions the target must support: `cssc` (Armv8.9/9.4 Common
 Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,
 `ctz`), `lrcpc2` (Armv8.4 unscaled store-release: `stlur`), `pauth`
 (Armv8.3 pointer authentication: `retaa`/`retab`), `lse`
-(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`), and
-`cmpbr` (Armv9.6 compare-and-branch: `cbgt`/`cbeq`/...). `pauth`
+(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`), `cmpbr`
+(Armv9.6 compare-and-branch: `cbgt`/`cbeq`/...), and `sha3`
+(Armv8.2 three-operand vector logic: `eor3`, `bcax`). `pauth`
 arms automatically on arm64e slices, whose ABI mandates FEAT_PAuth
-(the same auto-arm as the PAC audit); the rest stay opt-in.
+(the same auto-arm as the PAC audit); the rest stay opt-in. `cssc`
+and `sha3` name extensions that are never mandatory at any
+architecture version, so those two assert a specific target rather
+than a version floor.
 
 `-a <audit>` enables opt-in informational checks that flag missing
 hardening rather than missed folds; `pac` audits the binary against

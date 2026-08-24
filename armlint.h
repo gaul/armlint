@@ -76,6 +76,7 @@ void armlint_state_reset(armlint_state *state);
 // Bit 6, not 4: the two V8 knowledge bits below already claimed 4
 // and 5, and their values are part of the shipped header's contract.
 #define ARMLINT_FEATURE_CMPBR (1u << 6)
+#define ARMLINT_FEATURE_SHA3 (1u << 7)
 // V8CAGE differs in kind from the ISA bits above: it asserts a runtime
 // invariant of the scanned code rather than a hardware capability --
 // that x28 holds V8's pointer-compression cage base, which is 4GB
@@ -1380,6 +1381,47 @@ bool check_cmpbr_fold(armlint_state *state, const cs_insn *insn,
 bool armlint_advance_pending_cbr(armlint_state *state,
                                  const cs_insn *insn,
                                  size_t offset, armlint_finding *out);
+
+// Three-operand SHA3 logic synthesis (gated on ARMLINT_FEATURE_SHA3;
+// silent otherwise). FEAT_SHA3 -- optional from Armv8.2, never
+// mandatory -- carries four instructions that are general bit-mixing
+// rather than Keccak-specific; two of them collapse an adjacent pair:
+//
+//   eor v0.16b, v1.16b, v2.16b ; eor v0.16b, v0.16b, v3.16b
+//     -> eor3 v0.16b, v1.16b, v2.16b, v3.16b
+//   bic v0.16b, v2.16b, v3.16b ; eor v0.16b, v1.16b, v0.16b
+//     -> bcax v0.16b, v1.16b, v2.16b, v3.16b
+//
+// ("EOR + EOR foldable to EOR3 (SHA3)" and "BIC + EOR foldable to
+// BCAX (SHA3)"). Both are exact bitwise identities -- EOR3 is
+// Vn EOR Vm EOR Va and BCAX is Vn EOR (Vm AND NOT Va), which is what
+// the pairs compute -- with no lane width, rounding, or flag
+// behavior to preserve.
+//
+// Only the 16B forms open and close: EOR3 and BCAX have no 8B form,
+// and an 8B pair zeroes the destination's upper half where the fused
+// instruction would write real data. The consumer must read the
+// temp in exactly ONE source slot; with both sources equal to it the
+// EOR is a self-cancel to zero, which the three-operand form does not
+// reproduce. The producer's own sources may be the temp -- deleting
+// the producer leaves them holding the value the producer itself read
+// -- so the in-place `eor Vt, Vt, Vb` spelling folds like any other.
+//
+// The rewrite deletes the producer, so its destination must be dead
+// afterward. A consumer writing that same register kills it
+// structurally and emits on the spot -- the shape compilers actually
+// emit, and all 83 candidate pairs in OpenSSL's libcrypto take this
+// path; a fresh destination defers through the vector-register
+// liveness scan (armlint_advance_pending_fp).
+//
+// FEAT_SHA3 is never mandatory, so -m sha3 is a real assertion about
+// the target rather than a version floor -- and a library that
+// dispatches on it at runtime keeps the two-instruction path on
+// purpose, the same actionability caveat -m pauth carries. XAR and
+// RAX1, the other two FEAT_SHA3 instructions, fold three or more
+// instructions rather than two and are not matched; see TODO.md.
+bool check_sha3_fold(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out);
 
 // Forward FP/vector-register liveness scan, the FP twin of
 // armlint_advance_pending_mz: emits a deferred finding once a later

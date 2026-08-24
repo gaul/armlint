@@ -920,6 +920,19 @@ struct armlint_state {
     size_t adf_offset;
     char adf_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // 16B vector EOR or BIC pending an adjacent 16B EOR consumer, for
+    // the FEAT_SHA3 three-operand folds (check_sha3_fold, -m sha3).
+    // s3_is_bic selects BCAX over EOR3; s3_rd is the temp the consumer
+    // must read in exactly one source slot, s3_rn and s3_rm the
+    // producer's two sources.
+    bool s3_active;
+    bool s3_is_bic;
+    unsigned s3_rd;
+    unsigned s3_rn;
+    unsigned s3_rm;
+    size_t s3_offset;
+    char s3_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending scalar FMUL (S or D) awaiting an adjacent in-place FNEG
     // of its destination -- the pair is FNMUL, whose pseudocode
     // applies FPNeg to the already-rounded FPMul product, exactly
@@ -1419,6 +1432,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->simd_zero_active = false;
     state->rem_active = false;
     state->fmn_active = false;
+    state->s3_active = false;
     state->lcv_active = false;
     state->adf_active = false;
     state->cmx_active = false;
@@ -9394,6 +9408,114 @@ bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Three-same vector logic ops share one encoding class and differ
+// only in U (bit 29) and size (bits 23..22): AND/BIC/ORR/ORN at U = 0
+// and EOR/BSL/BIT/BIF at U = 1. Pinning both, plus Q = 1 for the 16B
+// form, leaves exactly one instruction per mask.
+//   EOR Vd.16B, Vn.16B, Vm.16B
+//   BIC Vd.16B, Vn.16B, Vm.16B   (Vd = Vn AND NOT Vm)
+#define SHA3_EOR_16B_MASK  0xFFE0FC00u
+#define SHA3_EOR_16B_VALUE 0x6E201C00u
+#define SHA3_BIC_16B_VALUE 0x4E601C00u
+
+bool check_sha3_fold(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_SHA3)) {
+        state->s3_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    bool produced = false;
+
+    // (1) Close: a 16B EOR consuming the pending producer's temp?
+    //     The temp must land in exactly ONE source slot. With both
+    //     sources equal to it the EOR cancels to zero, which neither
+    //     three-operand form reproduces -- that is a vector self-op,
+    //     not this fold. The producer's OWN sources may be the temp:
+    //     deleting the producer leaves them holding the value it read
+    //     itself, so `eor Vt, Vt, Vb ; eor Vt, Vt, Vc` folds like any
+    //     other spelling. Nothing else needs proving -- both rewrites
+    //     are exact bitwise identities over the same 128 bits, with no
+    //     lane width, rounding, or flag behavior to preserve.
+    if (state->s3_active) {
+        if ((op & SHA3_EOR_16B_MASK) == SHA3_EOR_16B_VALUE) {
+            unsigned rd = op & 0x1Fu;
+            unsigned rn = (op >> 5) & 0x1Fu;
+            unsigned rm = (op >> 16) & 0x1Fu;
+            unsigned other = 0;
+            bool match = false;
+            if (rn == state->s3_rd && rm != state->s3_rd) {
+                other = rm;
+                match = true;
+            } else if (rm == state->s3_rd && rn != state->s3_rd) {
+                other = rn;
+                match = true;
+            }
+            if (match) {
+                out->name = state->s3_is_bic
+                    ? "BIC + EOR foldable to BCAX (SHA3)"
+                    : "EOR + EOR foldable to EOR3 (SHA3)";
+                out->start_offset = state->s3_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                if (state->s3_is_bic) {
+                    // BCAX Vd, Vn, Vm, Va = Vn EOR (Vm AND NOT Va):
+                    // the EOR's other source is Vn, the BIC's two
+                    // sources are Vm and Va in that order.
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> bcax v%u.16b, v%u.16b, v%u.16b, v%u.16b",
+                        rd, other, state->s3_rn, state->s3_rm);
+                } else {
+                    // EOR3 Vd, Vn, Vm, Va = Vn EOR Vm EOR Va, which
+                    // is symmetric in the three sources.
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> eor3 v%u.16b, v%u.16b, v%u.16b, v%u.16b",
+                        rd, state->s3_rn, state->s3_rm, other);
+                }
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->s3_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+
+                // The rewrite deletes the producer, so the temp must
+                // be dead afterward. A consumer writing that same
+                // register kills it structurally; a fresh destination
+                // defers through the vector-register liveness scan.
+                if (rd == state->s3_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_fpreg(state, out, state->s3_rd);
+                }
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->s3_active = false;
+    }
+
+    // (2) Open: a 16B EOR (the EOR3 producer) or a 16B BIC (the BCAX
+    //     producer)? An EOR is both a valid producer and a valid
+    //     consumer, so it re-arms here after closing above -- a run of
+    //     XORs reports each adjacent pair, and applying any one of
+    //     them is sound on its own.
+    if ((op & SHA3_EOR_16B_MASK) == SHA3_EOR_16B_VALUE
+            || (op & SHA3_EOR_16B_MASK) == SHA3_BIC_16B_VALUE) {
+        state->s3_active = true;
+        state->s3_is_bic =
+            (op & SHA3_EOR_16B_MASK) == SHA3_BIC_16B_VALUE;
+        state->s3_rd = op & 0x1Fu;
+        state->s3_rn = (op >> 5) & 0x1Fu;
+        state->s3_rm = (op >> 16) & 0x1Fu;
+        state->s3_offset = offset;
+        snprintf(state->s3_disasm, sizeof(state->s3_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
 bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out)
 {
@@ -14363,6 +14485,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_madd_fold,
     check_udiv_msub_remainder,
     check_fmul_fneg_fold,
+    check_sha3_fold,
     check_ldr_cvtf_fold,
     check_ldr_literal_const,
     check_adr_fold,
