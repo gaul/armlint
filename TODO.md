@@ -67,6 +67,7 @@ The largest untouched family; none of these need liveness machinery.
 | FP16 lift | `-m fp16`: relax the `type <= 1` gates in the fmov/fcsel/fmul/cvtf checks |
 | LSE leftovers | `-m lse` folds the fetch-op, exchange, and converging CAS retry loops; remaining: diverging-exit CAS (LLVM's CLREX tail -- needs a second suggested branch and a two-path death argument), immediate-comparand and CBNZ-as-compare zero-expected shapes (zero of each in gh), byte/half CAS via the extended-register compare (`cmp w8, w1, uxtb`), cmp+csel MIN/MAX loops (`ldsmax` family), ST-forms for unused results, bitmask-immediate logic operands |
 | PAuth epilogue leftovers | v1 of `-m pauth` folds `autiasp`/`autibsp` + `ret` only; the general-encoding `autia x30, sp` producer and the one-shot `autiasp` + `br x30` → `retaa` (its first step now lands via the `br x30` → `ret` fold) remain |
+| CMPBR leftovers | `-m cmpbr` folds `cmp` + `b.cond` into `CB<cc>`. Remaining: `CBB<cc>`/`CBH<cc>`, whose byte/halfword compare only pays by also deleting an explicit `uxtb`/`uxth`/`sxtb`/`sxth` ahead of the compare -- a 3-for-1 or 4-for-1 fold needing the extend's own liveness argument (LLVM does not emit them either, llvm#135617). Also open: non-adjacent pairs, and a comparand materialized by a MOV chain rather than written as an immediate |
 
 ## Microarch/informational (candidates for the `-a` audit class)
 
@@ -96,6 +97,6 @@ populations below are the real beyond-adjacency mass.
 | Item | Notes |
 | --- | --- |
 | Multi-slot deferral | The single pending_mz/pending_fp slots drop the earlier finding when two deferrals overlap; false-negative-only, documented in `defer_dead_mov` |
-| Target-side liveness | Scan at a known branch target (buffer access exists); unlocks the general-register BR fold |
+| Target-side liveness | NZCV at a branch target is **done**: `nzcv_dead_at_target` walks the scanned buffer for the CMPBR fold, which cannot make the block-locality assumption the other branch folds make. The register-side twin (scan for a GPR at a known target) is still open and unlocks the general-register BR fold. The NZCV scan refuses rather than chases -- a `cbz`/`b` at the target ends it, which is 10 of the 16 pairs it rejects in /bin/ls |
 | Hybrid `mov`/`orr`+`movk` constant chains | Docs-acknowledged deferral in the MOV-chain machinery |
 | LDUR / writeback pair coalescing; load+sext at other addressing modes | Docs-acknowledged deferrals of the coalescer and sext folds |

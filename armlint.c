@@ -142,6 +142,22 @@ struct armlint_state {
     size_t cmp_offset;
     char cmp_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Plain CMP -- register (`cmp Rn, Rm`) or immediate
+    // (`cmp Rn, #imm12`) -- pending any B.cond consumer, for the
+    // FEAT_CMPBR compare-and-branch fold (check_cmpbr_fold, -m cmpbr).
+    // cbr_is_imm selects which comparand is live: cbr_imm for the
+    // immediate form, cbr_rm for the register one. `cmp Rn, XZR`
+    // opens as the immediate form with cbr_imm = 0, so no suggestion
+    // has to name a zero register.
+    bool cbr_active;
+    bool cbr_is_64bit;
+    bool cbr_is_imm;
+    unsigned cbr_rn;
+    unsigned cbr_rm;
+    unsigned cbr_imm;
+    size_t cbr_offset;
+    char cbr_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // TST Rn, #(1<<k) pending a B.EQ/B.NE consumer.
     bool tst_active;
     bool tst_is_64bit;
@@ -444,6 +460,16 @@ struct armlint_state {
     bool pending_cssc_active;
     unsigned pending_cssc_window;
     armlint_finding pending_cssc_finding;
+
+    // Deferred compare-and-branch finding awaiting proof that NZCV is
+    // dead on the fall-through path: CB<cc> does its own comparison
+    // and writes no flags, so every bit the deleted compare set must
+    // go unread. The taken edge is proven before the deferral even
+    // opens, by nzcv_dead_at_target scanning at the branch target, so
+    // this slot carries only the fall-through half.
+    bool pending_cbr_active;
+    unsigned pending_cbr_window;
+    armlint_finding pending_cbr_finding;
 
     // Deferred sign-shift finding awaiting proof that NZCV is dead:
     // the LSR/ASR rewrite deletes the compare and sets no flags, the
@@ -1402,6 +1428,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_cssc_active = false;
     state->sgn_active = false;
     state->pending_sgn_active = false;
+    state->cbr_active = false;
+    state->pending_cbr_active = false;
     state->aut_active = false;
     state->pac_sign_recent = 0;
     state->jt_stage = 0;
@@ -3286,6 +3314,37 @@ static bool defer_dead_nzcv_sgn(armlint_state *state,
     state->pending_sgn_finding = *out;
     state->pending_sgn_active = true;
     state->pending_sgn_window = LIVENESS_WINDOW;
+    return false;
+}
+
+// Fall-through half of the compare-and-branch proof: the standard
+// forward NZCV-death scan. The taken half was settled at the branch
+// by nzcv_dead_at_target, so a commit here means both edges are
+// proven.
+bool armlint_advance_pending_cbr(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4) {
+        state->pending_cbr_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    return advance_one_pending(op, &state->pending_cbr_active,
+                               &state->pending_cbr_window,
+                               &state->pending_cbr_finding, out);
+}
+
+// The compare-and-branch twin of defer_dead_nzcv_cssc: CB<cc> folds
+// the comparison into the branch and writes no flags at all, so every
+// NZCV bit the deleted CMP set must die unread.
+static bool defer_dead_nzcv_cbr(armlint_state *state,
+                                const armlint_finding *out)
+{
+    state->pending_cbr_finding = *out;
+    state->pending_cbr_active = true;
+    state->pending_cbr_window = LIVENESS_WINDOW;
     return false;
 }
 
@@ -5267,6 +5326,212 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
             state->sgn_rn = rn;
             state->sgn_offset = offset;
             snprintf(state->sgn_disasm, sizeof(state->sgn_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
+
+    return false;
+}
+
+// Prove NZCV dead at a branch target the fall-through scan never
+// visits. Every other branch fold here simply assumes it -- the flags
+// are defined within a basic block in compiled code -- but a fold
+// whose producer is a general two-register compare cannot: reusing
+// one compare across a branch is exactly what a compiler does for a
+// three-way comparison, and clang emits it (see check_cmpbr_fold).
+//
+// So walk forward from the target in the scanned buffer under the
+// same classify_liveness rules and the same bounded window as the
+// fall-through scan, and demand the flags be overwritten -- or the
+// path reach a call or return, past which the PCS makes them
+// caller-clobbered -- before any reader. Everything short of that
+// proof refuses: no buffer, a target outside it, a reader, a control
+// transfer whose own destination would have to be chased in turn, or
+// a window that expires without resolving.
+static bool nzcv_dead_at_target(const armlint_state *state,
+                                int64_t target)
+{
+    if (state->buf == NULL || target < 0) {
+        return false;
+    }
+    size_t off = (size_t)target;
+    for (unsigned i = 0; i < LIVENESS_WINDOW; i++) {
+        if (off > state->buf_len || state->buf_len - off < 4u) {
+            return false;
+        }
+        switch (classify_liveness(buf_word_at(state->buf, off))) {
+        case LIV_OVERWRITE:
+        case LIV_TERM_SAFE:
+            return true;
+        case LIV_READ:
+        case LIV_TERM_UNSAFE:
+            return false;
+        case LIV_UNKNOWN:
+            break;
+        }
+        off += 4u;
+    }
+    return false;
+}
+
+// CB<cc> spells its condition into the mnemonic, so "cb" plus the
+// A64 condition name is the whole rendering. Ten conditions have a
+// form: EQ/NE, the signed GT/GE/LT/LE and the unsigned HI/HS/LO/LS --
+// exactly the conditions a CMP's flags define as a comparison of its
+// two operands. MI/PL and VS/VC read a sign or an overflow that no
+// comparison of values reproduces, and AL/NV are not conditions.
+static bool cmpbr_cond_encodable(unsigned cond)
+{
+    switch (cond) {
+    case 0:  case 1:            // EQ, NE
+    case 2:  case 3:            // HS, LO
+    case 8:  case 9:            // HI, LS
+    case 10: case 11:           // GE, LT
+    case 12: case 13:           // GT, LE
+        return true;
+    default:                    // MI, PL, VS, VC, AL, NV
+        return false;
+    }
+}
+
+// CB<cc> (immediate) carries an unsigned 6-bit comparand. Six
+// conditions encode it directly, over 0..63; the other four are
+// assembler pseudo-instructions that shift the stored value by one --
+// CBGE/CBHS assemble as CBGT/CBHI of imm-1, reaching 1..64, and
+// CBLE/CBLS as CBLT/CBLO of imm+1, reaching -1..62 (a CMP's imm12 is
+// never negative, so 0..62 here). The condition is already known
+// encodable; this bounds the comparand.
+static bool cmpbr_imm_encodable(unsigned cond, unsigned imm)
+{
+    switch (cond) {
+    case 2:  case 10:           // HS, GE: stored as imm - 1
+        return imm >= 1u && imm <= 64u;
+    case 9:  case 13:           // LS, LE: stored as imm + 1
+        return imm <= 62u;
+    default:                    // EQ, NE, HI, LO, GT, LT
+        return imm <= 63u;
+    }
+}
+
+// A zero comparand belongs to the baseline folds, which need no ISA
+// extension, so this check stays off those conditions rather than
+// reporting one pair twice: check_cmp_zero_branch already turns EQ/NE
+// -- and HI/LS, which reduce to them once the compare pins C = 1 --
+// into CBZ/CBNZ, and GE/LT into TBZ/TBNZ of the sign bit. The
+// remaining two are not folds at all after a zero compare: C = 1
+// makes HS always taken and LO never (and CB could not spell HS #0
+// anyway, its window starting at 1). That leaves GT and LE, which are
+// genuinely new -- no baseline instruction tests "> 0" or "<= 0" in
+// one word.
+static bool cmpbr_zero_cond_reserved(unsigned cond)
+{
+    return cond != 12 && cond != 13;
+}
+
+bool check_cmpbr_fold(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4 || !(state->features & ARMLINT_FEATURE_CMPBR)) {
+        state->cbr_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: a B.cond consuming the pending compare? Bit 4 = 0
+    //     pins B.cond proper and excludes BC.cond, the Armv8.8
+    //     branch-consistent spelling whose hint CB cannot carry.
+    if (state->cbr_active) {
+        if ((op & 0xFF000010u) == 0x54000000u) {
+            unsigned cond = op & 0xFu;
+            int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+            imm19 = (imm19 ^ 0x40000) - 0x40000;
+            // CB replaces the compare, 4 bytes ahead of the branch, so
+            // the displacement it must encode is imm19 + 1 words --
+            // against a signed 9-bit field, a +-1KB reach where
+            // B.cond's imm19 had +-1MB. Same accounting as the TBZ
+            // fold in check_cmp_zero_branch, and conservative by one
+            // word for a forward target (deleting the compare pulls it
+            // 4 bytes closer).
+            int64_t cb_disp = (int64_t)imm19 + 1;
+            int64_t t_off = (int64_t)offset + (int64_t)imm19 * 4;
+            bool zero_cmp = state->cbr_is_imm && state->cbr_imm == 0;
+            if (cb_disp >= -256 && cb_disp <= 255
+                    && cmpbr_cond_encodable(cond)
+                    && !(zero_cmp && cmpbr_zero_cond_reserved(cond))
+                    && (!state->cbr_is_imm
+                        || cmpbr_imm_encodable(cond, state->cbr_imm))
+                    && nzcv_dead_at_target(state, t_off)) {
+                uint64_t target = insn->address
+                    + (uint64_t)((int64_t)imm19 * 4);
+                char w_or_x = state->cbr_is_64bit ? 'x' : 'w';
+
+                out->name = "CMP + B.cond foldable to "
+                    "compare-and-branch (CMPBR)";
+                out->start_offset = state->cbr_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                if (state->cbr_is_imm) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> cb%s %c%u, #0x%x, 0x%" PRIx64,
+                        a64_cond_names[cond], w_or_x, state->cbr_rn,
+                        state->cbr_imm, target);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> cb%s %c%u, %c%u, 0x%" PRIx64,
+                        a64_cond_names[cond], w_or_x, state->cbr_rn,
+                        w_or_x, state->cbr_rm, target);
+                }
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->cbr_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "b.%s 0x%" PRIx64, a64_cond_names[cond], target);
+
+                // The taken edge is already proven; the deferral
+                // carries the fall-through half, where the deleted
+                // compare's flags must likewise go unread.
+                defer_dead_nzcv_cbr(state, out);
+            }
+        }
+        // Strict adjacency: clear regardless of match.
+        state->cbr_active = false;
+    }
+
+    // (2) Open: a plain CMP -- SUBS with Rd = 31 -- in one of the two
+    //     spellings CB mirrors? The shifted-register form must carry
+    //     LSL #0 (CB has no shifted or extended-register operand) and
+    //     the immediate form sh = 0 (a comparand this check bounds per
+    //     condition at the close). CMN and TST never open: CB has no
+    //     negated or masked comparand. `cmp Rn, XZR` is the register
+    //     spelling of `cmp Rn, #0` and normalizes to the immediate
+    //     form. Rn = 31 never opens either -- it is SP in the
+    //     immediate form, which CB cannot encode, and a degenerate
+    //     compare of XZR in the register one.
+    if ((op & 0x7FE0FC1Fu) == 0x6B00001Fu) {
+        unsigned rn = (op >> 5) & 0x1Fu;
+        unsigned rm = (op >> 16) & 0x1Fu;
+        if (rn != 31) {
+            state->cbr_active = true;
+            state->cbr_is_64bit = ((op >> 31) & 1u) != 0;
+            state->cbr_is_imm = (rm == 31);
+            state->cbr_rn = rn;
+            state->cbr_rm = rm;
+            state->cbr_imm = 0;
+            state->cbr_offset = offset;
+            snprintf(state->cbr_disasm, sizeof(state->cbr_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    } else if ((op & 0x7FC0001Fu) == 0x7100001Fu) {
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if (rn != 31) {
+            state->cbr_active = true;
+            state->cbr_is_64bit = ((op >> 31) & 1u) != 0;
+            state->cbr_is_imm = true;
+            state->cbr_rn = rn;
+            state->cbr_rm = 0;
+            state->cbr_imm = (op >> 10) & 0xFFFu;
+            state->cbr_offset = offset;
+            snprintf(state->cbr_disasm, sizeof(state->cbr_disasm),
                 "%s %s", insn->mnemonic, insn->op_str);
         }
     }
@@ -14077,6 +14342,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_zs,
     armlint_advance_pending_cssc,
     armlint_advance_pending_sgn,
+    armlint_advance_pending_cbr,
     armlint_advance_pending_fp,
     armlint_advance_pending_mz,
     armlint_advance_pending_tb,
@@ -14118,6 +14384,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_single_bit_cbz,
     check_cset_fold,
     check_cmp_cset_sign,
+    check_cmpbr_fold,
     check_aut_ret,
     check_br_x30,
     check_branch_to_next,

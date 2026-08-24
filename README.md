@@ -85,7 +85,12 @@ the argument against each.
   branch's own taken edge, so these folds assume N/C/V is dead at every
   branch target. That holds for compiled code, where the flags are
   defined within a basic block, but not for hand-written assembly that
-  deliberately keeps a flag live into a branch target.
+  deliberately keeps a flag live into a branch target. The
+  compare-and-branch fold (`-m cmpbr`) is the one check that does not
+  make the assumption: its producer is a general two-register compare,
+  which clang's three-way comparator really does read again at the
+  branch target, so it proves the taken edge with a second scan
+  starting there.
 
 Findings are *opportunities*, not guaranteed speedups: some -- the pre-
 and post-indexed addressing folds -- are code-size and front-end wins
@@ -156,6 +161,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`cmp #0` + `cneg`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `abs` (`-m cssc`) |
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |
 | [NEON popcount round trip](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `cnt Xd, Xn` (`-m cssc`) |
+| [`cmp` + `b.<cond>`](analyses.md#compare-and-branch-synthesis-feature-gated--m-cmpbr) | `cb<cond> Rn, Rm`/`#imm, label` (`-m cmpbr`) |
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`; auto-armed on arm64e) |
 | [unsigned LR spill; raw `br`/`blr`; zero-discriminator `braaz`/`blraaz`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
@@ -312,8 +318,9 @@ typical `minos < 12` Mach-O binary.
 instructions the target must support: `cssc` (Armv8.9/9.4 Common
 Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,
 `ctz`), `lrcpc2` (Armv8.4 unscaled store-release: `stlur`), `pauth`
-(Armv8.3 pointer authentication: `retaa`/`retab`), and `lse`
-(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`). `pauth`
+(Armv8.3 pointer authentication: `retaa`/`retab`), `lse`
+(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`), and
+`cmpbr` (Armv9.6 compare-and-branch: `cbgt`/`cbeq`/...). `pauth`
 arms automatically on arm64e slices, whose ABI mandates FEAT_PAuth
 (the same auto-arm as the PAC audit); the rest stay opt-in.
 

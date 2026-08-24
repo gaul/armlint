@@ -190,6 +190,19 @@ static int run_lse_check(const uint8_t *code, size_t code_size)
     return run_features_check(code, code_size, ARMLINT_FEATURE_LSE);
 }
 
+// The compare-and-branch check proves NZCV dead at the branch target,
+// which needs the scanned buffer -- so these run through the real
+// driver loop (which sets it) rather than run_features_check.
+static int run_cmpbr_check(const uint8_t *code, size_t code_size)
+{
+    return run_driver_check(code, code_size, ARMLINT_FEATURE_CMPBR);
+}
+
+static int run_cmpbr_unarmed(const uint8_t *code, size_t code_size)
+{
+    return run_driver_check(code, code_size, 0);
+}
+
 #define EXPECT_FINDINGS(expected, ...) \
 do { \
     static const uint8_t bytes[] = { __VA_ARGS__ }; \
@@ -10806,6 +10819,252 @@ static void test_cssc_popcount(void)
     assert(run_helper_check(code, 20) == 0);
 }
 
+// Every condition CB<cc> can express, and the six it cannot.
+static const unsigned cmpbr_conds[10] = {
+    0, 1, 2, 3, 8, 9, 10, 11, 12, 13,   // EQ NE HS LO HI LS GE LT GT LE
+};
+static const unsigned cmpbr_conds_absent[6] = {
+    4, 5, 6, 7, 14, 15,                 // MI PL VS VC AL NV
+};
+
+// The canonical 16-byte frame these cases share:
+//
+//   0: <the compare, written by the caller>
+//   4: b.<cond> +8          -- taken edge lands on the RET at 12
+//   8: cmp x9, #0           -- fall-through kill (NZCV overwritten)
+//  12: ret                  -- taken edge's kill (flags die with the
+//                              function)
+//
+// Both edges of the fold are therefore provable, and the caller only
+// has to vary the compare and the condition.
+static void cmpbr_frame(uint8_t code[16], unsigned cond)
+{
+    b_cond(&code[4], cond, 8);
+    cmp_x_imm(&code[8], 9, 0);
+    write_le32(&code[12], 0xD65F03C0u);     // ret
+}
+
+// A range case wants its target far from the pair, so it gets its own
+// frame: NOPs everywhere, the pair parked mid-buffer, and a RET
+// planted at the branch target.
+static int cmpbr_range_case(int32_t byte_disp)
+{
+    static uint8_t code[3072];
+    for (size_t i = 0; i < sizeof(code); i += 4) {
+        write_le32(&code[i], 0xD503201Fu);  // nop
+    }
+    cmp_x_reg(&code[1536], 1, 2);
+    b_cond(&code[1540], 12, byte_disp);     // b.gt
+    cmp_x_imm(&code[1544], 9, 0);           // fall-through kill
+    write_le32(&code[(size_t)(1540 + byte_disp)], 0xD65F03C0u);   // ret
+    return run_cmpbr_check(code, sizeof(code));
+}
+
+static void test_cmpbr_fold(void)
+{
+    uint8_t code[24];
+
+    // Every expressible condition folds off a plain register compare.
+    for (size_t i = 0; i < 10; i++) {
+        cmp_x_reg(&code[0], 1, 2);
+        cmpbr_frame(code, cmpbr_conds[i]);
+        assert(run_cmpbr_check(code, 16) == 1);
+    }
+
+    // MI/PL read a sign and VS/VC an overflow that no comparison of
+    // two values reproduces; AL/NV are not conditions.
+    for (size_t i = 0; i < 6; i++) {
+        cmp_x_reg(&code[0], 1, 2);
+        cmpbr_frame(code, cmpbr_conds_absent[i]);
+        assert(run_cmpbr_check(code, 16) == 0);
+    }
+
+    // The W form folds the same way.
+    cmp_w_reg(&code[0], 3, 4);
+    cmpbr_frame(code, 9);                   // b.ls
+    assert(run_cmpbr_check(code, 16) == 1);
+
+    // The immediate comparand is an unsigned 6-bit field. EQ/NE and
+    // GT/LT/HI/LO encode it directly, reaching 0..63.
+    static const unsigned direct[6] = {0, 1, 12, 11, 8, 3};
+    for (size_t i = 0; i < 6; i++) {
+        cmp_x_imm(&code[0], 1, 63);
+        cmpbr_frame(code, direct[i]);
+        assert(run_cmpbr_check(code, 16) == 1);
+
+        cmp_x_imm(&code[0], 1, 64);
+        cmpbr_frame(code, direct[i]);
+        assert(run_cmpbr_check(code, 16) == 0);
+    }
+
+    // GE and HS assemble as CBGT/CBHI of imm-1, so their window is
+    // 1..64.
+    static const unsigned minus_one[2] = {10, 2};    // GE, HS
+    for (size_t i = 0; i < 2; i++) {
+        cmp_x_imm(&code[0], 1, 1);
+        cmpbr_frame(code, minus_one[i]);
+        assert(run_cmpbr_check(code, 16) == 1);
+
+        cmp_x_imm(&code[0], 1, 64);
+        cmpbr_frame(code, minus_one[i]);
+        assert(run_cmpbr_check(code, 16) == 1);
+
+        cmp_x_imm(&code[0], 1, 65);
+        cmpbr_frame(code, minus_one[i]);
+        assert(run_cmpbr_check(code, 16) == 0);
+    }
+
+    // LE and LS assemble as CBLT/CBLO of imm+1, so their window stops
+    // at 62.
+    static const unsigned plus_one[2] = {13, 9};     // LE, LS
+    for (size_t i = 0; i < 2; i++) {
+        cmp_x_imm(&code[0], 1, 62);
+        cmpbr_frame(code, plus_one[i]);
+        assert(run_cmpbr_check(code, 16) == 1);
+
+        cmp_x_imm(&code[0], 1, 63);
+        cmpbr_frame(code, plus_one[i]);
+        assert(run_cmpbr_check(code, 16) == 0);
+    }
+
+    // A zero comparand belongs to the baseline folds -- CBZ/CBNZ for
+    // EQ/NE/HI/LS, TBZ/TBNZ for GE/LT, and nothing at all for the
+    // constant-valued HS/LO. Arming the feature must not add a second
+    // report of the same pair, so the count matches the unarmed run.
+    static const unsigned zero_reserved[8] = {0, 1, 8, 9, 10, 11, 2, 3};
+    for (size_t i = 0; i < 8; i++) {
+        cmp_x_imm(&code[0], 1, 0);
+        cmpbr_frame(code, zero_reserved[i]);
+        assert(run_cmpbr_check(code, 16) == run_cmpbr_unarmed(code, 16));
+    }
+    // ... and that comparison has teeth: the baseline fold does fire.
+    cmp_x_imm(&code[0], 1, 0);
+    cmpbr_frame(code, 0);                   // b.eq -> cbz
+    assert(run_cmpbr_unarmed(code, 16) == 1);
+
+    // GT and LE do survive a zero comparand: no baseline instruction
+    // tests "> 0" or "<= 0" in one word.
+    cmp_x_imm(&code[0], 1, 0);
+    cmpbr_frame(code, 12);                  // b.gt
+    assert(run_cmpbr_unarmed(code, 16) == 0);
+    assert(run_cmpbr_check(code, 16) == 1);
+
+    cmp_x_imm(&code[0], 1, 0);
+    cmpbr_frame(code, 13);                  // b.le
+    assert(run_cmpbr_check(code, 16) == 1);
+
+    // `cmp Rn, XZR` is the register spelling of `cmp Rn, #0` and
+    // opens as the immediate form, so it obeys the same split.
+    cmp_x_reg(&code[0], 1, 31);
+    cmpbr_frame(code, 13);                  // b.le -> cble x1, #0
+    assert(run_cmpbr_check(code, 16) == 1);
+
+    cmp_x_reg(&code[0], 1, 31);
+    cmpbr_frame(code, 0);                   // b.eq -> the CBZ fold
+    assert(run_cmpbr_check(code, 16) == run_cmpbr_unarmed(code, 16));
+
+    // CB replaces the compare, 4 bytes ahead of the branch, so the
+    // displacement it must encode is imm19 + 1 words against a signed
+    // 9-bit field: +-1KB where B.cond had +-1MB.
+    assert(cmpbr_range_case(254 * 4) == 1);     // imm19 + 1 ==  255
+    assert(cmpbr_range_case(255 * 4) == 0);     // imm19 + 1 ==  256
+    assert(cmpbr_range_case(-257 * 4) == 1);    // imm19 + 1 == -256
+    assert(cmpbr_range_case(-258 * 4) == 0);    // imm19 + 1 == -257
+
+    // BC.cond carries the Armv8.8 branch-consistency hint, which CB
+    // cannot.
+    cmp_x_reg(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    bc_cond(&code[4], 12, 8);
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    // Rn = 31 is SP in the immediate form, which CB cannot encode,
+    // and a degenerate XZR compare in the register one.
+    cmp_x_imm(&code[0], 31, 16);
+    cmpbr_frame(code, 12);
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    cmp_x_reg(&code[0], 31, 2);
+    cmpbr_frame(code, 12);
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    // Shifted and shift-12 compares, CMN and TST: no CB counterpart.
+    cmp_x_reg_lsl(&code[0], 1, 2, 3);
+    cmpbr_frame(code, 12);
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    write_le32(&code[0], 0xF140043Fu | (1u << 5));   // cmp x1, #1, lsl #12
+    cmpbr_frame(code, 12);
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    cmn_x_reg_sr(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    tst_w_reg(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    // Strict adjacency: an instruction between the compare and the
+    // branch expires the pair.
+    cmp_x_reg(&code[0], 1, 2);
+    write_le32(&code[4], 0xD503201Fu);      // nop
+    b_cond(&code[8], 12, 8);                // -> the ret at 16
+    cmp_x_imm(&code[12], 9, 0);
+    write_le32(&code[16], 0xD65F03C0u);     // ret
+    assert(run_cmpbr_check(code, 20) == 0);
+
+    // A RET on the fall-through is a safe terminator too: the flags
+    // die with the function.
+    cmp_x_reg(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    write_le32(&code[8], 0xD65F03C0u);      // ret
+    assert(run_cmpbr_check(code, 16) == 1);
+
+    // A flag reader on the fall-through keeps the compare alive.
+    cmp_x_reg(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    write_le32(&code[8], 0x9A9FA7E0u);      // cset x0, lt
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    cmp_x_reg(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    b_cond(&code[8], 0, -8);                // b.eq back to the compare
+    assert(run_cmpbr_check(code, 16) == 0);
+
+    // The taken edge is proven, not assumed -- clang's three-way
+    // comparator branches twice off one compare, and the target's
+    // b.ge would read flags the fold deletes.
+    cmp_x_reg(&code[0], 10, 11);
+    b_cond(&code[4], 13, 12);               // b.le -> offset 16
+    write_le32(&code[8], 0x52800020u);      // mov w0, #1
+    write_le32(&code[12], 0xD65F03C0u);     // ret (fall-through kill)
+    b_cond(&code[16], 10, -16);             // b.ge back to the compare
+    write_le32(&code[20], 0xD65F03C0u);     // ret
+    assert(run_cmpbr_check(code, 24) == 0);
+
+    // The same shape with a flag overwrite at the target instead
+    // folds: both edges now die unread.
+    cmp_x_reg(&code[0], 10, 11);
+    b_cond(&code[4], 13, 12);               // b.le -> offset 16
+    write_le32(&code[8], 0x52800020u);      // mov w0, #1
+    write_le32(&code[12], 0xD65F03C0u);     // ret
+    cmp_x_imm(&code[16], 9, 0);
+    write_le32(&code[20], 0xD65F03C0u);     // ret
+    assert(run_cmpbr_check(code, 24) == 1);
+
+    // Without -m cmpbr the check is silent on the same bytes.
+    cmp_x_reg(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    assert(run_cmpbr_unarmed(code, 16) == 0);
+
+    // And with no scanned buffer there is no target to prove, so it
+    // stays silent rather than assuming.
+    cmp_x_reg(&code[0], 1, 2);
+    cmpbr_frame(code, 12);
+    assert(run_features_check(code, 16, ARMLINT_FEATURE_CMPBR) == 0);
+}
+
 static void test_adr_fold(void)
 {
     uint8_t code[12];
@@ -13501,6 +13760,7 @@ int main(void)
     test_cssc_abs();
     test_cssc_ctz();
     test_cssc_popcount();
+    test_cmpbr_fold();
     test_extend_add_sub_fold();
     test_add_ldr_register_offset();
     test_sxtw_ldr_fold();

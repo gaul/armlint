@@ -1,0 +1,37 @@
+CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x0 <_main>: -> cbgt x1, x2, 0x74 (2 instructions)
+  cmp x1, x2
+  b.gt 0x74
+
+CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x8 <_main+0x8>: -> cbls w3, w4, 0x74 (2 instructions)
+  cmp w3, w4
+  b.ls 0x74
+
+CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x10 <_main+0x10>: -> cbeq x5, #0x3f, 0x74 (2 instructions)
+  cmp x5, #0x3f
+  b.eq 0x74
+
+CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x18 <_main+0x18>: -> cbge w6, #0x40, 0x74 (2 instructions)
+  cmp w6, #0x40
+  b.ge 0x74
+
+CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x20 <_main+0x20>: -> cble x7, #0x3e, 0x74 (2 instructions)
+  cmp x7, #0x3e
+  b.le 0x74
+
+CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x28 <_main+0x28>: -> cbgt x8, #0x0, 0x74 (2 instructions)
+  cmp x8, #0
+  b.gt 0x74
+
+CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x30 <_main+0x30>: -> cble x9, #0x0, 0x74 (2 instructions)
+  cmp x9, xzr
+  b.le 0x74
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x38 <_main+0x38>: -> cbz x10, 0x74 (2 instructions)
+  cmp x10, #0
+  b.eq 0x74
+
+Optimization opportunities by type:
+       7  CMP + B.cond foldable to compare-and-branch (CMPBR)
+       1  compare-zero branch foldable into CBZ/CBNZ
+
+8 optimization opportunities in 37 instructions

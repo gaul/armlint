@@ -1576,6 +1576,104 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   every control transfer; the realistic catch is the inlined chain
   whose vector register is reused shortly after.
 
+## compare-and-branch synthesis (feature-gated: `-m cmpbr`)
+
+* Armv9.6's FEAT_CMPBR -- optional from Armv9.5, mandatory from 9.6 --
+  adds `CB<cc>`, which does a comparison and a conditional branch in
+  one instruction and writes no flags. The compare in front of a
+  conditional branch then disappears:
+  * `cmp x1, x2 ; b.gt L` -> `cbgt x1, x2, L`
+  * `cmp w0, #10 ; b.ls L` -> `cbls w0, #0xa, L`
+  ("CMP + B.cond foldable to compare-and-branch (CMPBR)"). The check
+  is silent without `-m cmpbr`: a target that does not implement
+  FEAT_CMPBR finds the encoding UNDEFINED.
+* The condition maps across unchanged. `CB<cc>` spells its condition
+  into the mnemonic, and the ten it can express -- `EQ`/`NE`, the
+  signed `GT`/`GE`/`LT`/`LE`, and the unsigned `HI`/`HS`/`LO`/`LS` --
+  are exactly the ten a `CMP`'s flags define as a comparison of the
+  two operands (`HS` is `C`, `GE` is `N == V`, and so on), so each
+  `b.<cc>` becomes `cb<cc>` of the same operands in the same order.
+  `MI`/`PL` read a sign and `VS`/`VC` an overflow that no comparison
+  of values reproduces; `AL`/`NV` are not conditions. None opens.
+* Only the two compare spellings `CB` mirrors open: shifted-register
+  with `LSL #0` (`cmp Rn, Rm`) and immediate with `sh = 0`
+  (`cmp Rn, #imm12`). A shifted or extended-register compare has no
+  `CB` operand for the shift; `CMN` compares against a negated operand
+  and `TST` against a mask, neither of which `CB` expresses.
+  `cmp Rn, XZR` is the register spelling of `cmp Rn, #0` and reports
+  as the immediate form, so no suggestion has to name a zero register.
+  `Rn = 31` never opens: it is SP in the immediate form, which `CB`
+  cannot encode (its `Rt = 31` is the zero register), and a degenerate
+  `XZR` compare in the register one.
+* Two encoding windows gate the rewrite:
+  * **The comparand.** `CB<cc>` (immediate) carries an unsigned 6-bit
+    field. `EQ`/`NE`/`GT`/`LT`/`HI`/`LO` encode it directly and reach
+    0..63. The other four are assembler pseudo-instructions that shift
+    the stored value by one: `CBGE`/`CBHS` assemble as `CBGT`/`CBHI`
+    of `imm-1` and so reach 1..64, `CBLE`/`CBLS` as `CBLT`/`CBLO` of
+    `imm+1` and so stop at 62.
+  * **The reach.** `CB`'s `imm9` spans -1024..1020 bytes where
+    `B.cond`'s `imm19` spanned +-1MB. The `CB` sits at the compare's
+    address, 4 bytes ahead of the branch, so the displacement it must
+    encode is `imm19 + 1` words -- the same accounting the `TBZ` fold
+    makes, and conservative by one word for a forward target, which
+    deleting the compare pulls 4 bytes closer.
+* A zero comparand is left to the baseline folds rather than reported
+  twice. [`cmp Rn, #0` + `b.eq`/`b.ne`](#compare-zero-branch-foldable-into-cbzcbnz)
+  is already `CBZ`/`CBNZ` (and `b.hi`/`b.ls` reduce to those once the
+  compare pins `C = 1`), and
+  [`b.lt`/`b.ge`](#compare-zero-signed-branch-foldable-into-tbztbnz)
+  is already `TBZ`/`TBNZ` of the sign bit -- none of which needs an
+  extension. `HS` and `LO` are not folds at all after a zero compare
+  (`C = 1` makes `HS` always taken and `LO` never), and `CBHS #0` is
+  outside `CBHS`'s window anyway. `GT` and `LE` are what remains, and
+  they are genuinely new: no baseline instruction tests `> 0` or
+  `<= 0` in one word.
+* **Soundness: both edges of the branch are proven, not one.** The
+  rewrite deletes the compare and `CB` writes no flags at all, so the
+  old NZCV must go unread whichever way the branch goes. The
+  fall-through half is the usual deferred scan. The taken half is the
+  part that makes this check different from every other branch fold
+  here: those assume NZCV is dead at the target -- fair for a
+  zero-test producer, whose flags a compiler rarely reuses -- but this
+  one's producer is a general two-register compare, which is exactly
+  what a compiler *does* reuse across a branch. clang's three-way
+  comparator is the shape, and `/bin/ls` is full of it:
+
+  ```asm
+  cmp   x10, x11
+  b.le  L         ; L below re-reads N/Z/V from THIS compare
+  mov   w0, #1
+  ret
+  L: b.ge ...
+  ```
+
+  Folding there would leave `L` reading undefined flags. So emission
+  additionally requires a forward scan *starting at the branch
+  target* to reach a flag overwrite -- or a call or return, past which
+  the PCS makes the flags caller-clobbered -- before any reader, under
+  the same bounded window and the same conservative classification as
+  the fall-through scan. Anything short of that proof refuses: no
+  scanned buffer, a target outside it, a reader, a control transfer
+  whose own destination would have to be chased in turn, or a window
+  that expires. On macOS 26's `/bin/ls` it refuses 16 of 52 candidate
+  pairs, leaving 36 findings in 3817 instructions: six are the
+  comparator shape above, where the target genuinely re-reads the
+  deleted flags, and the other ten are conservative -- a `CBZ`/`CBNZ`
+  or an unconditional `B` at the target ends the scan before it can
+  reach a kill. What survives is not a trickle: arm64e `/usr/lib/dyld`
+  reports 2550 pairs in 161738 instructions, spread across all ten
+  conditions (`cbne` 1366, `cbeq` 658, then the unsigned four, with
+  the signed `cbgt`/`cble`/`cblt`/`cbge` the tail at 64), and every
+  one of them re-assembles as a real `CB<cc>` at its own
+  displacement.
+* Not implemented: `CBB<cc>` and `CBH<cc>`, the byte and halfword
+  compares. They pay off only by deleting an explicit
+  `UXTB`/`UXTH`/`SXTB`/`SXTH` ahead of the compare -- a 3-for-1 or
+  4-for-1 fold with its own liveness argument -- since on already
+  narrow values `CB` itself is the same one instruction. See
+  [TODO.md](TODO.md).
+
 ## split pointer-authentication return foldable into RETAA/RETAB (feature-gated: `-m pauth`)
 
 * A pac-ret epilogue restores the signed return address, authenticates

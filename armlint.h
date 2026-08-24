@@ -73,6 +73,9 @@ void armlint_state_reset(armlint_state *state);
 #define ARMLINT_FEATURE_LRCPC2 (1u << 1)
 #define ARMLINT_FEATURE_PAUTH (1u << 2)
 #define ARMLINT_FEATURE_LSE (1u << 3)
+// Bit 6, not 4: the two V8 knowledge bits below already claimed 4
+// and 5, and their values are part of the shipped header's contract.
+#define ARMLINT_FEATURE_CMPBR (1u << 6)
 // V8CAGE differs in kind from the ISA bits above: it asserts a runtime
 // invariant of the scanned code rather than a hardware capability --
 // that x28 holds V8's pointer-compression cage base, which is 4GB
@@ -1312,6 +1315,69 @@ bool armlint_advance_pending_cssc(armlint_state *state,
 // NZCV-death advancer for the deferred sign-shift finding
 // (check_cmp_cset_sign), parallel to armlint_advance_pending_cssc.
 bool armlint_advance_pending_sgn(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
+
+// Compare-and-branch synthesis (gated on ARMLINT_FEATURE_CMPBR;
+// silent otherwise). Armv9.6 FEAT_CMPBR -- optional from Armv9.5 --
+// adds CB<cc>, which compares and branches in one instruction and
+// writes no flags, so the compare in front of a conditional branch
+// disappears:
+//
+//   cmp x1, x2 ; b.gt L   -> cbgt x1, x2, L
+//   cmp w0, #10 ; b.ls L  -> cbls w0, #0xa, L
+//
+// ("CMP + B.cond foldable to compare-and-branch (CMPBR)"). CB<cc>
+// spells its condition into the mnemonic, and the ten it can express
+// -- EQ/NE, the signed GT/GE/LT/LE, and the unsigned HI/HS/LO/LS --
+// are exactly the conditions a CMP's flags define as a comparison of
+// the two operands, so each maps across unchanged. MI/PL/VS/VC read
+// flags no comparison of values reproduces and AL/NV are not
+// conditions; none opens.
+//
+// Only the two compare spellings CB mirrors open: shifted-register
+// with LSL #0 (`cmp Rn, Rm`) and immediate with sh = 0
+// (`cmp Rn, #imm12`). A shifted or extended-register compare, CMN,
+// and TST have no CB counterpart. `cmp Rn, XZR` normalizes to the
+// immediate form so no suggestion has to name a zero register, and
+// Rn = 31 never opens (SP in the immediate form, which CB cannot
+// encode; a degenerate XZR compare in the register form).
+//
+// Two encoding limits gate emission. CB's comparand is an unsigned
+// 6-bit field: EQ/NE/GT/LT/HI/LO reach 0..63 directly, while GE/HS
+// (assembled as CBGT/CBHI of imm-1) reach 1..64 and LE/LS (CBLT/CBLO
+// of imm+1) reach 0..62. And CB's imm9 is a +-1KB reach where
+// B.cond's imm19 had +-1MB: the CB sits at the compare's address, 4
+// bytes ahead of the branch, so the displacement it must encode is
+// imm19 + 1 words.
+//
+// A zero comparand is left to the baseline folds rather than reported
+// twice: check_cmp_zero_branch already turns EQ/NE (and HI/LS, which
+// reduce to them once the compare pins C = 1) into CBZ/CBNZ and GE/LT
+// into TBZ/TBNZ of the sign bit, none of which needs an extension.
+// After a zero compare HS is always taken and LO never, so neither is
+// a fold. GT and LE are what remains, and they are genuinely new: no
+// baseline instruction tests "> 0" or "<= 0" in one word.
+//
+// The rewrite deletes the compare and CB writes no flags at all, so
+// the old NZCV must go unread on BOTH edges of the branch. The
+// fall-through half is the usual deferred scan
+// (armlint_advance_pending_cbr). The taken half is proven too, not
+// assumed as the CBZ/CBNZ and TBZ/TBNZ folds assume it: this fold's
+// producer is a general two-register compare, which is exactly what a
+// compiler reuses across a branch -- clang's three-way comparator
+// branches twice off one CMP, and its second branch sits at the
+// first's target. So emission also requires a forward scan starting
+// at the target to reach a flag overwrite (or a call or return, past
+// which the PCS makes the flags caller-clobbered) before any reader.
+// That scan reads the scanned buffer, so the check is silent without
+// one -- check_instructions always supplies it.
+bool check_cmpbr_fold(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out);
+
+// NZCV-death advancer for the deferred compare-and-branch finding,
+// parallel to armlint_advance_pending_cssc.
+bool armlint_advance_pending_cbr(armlint_state *state,
                                  const cs_insn *insn,
                                  size_t offset, armlint_finding *out);
 
