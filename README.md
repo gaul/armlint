@@ -465,15 +465,32 @@ backlog, built separately with `make tools`:
   redundancies no pair statistic can see: dead definitions, redundant
   reloads of the same address, re-materialized constants, and zero
   compares of a value whose producer could have set the flags.
+* `tools/shapescan.py` counts a fixed list of *specific* candidates --
+  the rows TODO.md tracks -- with their real operand, range and
+  encodability conditions applied, which is what separates a
+  population from a pair count. `adrp` + `add` is the standing
+  example: 753,648 adjacent dependent pairs across the corpus, of
+  which 43,434 have a target inside ADR's reach. Run
+  `tools/shapescan.py --selftest` first: it assembles one reference
+  instance of every mask with clang and checks that each matches its
+  own instruction and no other, which is the only thing standing
+  between a hand-derived mask and a plausible-looking wrong number.
+  `-e SHAPE` prints example sites. Needs numpy.
 
 The workflow that produced several of the current checks: compile a
 representative corpus, run `pairscan` to rank pair shapes, classify
 the top shapes as by-design or foldable, then use `defuse` to decide
-whether a candidate needs adjacency only or a liveness window. Both
-tools lean on Capstone's register-access model, which mis-reports the
-compare aliases (`CMP`/`CMN`/`TST` mark their first operand as a
-write); `defuse` corrects for this, and armlint's own checks decode
-the raw encodings precisely to avoid that class of problem.
+whether a candidate needs adjacency only or a liveness window, and
+`shapescan.py` to size the survivor with its real conditions applied
+before writing any code. `pairscan` and `defuse` lean on Capstone's
+register-access model, which mis-reports the compare aliases
+(`CMP`/`CMN`/`TST` mark their first operand as a write); `defuse`
+corrects for this, and armlint's own checks decode the raw encodings
+precisely to avoid that class of problem. `shapescan.py` decodes raw
+encodings for the same reason, and self-tests them because that is
+where its own bugs live: every wrong figure it has produced came from
+a mask one bit too loose or a destination modelled as write-only when
+the instruction merges into it.
 
 ## References
 
