@@ -1,0 +1,14 @@
+UMOV of lane 0 foldable to FMOV (FP16) at offset: 0x0 <_main>: -> fmov w0, h1 (1 instructions)
+  umov w0, v1.h[0]
+
+UMOV of lane 0 foldable to FMOV at offset: 0x4 <_main+0x4>: -> fmov w2, s3 (1 instructions)
+  mov w2, v3.s[0]
+
+UMOV of lane 0 foldable to FMOV at offset: 0x8 <_main+0x8>: -> fmov x4, d5 (1 instructions)
+  mov x4, v5.d[0]
+
+Optimization opportunities by type:
+       2  UMOV of lane 0 foldable to FMOV
+       1  UMOV of lane 0 foldable to FMOV (FP16)
+
+3 optimization opportunities in 8 instructions

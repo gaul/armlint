@@ -77,6 +77,11 @@ void armlint_state_reset(armlint_state *state);
 // and 5, and their values are part of the shipped header's contract.
 #define ARMLINT_FEATURE_CMPBR (1u << 6)
 #define ARMLINT_FEATURE_SHA3 (1u << 7)
+// FEAT_FP16 supplies the half-precision transfer forms, notably
+// FMOV Wd, Hn -- the target of the halfword arm of the lane-0 UMOV
+// fold. Without it that arm stays silent; the S and D arms need no
+// extension and are always live.
+#define ARMLINT_FEATURE_FP16 (1u << 8)
 // V8CAGE differs in kind from the ISA bits above: it asserts a runtime
 // invariant of the scanned code rather than a hardware capability --
 // that x28 holds V8's pointer-compression cage base, which is 4GB
@@ -743,6 +748,16 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
 // are skipped because the flag-set is the user's intent.
 bool check_self_op(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out);
+
+// Detect UMOV of lane 0 -- umov w0, v1.s[0], umov x0, v1.d[0], and
+// under ARMLINT_FEATURE_FP16 umov w0, v1.h[0] -- which move exactly
+// the bits FMOV Wd, Sn / Xd, Dn / Wd, Hn already reach, Sn/Dn/Hn being
+// views of the low bits of Vn. One instruction either way; FMOV uses a
+// cheaper port on Apple cores. Confined to lane 0 because FMOV
+// (general) can only address the low element, and to the H/S/D sizes
+// because no FMOV reads a byte element.
+bool check_umov_lane0_fmov(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
 
 // Detect CSEL Rd, Rn, Rn, cond -- the same-operand case where both
 // branches of the conditional select produce Rn. The cond is

@@ -1639,6 +1639,51 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   forward register-liveness scan. v1 matches the unsigned-offset
   addressing form only, like the other load-rewriting folds.
 
+## UMOV of lane 0 foldable to FMOV
+
+* `umov w0, v1.s[0]` -> `fmov w0, s1`, and `umov x0, v1.d[0]` ->
+  `fmov x0, d1`. `Sn` and `Dn` are not separate registers: they are the
+  low 32 and 64 bits of `Vn`. For lane 0 the two instructions therefore
+  move identical bits into an identical destination, zero-extending the
+  same way, and the rewrite needs no conditions beyond the operand
+  shape -- nothing is deleted, no flags or memory are involved, and the
+  source is read exactly once either way. This is the one check in the
+  file with no liveness argument at all.
+* **What it saves is not size.** Both encodings are one instruction.
+  `FMOV` uses a cheaper port than `UMOV` on Apple cores (Apple Silicon
+  CPU Optimization Guide 4.5.2), so this is an execution-resource
+  finding, in the same "cheaper, not shorter" class as the pair-offset
+  residue. Worth knowing before acting on a large count of them.
+* **Only lane 0.** `FMOV` (general) can address just the low element,
+  which is the entire restriction. The lane index lives in `imm5` above
+  the size bit -- `.s[i]` encodes as `i:100`, `.d[i]` as `i:1000` -- so
+  "lane 0" is exactly "no bits set above the size bit", a single mask
+  test. `umov w0, v1.s[2]` has no `FMOV` spelling whatsoever.
+* **The B forms never fold** at any lane: there is no `FMOV Wd, Bn`.
+* The halfword arm is feature-gated (`-m fp16`), reported under its own
+  name `UMOV of lane 0 foldable to FMOV (FP16)`:
+  `umov w0, v1.h[0]` -> `fmov w0, h1`. Both zero-extend `Vn[15:0]` into
+  `Wd`, but `FMOV Wd, Hn` is FEAT_FP16, so the fold is silent unless
+  the target is known to have it. It is where the volume is: 1,780
+  sites across the corpus against 484 for the always-live arms, 1,775
+  of them in librustc_driver.
+* `Rd = 31` is excluded. That is ZR, so the transfer is discarded and
+  the instruction is dead outright; respelling a dead instruction as a
+  different dead instruction is not useful advice, and the deletion
+  belongs to a different check.
+* **Match on the encoding, not the mnemonic.** `MOV Wd, Vn.S[index]`
+  and `MOV Xd, Vn.D[index]` are the *preferred* aliases for exactly
+  the two always-live forms, so both the assembler and every
+  disassembler print them as `mov`; only the `.b` and `.h` forms show
+  up as `umov`. Grepping disassembly for "umov" finds none of the
+  unconditionally foldable sites.
+* Corpus: 484 always-live sites (464 libcrypto, 20 go) plus 1,780
+  FP16-gated ones. The operand condition is what makes this a check
+  rather than a blanket rewrite -- there are 7,150 `UMOV`s in the
+  corpus and only 484 are lane-0 S or D, 6.8%. librustc_driver's 6,465
+  are almost entirely halfword extraction and `.d[1]`, the *high*
+  lane; libcrypto's are the reverse.
+
 ## CSSC synthesis (feature-gated: `-m cssc`)
 
 * Armv8.9/9.4 Common Short Sequence Compression gives single

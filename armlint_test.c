@@ -236,6 +236,11 @@ static int run_lse_check(const uint8_t *code, size_t code_size)
     return run_features_check(code, code_size, ARMLINT_FEATURE_LSE);
 }
 
+static int run_fp16_check(const uint8_t *code, size_t code_size)
+{
+    return run_features_check(code, code_size, ARMLINT_FEATURE_FP16);
+}
+
 // The compare-and-branch check proves NZCV dead at the branch target,
 // which needs the scanned buffer -- so these run through the real
 // driver loop (which sets it) rather than run_features_check.
@@ -607,6 +612,19 @@ static void encode_sr(uint8_t out[4], uint32_t base,
         | ((rn & 0x1fu) << 5)
         | (rd & 0x1fu);
     write_le32(out, op);
+}
+
+// UMOV Wd/Xd, Vn.<T>[index]: 0 Q 001110000 imm5 001111 Rn Rd. imm5 is
+// size-terminated -- lowest set bit picks B/H/S/D, bits above it are
+// the lane index -- and Q is pinned by the size (0 for B/H/S, 1 for D).
+static inline void umov(uint8_t out[4], unsigned size, unsigned index,
+                        unsigned rd, unsigned rn)
+{
+    static const unsigned size_bit[4] = { 1u, 2u, 4u, 8u };
+    unsigned imm5 = size_bit[size] | (index << (size + 1));
+    uint32_t q = (size == 3u) ? (1u << 30) : 0u;
+    write_le32(out, 0x0e003c00u | q | ((imm5 & 0x1fu) << 16)
+        | ((rn & 0x1fu) << 5) | (rd & 0x1fu));
 }
 
 static inline void add_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)  { encode_sr(out, 0x0b000000u, rd, rn, rm); }
@@ -5471,6 +5489,59 @@ static void test_self_op(void)
     eor_w(&code[4], 2, 3, 3);
     assert(run_helper_check(code, 8) == 2);
 }
+
+static void test_umov_lane0_fmov(void)
+{
+    uint8_t code[4];
+    const char *name = "UMOV of lane 0 foldable to FMOV";
+    const char *fp16_name = "UMOV of lane 0 foldable to FMOV (FP16)";
+
+    // Lane 0 of the S and D forms reads exactly the bits FMOV reaches
+    // through the Sn / Dn views of Vn. No extension needed.
+    umov(&code[0], 2, 0, 0, 1);          // umov w0, v1.s[0]
+    assert(run_named_check(code, 4, name) == 1);
+    umov(&code[0], 3, 0, 0, 1);          // umov x0, v1.d[0]
+    assert(run_named_check(code, 4, name) == 1);
+
+    // Any other lane is unreachable: FMOV (general) addresses only the
+    // low element, so there is no spelling to fold to.
+    for (unsigned i = 1; i < 4; i++) {
+        umov(&code[0], 2, i, 0, 1);      // umov w0, v1.s[i]
+        assert(run_named_check(code, 4, name) == 0);
+    }
+    umov(&code[0], 3, 1, 0, 1);          // umov x0, v1.d[1]
+    assert(run_named_check(code, 4, name) == 0);
+
+    // The B forms have no FMOV counterpart at any lane -- there is no
+    // FMOV Wd, Bn -- so lane 0 does not save them.
+    umov(&code[0], 0, 0, 0, 1);          // umov w0, v1.b[0]
+    assert(run_check(code, 4) == 0);
+    assert(run_fp16_check(code, 4) == 0);
+
+    // Rd = 31 is ZR: the transfer is discarded, so the instruction is
+    // dead outright and respelling it is not the advice to give.
+    umov(&code[0], 2, 0, 31, 1);
+    assert(run_named_check(code, 4, name) == 0);
+
+    // The halfword arm needs FMOV Wd, Hn, which is FEAT_FP16: silent
+    // by default, reported under the feature, and under its own name
+    // so the two arms stay distinguishable in a summary.
+    umov(&code[0], 1, 0, 0, 1);          // umov w0, v1.h[0]
+    assert(run_check(code, 4) == 0);
+    assert(run_fp16_check(code, 4) == 1);
+    assert(run_named_check(code, 4, fp16_name) == 0);
+
+    // The lane restriction still applies with the feature on.
+    umov(&code[0], 1, 1, 0, 1);          // umov w0, v1.h[1]
+    assert(run_fp16_check(code, 4) == 0);
+    umov(&code[0], 1, 0, 31, 1);         // discarded halfword
+    assert(run_fp16_check(code, 4) == 0);
+
+    // Enabling FP16 must not disturb the always-live arms.
+    umov(&code[0], 2, 0, 0, 1);
+    assert(run_fp16_check(code, 4) == 1);
+}
+
 
 static void test_csel_self(void)
 {
@@ -14214,6 +14285,7 @@ int main(void)
     test_subs_cmp_redundant();
     test_add_sub_zero();
     test_self_op();
+    test_umov_lane0_fmov();
     test_csel_self();
     test_fcsel_self();
     test_bfxil_synth();

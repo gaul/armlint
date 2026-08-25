@@ -7337,6 +7337,112 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// Decode UMOV Wd, Vn.<T>[index] / UMOV Xd, Vn.D[index]:
+//   0 Q 001110000 imm5 001111 Rn Rd
+//
+// imm5 is a one-hot-terminated field: the LOWEST set bit picks the
+// element size and everything above it is the lane index, so lane 0 is
+// exactly "no bits set above the size bit". imm5 with none of bits 3..0
+// set (0bx0000) is unallocated.
+//
+// Q is not free: it selects the destination width and the architecture
+// pins it to the size. Q = 0 is a W destination (B, H, S elements),
+// Q = 1 an X destination (D elements only).
+static bool decode_umov(uint32_t op, unsigned *out_size,
+                        unsigned *out_index, unsigned *out_rn,
+                        unsigned *out_rd)
+{
+    if ((op & 0xBFE0FC00u) != 0x0E003C00u) {
+        return false;
+    }
+    unsigned imm5 = (op >> 16) & 0x1Fu;
+    unsigned size, index;
+    if (imm5 & 1u) {
+        size = 0u; index = imm5 >> 1;           // B
+    } else if (imm5 & 2u) {
+        size = 1u; index = imm5 >> 2;           // H
+    } else if (imm5 & 4u) {
+        size = 2u; index = imm5 >> 3;           // S
+    } else if (imm5 & 8u) {
+        size = 3u; index = imm5 >> 4;           // D
+    } else {
+        return false;                            // unallocated
+    }
+    if ((size == 3u) != (((op >> 30) & 1u) == 1u)) {
+        return false;
+    }
+    *out_size = size;
+    *out_index = index;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rd = op & 0x1Fu;
+    return true;
+}
+
+// UMOV of lane 0 rewritten as the FMOV that reads the same bits.
+//
+//   umov w0, v1.s[0]  ->  fmov w0, s1
+//   umov x0, v1.d[0]  ->  fmov x0, d1
+//   umov w0, v1.h[0]  ->  fmov w0, h1     (FEAT_FP16 only)
+//
+// Sn, Dn and Hn are not separate registers: they are the low 32, 64 and
+// 16 bits of Vn. So for lane 0 both instructions move the identical
+// bits into the identical destination, zero-extending the same way, and
+// the rewrite is unconditional -- nothing is deleted, no flags or
+// memory are touched, and the source register is read exactly once
+// either way. That makes this the rare check with no liveness argument
+// at all.
+//
+// The saving is execution resources rather than size: both encodings
+// are one instruction, but FMOV uses a cheaper port than UMOV on Apple
+// cores (Apple Silicon CPU Optimization Guide 4.5.2). It is reported
+// like any other finding, but a reader weighing it should know it does
+// not shrink the binary.
+//
+// FMOV (general) can only reach the LOW element, which is what confines
+// this to lane 0: umov w0, v1.s[2] has no FMOV spelling whatsoever. The
+// B forms have no FMOV counterpart at any lane (there is no
+// FMOV Wd, Bn), so they never fold.
+bool check_umov_lane0_fmov(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        return false;
+    }
+
+    unsigned size, index, rn, rd;
+    if (!decode_umov(insn_word(insn), &size, &index, &rn, &rd)) {
+        return false;
+    }
+    if (index != 0u || size == 0u) {
+        return false;
+    }
+    // Rd = 31 is ZR: the transfer is discarded, so the whole
+    // instruction is dead and respelling it as a different dead
+    // instruction is not the advice to give.
+    if (rd == 31u) {
+        return false;
+    }
+    // The halfword arm needs FMOV Wd, Hn, which is FEAT_FP16.
+    if (size == 1u && !(state->features & ARMLINT_FEATURE_FP16)) {
+        return false;
+    }
+
+    char rd_wx = (size == 3u) ? 'x' : 'w';
+    char vt = "?hsd"[size];
+
+    out->name = (size == 1u)
+        ? "UMOV of lane 0 foldable to FMOV (FP16)"
+        : "UMOV of lane 0 foldable to FMOV";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail),
+        "-> fmov %c%u, %c%u", rd_wx, rd, vt, rn);
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 bool check_csel_self(armlint_state *state, const cs_insn *insn,
                      size_t offset, armlint_finding *out)
 {
@@ -14811,6 +14917,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_add_sub_imm_chain,
     check_add_sub_zero,
     check_self_op,
+    check_umov_lane0_fmov,
     check_csel_self,
     check_fcsel_self,
     check_bfxil_synth,

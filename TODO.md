@@ -57,7 +57,7 @@ here with measured populations so it is not re-investigated.
 | `and xd, xn, #0xffffffff` / `ubfx xd, xn, #0, #32` | `mov wd, wn` | Zero-latency rename on Neoverse; neutral elsewhere. 2026-08 sweep: **56** |
 | ZR-operand ALU spellings (`orr wd, wn, wzr`, `add wd, wn, wzr`, `mul xd, xn, xzr`, `eor wd, wn, wzr`, ...) | `mov` / `neg` / `mvn` / `mov #0` | The docs' "further simplification left to the reader" after the MOV #0 → ZR findings; enumerate the alias table. 2026-08 sweep: **90**, all in librustc_driver |
 | `lsl #0`, `extr Rd, Rn, Rn, #0`, full-width `ubfx` | `mov` | Degenerate-immediate spellings of a register copy. 2026-08 sweep: **0** |
-| `umov wd, vn.s[0]` | `fmov wd, sn` | Apple guide §4.5.2 (cheaper port usage); value-identical. 2026-08 sweep: **484** (464 libcrypto, 20 go, 0 elsewhere), counting the `.s[0]` and `.d[0]` forms. The cheapest check on this list: one instruction, no liveness argument, no pair state |
+| ~~`umov wd, vn.s[0]`~~ | ~~`fmov wd, sn`~~ | **Done** (check_umov_lane0_fmov; see [analyses.md](analyses.md#umov-of-lane-0-foldable-to-fmov)). 484 always-live sites (464 libcrypto, 20 go), plus a halfword arm under the new `-m fp16` knob that is four times larger again -- 1,780 sites, 1,775 of them in librustc_driver, folding `umov wd, vn.h[0]` to the FEAT_FP16 `fmov wd, hn`. Two things the sweep figure hid: the `.s[0]`/`.d[0]` forms disassemble as `mov`, not `umov`, because MOV is their preferred alias, so the check must match encodings; and the win is port usage, not size |
 
 ## SIMD & FP
 
@@ -84,7 +84,7 @@ here with measured populations so it is not re-investigated.
 
 | Item | Notes |
 | --- | --- |
-| FP16 lift | `-m fp16`: relax the `type <= 1` gates in the fmov/fcsel/fmul/cvtf checks |
+| FP16 lift | The `-m fp16` knob now **exists** (added with the lane-0 UMOV fold, whose halfword arm it gates). Still open: relaxing the `type <= 1` gates in the fmov/fcsel/fmul/cvtf checks so the half-precision forms of those folds report under it too |
 | LSE leftovers | `-m lse` folds the fetch-op, exchange, and converging CAS retry loops; remaining: diverging-exit CAS (LLVM's CLREX tail -- needs a second suggested branch and a two-path death argument), immediate-comparand and CBNZ-as-compare zero-expected shapes (zero of each in gh), byte/half CAS via the extended-register compare (`cmp w8, w1, uxtb`), cmp+csel MIN/MAX loops (`ldsmax` family), ST-forms for unused results, bitmask-immediate logic operands |
 | PAuth epilogue leftovers | v1 of `-m pauth` folds `autiasp`/`autibsp` + `ret` only; the general-encoding `autia x30, sp` producer and the one-shot `autiasp` + `br x30` → `retaa` (its first step now lands via the `br x30` → `ret` fold) remain |
 | CMPBR leftovers | `-m cmpbr` folds `cmp` + `b.cond` into `CB<cc>`. Remaining: `CBB<cc>`/`CBH<cc>`, whose byte/halfword compare only pays by also deleting an explicit `uxtb`/`uxth`/`sxtb`/`sxth` ahead of the compare -- a 3-for-1 or 4-for-1 fold needing the extend's own liveness argument (LLVM does not emit them either, llvm#135617). Also open: non-adjacent pairs, and a comparand materialized by a MOV chain rather than written as an immediate |
