@@ -934,29 +934,71 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   either side is not a chain but a redundant instruction, left to
   [`ADD/SUB #0 is redundant`](#addsub-0-is-redundant) so no window is
   reported twice.
-* **Where the shape comes from.** It is stack-address arithmetic, and
-  the two constants are born in different compiler phases. The first
-  (`add x8, sp, #0x320`) is a stack object's address: its offset is
-  not a constant until the compiler assigns the frame layout, which
-  happens after instruction selection and register allocation. The
-  second (`add x8, x8, #0x8`) is a field offset from the IR, constant
-  from the start. LLVM's `LocalStackSlotAllocation` deliberately
-  materializes a frame base register so later frame references can be
-  a base-plus-delta pair -- and when a base ends up with a single use,
-  the pair collapses to one `add`, but nothing revisits it. Under
-  `clang -O2`, interior pointers into a stack array emit exactly
-  `add x20, sp, #0x8 ; add x0, x20, #0x188`, while a plain
-  `&local.field`, where both constants are visible at instruction
-  selection, folds into a single `add`.
-* That mechanism explains the distribution. In the 2026-08 corpus
-  sweep the check reports 26,929 findings in `librustc_driver` (26.0M
-  instructions) against 37 in dyld, 11 in go, 11 in libcrypto, 5 in
-  ssh and 4 in bash: rustc's frames are large and full of interior
-  pointers -- enum payloads, iterator and future state, `&mut` borrows
-  into locals -- that get spilled, which is exactly when frame base
-  registers appear. 64% of the foldable chains are sp- or
-  frame-pointer-relative, and the second immediate is a field offset
-  (median 16 bytes, 97% under 256).
+* **Where the shape comes from.** Two unrelated LLVM behaviours
+  produce it in roughly equal measure. Classifying librustc_driver's
+  26,929 findings by what feeds the opening instruction: 13,607
+  (50.6%) are global-address arithmetic, where the open is the `add`
+  of an `adrp`/`add` page pair; 12,875 (47.8%) are stack-address
+  arithmetic, where the open is `sp`- or frame-pointer-relative; 447
+  (1.6%) are neither.
+* **The stack half is instruction selection.** A bare `ISD::FrameIndex`
+  is selected to `ADDXri <FI>, 0` with a hardcoded zero immediate (the
+  `ISD::FrameIndex` case in `AArch64DAGToDAGISel::Select`), so an
+  interior pointer into an alloca that escapes becomes two
+  instructions before frame layout is even considered:
+
+      %0:gpr64sp = ADDXri %stack.0.a, 0, 0
+      %1:gpr64sp = nuw ADDXri killed %0, 8, 0
+
+  which resolves to `add x8, sp, #0x320 ; add x8, x8, #0x8`. The
+  offset was never expensive: `rewriteAArch64FrameIndex()` already
+  adds whatever immediate an `ADDXri` carries to the resolved frame
+  offset, so selection could have put the constant there and simply
+  did not. Memory operands escape the shape because
+  `SelectAddrModeIndexed` folds `FrameIndex + offset` into the
+  addressing mode -- the same address used by a load is one
+  `ldr x0, [sp, #0x328]` -- which is why the shape marks *escaping*
+  interior pointers specifically. Nothing downstream repairs it:
+  `LocalStackSlotAllocation` leaves the pair untouched, and
+  `AArch64MIPeepholeOpt` coalesces `ADDXrr` but not `ADDXri` chains.
+* **The global half is a declined relocation fold.**
+  `performGlobalAddressCombine` in `AArch64ISelLowering.cpp` normally
+  folds a constant offset into the symbol's relocation addend, giving
+  `adrp x8, sym@PAGE+16 ; add x8, x8, sym@PAGEOFF+16`. It declines in
+  three cases, and each declined fold leaves a third instruction
+  behind: when the offset runs past the object's size
+  (`Offset > getTypeAllocSize`), the dominant shape here; when the
+  same global is also used at a smaller offset, which trips its
+  "require that the new offset is larger" guard; and when the offset
+  is negative, which it skips with the comment that those "aren't
+  really common enough to matter" -- borne out here, where only 50 of
+  the 13,607 global chains close with a `sub`.
+* **The two halves are not equally actionable.** The stack half is a
+  plain missed optimization -- the constant is available at selection
+  and the frame-index rewrite already accepts it. Folding it there
+  removes 3,893 of 3,893 chains from the 25 largest translation units
+  of an LLVM+clang build, and 0.35% of all instructions emitted, with
+  no translation unit getting larger. That corpus is all stack family:
+  measured on unlinked objects, where `add xN, xN, @PAGEOFF` still
+  carries a zero immediate awaiting relocation, so the open half of a
+  global chain does not yet exist. The global half is a *relink*-level
+  observation, for the same reason as the `adrp`+`add` note under
+  [`ADD/SUB #0 is redundant`](#addsub-0-is-redundant): armlint reads
+  the linked image, where `pageoff` is resolved and it can check that
+  `pageoff + K` still encodes, but the compiler emitting the
+  relocation cannot prove that statically. Both halves are sound
+  rewrites of the binary in hand, which is what the check reports.
+* The stack half explains the distribution. The check reports 26,929
+  findings in `librustc_driver` (26.0M instructions) against 37 in
+  dyld, 11 in go, 11 in libcrypto, 5 in ssh and 4 in bash -- 1,037 per
+  million instructions against 229, 44 and 34 for the C and C++
+  binaries. rustc's frames are large and full of interior pointers --
+  enum payloads, iterator and future state, `&mut` borrows into locals
+  -- and every one that escapes to a call rather than being loaded
+  through pays the extra `add`. The corpus has no large C program,
+  though, so that ratio mixes language with program size. The second
+  immediate is a field offset in both halves: median 16 bytes, 98.6%
+  under 256.
 * Verification: `tools/shapescan.py` independently identifies 46,115
   candidate chains in `librustc_driver`; armlint reports a strict
   subset of them, with no finding outside that set, the remainder
