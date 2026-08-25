@@ -21,6 +21,12 @@ population below was spot-checked against real disassembly -- both
 steps caught mask and modelling errors that had inflated earlier
 counts by one to three orders of magnitude.
 
+Where a candidate needed operand conditions finer than one shape mask
+can carry, it has its own scanner held to the same discipline:
+`tools/addpairscan.py` splits the ADD + LDP/STP family into the half
+that folds 2-for-1 and the half whose offset overflows the pair's
+imm7, and carries its own `--selftest`.
+
 ## Flag-fold leftovers
 
 | Pattern | Rewrite | Notes |
@@ -70,7 +76,7 @@ here with measured populations so it is not re-investigated.
 | Pattern | Rewrite | Notes |
 | --- | --- | --- |
 | `adrp` + `add` → `adr` (target within ±1MB) | shorter form | Actionability caveat: linker-resolved relocations make this a relink-level suggestion; likely opt-in. The pair is the most frequent dependent pair in every corpus (2026-07 sweep: 59.7k go, 42.5k rustup, 642k librustc_driver) but **most of those targets are nowhere near ADR's ±1MB reach**. 2026-08 sweep, resolving each target and range-checking it: 43,434 of 753,648 pairs qualify (5.8%) -- 18,138 of 652,138 in librustc_driver (2.8%), 4,992 of 59,943 in go (8.3%), and essentially all of them in the small binaries (dyld 5,164, ssh 7,937, bash 4,966). Still the largest single population here, but a 17x smaller prize than the raw pair count suggests |
-| `adrp` + `ldr Sd/Dd/Qd` from a literal pool | `fmov #imm8` / `movi` when the pointed-to constant encodes | 24.3k `adrp`+`ldr d` pairs in librustc_driver; needs reading the target section's bytes at the resolved address -- same relink caveat and infrastructure as the rows above |
+| ~~`adrp` + `ldr Sd/Dd/Qd` from a literal pool~~ | ~~`fmov #imm8` / `movi`~~ | **Closed, 2026-08 sweep: 35 encodable of 42,324 FP pool loads (0.08%).** The premise was wrong, not just the count. Resolving every target and decoding the bytes shows librustc_driver's 24,333 `ldr d` loads from `__TEXT,__const` are not doubles at all -- they are 8-byte struct/tuple blobs moved through the FP register file (one target decodes to the ASCII `cc_excep`). Of the genuine FP constants, LLVM already materializes every encodable one via FMOV/MOVI, so the pool holds only what does not encode: 0 of 25,241 `ldr d` and 32 of 17,042 `ldr q` corpus-wide |
 | BR fold for general registers (`adr x8, L ; br x8`) | `b L` | v1 folds x16/x17 only (veneer-scratch ABI argument); the general case needs liveness at the TARGET, a new scan mode |
 | mov-wide address chains → `adr`/`adrp`+`add`; `mov`+`blr` → `bl` | shorter form | Same actionability caveat as adrp+add |
 
@@ -92,7 +98,7 @@ here with measured populations so it is not re-investigated.
 | Render `mov xd, #0` (not `mov xd, xzr`) and `movi v0.2d, #0` (not `movi d0, #0`) | Apple eliminates only those spellings at rename; rendering tweaks to existing checks |
 | Loaded value as base not offset (`[x9, x8]` → `[x8, x9]` when x8 was just loaded) | Apple guide §4.6.7: 1 cycle of address-generation latency |
 | PAC audit v2: non-SP LR stores (jmp_buf/context saves; rare -- 0 in bash/dyld, lives in libsystem_c), the compact `ldrb`-scaled jump-table variant (`adr` + `ldrb` + `add …, lsl #2` + `br`; seen in Homebrew arm64 libcapstone, unmatched by the ldrsw classifier) | Auto-arm on arm64e slices: **done** for both `-a pac` and `-m pauth`. Jump-table classification for the dominant `ldrsw` idiom: **done** (jt_advance in check_pac_raw_indirect empties the arm64e raw-BR worklist). Zero-discriminator forward edges: **done** (check_pac_zero_disc_indirect flags `braaz`/`blraaz`/`brabz`/`blrabz`; census ssh 109, sshd 39, zsh 443, ls 2, bash 85, dyld 169) |
-| LDP/STP synthesized through a scratch ADD (`add x27, xN, #big ; ldp x3, x4, [x27]`) → two plain `ldr`/`str` with the offset folded in | Size-neutral 2-for-2 that drops the ADD from the address dependency chain and frees the scratch; gc emits it whenever a pair offset exceeds ±504 or is 8-misaligned, LLVM for big Q-register spill offsets; requires the split offsets to encode (scaled imm12, or LDUR/STUR range). 2026-08 sweep: **16,838**, overwhelmingly a Go phenomenon -- 13,587 in go against 3,176 in librustc_driver and under 40 in every other binary, and almost all of them gc's fixed `x27` scratch (`add x27, x27, #0xa80 ; ldp x3, x4, [x27]`). The ADD is in place, so the fold needs the dead-producer scan to prove the scratch's new value unused |
+| LDP/STP synthesized through a scratch ADD (`add x27, xN, #big ; ldp x3, x4, [x27]`) → two plain `ldr`/`str` with the offset folded in | Size-neutral 2-for-2 that drops the ADD from the address dependency chain and frees the scratch; gc emits it whenever a pair offset exceeds ±504 or is 8-misaligned, LLVM for big Q-register spill offsets; requires the split offsets to encode (scaled imm12, or LDUR/STUR range). 2026-08 sweep, re-measured: **17,565** sites whose combined offset overflows the pair's imm7 (10,659 go, 6,825 librustc_driver, under 80 elsewhere). The in-range half of this family -- 8,775 sites that fold 2-for-**1** rather than 2-for-2 -- turned out to be the bigger prize and is now **done** (check_add_ldr_imm_offset's pair arm; see [analyses.md](analyses.md#add--ldpstp-foldable-to-immediate-offset-ldpstp)). What remains here is only the out-of-range residue, where the win is latency and a freed scratch rather than a shorter sequence |
 
 ## Window candidates (2026-07 corpus sweep)
 
@@ -107,11 +113,22 @@ populations below are the real beyond-adjacency mass.
 | Same-address reload: second `ldr`/`ldrb`/`ldrh` of an untouched `[Rn, #d]` with no store/call/barrier between | reuse the first value (delete the reload, or copy the first destination) | ~18.2k in librustc_driver (d4-7 dominant), ~830 rustup, ~320 go. Signature shape: chained keyword-compare arms clobber the loaded register to materialize the next `ccmp` constant, then reload both fields. Deletion cannot meet the hard soundness bar -- a plain LDR may be a relaxed atomic, so a concurrent writer is architecturally visible -- so this is opt-in/informational class material |
 | Zero-CMP → S-variant with a 1-2 instruction gap | as the adjacent fold | go `cmp0\|and`: 72 at d2, 10 at d3 vs 42 at d1 -- gc's non-adjacent tail rivals the adjacent population; same flag-liveness scan, wider match |
 
+## Investigated and closed (2026-08 sweep)
+
+Candidates that never earned a row above, measured and rejected.
+Recorded so they are not re-investigated; two of them looked large
+before the operand conditions were applied.
+
+| Pattern | Rewrite | Measured |
+| --- | --- | --- |
+| Interleaved copy `ldr Rt,[Rn,#a] ; str Rt,[Rm,#b] ; ldr Rt2,[Rn,#a+s] ; str Rt2,[Rm,#b+s]` | `ldp`/`stp` (4 -> 2) | **27** across 28.4M instructions (10 Q, 12 X/W cross-base, 5 X same-base). The strict-adjacency LDP/STP coalescer cannot see these -- the load/store interleave hides both same-direction pairs -- and the pair count that motivated the look was large (`ldr x,[sp+i] ; str x,[sp+i]` is the 11th most frequent dependent pair in librustc_driver at 29,271). But LLVM's `AArch64LoadStoreOptimizer` has already paired essentially all of them; what remains adjacent-and-interleaved is noise. Would also have needed an alias argument for the cross-base majority, since the rewrite moves the second load ahead of the first store |
+| `sub sp, sp, #N ; stp Xt, Xt2, [sp]` | `stp Xt, Xt2, [sp, #-N]!` | **0 of 79,127** pairs. Only 2 have the zero pair-offset that pre-indexing requires, and neither has an `N` that encodes in imm7. Compilers already use the writeback prologue where it applies (`stp x29, x30, [sp, #-16]!`); where they emit the separate `sub sp`, the callee-saves sit at a non-zero offset by design and no pre-index expression exists. The pair count looks inviting -- 74,761 in librustc_driver alone -- and is entirely unfoldable |
+
 ## Infrastructure
 
 | Item | Notes |
 | --- | --- |
 | Multi-slot deferral | The single pending_mz/pending_fp slots drop the earlier finding when two deferrals overlap; false-negative-only, documented in `defer_dead_mov` |
 | Target-side liveness | NZCV at a branch target is **done**: `nzcv_dead_at_target` walks the scanned buffer for the CMPBR fold, which cannot make the block-locality assumption the other branch folds make. The register-side twin (scan for a GPR at a known target) is still open and unlocks the general-register BR fold. The NZCV scan refuses rather than chases -- a `cbz`/`b` at the target ends it, which is 10 of the 16 pairs it rejects in /bin/ls |
-| Hybrid `mov`/`orr`+`movk` constant chains | Docs-acknowledged deferral in the MOV-chain machinery |
+| ~~Hybrid `mov`/`orr`+`movk` constant chains~~ | **Closed, 2026-08 sweep: 10 shortenable chains across 1.96M.** The docs-acknowledged deferral in the MOV-chain machinery ("the reported minimum is an upper bound on the true one") is an upper bound that never binds. Modelling the hybrid minimum -- the whole value as a bitmask immediate, or a bitmask immediate differing in exactly one halfword plus a MOVK -- over every maximal MOVZ/MOVN+MOVK chain finds 10 sites where it beats the pure move-wide minimum, all in go, all 3 insns -> 2. LLVM's `expandMOVImm` already tries the ORR+MOVK forms; gc's assembler does not. Of the corpus's 80,904 multi-instruction chains (47,334 of length 2, 1,974 of 3, 31,596 of 4), **zero** are shortenable by the pure move-wide rule armlint already applies |
 | LDUR / writeback pair coalescing; load+sext at other addressing modes | Docs-acknowledged deferrals of the coalescer and sext folds |

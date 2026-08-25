@@ -71,6 +71,52 @@ static int run_check(const uint8_t *code, size_t code_size)
 // Like run_check, but mirrors the real driver: iterates with
 // cs_disasm_iter (skipping undecodable data-in-text words) and hands
 // the checks the full buffer for binary-aware literal chasing.
+// run_check restricted to findings carrying a given name. Needed
+// where two checks legitimately see the same window and a bare count
+// would no longer say which one fired: an ADD feeding a pair load
+// whose destination covers the base rejects the pre-indexed rewrite
+// (the writeback would collide with a loaded register) but folds
+// cleanly into an immediate-offset pair.
+static int run_named_check(const uint8_t *code, size_t code_size,
+                           const char *name)
+{
+    cs_insn *insns = NULL;
+    size_t count = cs_disasm(g_handle, code, code_size, 0, 0, &insns);
+    if (count != code_size / 4) {
+        if (insns != NULL) {
+            cs_free(insns, count);
+        }
+        return -1;
+    }
+
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+
+    int findings = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t offset = (size_t)insns[i].address;
+        for (size_t k = 0; k < armlint_check_registry_count; k++) {
+            armlint_finding f;
+            if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && strcmp(f.name, name) == 0) {
+                findings++;
+            }
+        }
+    }
+
+    armlint_finding f;
+    if (armlint_flush(state, &f)
+            && !armlint_finding_has_side_entry(state, &f)
+            && strcmp(f.name, name) == 0) {
+        findings++;
+    }
+
+    armlint_state_destroy(state);
+    cs_free(insns, count);
+    return findings;
+}
+
 static int run_buffer_check(const uint8_t *code, size_t code_size)
 {
     cs_insn *insn = cs_malloc(g_handle);
@@ -12023,6 +12069,145 @@ static void test_add_ldr_imm_offset(void)
     assert(run_reg_dead(code, 12, 8) == 0);
 }
 
+static void test_add_ldp_stp_imm_offset(void)
+{
+    uint8_t code[16];
+    const char *ldp_name = "ADD + LDP foldable to immediate-offset LDP";
+    const char *stp_name = "ADD + STP foldable to immediate-offset STP";
+
+    // Structural kill: the pair load's destination list covers the
+    // ADD's Rd, so the sum is provably dead at the consumer.
+    // add x8, x26, #0xb8 ; ldp x8, x20, [x8, #-0xb8]
+    //   -> ldp x8, x20, [x26]. The real-code shape, modulo which
+    // destination aliases.
+    add_x_imm(&code[0], 8, 26, 0xb8);
+    ldp_x_soff(&code[4], 8, 20, 8, -0xb8 / 8);
+    assert(run_named_check(code, 8, ldp_name) == 1);
+
+    // Either destination proves it.
+    add_x_imm(&code[0], 8, 26, 0xb8);
+    ldp_x_soff(&code[4], 20, 8, 8, -0xb8 / 8);
+    assert(run_named_check(code, 8, ldp_name) == 1);
+
+    // The combined offset may be zero, positive, or negative; all
+    // three are expressible because imm7 is signed.
+    add_x_imm(&code[0], 8, 26, 16);
+    ldp_x_soff(&code[4], 8, 20, 8, 2);       // 16 + 16 = +32
+    assert(run_named_check(code, 8, ldp_name) == 1);
+    add_x_imm(&code[0], 8, 26, 16);
+    ldp_x_soff(&code[4], 8, 20, 8, -6);      // 16 - 48 = -32
+    assert(run_named_check(code, 8, ldp_name) == 1);
+
+    // Read-modify-write ADD (Rd == Rn) folds: the rewrite names the
+    // pre-ADD value as base, which is what the original addressed.
+    add_x_imm(&code[0], 8, 8, 8);
+    ldp_x_soff(&code[4], 11, 12, 8, -1);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Range: the SCALED combined offset must fit signed 7 bits.
+    // 63 * 8 = 504 folds; 512 does not.
+    add_x_imm(&code[0], 8, 1, 504);
+    ldp_x_soff(&code[4], 8, 20, 8, 0);
+    assert(run_named_check(code, 8, ldp_name) == 1);
+    add_x_imm(&code[0], 8, 1, 512);
+    ldp_x_soff(&code[4], 8, 20, 8, 0);
+    assert(run_named_check(code, 8, ldp_name) == 0);
+
+    // The -64 floor is reachable only through the MOV-from-SP alias,
+    // the one opener that admits a zero immediate:
+    // mov x8, sp ; ldp x8, x20, [x8, #-512] -> ldp x8, x20, [sp, #-512].
+    // The source imm7 already bottoms out at -64 and a positive ADD
+    // immediate can only pull the total up, so the floor cannot be
+    // undershot -- there is no rejection case to assert.
+    add_x_imm(&code[0], 8, 31, 0);
+    ldp_x_soff(&code[4], 8, 20, 8, -64);
+    assert(run_named_check(code, 8, ldp_name) == 1);
+
+    // Alignment is decided by the ADD alone (imm7 is pre-scaled):
+    // #4 is not a multiple of the X pair's 8-byte transfer.
+    add_x_imm(&code[0], 8, 1, 4);
+    ldp_x_soff(&code[4], 8, 20, 8, 0);
+    assert(run_named_check(code, 8, ldp_name) == 0);
+
+    // ...but #4 IS aligned for a W pair (4-byte transfer).
+    add_x_imm(&code[0], 8, 1, 4);
+    ldp_w_soff(&code[4], 8, 20, 8, 0);
+    assert(run_named_check(code, 8, ldp_name) == 1);
+
+    // Q pairs scale by 16; LDPSW by 4 despite its X destinations.
+    add_x_imm(&code[0], 8, 1, 32);
+    ldp_q_soff(&code[4], 0, 1, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+    add_x_imm(&code[0], 8, 1, 4);
+    ldpsw_soff(&code[4], 8, 20, 8, 0);
+    assert(run_named_check(code, 8, ldp_name) == 1);
+
+    // Stores have no structural kill -- nothing overwrites the
+    // address register -- so they defer until it provably dies.
+    add_x_imm(&code[0], 8, 1, 16);
+    stp_x_soff(&code[4], 3, 4, 8, 0);
+    assert(run_named_check(code, 8, stp_name) == 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A pair store whose data register is the ADD's Rd never folds:
+    // the rewritten store would read the deleted sum. Both slots.
+    add_x_imm(&code[0], 8, 1, 16);
+    stp_x_soff(&code[4], 8, 4, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 0);
+    add_x_imm(&code[0], 8, 1, 16);
+    stp_x_soff(&code[4], 3, 8, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // A SIMD&FP pair store carrying the same register NUMBER is not
+    // an alias -- q8 and x8 are different files -- so it still folds.
+    add_x_imm(&code[0], 8, 1, 32);
+    stp_q_soff(&code[4], 8, 9, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A fresh-destination pair load defers too (nothing kills the
+    // address register in the window).
+    add_x_imm(&code[0], 8, 1, 16);
+    ldp_x_soff(&code[4], 3, 4, 8, 0);
+    assert(run_named_check(code, 8, ldp_name) == 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // A read of the address register before the kill keeps it live.
+    add_x_imm(&code[0], 8, 1, 16);
+    ldp_x_soff(&code[4], 3, 4, 8, 0);
+    add_x(&code[8], 5, 8, 6);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Negative: the pair's base is not the ADD's destination.
+    add_x_imm(&code[0], 8, 1, 16);
+    ldp_x_soff(&code[4], 8, 20, 9, 0);
+    assert(run_named_check(code, 8, ldp_name) == 0);
+
+    // Negative: ADD writes SP. Folding would discard an observable
+    // SP update, so the opener never fires (as for the singles).
+    add_x_imm(&code[0], 31, 1, 16);
+    ldp_x_soff(&code[4], 8, 20, 31, 0);
+    assert(run_named_check(code, 8, ldp_name) == 0);
+
+    // Positive: ADD *reads* SP -- the canonical stack shape.
+    // add x8, sp, #0x30 ; stp x1, x2, [x8, #-0x10]
+    //   -> stp x1, x2, [sp, #0x20].
+    add_x_imm(&code[0], 8, 31, 0x30);
+    stp_x_soff(&code[4], 1, 2, 8, -2);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Negative: intervening instruction breaks adjacency.
+    add_x_imm(&code[0], 8, 1, 16);
+    add_x(&code[4], 5, 5, 6);
+    ldp_x_soff(&code[8], 8, 20, 8, 0);
+    assert(run_named_check(code, 12, ldp_name) == 0);
+
+    // Negative: the writeback pair forms belong to the pre-/post-
+    // index checks, not this one -- decode_pair_soff rejects them.
+    add_x_imm(&code[0], 8, 1, 16);
+    stp_x_pre(&code[4], 3, 4, 8, 0);
+    assert(run_named_check(code, 8, stp_name) == 0);
+}
+
 static void test_add_stlr_fold(void)
 {
     uint8_t code[16];
@@ -13346,14 +13531,23 @@ static void test_add_ldr_str_pre_indexed(void)
     ldp_x_soff(&code[4], 3, 4, 1, 0);
     assert(run_helper_check(code, 8) == 0);
 
-    // A pair destination aliasing the base rejects -- either data
-    // register.
+    // A pair destination aliasing the base rejects the PRE-INDEXED
+    // rewrite -- either data register -- because the writeback would
+    // land in a register the load also writes. The immediate-offset
+    // pair fold has no writeback and claims the window instead, so
+    // assert by name rather than by count here.
     add_x_imm(&code[0], 1, 1, 16);
     ldp_x_soff(&code[4], 1, 4, 1, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8,
+        "ADD + LDP foldable to pre-indexed LDP") == 0);
+    assert(run_named_check(code, 8,
+        "ADD + LDP foldable to immediate-offset LDP") == 1);
     add_x_imm(&code[0], 1, 1, 16);
     ldp_x_soff(&code[4], 4, 1, 1, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8,
+        "ADD + LDP foldable to pre-indexed LDP") == 0);
+    assert(run_named_check(code, 8,
+        "ADD + LDP foldable to immediate-offset LDP") == 1);
 
     // LDP with Rt == Rt2: CONSTRAINED UNPREDICTABLE on its own; the
     // closer rejects it. Capstone 5 refuses to decode the encoding,
@@ -14067,6 +14261,7 @@ int main(void)
     test_sxtw_ldr_fold();
     test_ldr_sext_fold();
     test_add_ldr_imm_offset();
+    test_add_ldp_stp_imm_offset();
     test_add_stlr_fold();
     test_aut_ret();
     test_pac_audit();

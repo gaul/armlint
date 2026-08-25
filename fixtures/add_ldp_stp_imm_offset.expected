@@ -1,0 +1,53 @@
+ADD + LDP foldable to immediate-offset LDP at offset: 0x0 <_main>: -> ldp x21, x19, [x26] (2 instructions)
+  add x19, x26, #0xb8
+  ldp x21, x19, [x19, #-0xb8]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x8 <_main+0x8>: -> ldp x8, x20, [x26] (2 instructions)
+  add x8, x26, #0xb8
+  ldp x8, x20, [x8, #-0xb8]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x10 <_main+0x10>: -> ldp x8, x20, [x26, #0x20] (2 instructions)
+  add x8, x26, #0x10
+  ldp x8, x20, [x8, #0x10]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x18 <_main+0x18>: -> ldp x8, x20, [x26, #-0x20] (2 instructions)
+  add x8, x26, #0x10
+  ldp x8, x20, [x8, #-0x30]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x20 <_main+0x20>: -> ldp w8, w20, [x1, #0x4] (2 instructions)
+  add x8, x1, #0x4
+  ldp w8, w20, [x8]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x28 <_main+0x28>: -> ldpsw x8, x20, [x1, #0x4] (2 instructions)
+  add x8, x1, #0x4
+  ldpsw x8, x20, [x8]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x30 <_main+0x30>: -> ldp x8, x12, [x8] (2 instructions)
+  add x8, x8, #0x8
+  ldp x8, x12, [x8, #-0x8]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x38 <_main+0x38>: -> ldp x8, x20, [x1, #0x1f8] (2 instructions)
+  add x8, x1, #0x1f8
+  ldp x8, x20, [x8]
+
+ADD + STP foldable to immediate-offset STP at offset: 0x6c <_main+0x6c>: -> stp x3, x4, [x1, #0x10] (2 instructions)
+  add x8, x1, #0x10
+  stp x3, x4, [x8]
+
+ADD + STP foldable to immediate-offset STP at offset: 0x78 <_main+0x78>: -> stp x1, x2, [sp, #0x20] (2 instructions)
+  add x8, sp, #0x30
+  stp x1, x2, [x8, #-0x10]
+
+ADD + LDP foldable to immediate-offset LDP at offset: 0x84 <_main+0x84>: -> ldp x3, x4, [x1, #0x10] (2 instructions)
+  add x8, x1, #0x10
+  ldp x3, x4, [x8]
+
+ADD + STP foldable to immediate-offset STP at offset: 0x90 <_main+0x90>: -> stp q8, q9, [x1, #0x20] (2 instructions)
+  add x8, x1, #0x20
+  stp q8, q9, [x8]
+
+Optimization opportunities by type:
+       9  ADD + LDP foldable to immediate-offset LDP
+       3  ADD + STP foldable to immediate-offset STP
+
+12 optimization opportunities in 50 instructions

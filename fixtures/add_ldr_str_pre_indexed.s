@@ -146,6 +146,8 @@ _main:
     ldp     x2, x3, [x10]
 
     // N) Pair destination aliases the base: writeback UNPREDICTABLE.
+    // The immediate-offset pair fold claims this window instead --
+    // it needs no writeback, so the conflict does not arise.
     add     x11, x11, #16
     ldp     x11, x2, [x11]
 

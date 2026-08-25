@@ -13662,6 +13662,97 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// Decode a load/store pair, signed-offset (no-writeback) form:
+// opc(2) 101 V(1) 010 L(1) imm7 Rt2 Rn Rt. Accepts exactly the
+// combinations that have pre-/post-indexed counterparts: integer W
+// (opc=00) and X (opc=10) pairs, LDPSW (opc=01 with L=1: two 4-byte
+// sign-extending loads into Xt destinations, flagged in out_is_sw),
+// and SIMD&FP S/D/Q pairs (V=1, opc=00/01/10). opc=11 and the opc=01
+// integer store are unallocated. out_lg2size is the log2 PER-REGISTER
+// transfer bytes (2/3/4); imm7 (returned sign-extended) and the
+// writeback immediate of the indexed forms are scaled by that size.
+// LDNP/STNP use a different mode field (000) and do not match.
+static bool decode_pair_soff(uint32_t op, bool *out_is_load,
+                             bool *out_is_fp, bool *out_is_sw,
+                             unsigned *out_lg2size, int *out_imm7,
+                             unsigned *out_rn, unsigned *out_rt,
+                             unsigned *out_rt2)
+{
+    if ((op & 0x3B800000u) != 0x29000000u) {
+        return false;
+    }
+    unsigned opc = (op >> 30) & 0x3u;
+    bool is_fp = ((op >> 26) & 1u) != 0;
+    bool is_load = ((op >> 22) & 1u) != 0;
+    bool is_sw = false;
+    unsigned lg2;
+    if (opc == 3u) {
+        return false;               // unallocated in both files
+    }
+    if (is_fp) {
+        lg2 = opc + 2u;             // S/D/Q
+    } else if (opc == 1u) {
+        if (!is_load) {
+            return false;           // integer opc=01 store: unallocated
+        }
+        is_sw = true;               // LDPSW
+        lg2 = 2u;
+    } else {
+        lg2 = opc == 0u ? 2u : 3u;  // W / X
+    }
+    *out_is_load = is_load;
+    *out_is_fp = is_fp;
+    *out_is_sw = is_sw;
+    *out_lg2size = lg2;
+    int imm7 = (int)((op >> 15) & 0x7Fu);
+    if (imm7 & 0x40) {
+        imm7 -= 128;
+    }
+    *out_imm7 = imm7;
+    *out_rt2 = (op >> 10) & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// Pair mnemonic: LDPSW carries its own; otherwise ldp/stp by
+// direction (SIMD&FP pairs share the integer mnemonics).
+static const char *pair_mnemonic(bool is_load, bool is_sw)
+{
+    if (is_sw) {
+        return "ldpsw";
+    }
+    return is_load ? "ldp" : "stp";
+}
+
+// Format one data register of a pair. LDPSW transfers 4 bytes per
+// register but writes X destinations, so it renders as size 3.
+static void format_pair_rt(char *buf, size_t bufsz, bool is_fp,
+                           bool is_sw, unsigned lg2size, unsigned rt)
+{
+    format_ls_rt(buf, bufsz, is_fp, is_sw ? 3u : lg2size, rt);
+}
+
+// Render a pair access carrying a SIGNED byte offset -- "ldp x0, x1,
+// [sp, #-0x10]" -- with the bare "[sp]" spelling for a zero offset.
+// prefix is "-> " for a suggested rewrite and "" for a quoted
+// original. Only the signed-offset forms reach here; the writeback
+// spellings belong to the pre-/post-index checks.
+static void format_pair_mem(char *buf, size_t bufsz, const char *prefix,
+                            const char *mnem, const char *rts,
+                            const char *base, int32_t byte_off)
+{
+    if (byte_off == 0) {
+        snprintf(buf, bufsz, "%s%s %s, [%s]", prefix, mnem, rts, base);
+    } else if (byte_off < 0) {
+        snprintf(buf, bufsz, "%s%s %s, [%s, #-0x%x]",
+            prefix, mnem, rts, base, (unsigned)(-byte_off));
+    } else {
+        snprintf(buf, bufsz, "%s%s %s, [%s, #0x%x]",
+            prefix, mnem, rts, base, (unsigned)byte_off);
+    }
+}
+
 bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset,
@@ -13763,6 +13854,99 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                         ls_mnem, rt_buf, ls_rn, ls_byte_imm);
                 }
                 if (!is_store && ls_rt == state->addi_pending_rd) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, state->addi_pending_rd);
+                }
+            }
+        }
+
+        // (1b) The same fold reached through a load/store PAIR. The
+        //     pair forms have no unsigned-offset encoding: imm7 is
+        //     SIGNED and scaled by the per-register transfer size, so
+        //     the combined offset can land on either side of the new
+        //     base. That makes the dominant real shape an ADD forward
+        //     and a negative imm7 back -- "add x19, x26, #0xb8 ;
+        //     ldp x21, x20, [x19, #-0xb8]" -> "ldp x21, x20, [x26]" --
+        //     which the single-access fold cannot express at all,
+        //     since LDR/STR-uimm has no negative offset. The deleted
+        //     ADD is the same saving; only the range test differs.
+        unsigned p_lg2, p_rn, p_rt, p_rt2;
+        int p_imm7;
+        bool p_is_load, p_is_fp, p_is_sw;
+        if (decode_pair_soff(op, &p_is_load, &p_is_fp, &p_is_sw,
+                             &p_lg2, &p_imm7, &p_rn, &p_rt, &p_rt2)
+                && p_rn == state->addi_pending_rd
+                && !offset_is_branch_target(state, offset)) {
+            // A pair STORE whose data registers include the ADD's Rd
+            // cannot fold: the rewritten store would read the deleted
+            // sum. SIMD&FP data registers live in the other file and
+            // can never alias the integer base, so the test is for
+            // integer pairs only -- the same split the single-access
+            // fold makes. Rt = 31 in a pair is ZR, never SP, and the
+            // ADD's Rd is never 31, so no ZR case slips through.
+            bool rt_aliases_rd = !p_is_fp
+                && (p_rt == state->addi_pending_rd
+                    || p_rt2 == state->addi_pending_rd);
+            // imm7 is already scaled, so the combined offset's
+            // alignment depends only on the ADD's byte immediate, and
+            // the scaled total must fit signed 7 bits. add_imm <=
+            // 0xFFF000 and |p_imm7 * size| <= 1024, so int32_t holds
+            // every intermediate; combined is a multiple of
+            // access_size once the alignment test passes, which makes
+            // the division exact in both signs.
+            unsigned access_size = 1u << p_lg2;
+            int32_t add_imm = (int32_t)state->addi_pending_imm;
+            int32_t pair_byte_imm = p_imm7 * (int32_t)access_size;
+            int32_t combined = add_imm + pair_byte_imm;
+            if ((p_is_load || !rt_aliases_rd)
+                    && (add_imm & (int32_t)(access_size - 1u)) == 0
+                    && combined / (int32_t)access_size >= -64
+                    && combined / (int32_t)access_size <= 63) {
+                const char *mnem = pair_mnemonic(p_is_load, p_is_sw);
+                char rt_buf[8];
+                char rt2_buf[8];
+                char rts[20];
+                format_pair_rt(rt_buf, sizeof(rt_buf), p_is_fp, p_is_sw,
+                    p_lg2, p_rt);
+                format_pair_rt(rt2_buf, sizeof(rt2_buf), p_is_fp,
+                    p_is_sw, p_lg2, p_rt2);
+                snprintf(rts, sizeof(rts), "%s, %s", rt_buf, rt2_buf);
+
+                out->name = p_is_load
+                    ? "ADD + LDP foldable to immediate-offset LDP"
+                    : "ADD + STP foldable to immediate-offset STP";
+                out->start_offset = state->addi_pending_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+
+                char base_buf[8];
+                if (state->addi_pending_rn == 31) {
+                    snprintf(base_buf, sizeof(base_buf), "sp");
+                } else {
+                    snprintf(base_buf, sizeof(base_buf), "x%u",
+                        state->addi_pending_rn);
+                }
+                format_pair_mem(out->detail, sizeof(out->detail),
+                    "-> ", mnem, rts, base_buf, combined);
+
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->addi_pending_disasm);
+                char pair_base[8];
+                snprintf(pair_base, sizeof(pair_base), "x%u", p_rn);
+                format_pair_mem(out->lines[1], sizeof(out->lines[1]),
+                    "", mnem, rts, pair_base, pair_byte_imm);
+
+                // An integer pair LOAD whose destination list covers
+                // the ADD's Rd overwrites the address register right
+                // here, proving the sum dead; every other pair defers
+                // through the forward register-liveness scan. Naming
+                // the new base among a pair load's destinations is
+                // fine: the no-writeback form reads the base once
+                // before writing either destination, and compilers
+                // emit that shape freely (32,078 sites in the mining
+                // corpus).
+                if (p_is_load && rt_aliases_rd) {
                     produced = true;
                 } else {
                     defer_dead_mov(state, out, state->addi_pending_rd);
@@ -13932,77 +14116,6 @@ bool check_add_stlr_fold(armlint_state *state,
     // Every finding defers through the liveness scan; nothing is
     // produced on the spot.
     return false;
-}
-
-// Decode a load/store pair, signed-offset (no-writeback) form:
-// opc(2) 101 V(1) 010 L(1) imm7 Rt2 Rn Rt. Accepts exactly the
-// combinations that have pre-/post-indexed counterparts: integer W
-// (opc=00) and X (opc=10) pairs, LDPSW (opc=01 with L=1: two 4-byte
-// sign-extending loads into Xt destinations, flagged in out_is_sw),
-// and SIMD&FP S/D/Q pairs (V=1, opc=00/01/10). opc=11 and the opc=01
-// integer store are unallocated. out_lg2size is the log2 PER-REGISTER
-// transfer bytes (2/3/4); imm7 (returned sign-extended) and the
-// writeback immediate of the indexed forms are scaled by that size.
-// LDNP/STNP use a different mode field (000) and do not match.
-static bool decode_pair_soff(uint32_t op, bool *out_is_load,
-                             bool *out_is_fp, bool *out_is_sw,
-                             unsigned *out_lg2size, int *out_imm7,
-                             unsigned *out_rn, unsigned *out_rt,
-                             unsigned *out_rt2)
-{
-    if ((op & 0x3B800000u) != 0x29000000u) {
-        return false;
-    }
-    unsigned opc = (op >> 30) & 0x3u;
-    bool is_fp = ((op >> 26) & 1u) != 0;
-    bool is_load = ((op >> 22) & 1u) != 0;
-    bool is_sw = false;
-    unsigned lg2;
-    if (opc == 3u) {
-        return false;               // unallocated in both files
-    }
-    if (is_fp) {
-        lg2 = opc + 2u;             // S/D/Q
-    } else if (opc == 1u) {
-        if (!is_load) {
-            return false;           // integer opc=01 store: unallocated
-        }
-        is_sw = true;               // LDPSW
-        lg2 = 2u;
-    } else {
-        lg2 = opc == 0u ? 2u : 3u;  // W / X
-    }
-    *out_is_load = is_load;
-    *out_is_fp = is_fp;
-    *out_is_sw = is_sw;
-    *out_lg2size = lg2;
-    int imm7 = (int)((op >> 15) & 0x7Fu);
-    if (imm7 & 0x40) {
-        imm7 -= 128;
-    }
-    *out_imm7 = imm7;
-    *out_rt2 = (op >> 10) & 0x1Fu;
-    *out_rn = (op >> 5) & 0x1Fu;
-    *out_rt = op & 0x1Fu;
-    return true;
-}
-
-// Pair mnemonic: LDPSW carries its own; otherwise ldp/stp by
-// direction (SIMD&FP pairs share the integer mnemonics).
-static const char *pair_mnemonic(bool is_load, bool is_sw)
-{
-    if (is_sw) {
-        return "ldpsw";
-    }
-    return is_load ? "ldp" : "stp";
-}
-
-// Format one data register of a pair. LDPSW transfers 4 bytes per
-// register but writes X destinations, so it renders as size 3.
-static void format_pair_rt(char *buf, size_t bufsz, bool is_fp,
-                           bool is_sw, unsigned lg2size, unsigned rt)
-{
-    format_ls_rt(buf, bufsz, is_fp, is_sw ? 3u : lg2size, rt);
 }
 
 bool check_ldr_str_add_post_indexed(armlint_state *state,

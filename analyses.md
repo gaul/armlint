@@ -2698,6 +2698,76 @@ so quietly materialized through a scratch register instead.
   at close anyway so a doomed pairing never occupies the shared
   deferral slot.
 
+## ADD + LDP/STP foldable to immediate-offset LDP/STP
+
+* `add xt, xn, #a ; ldp xq, xr, [xt, #b]` ->
+  `ldp xq, xr, [xn, #(a+b)]`, and the store twin
+  (`ADD + STP foldable to immediate-offset STP`). The pair arm of the
+  single-access fold above, sharing its pending-ADD state, its
+  side-entry gate and its liveness scan; what differs is the slot the
+  combined offset has to fit.
+* Why it is not just the single-access rule with a wider register
+  list: the pair forms have **no unsigned-offset encoding**. Their
+  `imm7` is SIGNED and pre-scaled by the per-register transfer size,
+  so the combined offset may land on either side of the new base. The
+  shape that dominates real code is an ADD forward and a negative
+  `imm7` back, cancelling to a bare base --
+  `add x19, x26, #0xb8 ; ldp x21, x20, [x19, #-0xb8]` ->
+  `ldp x21, x20, [x26]` -- which the single-access fold cannot express
+  at all, because `LDR`/`STR`-uimm has no negative offset.
+* Encoding constraint: `imm7` is already a multiple of the transfer
+  size, so the combined offset's alignment is decided solely by the
+  ADD's byte immediate, and the SCALED total must fit signed 7 bits
+  (`-64 .. 63`, i.e. -512..504 bytes for an X pair, -1024..1008 for a
+  Q pair). The `sh=1` ADD form is accepted; a total that overflows the
+  slot keeps its own ADD, as before. The negative end cannot be
+  undershot: source `imm7` bottoms out at -64 and the ADD's immediate
+  is non-negative, so the only way to reach exactly -64 scaled is the
+  zero-immediate MOV-from-SP alias.
+* Both integer and SIMD&FP pairs fold, plus `LDPSW` (whose transfer is
+  4 bytes per register even though it writes X destinations, so it
+  scales by 4). The writeback spellings are not matched here -- those
+  belong to the pre-/post-index checks.
+* Deadness tiers, as for the single-access fold. An integer pair LOAD
+  whose destination list covers the ADD's `Rd` overwrites the address
+  register on the spot, proving the sum dead with no scan; every other
+  pair -- stores, fresh-destination loads, and all SIMD&FP pairs --
+  defers through the forward register-liveness scan. In the mining
+  corpus the structural tier is tiny (27 sites of 8,775 candidates):
+  essentially the whole population is deferred, which is why this
+  check could not have been written before that scan existed.
+* A pair STORE whose data registers include the ADD's `Rd` never
+  folds -- the rewritten store would read the deleted sum. The test is
+  for integer pairs only: SIMD&FP data registers live in the other
+  register file and can never alias the integer base, so
+  `stp q8, q9, [x8]` off `add x8, ...` folds despite the shared
+  register number. `Rt = 31` in a pair is ZR, never SP, and the ADD's
+  `Rd` is never 31, so no zero-register case slips through the alias
+  test.
+* Naming the new base among a pair LOAD's destinations is safe: the
+  no-writeback form reads the base once before writing either
+  destination (the `t == n` restriction applies to the pre- and
+  post-indexed forms, not this one), and compilers emit that shape
+  freely -- 32,078 sites across the mining corpus.
+* Actionability limit: in an UNLINKED object an ADD immediate may be a
+  relocation field (`R_AARCH64_ADD_ABS_LO12_NC`, Mach-O `PAGEOFF12`),
+  and no relocation type targets a pair's `imm7`, so the fold would
+  not be expressible even though it is sound. armlint does not read
+  relocations, so this is a residual false positive on unlinked input;
+  on linked binaries -- what the corpus figures below measure -- the
+  immediate is final and the concern does not arise. The same caveat
+  applies to the single-access fold, where the `:lo12:` load form
+  happens to make it expressible.
+* Corpus: 8,775 candidate sites fold 2-for-1 across 28.4M instructions
+  (5,467 librustc_driver, 3,270 go), of which armlint reports 2,864
+  after the liveness scan -- 2,811 in librustc_driver, a 51% realized
+  rate matching the ADD/SUB chain check's. Go realizes far less (50 of
+  3,270): gc's fixed `x27` scratch stays live across the pair, so the
+  scan correctly refuses. A further 17,565 sites have a combined
+  offset too large for `imm7`; those split into two singles rather
+  than one pair and are tracked in [TODO.md](TODO.md) as a
+  latency-only, size-neutral rewrite.
+
 ## LDR/STR (or LDP/STP) + ADD/SUB foldable to post-indexed form
 
 * `ldr xt, [xn] ; add xn, xn, #imm` -> `ldr xt, [xn], #imm`, and the

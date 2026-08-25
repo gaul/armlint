@@ -477,6 +477,12 @@ backlog, built separately with `make tools`:
   own instruction and no other, which is the only thing standing
   between a hand-derived mask and a plausible-looking wrong number.
   `-e SHAPE` prints example sites. Needs numpy.
+* `tools/addpairscan.py` sizes the ADD-immediate + `LDP`/`STP` family,
+  which one shape mask cannot split honestly: the half whose combined
+  offset fits the pair's signed, pre-scaled `imm7` folds two
+  instructions into one, while the half that overflows it can only be
+  split into two singles at no size saving. 8,775 against 17,565
+  across the corpus. Carries its own `--selftest`; needs numpy.
 
 The workflow that produced several of the current checks: compile a
 representative corpus, run `pairscan` to rank pair shapes, classify
