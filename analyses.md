@@ -1639,6 +1639,62 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   forward register-liveness scan. v1 matches the unsigned-offset
   addressing form only, like the other load-rewriting folds.
 
+## low-32 zero-extension foldable to MOV Wd, Wn
+
+* `and x0, x1, #0xffffffff` -> `mov w0, w1`, and the bitfield spelling
+  `ubfx x0, x1, #0, #32` -> `mov w0, w1`. Both compute
+  `ZeroExtend(Xn[31:0], 64)`, which is exactly what a W-form register
+  move already does: every W write zeroes the upper half of its X
+  register. One instruction either way, nothing deleted, no flags or
+  memory touched -- so like the lane-0 UMOV fold this needs no liveness
+  argument.
+* **What it saves is not size.** `MOV Wd, Wn` is an `ORR Wd, WZR, Wm`,
+  which Neoverse cores resolve at register rename with no execution
+  slot; the mask and the bitfield extract each occupy an ALU pipe.
+  Neutral on cores that do not rename it away, so this is another
+  "cheaper, not shorter" finding.
+* Only the X form matters. The 32-bit `and w0, w1, #0xffffffff` is not
+  even encodable -- the logical-immediate encoding excludes all-ones --
+  and a W-form op has nothing above bit 31 left to clear.
+* The width must be exactly 32 and the lsb exactly 0. A narrower mask
+  is a real extraction, and the full-width spellings clear nothing:
+  `ubfx xd, xn, #0, #64` is `UBFM Xd, Xn, #0, #63`, which the assembler
+  renders as `lsr xd, xn, #0` and which belongs with the degenerate
+  register-copy spellings, not here.
+* **`Rd == Rn` is deliberately not reported**, though the rewrite is
+  equally sound. It would read `-> mov w0, w0`, a shape whose obvious
+  follow-on is to delete it -- and deleting it is a miscompile, since a
+  W-form move of a register to itself still zeroes bits 63:32. For a
+  tool whose worst failure is a false positive, advice one step away
+  from a wrong edit is close enough to one. The in-place cases that
+  genuinely are deletable, where an earlier instruction already cleared
+  those bits, belong to
+  [`redundant zero-extension`](#redundant-zero-extension-after-a-producer-that-already-zeroed-those-bits),
+  which says "delete" rather than "respell". That exclusion costs 13 of
+  the 56 corpus candidates and removes the whole overlap.
+* Three operand traps, none of which the corpus happens to contain but
+  all of which the encodings allow:
+  * **AND-immediate's `Rd = 31` is SP, not ZR**, while the rewrite's
+    `ORR Wd, WZR, Wm` reads `Rd = 31` as WZR. The two encodings
+    disagree about register 31, so an SP destination can never fold.
+    The assembler enforces this from the other side: `and xzr, x1, #imm`
+    is rejected outright as an invalid operand.
+  * `UBFM`'s `Rd = 31` really is ZR, so that result is discarded and
+    the instruction is dead outright -- a deletion, not a respelling.
+  * A ZR source turns either op into a zero materialization rather than
+    a truncation; that belongs with the ZR-operand canonicalizations.
+* Corpus: 40 findings of 56 candidates across 28.4M instructions (30
+  librustc_driver, 6 libcrypto, 4 go). The 16 unreported are the 13
+  in-place cases above and 3 ZR-source ones; dyld's 4 candidates are
+  all in-place, which is why it contributes nothing.
+* Overlap with the two-instruction folds that consume the same
+  instruction -- the redundant zero-extension check, and the
+  zero-extend + LSL fold that turns `uxtw x0, w1 ; lsl x0, x0, #2`
+  into a `UBFIZ` -- is real in principle: the pair fold deletes the
+  instruction outright, which beats respelling it. In practice not one
+  of the 40 findings shares an offset with another check's, so no
+  precedence machinery is warranted. The fixtures pin both directions.
+
 ## UMOV of lane 0 foldable to FMOV
 
 * `umov w0, v1.s[0]` -> `fmov w0, s1`, and `umov x0, v1.d[0]` ->

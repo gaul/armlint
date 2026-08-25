@@ -26,6 +26,9 @@ zero-extend + LSL foldable into UBFIZ at offset: 0x30 <_main+0x30>: -> ubfiz w0,
   uxth w0, w1
   lsl w0, w0, #0x14
 
+low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x38 <_main+0x38>: -> mov w0, w1 (1 instructions)
+  ubfx x0, x1, #0, #0x20
+
 zero-extend + LSL foldable into UBFIZ at offset: 0x38 <_main+0x38>: -> ubfiz x0, x1, #2, #32 (2 instructions)
   ubfx x0, x1, #0, #0x20
   lsl x0, x0, #2
@@ -38,5 +41,6 @@ Optimization opportunities by type:
        4  zero-extend + LSL foldable into UBFIZ
        3  AND+LSL foldable into UBFIZ
        2  LSR+LSL foldable into bit-clearing AND
+       1  low-32 zero-extension foldable to MOV Wd, Wn
 
-9 optimization opportunities in 23 instructions
+10 optimization opportunities in 23 instructions

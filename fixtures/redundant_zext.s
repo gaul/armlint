@@ -39,7 +39,10 @@ _main:
     ldrh    w18, [x19]
     uxtb    w18, w18
 
-    // Negative: consumer's Rd doesn't match producer's Rd.
+    // Negative: consumer's Rd doesn't match producer's Rd. With the
+    // registers distinct the UXTW is no longer in place, so it picks
+    // up a low-32 zero-extension finding of its own -- a different
+    // check, and the reason this block is not silent.
     add     w20, w21, w22
     uxtw    x23, w20
 

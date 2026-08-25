@@ -159,6 +159,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`ldr`/`ldrsw` (literal) of an encodable constant](analyses.md#ldr-literal-foldable-to-movfmov-immediate) | `mov #imm` / `fmov #imm8` / `movi`+`mvni` for Q (no memory access) |
 | [`adr` + `ldr [x8]`/`br x16`](analyses.md#adr--single-use-of-its-target-foldable-to-the-direct-form) | `ldr Rt, <literal>` / `b L` |
 | [`umov Wd, Vn.s[0]` / `Xd, Vn.d[0]`](analyses.md#umov-of-lane-0-foldable-to-fmov) | `fmov Wd, Sn` / `Xd, Dn` (cheaper port; `.h[0]` under `-m fp16`) |
+| [`and Xd, Xn, #0xffffffff` / `ubfx Xd, Xn, #0, #32`](analyses.md#low-32-zero-extension-foldable-to-mov-wd-wn) | `mov Wd, Wn` (a rename on Neoverse rather than an ALU op) |
 | [`cmp` + `csel` (max/min shape)](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `smax`/`smin`/`umax`/`umin` (`-m cssc`) |
 | [`cmp #0` + `cneg`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `abs` (`-m cssc`) |
 | [`rbit` + `clz`](analyses.md#cssc-synthesis-feature-gated--m-cssc) | `ctz` (`-m cssc`) |

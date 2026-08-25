@@ -759,6 +759,19 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
 bool check_umov_lane0_fmov(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
+// Detect the two X-form spellings that keep only the low 32 bits --
+// AND Xd, Xn, #0xFFFFFFFF and UBFX Xd, Xn, #0, #32 -- both of which
+// compute what MOV Wd, Wn already computes, every W write zeroing the
+// upper half. One instruction either way; the MOV is a rename on
+// Neoverse rather than an ALU op. Excludes an SP destination (AND-imm
+// reads Rd = 31 as SP, the rewrite as WZR), a ZR destination (dead
+// outright), a ZR source (a zero materialization, not a truncation),
+// and Rd == Rn, whose rewrite would read "mov Wd, Wd" -- a real
+// truncation that looks deletable; check_redundant_zext owns the
+// in-place cases that really are deletable.
+bool check_and_lo32_mov(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out);
+
 // Detect CSEL Rd, Rn, Rn, cond -- the same-operand case where both
 // branches of the conditional select produce Rn. The cond is
 // irrelevant, the NZCV read is wasted, and the instruction is

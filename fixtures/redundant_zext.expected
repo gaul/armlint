@@ -22,6 +22,9 @@ redundant zero-extension after zeroing op at offset: 0x28 <_main+0x28>: mov w12,
   add w12, w13, w14
   mov w12, w12
 
+low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x44 <_main+0x44>: -> mov w23, w20 (1 instructions)
+  ubfx x23, x20, #0, #0x20
+
 redundant zero-extension after zeroing op at offset: 0x48 <_main+0x48>: uxtb w24, w24 is a no-op (bits >= 8 already zero) (2 instructions)
   lsr w24, w25, #0x18
   uxtb w24, w24
@@ -44,5 +47,6 @@ redundant zero-extension after zeroing op at offset: 0x68 <_main+0x68>: and w4, 
 
 Optimization opportunities by type:
       11  redundant zero-extension after zeroing op
+       1  low-32 zero-extension foldable to MOV Wd, Wn
 
-11 optimization opportunities in 31 instructions
+12 optimization opportunities in 31 instructions

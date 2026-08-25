@@ -35,7 +35,10 @@ _main:
     uxth    w0, w1
     lsl     w0, w0, #20            // -> ubfiz w0, w1, #20, #12
 
-    // 8) UXTW zero-extends into the 64-bit domain.
+    // 8) UXTW zero-extends into the 64-bit domain. The UXTW is also
+    //    reported on its own as a low-32 zero-extension (its
+    //    registers differ, so "mov w0, w1" spells it), which is a
+    //    separate finding on the same instruction.
     uxtw    x0, w1
     lsl     x0, x0, #2             // -> ubfiz x0, x1, #2, #32
 

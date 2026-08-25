@@ -7443,6 +7443,80 @@ bool check_umov_lane0_fmov(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// AND Xd, Xn, #0xFFFFFFFF and UBFX Xd, Xn, #0, #32 both compute
+// ZeroExtend(Xn[31:0], 64), which is what a W-form register move
+// already does -- every W write zeroes the upper half of its X
+// register:
+//
+//   and  x0, x1, #0xffffffff  ->  mov w0, w1
+//   ubfx x0, x1, #0, #32      ->  mov w0, w1
+//
+// One instruction either way, and no liveness argument: nothing is
+// deleted, no flags or memory are touched, the source is read once.
+// The gain is that MOV Wd, Wn (an ORR from WZR) is handled at register
+// rename on Neoverse cores, costing no execution slot, while the mask
+// and the bitfield extract each occupy an ALU pipe. Neutral on cores
+// that do not rename it away, so this is a "cheaper, not shorter"
+// finding like the lane-0 UMOV fold.
+//
+// Rd == Rn is deliberately NOT matched, though the rewrite would be
+// just as sound. It would read "-> mov w0, w0", a shape whose obvious
+// follow-on is to delete it -- and deleting it is a miscompile, since
+// a W-form move of a register to itself still zeroes bits 63:32. For a
+// tool whose worst failure is a false positive, advice one step away
+// from a wrong edit is close enough to one. The in-place cases that
+// genuinely ARE deletable, where something earlier already cleared
+// those bits, belong to check_redundant_zext, which says so directly.
+//
+// Three operand traps, none of which the mining corpus happens to
+// contain but all of which the encodings allow:
+//
+//   * AND-immediate's Rd = 31 is SP, not ZR, while the rewrite's
+//     ORR Wd, WZR, Wm reads Rd = 31 as WZR. The two encodings
+//     disagree about register 31, so an SP destination never folds.
+//   * UBFM's Rd = 31 really is ZR: that result is discarded, making
+//     the instruction dead outright. A deletion, not a respelling.
+//   * A ZR source turns either op into a zero materialization rather
+//     than a truncation, which belongs with the ZR-operand
+//     canonicalizations rather than here.
+bool check_and_lo32_mov(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    if (((op >> 31) & 1u) == 0u) {
+        return false;                   // W-form: nothing above to clear
+    }
+
+    unsigned c, rd, rn;
+    bool is_and = decode_and_imm_lowmask(op, &c, &rd, &rn);
+    bool is_ubfx = !is_and && decode_ubfm_zext(op, &c, &rd, &rn);
+    if ((!is_and && !is_ubfx) || c != 32u) {
+        return false;
+    }
+    if (rd == 31u || rn == 31u) {
+        return false;                   // SP destination, or ZR either side
+    }
+    if (rd == rn) {
+        return false;                   // would suggest "mov Wd, Wd"
+    }
+
+    out->name = "low-32 zero-extension foldable to MOV Wd, Wn";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail),
+        "-> mov w%u, w%u", rd, rn);
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 bool check_csel_self(armlint_state *state, const cs_insn *insn,
                      size_t offset, armlint_finding *out)
 {
@@ -14907,6 +14981,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_pac_lr_spill,
     check_pac_raw_indirect,
     check_pac_zero_disc_indirect,
+    check_and_lo32_mov,
     check_redundant_zext,
     check_redundant_sext,
     check_lsl_lsr_to_ubfx,

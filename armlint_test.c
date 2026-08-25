@@ -3286,6 +3286,7 @@ static void and_x_lowmask(uint8_t out[4], unsigned rd, unsigned rn,
 
 static void test_redundant_zext(void)
 {
+    const char *zext_name = "redundant zero-extension after zeroing op";
     uint8_t code[16];
 
     // -- Positive: W-form producer immediately followed by UXTW/AND. --
@@ -3327,16 +3328,21 @@ static void test_redundant_zext(void)
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: consumer's Rn doesn't match producer's Rd. --
+    //
+    // Asserted by name: with the registers distinct the consumer is no
+    // longer in place, so check_and_lo32_mov reports it as a plain
+    // low-32 zero-extension. That is a different, correct finding --
+    // the point here is that THIS check stays silent.
 
     add_w(&code[0], 0, 1, 2);
     uxtw(&code[4], 0, 5);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8, zext_name) == 0);
 
     // -- Negative: consumer's Rd doesn't match producer's Rd. --
 
     add_w(&code[0], 0, 1, 2);
     uxtw(&code[4], 5, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8, zext_name) == 0);
 
     // -- Negative: intervening instruction expires wzx state. --
 
@@ -4019,6 +4025,11 @@ static void test_and_lsr_to_ubfx(void)
 
 static void test_and_lsr_lsl_fold(void)
 {
+    // Asserted by name where a UXTW producer appears with distinct
+    // registers: check_and_lo32_mov reports that instruction on its
+    // own as a low-32 zero-extension, which is a separate and correct
+    // finding. These cases are about THIS fold's behaviour.
+    const char *ubfiz_name = "zero-extend + LSL foldable into UBFIZ";
     uint8_t code[16];
 
     // -- Positives: AND low-mask + LSL -> UBFIZ. --
@@ -4124,7 +4135,7 @@ static void test_and_lsr_lsl_fold(void)
     // uxtw x0, w1 ; lsl x0, x0, #2 -> ubfiz x0, x1, #2, #32.
     uxtw(&code[0], 0, 1);
     lsl_x(&code[4], 0, 0, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_named_check(code, 8, ubfiz_name) == 1);
 
     // .NET 7 form: mov w0, w0 ; lsl x0, x0, #2 -> ubfiz x0, x0, #2, #32.
     // The W-form MOV zero-extends the low 32 bits into the X domain just
@@ -4155,7 +4166,7 @@ static void test_and_lsr_lsl_fold(void)
     // UXTW feeds the 64-bit domain; a W-form LSL does not close it.
     uxtw(&code[0], 0, 1);
     lsl_w(&code[4], 0, 0, 4);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8, ubfiz_name) == 0);
 
     // W-form MOV + W-form LSL: the "field" is the whole register, so this
     // is a redundant MOV, not a UBFIZ -- the X-domain shift is required.
@@ -4182,7 +4193,7 @@ static void test_and_lsr_lsl_fold(void)
     uxtw(&code[0], 0, 1);
     movz_w(&code[4], 5, 1);
     lsl_x(&code[8], 0, 0, 2);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_named_check(code, 12, ubfiz_name) == 0);
 }
 
 static void test_mov_reg_self(void)
@@ -5541,6 +5552,69 @@ static void test_umov_lane0_fmov(void)
     umov(&code[0], 2, 0, 0, 1);
     assert(run_fp16_check(code, 4) == 1);
 }
+
+static void test_and_lo32_mov(void)
+{
+    uint8_t code[8];
+    const char *name = "low-32 zero-extension foldable to MOV Wd, Wn";
+
+    // Both spellings compute ZeroExtend(Xn[31:0], 64), which is what a
+    // W-form register move already does.
+    and_x_ff32(&code[0], 0, 1);             // and x0, x1, #0xffffffff
+    assert(run_named_check(code, 4, name) == 1);
+    uxtw(&code[0], 0, 1);                   // ubfx x0, x1, #0, #32
+    assert(run_named_check(code, 4, name) == 1);
+
+    // Rd == Rn is sound but not reported: the rewrite would read
+    // "mov w0, w0", whose obvious follow-on is to delete it -- and
+    // deleting it is a miscompile, the W-form move still zeroing bits
+    // 63:32. check_redundant_zext owns the in-place cases that really
+    // are deletable, and says "delete" rather than "respell".
+    and_x_ff32(&code[0], 0, 0);
+    assert(run_named_check(code, 4, name) == 0);
+    uxtw(&code[0], 0, 0);
+    assert(run_named_check(code, 4, name) == 0);
+    mov_w_reg(&code[0], 0, 1);              // mov w0, w1 -- zeroes 63:32
+    and_x_ff32(&code[4], 0, 0);
+    assert(run_named_check(code, 8, name) == 0);
+    assert(run_named_check(code, 8,
+        "redundant zero-extension after zeroing op") == 1);
+
+    // The width must be exactly 32. A narrower mask is a real
+    // extraction; the full-width spellings clear nothing at all.
+    and_run(&code[0], 1, 0, 1, 0, 16);      // and x0, x1, #0xffff
+    assert(run_named_check(code, 4, name) == 0);
+    ubfx_x(&code[0], 0, 1, 0, 16);
+    assert(run_named_check(code, 4, name) == 0);
+    ubfx_x(&code[0], 0, 1, 0, 64);          // renders as lsr x0, x1, #0
+    assert(run_named_check(code, 4, name) == 0);
+
+    // A non-zero lsb extracts from the middle, not the low word.
+    ubfx_x(&code[0], 0, 1, 4, 32);
+    assert(run_named_check(code, 4, name) == 0);
+
+    // W-form: nothing above bit 31 to clear.
+    and_run(&code[0], 0, 0, 1, 0, 16);
+    assert(run_named_check(code, 4, name) == 0);
+
+    // AND-immediate reads Rd = 31 as SP, while the rewrite's
+    // ORR Wd, WZR, Wm reads it as WZR. The encodings disagree about
+    // register 31, so an SP destination can never fold.
+    and_x_ff32(&code[0], 31, 1);            // and sp, x1, #0xffffffff
+    assert(run_named_check(code, 4, name) == 0);
+
+    // UBFM's Rd = 31 really is ZR: the result is discarded, making the
+    // instruction dead outright rather than respellable.
+    uxtw(&code[0], 31, 1);
+    assert(run_named_check(code, 4, name) == 0);
+
+    // A ZR source turns either op into a zero materialization.
+    and_x_ff32(&code[0], 0, 31);
+    assert(run_named_check(code, 4, name) == 0);
+    uxtw(&code[0], 0, 31);
+    assert(run_named_check(code, 4, name) == 0);
+}
+
 
 
 static void test_csel_self(void)
@@ -14286,6 +14360,7 @@ int main(void)
     test_add_sub_zero();
     test_self_op();
     test_umov_lane0_fmov();
+    test_and_lo32_mov();
     test_csel_self();
     test_fcsel_self();
     test_bfxil_synth();

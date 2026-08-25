@@ -1,0 +1,10 @@
+low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x0 <_main>: -> mov w0, w1 (1 instructions)
+  and x0, x1, #0xffffffff
+
+low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x4 <_main+0x4>: -> mov w2, w3 (1 instructions)
+  ubfx x2, x3, #0, #0x20
+
+Optimization opportunities by type:
+       2  low-32 zero-extension foldable to MOV Wd, Wn
+
+2 optimization opportunities in 13 instructions
