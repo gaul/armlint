@@ -2,20 +2,39 @@ SUBS + CMP of identical operands: redundant compare at offset: 0x0 <_main>: -> d
   subs x0, x1, x2
   cmp x1, x2
 
+compare whose flags are overwritten unread at offset: 0x4 <_main+0x4>: -> delete; NZCV overwritten unread by adds x0, x5, x6 (1 instructions)
+  cmp x1, x2
+
 ADDS + CMN of identical operands: redundant compare at offset: 0x8 <_main+0x8>: -> drop cmn x6, x5 (NZCV already set by adds x0, x5, x6) (2 instructions)
   adds x0, x5, x6
+  cmn x6, x5
+
+compare whose flags are overwritten unread at offset: 0xc <_main+0xc>: -> delete; NZCV overwritten unread by subs w0, w1, #0x10 (1 instructions)
   cmn x6, x5
 
 SUBS + CMP of identical operands: redundant compare at offset: 0x10 <_main+0x10>: -> drop cmp w1, #0x10 (NZCV already set by subs w0, w1, #0x10) (2 instructions)
   subs w0, w1, #0x10
   cmp w1, #0x10
 
+compare whose flags are overwritten unread at offset: 0x14 <_main+0x14>: -> delete; NZCV overwritten unread by cmp x3, x4 (1 instructions)
+  cmp w1, #0x10
+
+compare whose flags are overwritten unread at offset: 0x18 <_main+0x18>: -> delete; NZCV overwritten unread by cmp x3, x4 (1 instructions)
+  cmp x3, x4
+
 SUBS + CMP of identical operands: redundant compare at offset: 0x18 <_main+0x18>: -> drop cmp x3, x4 (NZCV already set by cmp x3, x4) (2 instructions)
   cmp x3, x4
   cmp x3, x4
 
+compare whose flags are overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; NZCV overwritten unread by subs x1, x1, x2 (1 instructions)
+  cmp x3, x4
+
+compare whose flags are overwritten unread at offset: 0x24 <_main+0x24>: -> delete; NZCV overwritten unread by subs x0, x1, x2 (1 instructions)
+  cmp x1, x2
+
 Optimization opportunities by type:
+       6  compare whose flags are overwritten unread
        3  SUBS + CMP of identical operands: redundant compare
        1  ADDS + CMN of identical operands: redundant compare
 
-4 optimization opportunities in 13 instructions
+10 optimization opportunities in 13 instructions

@@ -2,57 +2,109 @@ SUB + CMP of identical operands foldable to SUBS at offset: 0x0 <_main>: -> subs
   sub x0, x1, x2
   cmp x1, x2
 
+compare whose flags are overwritten unread at offset: 0x4 <_main+0x4>: -> delete; NZCV overwritten unread by cmp x3, x4 (1 instructions)
+  cmp x1, x2
+
 SUB + CMP of identical operands foldable to SUBS at offset: 0x8 <_main+0x8>: -> subs x0, x3, x4 (drop cmp x3, x4) (2 instructions)
   cmp x3, x4
   sub x0, x3, x4
 
+compare whose flags are overwritten unread at offset: 0x8 <_main+0x8>: -> delete; NZCV overwritten unread by cmp w1, w2 (1 instructions)
+  cmp x3, x4
+
 SUB + CMP of identical operands foldable to SUBS at offset: 0x10 <_main+0x10>: -> subs w0, w1, w2 (drop cmp w1, w2) (2 instructions)
   sub w0, w1, w2
+  cmp w1, w2
+
+compare whose flags are overwritten unread at offset: 0x14 <_main+0x14>: -> delete; NZCV overwritten unread by cmp x1, x2, lsl #3 (1 instructions)
   cmp w1, w2
 
 SUB + CMP of identical operands foldable to SUBS at offset: 0x18 <_main+0x18>: -> subs x0, x1, x2, lsl #3 (drop cmp x1, x2, lsl #3) (2 instructions)
   sub x0, x1, x2, lsl #3
   cmp x1, x2, lsl #3
 
+compare whose flags are overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; NZCV overwritten unread by cmp x1, #0x10 (1 instructions)
+  cmp x1, x2, lsl #3
+
 SUB + CMP of identical operands foldable to SUBS at offset: 0x20 <_main+0x20>: -> subs x0, x1, #0x10 (drop cmp x1, #0x10) (2 instructions)
   sub x0, x1, #0x10
+  cmp x1, #0x10
+
+compare whose flags are overwritten unread at offset: 0x24 <_main+0x24>: -> delete; NZCV overwritten unread by cmp x1, w2, uxtw (1 instructions)
   cmp x1, #0x10
 
 SUB + CMP of identical operands foldable to SUBS at offset: 0x28 <_main+0x28>: -> subs x0, x1, w2, uxtw (drop cmp x1, w2, uxtw) (2 instructions)
   sub x0, x1, w2, uxtw
   cmp x1, w2, uxtw
 
+compare whose flags are overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; NZCV overwritten unread by cmp x1, x2 (1 instructions)
+  cmp x1, w2, uxtw
+
 SUB + CMP of identical operands foldable to SUBS at offset: 0x30 <_main+0x30>: -> subs x1, x1, x2 (drop cmp x1, x2) (2 instructions)
   cmp x1, x2
   sub x1, x1, x2
 
+compare whose flags are overwritten unread at offset: 0x30 <_main+0x30>: -> delete; NZCV overwritten unread by cmp x1, x2 (1 instructions)
+  cmp x1, x2
+
+compare whose flags are overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; NZCV overwritten unread by cmp x6, x5 (1 instructions)
+  cmp x1, x2
+
+compare whose flags are overwritten unread at offset: 0x44 <_main+0x44>: -> delete; NZCV overwritten unread by cmp x1, x2, lsl #2 (1 instructions)
+  cmp x6, x5
+
+compare whose flags are overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; NZCV overwritten unread by subs x0, x1, x2 (1 instructions)
+  cmp x1, x2, lsl #2
+
 SUBS + CMP of identical operands: redundant compare at offset: 0x50 <_main+0x50>: -> drop cmp x1, x2 (NZCV already set by subs x0, x1, x2) (2 instructions)
   subs x0, x1, x2
+  cmp x1, x2
+
+compare whose flags are overwritten unread at offset: 0x54 <_main+0x54>: -> delete; NZCV overwritten unread by cmn x1, x2 (1 instructions)
   cmp x1, x2
 
 ADD + CMN of identical operands foldable to ADDS at offset: 0x58 <_main+0x58>: -> adds x0, x1, x2 (drop cmn x1, x2) (2 instructions)
   add x0, x1, x2
   cmn x1, x2
 
+compare whose flags are overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; NZCV overwritten unread by cmn w3, w4 (1 instructions)
+  cmn x1, x2
+
 ADD + CMN of identical operands foldable to ADDS at offset: 0x60 <_main+0x60>: -> adds w0, w3, w4 (drop cmn w3, w4) (2 instructions)
   cmn w3, w4
   add w0, w3, w4
 
+compare whose flags are overwritten unread at offset: 0x60 <_main+0x60>: -> delete; NZCV overwritten unread by cmn x1, #0x10 (1 instructions)
+  cmn w3, w4
+
 ADD + CMN of identical operands foldable to ADDS at offset: 0x68 <_main+0x68>: -> adds x0, x1, #0x10 (drop cmn x1, #0x10) (2 instructions)
   add x0, x1, #0x10
+  cmn x1, #0x10
+
+compare whose flags are overwritten unread at offset: 0x6c <_main+0x6c>: -> delete; NZCV overwritten unread by cmn x6, x5 (1 instructions)
   cmn x1, #0x10
 
 ADD + CMN of identical operands foldable to ADDS at offset: 0x70 <_main+0x70>: -> adds x0, x5, x6 (drop cmn x6, x5) (2 instructions)
   add x0, x5, x6
   cmn x6, x5
 
+compare whose flags are overwritten unread at offset: 0x74 <_main+0x74>: -> delete; NZCV overwritten unread by cmn x8, x7 (1 instructions)
+  cmn x6, x5
+
 ADD + CMN of identical operands foldable to ADDS at offset: 0x78 <_main+0x78>: -> adds x0, x7, x8 (drop cmn x8, x7) (2 instructions)
   cmn x8, x7
   add x0, x7, x8
 
+compare whose flags are overwritten unread at offset: 0x78 <_main+0x78>: -> delete; NZCV overwritten unread by cmn x6, x5 (1 instructions)
+  cmn x8, x7
+
+compare whose flags are overwritten unread at offset: 0x84 <_main+0x84>: -> delete; NZCV overwritten unread by cmp x3, x4 (1 instructions)
+  cmn x6, x5
+
 Optimization opportunities by type:
+      17  compare whose flags are overwritten unread
        7  SUB + CMP of identical operands foldable to SUBS
        5  ADD + CMN of identical operands foldable to ADDS
        1  SUBS + CMP of identical operands: redundant compare
 
-13 optimization opportunities in 37 instructions
+30 optimization opportunities in 37 instructions

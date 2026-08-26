@@ -1,0 +1,16 @@
+compare whose flags are overwritten unread at offset: 0x0 <_main>: -> delete; NZCV overwritten unread by cmp x1, #6 (1 instructions)
+  cmp x1, #8
+
+compare whose flags are overwritten unread at offset: 0xc <_main+0xc>: -> delete; NZCV overwritten unread by cmp w2, #5 (1 instructions)
+  cmp w2, #3
+
+compare whose flags are overwritten unread at offset: 0x20 <_main+0x20>: -> delete; NZCV overwritten unread by subs x11, x12, x13 (1 instructions)
+  tst w3, #0x10
+
+compare whose flags are overwritten unread at offset: 0x30 <_main+0x30>: -> delete; NZCV overwritten unread by cmp x4, #7 (1 instructions)
+  ccmp x5, #2, #0, eq
+
+Optimization opportunities by type:
+       4  compare whose flags are overwritten unread
+
+4 optimization opportunities in 35 instructions

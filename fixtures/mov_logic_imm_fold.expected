@@ -46,6 +46,9 @@ MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x58 <_main+0x58>: ->
   movz x0, #0x1
   eon x3, x2, x0
 
+compare whose flags are overwritten unread at offset: 0x34 <_main+0x34>: -> delete; NZCV overwritten unread by bics w3, w2, w0 (1 instructions)
+  tst x2, x0
+
 MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x60 <_main+0x60>: -> ands w3, w2, #0xfffffffe (2 instructions)
   movz w0, #0x1
   bics w3, w2, w0
@@ -60,6 +63,7 @@ self-op identity at offset: 0x94 <_main+0x94>: and x3, x0, x0 -> mov x3, x0 (1 i
 Optimization opportunities by type:
        9  MOV + AND/ORR/EOR foldable to bitmask immediate
        5  MOV + BIC/ORN/EON foldable to bitmask immediate
+       1  compare whose flags are overwritten unread
        1  self-op identity
 
-15 optimization opportunities in 39 instructions
+16 optimization opportunities in 39 instructions

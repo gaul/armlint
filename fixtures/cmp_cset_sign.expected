@@ -2,17 +2,41 @@ CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x0 <_main>: -> lsr x0, 
   cmp x1, #0
   cset x0, lt
 
+compare whose flags are overwritten unread at offset: 0x8 <_main+0x8>: -> delete; NZCV overwritten unread by cmp w1, #0 (1 instructions)
+  cmp x9, #0
+
 CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0xc <_main+0xc>: -> lsr w0, w1, #31 (2 instructions)
   cmp w1, #0
   cset w0, lt
+
+compare whose flags are overwritten unread at offset: 0x14 <_main+0x14>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
+  cmp w9, #0
 
 CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x18 <_main+0x18>: -> lsr x0, x1, #63 (2 instructions)
   cmp x1, #0
   cset x0, mi
 
+compare whose flags are overwritten unread at offset: 0x20 <_main+0x20>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
+  cmp x9, #0
+
 CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x24 <_main+0x24>: -> asr x0, x1, #63 (2 instructions)
   cmp x1, #0
   csetm x0, lt
+
+compare whose flags are overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
+  cmp x9, #0
+
+compare whose flags are overwritten unread at offset: 0x38 <_main+0x38>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
+  cmp x9, #0
+
+compare whose flags are overwritten unread at offset: 0x44 <_main+0x44>: -> delete; NZCV overwritten unread by cmp x1, #1 (1 instructions)
+  cmp x9, #0
+
+compare whose flags are overwritten unread at offset: 0x50 <_main+0x50>: -> delete; NZCV overwritten unread by cmp w1, #0 (1 instructions)
+  cmp x9, #0
+
+compare whose flags are overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
+  cmp x9, #0
 
 branch to the next instruction is a no-op at offset: 0x68 <_main+0x68>: -> delete: control falls through either way (1 instructions)
   b.lt #0x6c
@@ -22,7 +46,8 @@ CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x6c <_main+0x6c>: -> as
   csetm w3, mi
 
 Optimization opportunities by type:
+       8  compare whose flags are overwritten unread
        5  CMP #0 + sign CSET/CSETM foldable to LSR/ASR
        1  branch to the next instruction is a no-op
 
-6 optimization opportunities in 30 instructions
+14 optimization opportunities in 30 instructions

@@ -26,6 +26,9 @@ MOV + ADD/SUB foldable to immediate form at offset: 0x30 <_main+0x30>: -> cmp x2
   movz x0, #0x1f4
   cmp x2, x0
 
+compare whose flags are overwritten unread at offset: 0x34 <_main+0x34>: -> delete; NZCV overwritten unread by cmn x2, x0 (1 instructions)
+  cmp x2, x0
+
 MOV + ADD/SUB foldable to immediate form at offset: 0x38 <_main+0x38>: -> cmn x2, #0x258 (2 instructions)
   movz x0, #0x258
   cmn x2, x0
@@ -57,5 +60,6 @@ MOV + ADD/SUB foldable to sign-crossed immediate form at offset: 0x9c <_main+0x9
 Optimization opportunities by type:
       10  MOV + ADD/SUB foldable to immediate form
        4  MOV + ADD/SUB foldable to sign-crossed immediate form
+       1  compare whose flags are overwritten unread
 
-14 optimization opportunities in 46 instructions
+15 optimization opportunities in 46 instructions

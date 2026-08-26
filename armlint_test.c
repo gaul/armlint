@@ -2927,7 +2927,10 @@ static void test_cset_recompare(void)
     cmp_w_imm(&code[8], 8, 0);
     csel_w(&code[12], 0, 1, 2, 0);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    // The gap's own compare is itself dead here -- check_dead_compare
+    // reports it -- so count only the check under test.
+    assert(run_named_check(code, 20,
+        "CMP #0 of a live CSET is redundant") == 0);
 
     // -- Negative: the temp is overwritten in the gap. --
 
@@ -4803,7 +4806,11 @@ static void test_redundant_cmp_after_s_variant(void)
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    // The Rd = 31 head is a compare whose flags the next compare
+    // discards, so check_dead_compare reports it too; name the check
+    // under test.
+    assert(run_named_check(code, 16,
+        "compare-zero branch foldable into CBZ/CBNZ") == 1);
 
     // -- Negative: width mismatch (W S-variant, X CMP). --
 
@@ -4989,7 +4996,10 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 1);
+    // The gap's compare is dead in its own right (check_dead_compare
+    // reports it), so name the check under test.
+    assert(run_named_check(code, 20,
+        "compare-zero branch foldable into CBZ/CBNZ") == 1);
 
     // A gap instruction overwriting Rd breaks the pattern (the zero
     // test reads the newer value).
@@ -5227,6 +5237,10 @@ static void test_sub_cmp_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// check_dead_compare's finding name; several tests in this file share
+// a window with it and count by name rather than in bulk.
+#define DC_NAME "compare whose flags are overwritten unread"
+
 static void test_subs_cmp_redundant(void)
 {
     uint8_t code[12];
@@ -5253,9 +5267,14 @@ static void test_subs_cmp_redundant(void)
     assert(run_helper_check(code, 8) == 1);
 
     // An adjacent duplicate compare is the Rd = 31 producer case.
+    // This is the one window check_dead_compare also sees: it calls
+    // the FIRST compare dead where this check calls the second
+    // redundant. Both rewrites are correct, so both fire.
     cmp_x_reg(&code[0], 1, 2);
     cmp_x_reg(&code[4], 1, 2);
-    assert(run_helper_check(code, 8) == 1);
+    assert(run_named_check(code, 8,
+        "SUBS + CMP of identical operands: redundant compare") == 1);
+    assert(run_named_check(code, 8, DC_NAME) == 1);
 
     // W-form.
     write_le32(&code[0], 0x6B000000u | (2u << 16) | (1u << 5) | 0u);
@@ -5289,6 +5308,133 @@ static void test_subs_cmp_redundant(void)
     movz_x(&code[4], 5, 1, 0);
     write_le32(&code[8], 0xEB00001Fu | (2u << 16) | (1u << 5));
     assert(run_helper_check(code, 12) == 0);
+}
+
+// check_dead_compare reports through armlint_advance_pending_dc,
+// which fires on the OVERWRITING instruction, so several of these
+// fragments also trip neighbouring flag checks; run_named_check keeps
+// the count honest.
+static void test_dead_compare(void)
+{
+    uint8_t code[80];
+
+    // -- Positive: two compares back to back. The first writes flags
+    //    the second throws away before anything reads them. --
+    cmp_x_imm(&code[0], 1, 8);
+    cmp_x_imm(&code[4], 1, 6);
+    assert(run_named_check(code, 8, DC_NAME) == 1);
+
+    // A run of three yields two: each compare but the last is dead.
+    cmp_x_imm(&code[0], 1, 8);
+    cmp_x_imm(&code[4], 1, 6);
+    cmp_x_imm(&code[8], 1, 4);
+    assert(run_named_check(code, 12, DC_NAME) == 2);
+
+    // -- Positive: flag-neutral instructions in between do not matter.
+    cmp_x_imm(&code[0], 1, 8);
+    movz_x(&code[4], 9, 3, 0);
+    movz_x(&code[8], 10, 4, 0);
+    cmp_x_imm(&code[12], 1, 6);
+    assert(run_named_check(code, 16, DC_NAME) == 1);
+
+    // -- Positive: the killer needs only to write all of NZCV; an
+    //    S-variant with a live destination does that. --
+    cmp_x_imm(&code[0], 1, 8);
+    subs_w_imm(&code[4], 3, 4, 7);
+    assert(run_named_check(code, 8, DC_NAME) == 1);
+
+    // -- Positive: TST is a compare too (ANDS into the zero register).
+    tst_w_reg(&code[0], 1, 2);
+    cmp_x_imm(&code[4], 1, 6);
+    assert(run_named_check(code, 8, DC_NAME) == 1);
+
+    // -- Positive: CCMP has no destination at all, so a CCMP whose
+    //    flags are discarded is equally dead. --
+    ccmp_reg(&code[0], 1, 1, 1, 2, 0, 0);
+    cmp_x_imm(&code[4], 1, 6);
+    assert(run_named_check(code, 8, DC_NAME) == 1);
+
+    // -- Positive: FCMP is not reported itself, but it does overwrite
+    //    all four flags, so it retires a preceding compare. --
+    cmp_x_imm(&code[0], 1, 8);
+    write_le32(&code[4], 0x1E602000u | (1u << 16) | (0u << 5));  // fcmp d0, d1
+    assert(run_named_check(code, 8, DC_NAME) == 1);
+
+    // -- Negative: a reader between the two compares. --
+    cmp_x_imm(&code[0], 1, 8);
+    b_cond(&code[4], 0, 8);                  // b.eq
+    cmp_x_imm(&code[8], 1, 6);
+    assert(run_named_check(code, 12, DC_NAME) == 0);
+
+    cmp_x_imm(&code[0], 1, 8);
+    csel_x(&code[4], 0, 1, 2, 0);
+    cmp_x_imm(&code[8], 1, 6);
+    assert(run_named_check(code, 12, DC_NAME) == 0);
+
+    // A CCMP reads the flags it conditionally rewrites, so it never
+    // proves a preceding compare dead -- it only opens its own.
+    cmp_x_imm(&code[0], 1, 8);
+    ccmp_reg(&code[4], 1, 1, 1, 2, 0, 0);
+    assert(run_named_check(code, 8, DC_NAME) == 0);
+
+    // -- Negative: the terminators. A call and a return both leave
+    //    NZCV undefined under the PCS, which is enough for the folds
+    //    that keep the compare but not for deleting it outright. --
+    cmp_x_imm(&code[0], 1, 8);
+    bl_(&code[4], 8);
+    assert(run_named_check(code, 8, DC_NAME) == 0);
+
+    cmp_x_imm(&code[0], 1, 8);
+    ret_(&code[4]);
+    assert(run_named_check(code, 8, DC_NAME) == 0);
+
+    // -- Negative: an unsafe terminator ends the scan; the flags may
+    //    be live at a target the scan does not follow. --
+    cmp_x_imm(&code[0], 1, 8);
+    b_(&code[4], 8);
+    cmp_x_imm(&code[8], 1, 6);
+    assert(run_named_check(code, 12, DC_NAME) == 0);
+
+    cmp_x_imm(&code[0], 1, 8);
+    cbz_w(&code[4], 0, 8);
+    cmp_x_imm(&code[8], 1, 6);
+    assert(run_named_check(code, 12, DC_NAME) == 0);
+
+    // -- Negative: an S-variant keeping its result is not a compare.
+    //    Dropping its S bit is size- and cycle-neutral, so the check
+    //    stays out of that half of the family. --
+    subs_w_imm(&code[0], 3, 4, 7);
+    cmp_x_imm(&code[4], 1, 6);
+    assert(run_named_check(code, 8, DC_NAME) == 0);
+
+    // -- Negative: an FCMP is destination-free but excluded, because
+    //    deleting it would also drop the FPSR exception bits it sets.
+    write_le32(&code[0], 0x1E602000u | (1u << 16) | (0u << 5));  // fcmp d0, d1
+    cmp_x_imm(&code[4], 1, 6);
+    assert(run_named_check(code, 8, DC_NAME) == 0);
+
+    // -- Negative: the window expires. LIVENESS_WINDOW is 16, so a
+    //    compare 17 flag-neutral instructions ahead of the overwrite
+    //    is never proven. --
+    cmp_x_imm(&code[0], 1, 8);
+    for (unsigned i = 0; i < 17; i++) {
+        movz_x(&code[4 + 4 * i], 9, (uint16_t)(i + 1), 0);
+    }
+    cmp_x_imm(&code[4 + 4 * 17], 1, 6);
+    assert(run_named_check(code, 4 + 4 * 17 + 4, DC_NAME) == 0);
+
+    // The same fragment one instruction shorter still resolves.
+    cmp_x_imm(&code[0], 1, 8);
+    for (unsigned i = 0; i < 15; i++) {
+        movz_x(&code[4 + 4 * i], 9, (uint16_t)(i + 1), 0);
+    }
+    cmp_x_imm(&code[4 + 4 * 15], 1, 6);
+    assert(run_named_check(code, 4 + 4 * 15 + 4, DC_NAME) == 1);
+
+    // -- Negative: an isolated compare at end of region proves
+    //    nothing; the flush must discard it rather than emit. --
+    cmp_x_imm(&code[0], 1, 8);
+    assert(run_named_check(code, 4, DC_NAME) == 0);
 }
 
 static void test_add_sub_zero(void)
@@ -14357,6 +14503,7 @@ int main(void)
     test_zero_cmp_to_s_variant();
     test_sub_cmp_fold();
     test_subs_cmp_redundant();
+    test_dead_compare();
     test_add_sub_zero();
     test_self_op();
     test_umov_lane0_fmov();

@@ -1139,6 +1139,81 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   one flags the compare of the operands, and it needs no NZCV scan:
   the flags after the drop are bit-identical, unconditionally.
 
+## compare whose flags are overwritten unread
+
+* A compare writes no register: `CMP`/`CMN` are `ADDS`/`SUBS`
+  discarding into the zero register, `TST` is `ANDS` doing the same,
+  and `CCMP`/`CCMN` have no destination field at all. So a compare
+  whose NZCV nothing reads before some later instruction rewrites all
+  four flags has no effect whatever, and the rewrite is a deletion:
+  `cmp w9, #8 ; cmp w9, #6` -> drop the first.
+* This is the one member of the dead-flag family worth reporting.
+  Dropping the `s` off an `adds`/`subs`/`ands` whose destination is
+  still live is the same instruction count, the same encoding size and
+  the same latency and port on every AArch64 core -- the flag write
+  itself is a byproduct of the adder and costs a rename slot, not a
+  cycle. Deleting a compare returns a whole instruction slot: a fetch
+  slot, a decode slot, a ROB entry. The energy is in the instruction,
+  not in the flags it wrote.
+* The deadness proof accepts exactly one stopper, a later full write
+  of NZCV (`LIV_OVERWRITE`). The shared advancer
+  (`armlint_advance_pending`) would also accept a call or a return,
+  because the PCS leaves the condition flags undefined across both --
+  LLVM states that rule in as many words, and its machine outliner
+  leans on it, outlining only ranges where NZCV is dead, which is why
+  the tail of an `_OUTLINED_FUNCTION_*` is a place these turn up. But
+  that is an argument about a callee rather than about code in front
+  of the scanner, and hand-written assembly is free to ignore it: a
+  context restore ending `msr nzcv, x8 ; ret` reads perfectly dead to
+  a PCS-trusting scan. Deleting an instruction is not where that
+  argument gets spent, so `armlint_advance_pending_dc` refuses both
+  terminators. The corpus figures below are for the overwrite arm
+  alone.
+* No side-entry gate, despite the window spanning several
+  instructions. Only the head is deleted and nothing else in the
+  window changes, so a path entering in the middle never executed the
+  compare and cannot observe flags it did not write. The finding is
+  one instruction wide and is reported that way. This is why armlint
+  reports more sites than the standalone survey that motivated the
+  check: that survey abandoned a candidate whenever a branch target
+  fell inside the window, a caution the deletion does not need.
+* `FCMP`/`FCMPE` and `FCCMP`/`FCCMPE` are excluded even though they
+  are equally destination-free. They also set the FPSR cumulative
+  exception bits, and with the matching FPCR trap enabled may trap on
+  a NaN, so deleting one drops architectural state an NZCV scan cannot
+  see. They still count as killers -- an `fcmp` does overwrite all
+  four flags -- just never as the deleted instruction. `ADCS`/`SBCS`
+  into the zero register are omitted for population rather than
+  soundness: the corpus has none.
+* Overlaps [`SUBS`/`ADDS` + `CMP`/`CMN` of identical
+  operands](#subsadds--cmpcmn-of-identical-operands-redundant-compare)
+  on exactly one shape, an adjacent pair of identical compares, where
+  that check calls the second redundant and this one calls the first
+  dead. Both rewrites are correct and both fire; the corpus contains
+  no such pair.
+* **Corpus: 315 sites** across the 28.5M-instruction sweep -- 306 in
+  `librustc_driver`, 9 in `go`, and zero in `libcrypto`, `dyld`,
+  `bash`, `ssh` and `zsh`. The shape is overwhelmingly one compare
+  followed by another within a handful of instructions (`cmp` + `cmp`
+  accounts for nearly all of it), which is why the strict-adjacency
+  discipline the rest of the flag checks use would find only about a
+  third of them: the surveyed distance histogram runs +1: 57, +2: 59,
+  +3: 26, +4: 25, +5..7: 8.
+* Where the shape comes from: the same late-pipeline restructuring
+  that leaves the other flag residue behind. Tail merging and the
+  machine outliner move code across block boundaries after the
+  compare's consumer has already been rewritten or dropped, and
+  nothing re-runs dead-code elimination on the flags afterwards. A
+  representative `librustc_driver` site interleaves three of armlint's
+  findings at once -- `cmp w9, #8 ; cmp w9, #6 ; csel x10, x8, x8, eq
+  ; cmp w9, #4 ; mov x8, x8 ; cmp w9, #5` -- two dead compares, a
+  [same-operand CSEL](#csel-same-operand-identity-csel-rd-rn-rn-cond)
+  and a [literal no-op `mov`](#mov-xd-xd-is-a-literal-no-op).
+* The other half of the dead-flag family -- an `adds`/`subs`/`ands`
+  with a live destination whose flags are equally dead -- is measured
+  and deliberately unimplemented; see
+  [TODO.md](TODO.md#flag-fold-leftovers).
+
 ## ADD #1 + CSEL foldable to CSINC
 
 * `add wt, ws, #1 ; csel wd, wn, wt, cc` instead of

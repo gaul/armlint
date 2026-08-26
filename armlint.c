@@ -353,6 +353,15 @@ struct armlint_state {
     unsigned pending_window;
     armlint_finding pending_finding;
 
+    // Deferred "dead compare" finding, parallel to pending_* but
+    // advanced by armlint_advance_pending_dc, which -- unlike the
+    // shared advancer -- refuses LIV_TERM_SAFE. Two compares cannot
+    // be pending at once: the second is itself a full NZCV write, so
+    // it retires the first before opening its own slot.
+    bool pending_dc_active;
+    unsigned pending_dc_window;
+    armlint_finding pending_dc_finding;
+
     // Flag-setting ALU (S-variant: ADDS/SUBS/ANDS/BICS/ADCS/SBCS)
     // pending a CMP/TST-zero of its Rd. All members of the set put
     // Z = (Rd == 0), so a follow-up CMP Rd, #0 / CMP Rd, ZR / TST
@@ -1421,6 +1430,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->scp_cmp_active = false;
     state->rcs_active = false;
     state->pending_active = false;
+    state->pending_dc_active = false;
     state->pending_sv_active = false;
     state->pending_zs_active = false;
     state->pending_mz_active = false;
@@ -3262,6 +3272,46 @@ bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
                                &state->pending_finding, out);
 }
 
+// Advance the deferred dead-compare finding by one instruction. Same
+// shape as advance_one_pending with one stopper reclassified:
+// LIV_TERM_SAFE suppresses the finding here rather than proving it.
+// See check_dead_compare for why a deletion does not spend the PCS
+// argument. Emission fills in the overwriting instruction, which is
+// only known here.
+bool armlint_advance_pending_dc(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (!state->pending_dc_active) {
+        return false;
+    }
+    if (insn->size != 4) {
+        state->pending_dc_active = false;
+        return false;
+    }
+    switch (classify_liveness(insn_word(insn))) {
+    case LIV_OVERWRITE:
+        *out = state->pending_dc_finding;
+        snprintf(out->detail, sizeof(out->detail),
+            "-> delete; NZCV overwritten unread by %s %s",
+            insn->mnemonic, insn->op_str);
+        state->pending_dc_active = false;
+        return true;
+    case LIV_READ:
+    case LIV_TERM_SAFE:
+    case LIV_TERM_UNSAFE:
+        state->pending_dc_active = false;
+        return false;
+    case LIV_UNKNOWN:
+        if (state->pending_dc_window == 0
+                || --state->pending_dc_window == 0) {
+            state->pending_dc_active = false;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out)
 {
@@ -4412,6 +4462,78 @@ bool check_subs_cmp_redundant(armlint_state *state, const cs_insn *insn,
     }
 
     return produced;
+}
+
+// True for the integer instructions whose entire architectural effect
+// is NZCV: the ADDS/SUBS/ANDS/BICS shapes that discard their result
+// into the zero register -- the CMP, CMN and TST aliases -- and the
+// conditional compares, which have no destination field at all. The
+// masks are classify_liveness's own, so anything accepted here is a
+// LIV_OVERWRITE there (LIV_READ for CCMP/CCMN, which read the flags
+// they conditionally rewrite); test_dead_compare pins that
+// correspondence.
+static bool is_flag_only_compare(uint32_t op)
+{
+    // CCMP/CCMN, register and immediate. Tested first: the low five
+    // bits are the #nzcv literal, not an Rd, so the ZR test below
+    // would read them as a register.
+    if ((op & 0x3FE00000u) == 0x3A400000u) {
+        return true;
+    }
+    // Everything that follows writes Rd, so only the ZR spelling has
+    // no effect beyond the flags.
+    if ((op & 0x1Fu) != 0x1Fu) {
+        return false;
+    }
+    // ADDS/SUBS immediate -- CMP/CMN (immediate).
+    if ((op & 0x3F800000u) == 0x31000000u) {
+        return true;
+    }
+    // ADDS/SUBS shifted- and extended-register -- CMP/CMN (register).
+    // Rd = 31 is the zero register for the S-forms; it is the non-S
+    // forms that read it as SP.
+    if ((op & 0x3F000000u) == 0x2B000000u) {
+        return true;
+    }
+    // ANDS immediate -- TST (immediate).
+    if ((op & 0x7F800000u) == 0x72000000u) {
+        return true;
+    }
+    // ANDS/BICS shifted-register -- TST (register), plus the BICS
+    // spelling, which has no alias of its own but discards its result
+    // just the same.
+    if ((op & 0x7F000000u) == 0x6A000000u) {
+        return true;
+    }
+    return false;
+}
+
+bool check_dead_compare(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out)
+{
+    (void)out;   // emission goes through armlint_advance_pending_dc
+
+    if (insn->size != 4) {
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    if (!is_flag_only_compare(op)) {
+        return false;
+    }
+
+    armlint_finding *p = &state->pending_dc_finding;
+    p->name = "compare whose flags are overwritten unread";
+    p->start_offset = offset;
+    p->insn_count = 1;
+    clear_finding_strings(p);
+    snprintf(p->lines[0], sizeof(p->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // The detail names the overwriting instruction and is filled in
+    // when the scan finds it.
+    state->pending_dc_active = true;
+    state->pending_dc_window = LIVENESS_WINDOW;
+    return false;
 }
 
 // TST Rn, #(1<<k) = ANDS XZR, Rn, #imm where the logical immediate
@@ -14926,6 +15048,7 @@ static void report_finding(const armlint_finding *finding, bool verbose,
 // or advancer is a single-line edit here.
 const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending,
+    armlint_advance_pending_dc,
     armlint_advance_pending_sv,
     armlint_advance_pending_zs,
     armlint_advance_pending_cssc,
@@ -15003,6 +15126,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_zero_cmp_to_s_variant,
     check_sub_cmp_fold,
     check_subs_cmp_redundant,
+    check_dead_compare,
     check_mul_add_sub_fold,
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,

@@ -2,24 +2,40 @@ TST single-bit + CSET foldable into UBFX at offset: 0x0 <_main>: -> ubfx w8, w0,
   tst w0, #0x10
   cset w8, ne
 
+compare whose flags are overwritten unread at offset: 0x8 <_main+0x8>: -> delete; NZCV overwritten unread by tst x1, #0x10000000000 (1 instructions)
+  cmp w1, w2
+
 TST single-bit + CSET foldable into UBFX at offset: 0xc <_main+0xc>: -> ubfx x9, x1, #40, #1 (2 instructions)
   tst x1, #0x10000000000
   cset x9, ne
+
+compare whose flags are overwritten unread at offset: 0x14 <_main+0x14>: -> delete; NZCV overwritten unread by tst w2, #0x80000000 (1 instructions)
+  cmp w1, w2
 
 TST single-bit + CSET foldable into UBFX at offset: 0x18 <_main+0x18>: -> ubfx w10, w2, #31, #1 (2 instructions)
   tst w2, #0x80000000
   cset w10, mi
 
+compare whose flags are overwritten unread at offset: 0x20 <_main+0x20>: -> delete; NZCV overwritten unread by tst w3, #1 (1 instructions)
+  cmp w1, w2
+
 TST single-bit + CSETM foldable into SBFX at offset: 0x24 <_main+0x24>: -> sbfx w11, w3, #0, #1 (2 instructions)
   tst w3, #0x1
   csetm w11, ne
+
+compare whose flags are overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; NZCV overwritten unread by tst w4, #0x10 (1 instructions)
+  cmp w1, w2
+
+compare whose flags are overwritten unread at offset: 0x38 <_main+0x38>: -> delete; NZCV overwritten unread by tst w5, #0x10 (1 instructions)
+  cmp w1, w2
 
 branch to the next instruction is a no-op at offset: 0x44 <_main+0x44>: -> delete: control falls through either way (1 instructions)
   b.eq #0x48
 
 Optimization opportunities by type:
+       5  compare whose flags are overwritten unread
        3  TST single-bit + CSET foldable into UBFX
        1  TST single-bit + CSETM foldable into SBFX
        1  branch to the next instruction is a no-op
 
-5 optimization opportunities in 19 instructions
+10 optimization opportunities in 19 instructions

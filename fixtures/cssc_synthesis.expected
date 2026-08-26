@@ -2,9 +2,15 @@ CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0x0 <_main>: -> smax x0, x1, x2
   cmp x1, x2
   csel x0, x1, x2, gt
 
+compare whose flags are overwritten unread at offset: 0x8 <_main+0x8>: -> delete; NZCV overwritten unread by cmp w1, w2 (1 instructions)
+  cmp x9, #0
+
 CMP + CSEL foldable to MAX/MIN (CSSC) at offset: 0xc <_main+0xc>: -> umin w0, w1, w2 (2 instructions)
   cmp w1, w2
   csel w0, w2, w1, hi
+
+compare whose flags are overwritten unread at offset: 0x14 <_main+0x14>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
+  cmp w9, #0
 
 CMP #0 + CNEG foldable to ABS (CSSC) at offset: 0x18 <_main+0x18>: -> abs x0, x1 (2 instructions)
   cmp x1, #0
@@ -20,14 +26,18 @@ NEON popcount foldable to CNT (CSSC) at offset: 0x2c <_main+0x2c>: -> cnt x0, x1
   addv b0, v0.8b
   fmov w0, s0
 
+compare whose flags are overwritten unread at offset: 0x20 <_main+0x20>: -> delete; NZCV overwritten unread by cmp x1, x2 (1 instructions)
+  cmp x9, #0
+
 branch to the next instruction is a no-op at offset: 0x48 <_main+0x48>: -> delete: control falls through either way (1 instructions)
   b.eq #0x4c
 
 Optimization opportunities by type:
+       3  compare whose flags are overwritten unread
        2  CMP + CSEL foldable to MAX/MIN (CSSC)
        1  CMP #0 + CNEG foldable to ABS (CSSC)
        1  NEON popcount foldable to CNT (CSSC)
        1  RBIT + CLZ foldable to CTZ (CSSC)
        1  branch to the next instruction is a no-op
 
-6 optimization opportunities in 23 instructions
+9 optimization opportunities in 23 instructions

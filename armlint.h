@@ -2236,6 +2236,14 @@ bool check_simd_cmp_zero(armlint_state *state, const cs_insn *insn,
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
+// Advance the deferred dead-compare finding (check_dead_compare) by
+// one instruction. Parallel to armlint_advance_pending with a single
+// difference: LIV_TERM_SAFE -- a call or a return -- suppresses the
+// finding here instead of proving it. Same calling contract: once per
+// instruction, before the per-instruction checks; offset unused.
+bool armlint_advance_pending_dc(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
 // Detect an S-variant ALU (ADDS/SUBS/ANDS/BICS/ADCS/SBCS) writing Rd,
 // followed immediately by a CMP/CMN/TST zero test of Rd (any of the
 // decode_zero_test spellings), followed immediately by B.EQ/B.NE. All
@@ -2369,6 +2377,50 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
 // "ADDS + CMN of identical operands: redundant compare".
 bool check_subs_cmp_redundant(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
+
+// Detect a compare whose NZCV no instruction reads before the flags
+// are overwritten wholesale. A compare writes no register -- CMP/CMN
+// are ADDS/SUBS discarding into the zero register, TST is ANDS doing
+// the same, and CCMP/CCMN have no destination field -- so flags that
+// nothing reads leave the instruction with no effect at all. The
+// rewrite is a deletion, which makes this the one member of the
+// dead-flag family worth reporting: dropping the S bit off an
+// ADDS/SUBS whose destination is still live costs the same byte count
+// and the same cycle, while deleting a compare returns a whole
+// instruction slot.
+//
+// The deadness proof accepts exactly one stopper, a later full write
+// of NZCV. The shared advancer would also accept a call or a return,
+// on the strength of the PCS leaving the condition flags undefined
+// across both -- LLVM states that rule in as many words and its
+// machine outliner leans on it, outlining only ranges where NZCV is
+// dead (which is why an outlined function's tail is a place these
+// turn up). But that is an argument about a callee rather than about
+// code in front of the scanner, and hand-written assembly does not
+// have to honor it: a context restore ending `msr nzcv, x8 ; ret`
+// reads perfectly dead to a PCS-trusting scan. Deleting an
+// instruction is not where that argument gets spent, so
+// armlint_advance_pending_dc refuses both terminators.
+//
+// No side-entry gate is needed even though the window spans several
+// instructions. Only the head is deleted and nothing else in the
+// window changes, so a path entering in the middle never executed the
+// compare and cannot observe the flags it did not write. The finding
+// is one instruction wide, which is how it is reported.
+//
+// FCMP/FCMPE and FCCMP/FCCMPE are excluded despite being equally
+// destination-free: they also set the FPSR cumulative exception bits
+// and, with the matching FPCR trap enabled, may trap on a NaN, so a
+// deletion drops architectural state an NZCV scan cannot see. ADCS
+// and SBCS to ZR are omitted for population rather than soundness --
+// the corpus has none. Neither exclusion costs a finding.
+//
+// Overlaps check_subs_cmp_redundant only on an adjacent pair of
+// identical compares, where that check reports the second as
+// redundant and this one the first as dead. Both rewrites are
+// correct; the corpus contains no such pair.
+bool check_dead_compare(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out);
 
 // Advance the deferred "redundant CMP after S-variant" finding's
 // flag-liveness scan by one instruction. Parallel to
