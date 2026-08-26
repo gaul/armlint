@@ -95,4 +95,40 @@ _main:
     ldr     x5, [sp]
     ldr     x5, [sp, #8]
 
+    // Positive: two unscaled LDURs at a negative displacement. The
+    // scaled form cannot spell a negative offset at all, so this whole
+    // shape is invisible to a matcher that decodes only LDR (unsigned
+    // offset).
+    ldur    x0, [x10, #-16]
+    ldur    x1, [x10, #-8]         // -> ldp x0, x1, [x10, #-16]
+
+    // Positive: a mixed pair. Assemblers pick the encoding per
+    // instruction, so a run crossing the scaled form's constraints
+    // comes out half LDUR and half LDR.
+    ldur    x2, [x11, #8]
+    ldr     x3, [x11, #16]         // -> ldp x2, x3, [x11, #8]
+
+    // Positive: mixed, reverse order.
+    ldr     x5, [x12, #16]
+    ldur    x4, [x12, #8]          // -> ldp x4, x5, [x12, #8]
+
+    // Negative: adjacent but 8-misaligned. LDP's imm7 counts whole
+    // transfer units, so a displacement the unscaled form can express
+    // and the pair form cannot must not fold.
+    ldur    x6, [x13, #4]
+    ldur    x7, [x13, #12]
+
+    // Positive: SIMD&FP unscaled pair.
+    ldur    d0, [x2, #-16]
+    ldur    d1, [x2, #-8]          // -> ldp d0, d1, [x2, #-16]
+
+    // Positive: unscaled store pair, repeated source.
+    stur    x5, [sp, #-16]
+    stur    x5, [sp, #-8]          // -> stp x5, x5, [sp, #-16]
+
+    // Positive: unscaled zero stores. A negative slot cannot use the
+    // scaled STR xzr, so the rewrite is STUR xzr.
+    stur    wzr, [x12, #-8]
+    stur    wzr, [x12, #-4]        // -> stur xzr, [x12, #-8]
+
     ret

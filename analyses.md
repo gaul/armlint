@@ -668,9 +668,8 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 ## adjacent LDR/STR foldable into LDP/STP
 
-* Two unsigned-offset `LDR Wt, [Rn, #imm12*4]` (or X-form,
-  scale 8) to consecutive scaled offsets fold into a single
-  `LDP Wt1, Wt2, [Rn, #imm7*4]`. Analogous for stores ->
+* Two `LDR Wt, [Rn, #imm]` (or X-form) to consecutive offsets fold
+  into a single `LDP Wt1, Wt2, [Rn, #imm7*4]`. Analogous for stores ->
   `STP`. Both W- and X-form supported, and the SIMD&FP S/D/Q sizes
   (scales 4/8/16) coalesce the same way into their own `LDP`/`STP`
   forms -- the FP B and H sizes have no pair encoding and are not
@@ -682,14 +681,25 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the LDP-with-writeback caveat noted for the post-index fold: the plain
   pair forms are a win, whereas pairing *with* writeback can cost extra
   micro-ops on Apple cores.
-* Currently supports only the unsigned-offset form. The scaled imm12
-  guarantees natural alignment to the access size, which the LDP
-  encoding requires. `LDUR` (unscaled) and pre-/post-indexed forms
-  are deferred: their byte offsets aren't constrained to be a
-  multiple of the access size, and `LDP/STP` on unaligned
-  addresses has implementation-defined behaviour on AArch64
-  (some cores fault even when single `LDR/STR` works under
-  `SCTLR_EL1.A = 0`).
+* Both spellings of the addressing mode are decoded: the
+  unsigned-offset form (`LDR`, imm12 scaled by the access size) and
+  the unscaled one (`LDUR`, a signed 9-bit byte count). Assemblers
+  choose per instruction -- JSC's arm64 MacroAssembler, for one, emits
+  `LDUR` for every displacement under 256 -- so a single run of
+  accesses routinely comes out as a mix, and matching only the scaled
+  form misses both the all-unscaled runs and the mixed pairs. Offsets
+  are therefore normalized to signed bytes before comparison, and a
+  pair fires whichever way each half is spelled.
+* Because the unscaled form can express displacements the pair form
+  cannot, the imm7 test is explicit rather than implied by the
+  encoding: the lower of the two byte offsets must divide evenly by
+  the transfer size and lie within -64..63 of them. The alignment half
+  of that is what the scaled imm12 used to guarantee for free, and it
+  is what keeps the rewrite off addresses where `LDP`/`STP` has
+  implementation-defined behaviour on AArch64 (some cores fault even
+  where a single `LDR`/`STR` works under `SCTLR_EL1.A = 0`).
+* Pre- and post-indexed forms remain deferred: they write back to the
+  base, so they are not interchangeable with a plain pair.
 * Constraints checked: same base register `Rn`; same access size
   (both W, both X, or the same S/D/Q); same direction (load/load or
   store/store); consecutive offsets (`imm12_2 = imm12_1 + 1` in
@@ -701,8 +711,8 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `Rt != Rn` (else the first load clobbers the base before the
   second load reads it) -- a SIMD&FP `Rt` can never alias the
   integer base, so that guard does not apply to FP pairs. The LOWER
-  of the two imm12s must also fit LDP's signed-7-bit imm7 (i.e.,
-  be at most 63 for non-negative unsigned-offset sources).
+  of the two byte offsets must also be a multiple of the transfer size
+  and fit LDP's signed 7-bit imm7 in units of it.
 * Reverse-order pairs (`ldr Rt2, [Rn, #imm+1] ; ldr Rt1, [Rn,
   #imm]` -- higher offset first) are also coalesced, into a
   `ldp Rt1, Rt2, [Rn, #imm]` with the Rt operands ordered by
@@ -718,10 +728,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   pairs), but neither are two separate LDRs. So the rewrite
   doesn't change ordering or atomicity guarantees -- acquire /
   release variants use different opcodes.
-* Adjacent unsigned-offset `LDRSW Xt, [Rn, #imm12*4]` pairs fold
+* Adjacent `LDRSW Xt, [Rn, #imm]` pairs (`LDURSW` included) fold
   analogously into a single `LDPSW Xt1, Xt2, [Rn, #imm7*4]`. Same
   constraints (same base, consecutive offsets, distinct Rts, first
-  `Rt != Rn`, first imm12 <= 63), with the added requirement that
+  `Rt != Rn`, lower offset within a 4-byte-scaled imm7), with the
+  added requirement that
   the kind matches: a pending `LDR` does not pair with an `LDRSW`
   (different opcode, different sign-extension semantics). LDPSW is
   always 64-bit destination, load-only, 4-byte transfer.

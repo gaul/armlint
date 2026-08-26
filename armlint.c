@@ -875,7 +875,7 @@ struct armlint_state {
     unsigned lsp_lg2size;
     unsigned lsp_rt;
     unsigned lsp_rn;
-    unsigned lsp_imm12;
+    int32_t lsp_byte_off;
     size_t lsp_offset;
     char lsp_disasm[ARMLINT_FINDING_LINE_LEN];
 
@@ -12751,6 +12751,79 @@ static bool decode_fp_ldr_str_uimm(uint32_t op, bool *out_is_load,
     return true;
 }
 
+// The unscaled counterparts of the three decoders above. AArch64 has
+// two ways to spell the same load or store against a base plus a small
+// constant: the unsigned-offset form (imm12, scaled by the transfer
+// size, non-negative) and the unscaled form (imm9, a signed byte count,
+// LDUR/STUR). Assemblers pick whichever encodes, so a run of accesses
+// straddling the scaled form's alignment or sign constraints comes out
+// as a mix of the two -- JSC's MacroAssembler, for one, emits LDUR for
+// every displacement under 256. A pair matcher that decodes only the
+// scaled form goes blind on those, so decode both and compare in bytes.
+//
+// The unscaled family is size(2) 111 V 00 opc(2) 0 imm9 00 Rn Rt: bit 21
+// clear and bits 11:10 zero distinguish it from the register-offset and
+// the pre-/post-indexed forms, which are not interchangeable with a
+// plain LDP/STP.
+
+// Sign-extend the 9-bit unscaled immediate to a byte displacement.
+static int32_t simm9_of(uint32_t op)
+{
+    uint32_t raw = (op >> 12) & 0x1FFu;
+    return raw >= 0x100u ? (int32_t)raw - 512 : (int32_t)raw;
+}
+
+// LDUR/STUR, integer W/X form (size = 1x, opc[1] = 0, V = 0).
+static bool decode_ldr_str_simm9(uint32_t op, bool *out_is_load,
+                                 bool *out_is_64bit, int32_t *out_off,
+                                 unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0xBF200C00u) != 0xB8000000u) {
+        return false;
+    }
+    *out_is_64bit = ((op >> 30) & 1u) == 1u;
+    *out_is_load  = ((op >> 22) & 1u) == 1u;
+    *out_off = simm9_of(op);
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// LDURSW (size = 10, opc = 10, V = 0): always a load, always Xt.
+static bool decode_ldursw_simm9(uint32_t op, int32_t *out_off,
+                                unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0xFFE00C00u) != 0xB8800000u) {
+        return false;
+    }
+    *out_off = simm9_of(op);
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// SIMD&FP LDUR/STUR of any size (V = 1), returning lg2size in 0..4.
+static bool decode_fp_ldr_str_simm9(uint32_t op, bool *out_is_load,
+                                    unsigned *out_lg2size, int32_t *out_off,
+                                    unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0x3F200C00u) != 0x3C000000u) {
+        return false;
+    }
+    unsigned size = (op >> 30) & 0x3u;
+    unsigned opc = (op >> 22) & 0x3u;
+    unsigned lg2 = size + ((opc & 0x2u) << 1);
+    if (lg2 > 4u) {
+        return false;   // opc[1] with size != 00 is unallocated
+    }
+    *out_is_load = (opc & 1u) != 0;
+    *out_lg2size = lg2;
+    *out_off = simm9_of(op);
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
 // Register-class letter for a load/store data register: SIMD&FP sizes
 // render their own class letter (b/h/s/d/q by log2 transfer size);
 // integer sizes render w (B/H/W) or x.
@@ -12994,21 +13067,39 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     bool is_fp = false;
     unsigned lg2size = 0;
     unsigned imm12, rn, rt;
+    int32_t byte_off;
 
+    // Both spellings of every family are accepted and normalized to a
+    // signed byte displacement, so a scaled access pairs with an
+    // unscaled neighbour just as it does with another scaled one.
     if (decode_ldrsw_uimm(op, &imm12, &rn, &rt)) {
         // LDRSW: always load, always Xt, transfer = 4 bytes.
+        is_load = true;
+        is_64bit = true;
+        is_sext = true;
+        byte_off = (int32_t)(imm12 * 4u);
+    } else if (decode_ldursw_simm9(op, &byte_off, &rn, &rt)) {
         is_load = true;
         is_64bit = true;
         is_sext = true;
     } else if (decode_ldr_str_uimm(op, &is_load, &is_64bit, &imm12,
                                    &rn, &rt)) {
         // Integer W/X form.
+        byte_off = (int32_t)(imm12 * (is_64bit ? 8u : 4u));
+    } else if (decode_ldr_str_simm9(op, &is_load, &is_64bit, &byte_off,
+                                    &rn, &rt)) {
+        // Integer W/X form, unscaled.
     } else if (decode_fp_ldr_str_uimm(op, &is_load, &lg2size, &imm12,
                                       &rn, &rt)
                && lg2size >= 2u) {
         // SIMD&FP S/D/Q form. The B and H sizes have no LDP/STP
         // encoding, so they fall to the else and expire the window
         // like any other non-pairable instruction.
+        is_fp = true;
+        byte_off = (int32_t)(imm12 << lg2size);
+    } else if (decode_fp_ldr_str_simm9(op, &is_load, &lg2size, &byte_off,
+                                       &rn, &rt)
+               && lg2size >= 2u) {
         is_fp = true;
     } else {
         // Non-pairable instruction expires the window (strict
@@ -13017,6 +13108,11 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         return false;
     }
 
+    // Bytes moved by one access, which is both the stride that makes
+    // two of them adjacent and the scale of the pair form's imm7.
+    int32_t xfer = is_fp ? (int32_t)(1u << lg2size)
+        : (is_sext ? 4 : (is_64bit ? 8 : 4));
+
     bool produced = false;
 
     // Adjacent in either direction: forward (pending at lower offset,
@@ -13024,9 +13120,9 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     // at lower). In the reverse case the LDP's Rt order is swapped so
     // the register at the lower address still appears first.
     bool forward = state->lsp_active
-        && imm12 == state->lsp_imm12 + 1;
+        && byte_off == state->lsp_byte_off + xfer;
     bool reverse = state->lsp_active
-        && state->lsp_imm12 == imm12 + 1;
+        && state->lsp_byte_off == byte_off + xfer;
 
     // Try to close: does this instruction partner the pending one?
     //   - same kind (sext/zext, integer/FP) -- LDR cannot pair with
@@ -13034,7 +13130,7 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     //   - same direction (load/load or store/store)
     //   - same size (W/W, X/X, or equal S/D/Q)
     //   - same base Rn
-    //   - consecutive in scaled units (forward or reverse)
+    //   - consecutive in transfer-size units (forward or reverse)
     //   - distinct destination registers for LOADS: LDP/LDPSW with
     //     Rt1 == Rt2 is CONSTRAINED UNPREDICTABLE. Stores have no
     //     such restriction -- STP Rt, Rt stores the value twice --
@@ -13046,9 +13142,14 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
     //     constraint applies to both forward and reverse. It doesn't
     //     apply to stores, nor to SIMD&FP loads: an FP Rt can never
     //     alias the integer base.
-    //   - the LOWER of the two imm12s fits LDP/STP imm7 (signed 7-bit,
-    //     scaled), i.e., the lower imm12 must be <= 63 (unsigned).
-    unsigned low_imm12 = forward ? state->lsp_imm12 : imm12;
+    //   - the LOWER of the two displacements fits LDP/STP's imm7, a
+    //     signed 7-bit count of transfer-size units: it must divide
+    //     evenly by the transfer size and land in -64..63 of them. An
+    //     unscaled source can be misaligned or negative where a scaled
+    //     one never is, so both halves of that test are load-bearing.
+    int32_t low_off = forward ? state->lsp_byte_off : byte_off;
+    bool pair_imm_ok = low_off % xfer == 0
+        && low_off / xfer >= -64 && low_off / xfer <= 63;
 
     // A pair of adjacent W-form zero-register stores writes the same
     // eight bytes as one STR XZR: prefer that narrower rewrite over
@@ -13064,26 +13165,21 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
             && (is_fp || state->lsp_is_64bit == is_64bit)
             && state->lsp_rn == rn
             && (!is_load || rt != state->lsp_rt)
-            && low_imm12 <= 63u
+            && pair_imm_ok
             && (!is_load || is_fp || state->lsp_rt != rn)) {
         // LDPSW always loads Xt with 4-byte transfer; SIMD&FP pairs
         // take their class letter and log2 size; otherwise the register
-        // width follows is_64bit and the transfer size matches. rt_size
-        // feeds format_ls_rt, which renders register 31 as the zero
-        // register rather than the non-assemblable "w31"/"x31".
+        // width follows is_64bit. rt_size feeds format_ls_rt, which
+        // renders register 31 as the zero register rather than the
+        // non-assemblable "w31"/"x31".
         unsigned rt_size;
-        unsigned xfer;
         if (is_fp) {
             rt_size = lg2size;
-            xfer = 1u << lg2size;
         } else if (is_sext) {
             rt_size = 3u;            // LDPSW transfers 4 bytes into Xt
-            xfer = 4u;
         } else {
             rt_size = is_64bit ? 3u : 2u;
-            xfer = is_64bit ? 8u : 4u;
         }
-        unsigned byte_off = low_imm12 * xfer;
 
         out->start_offset = state->lsp_offset;
         out->insn_count = 2;
@@ -13098,12 +13194,14 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
 
         if (zero_store) {
             // STR's scaled offset must be a non-negative multiple of 8;
-            // the odd 4-byte slot (byte_off % 8 == 4) needs unscaled
-            // STUR. byte_off <= 252 here, in range for both forms.
-            const char *mnem = byte_off % 8u == 0u ? "str" : "stur";
+            // an odd 4-byte slot or a negative displacement needs the
+            // unscaled STUR. These are W-form pairs, so low_off is a
+            // multiple of 4 in -256..252 -- always inside STUR's simm9.
+            const char *mnem = low_off >= 0 && low_off % 8 == 0
+                ? "str" : "stur";
             out->name = "adjacent zero STRs foldable into STR xzr";
             snprintf(out->detail, sizeof(out->detail),
-                "-> %s xzr, [%s, #%u]", mnem, rn_buf, byte_off);
+                "-> %s xzr, [%s, #%d]", mnem, rn_buf, low_off);
         } else {
             const char *pair_mnem;
             if (is_sext) {
@@ -13134,8 +13232,8 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
             format_ls_rt(rt2_buf, sizeof(rt2_buf), is_fp, rt_size,
                 second_rt);
             snprintf(out->detail, sizeof(out->detail),
-                "-> %s %s, %s, [%s, #%u]",
-                pair_mnem, rt1_buf, rt2_buf, rn_buf, byte_off);
+                "-> %s %s, %s, [%s, #%d]",
+                pair_mnem, rt1_buf, rt2_buf, rn_buf, low_off);
         }
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->lsp_disasm);
@@ -13156,7 +13254,7 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
         state->lsp_lg2size = lg2size;
         state->lsp_rt = rt;
         state->lsp_rn = rn;
-        state->lsp_imm12 = imm12;
+        state->lsp_byte_off = byte_off;
         state->lsp_offset = offset;
         snprintf(state->lsp_disasm, sizeof(state->lsp_disasm),
             "%s %s", insn->mnemonic, insn->op_str);

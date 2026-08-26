@@ -50,11 +50,35 @@ adjacent STRs foldable into STP at offset: 0x90 <_main+0x90>: -> stp xzr, xzr, [
   str xzr, [x12]
   str xzr, [x12, #8]
 
+adjacent LDRs foldable into LDP at offset: 0xa0 <_main+0xa0>: -> ldp x0, x1, [x10, #-16] (2 instructions)
+  ldur x0, [x10, #-0x10]
+  ldur x1, [x10, #-8]
+
+adjacent LDRs foldable into LDP at offset: 0xa8 <_main+0xa8>: -> ldp x2, x3, [x11, #8] (2 instructions)
+  ldur x2, [x11, #8]
+  ldr x3, [x11, #0x10]
+
+adjacent LDRs foldable into LDP (reverse order) at offset: 0xb0 <_main+0xb0>: -> ldp x4, x5, [x12, #8] (2 instructions)
+  ldr x5, [x12, #0x10]
+  ldur x4, [x12, #8]
+
+adjacent LDRs foldable into LDP at offset: 0xc0 <_main+0xc0>: -> ldp d0, d1, [x2, #-16] (2 instructions)
+  ldur d0, [x2, #-0x10]
+  ldur d1, [x2, #-8]
+
+adjacent STRs foldable into STP at offset: 0xc8 <_main+0xc8>: -> stp x5, x5, [sp, #-16] (2 instructions)
+  stur x5, [sp, #-0x10]
+  stur x5, [sp, #-8]
+
+adjacent zero STRs foldable into STR xzr at offset: 0xd0 <_main+0xd0>: -> stur xzr, [x12, #-8] (2 instructions)
+  stur wzr, [x12, #-8]
+  stur wzr, [x12, #-4]
+
 Optimization opportunities by type:
-       6  adjacent STRs foldable into STP
-       2  adjacent LDRs foldable into LDP
-       2  adjacent LDRs foldable into LDP (reverse order)
-       2  adjacent zero STRs foldable into STR xzr
+       7  adjacent STRs foldable into STP
+       5  adjacent LDRs foldable into LDP
+       3  adjacent LDRs foldable into LDP (reverse order)
+       3  adjacent zero STRs foldable into STR xzr
        1  adjacent LDRSWs foldable into LDPSW
 
-13 optimization opportunities in 41 instructions
+19 optimization opportunities in 55 instructions
