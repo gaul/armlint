@@ -824,6 +824,30 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
 bool check_vector_self_op(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// An ALU instruction whose Rm operand is the zero register, so the
+// operation collapses to a copy, a constant, or a NOT:
+//
+//   orr w0, w1, wzr  ->  mov w0, w1        add/sub/eor/bic likewise
+//   and w0, w1, wzr  ->  mov w0, wzr       mul likewise
+//   orn w0, w1, wzr  ->  mov w0, #-1
+//   eon w0, w1, wzr  ->  mvn w0, w1
+//
+// Rm is the deliberate side. Every CANONICAL degenerate spelling puts
+// ZR in Rn instead -- `mov Rd, Rm` is `orr Rd, ZR, Rm`, `neg` is
+// `sub Rd, ZR, Rm`, `mvn` is `orn Rd, ZR, Rm` -- so requiring Rm = 31
+// with Rn != 31 keeps all of them out without special-casing the alias
+// table. Rd = 31 is excluded too: that instruction writes nothing and
+// belongs to the dead-ZR-destination candidate, which the corpus
+// measures at zero.
+//
+// The S-variants are excluded because their flag write is a second
+// result the rewrite would drop, and the shifted forms because a
+// shifted ZR is still zero but is not what the swept population
+// counted. 1-for-1 with no liveness argument, like the two self-op
+// checks: same destination, same value, no flags or memory touched.
+bool check_zr_operand_alu(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect UMOV of lane 0 -- umov w0, v1.s[0], umov x0, v1.d[0], and
 // under ARMLINT_FEATURE_FP16 umov w0, v1.h[0] -- which move exactly
 // the bits FMOV Wd, Sn / Xd, Dn / Wd, Hn already reach, Sn/Dn/Hn being

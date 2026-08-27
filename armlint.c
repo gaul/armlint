@@ -7754,6 +7754,123 @@ bool check_vector_self_op(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// An ALU instruction whose Rm operand is the zero register, written in
+// the shifted-register form with no shift. Decodes the logical class
+// (AND/BIC/ORR/ORN/EOR/EON), the ADD/SUB class, and MUL, returning what
+// the operation collapses to.
+//
+// Rm is the deliberate side. The CANONICAL degenerate spellings all put
+// ZR in Rn instead -- `mov Rd, Rm` is `orr Rd, ZR, Rm`, `neg Rd, Rm` is
+// `sub Rd, ZR, Rm`, `mvn Rd, Rm` is `orn Rd, ZR, Rm` -- and the
+// assembler prints those as their aliases. Matching Rm = 31 with
+// Rn != 31 keeps every one of them out without needing to special-case
+// the alias table.
+//
+// The S-variants (ANDS/BICS/ADDS/SUBS) are excluded: their flag write
+// is a second result the rewrite would drop.
+enum zr_alu_kind { ZR_COPY, ZR_ZERO, ZR_NEG_ONE, ZR_NOT };
+
+static bool decode_zr_operand_alu(uint32_t op, unsigned *out_sf,
+                                  const char **out_mnem,
+                                  enum zr_alu_kind *out_kind,
+                                  unsigned *out_rd, unsigned *out_rn)
+{
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    if (rm != 31u || rn == 31u || rd == 31u) {
+        return false;
+    }
+    *out_sf = (op >> 31) & 1u;
+    *out_rd = rd;
+    *out_rn = rn;
+
+    // Logical, shifted register: sf opc 01010 shift N Rm imm6 Rn Rd.
+    // Pin shift = LSL and imm6 = 0; a shifted ZR is still zero, so
+    // those fold too, but the swept population is the unshifted form
+    // and admitting more would make the figure unreproducible.
+    if ((op & 0x1FC0FC00u) == 0x0A000000u) {
+        unsigned opc = (op >> 29) & 0x3u;
+        unsigned n = (op >> 21) & 1u;
+        if (opc == 3u) {
+            return false;                       // ANDS/BICS write flags
+        }
+        static const char *const mn[3][2] = {
+            { "and", "bic" }, { "orr", "orn" }, { "eor", "eon" },
+        };
+        *out_mnem = mn[opc][n];
+        if (opc == 0u) {
+            *out_kind = n ? ZR_COPY : ZR_ZERO;      // Rn&~0=Rn, Rn&0=0
+        } else if (opc == 1u) {
+            *out_kind = n ? ZR_NEG_ONE : ZR_COPY;   // Rn|~0=-1, Rn|0=Rn
+        } else {
+            *out_kind = n ? ZR_NOT : ZR_COPY;       // Rn^~0=~Rn, Rn^0=Rn
+        }
+        return true;
+    }
+    // ADD/SUB, shifted register: sf op S 01011 shift 0 Rm imm6 Rn Rd.
+    if ((op & 0x3FE0FC00u) == 0x0B000000u) {
+        *out_mnem = ((op >> 30) & 1u) ? "sub" : "add";
+        *out_kind = ZR_COPY;                        // Rn +- 0 = Rn
+        return true;
+    }
+    // MUL, which is MADD with Ra = ZR: sf 00 11011 000 Rm 0 Ra Rn Rd.
+    if ((op & 0x7FE0FC00u) == 0x1B007C00u) {
+        *out_mnem = "mul";
+        *out_kind = ZR_ZERO;                        // Rn * 0 = 0
+        return true;
+    }
+    return false;
+}
+
+bool check_zr_operand_alu(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    unsigned sf, rd, rn;
+    const char *mnem;
+    enum zr_alu_kind kind;
+    if (!decode_zr_operand_alu(op, &sf, &mnem, &kind, &rd, &rn)) {
+        return false;
+    }
+    (void)mnem;
+
+    char wx = sf ? 'x' : 'w';
+
+    out->name = "ZR-operand ALU spelling";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+
+    switch (kind) {
+    case ZR_COPY:
+        snprintf(out->detail, sizeof(out->detail),
+            "-> mov %c%u, %c%u", wx, rd, wx, rn);
+        break;
+    case ZR_ZERO:
+        snprintf(out->detail, sizeof(out->detail),
+            "-> mov %c%u, %czr", wx, rd, wx);
+        break;
+    case ZR_NEG_ONE:
+        snprintf(out->detail, sizeof(out->detail),
+            "-> mov %c%u, #-1 (movn %c%u, #0)", wx, rd, wx, rd);
+        break;
+    case ZR_NOT:
+        snprintf(out->detail, sizeof(out->detail),
+            "-> mvn %c%u, %c%u", wx, rd, wx, rn);
+        break;
+    }
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 // Decode UMOV Wd, Vn.<T>[index] / UMOV Xd, Vn.D[index]:
 //   0 Q 001110000 imm5 001111 Rn Rd
 //
@@ -16033,6 +16150,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_add_sub_zero,
     check_self_op,
     check_vector_self_op,
+    check_zr_operand_alu,
     check_umov_lane0_fmov,
     check_csel_self,
     check_fcsel_self,

@@ -1,0 +1,34 @@
+ZR-operand ALU spelling at offset: 0x0 <_main>: -> mov w0, w1 (1 instructions)
+  orr w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0x4 <_main+0x4>: -> mov x0, x1 (1 instructions)
+  orr x0, x1, xzr
+
+ZR-operand ALU spelling at offset: 0x8 <_main+0x8>: -> mov w0, w1 (1 instructions)
+  eor w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0xc <_main+0xc>: -> mov w0, w1 (1 instructions)
+  bic w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0x10 <_main+0x10>: -> mov w0, w1 (1 instructions)
+  add w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0x14 <_main+0x14>: -> mov w0, w1 (1 instructions)
+  sub w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0x18 <_main+0x18>: -> mov w0, wzr (1 instructions)
+  and w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0x1c <_main+0x1c>: -> mov w0, wzr (1 instructions)
+  mul w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0x20 <_main+0x20>: -> mov w0, #-1 (movn w0, #0) (1 instructions)
+  orn w0, w1, wzr
+
+ZR-operand ALU spelling at offset: 0x24 <_main+0x24>: -> mvn w0, w1 (1 instructions)
+  eon w0, w1, wzr
+
+Optimization opportunities by type:
+      10  ZR-operand ALU spelling
+
+10 optimization opportunities in 19 instructions

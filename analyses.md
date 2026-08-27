@@ -719,6 +719,47 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   OpenSSL's `_asm_aescbc_sha1_hmac`, where they zero accumulators four
   at a time inside the stitched AES-CBC + SHA1-HMAC loop.
 
+## ZR-operand ALU spelling (`AND/ORR/EOR/BIC/ORN/EON/ADD/SUB/MUL Rd, Rn, ZR`)
+
+* An ALU instruction whose **Rm** operand is the zero register
+  collapses, because one input is a known constant:
+
+  ```
+  orr w0, w1, wzr  ->  mov w0, w1        add / sub / eor / bic likewise
+  and w0, w1, wzr  ->  mov w0, wzr       mul likewise
+  orn w0, w1, wzr  ->  mov w0, #-1
+  eon w0, w1, wzr  ->  mvn w0, w1
+  ```
+
+* **Rm is the deliberate side, and it is what keeps the alias table
+  out.** Every canonical degenerate spelling puts ZR in *Rn*: `mov Rd,
+  Rm` is `orr Rd, ZR, Rm`, `neg Rd, Rm` is `sub Rd, ZR, Rm`, `mvn Rd,
+  Rm` is `orn Rd, ZR, Rm`. Those are the assembler's own output for
+  three of the most common instructions in any binary, and reporting
+  them would be nonsense. Requiring `Rm = 31` with `Rn != 31` excludes
+  all of them without enumerating a single alias.
+* `Rd = 31` is excluded too: that instruction writes nothing and
+  belongs to the dead-ZR-destination candidate, which the corpus
+  measures at zero.
+* The **S-variants are excluded** (`ANDS`/`BICS`/`ADDS`/`SUBS`). Their
+  flag write is a second result the rewrite would drop, which is the
+  dead-flag candidate's question, not this one. The first version of
+  the ADD/SUB mask left the S bit free and reported three `adds` in go,
+  taking the corpus figure to 95 against a swept 90 -- the discrepancy
+  is what found the bug.
+* Only the unshifted forms are matched. A shifted ZR is still zero, so
+  `orr w0, w1, wzr, lsl #3` would fold identically; admitting it would
+  make the reported figure diverge from the swept population for no
+  new shape. Recorded rather than done.
+* No liveness argument and no side entry, like the two self-op checks:
+  1-for-1 into the same destination with the same value, no flags, no
+  memory.
+* Corpus: **90** findings across 28.4M instructions, every one in
+  librustc_driver -- exactly the swept population. By operation: 67
+  `orr`, 14 `and`, 7 `add`, 2 `sub`. No `mul`, `bic`, `orn` or `eon`
+  site occurs, so four of the nine decoded members are carried on the
+  strength of the encoding rather than of the corpus.
+
 ## adjacent LDR/STR foldable into LDP/STP
 
 * Two `LDR Wt, [Rn, #imm]` (or X-form) to consecutive offsets fold

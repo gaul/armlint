@@ -9701,9 +9701,13 @@ static void test_mul_add_sub_fold(void)
 
     // ADD whose other operand is XZR is MUL + register copy, not an
     // accumulate; a ZR-accumulator MADD would just respell the MUL.
+    // Named, because that ADD is itself a ZR-operand spelling and
+    // check_zr_operand_alu reports it -- correctly, and on the very
+    // shape this case is built from.
     mul_x(&code[0], 3, 1, 2);
     add_x(&code[4], 5, 3, 31);
-    assert(run_reg_dead(code, 8, 3) == 0);
+    assert(run_named_reg_dead(code, 8, 3,
+        "MUL + ADD/SUB foldable to MADD/MSUB") == 0);
 
     // Rd = 31 consumer (dead write) is excluded even with a kill.
     mul_x(&code[0], 3, 1, 2);
@@ -9868,10 +9872,13 @@ static void test_widening_mul_add_sub_fold(void)
     assert(run_reg_dead(code, 12, 8) == 0);
 
     // ADD whose other operand is XZR is a multiply + register copy,
-    // not an accumulate; excluded.
+    // not an accumulate; excluded. Named for the same reason as the
+    // MUL case above: that ADD is a ZR-operand spelling in its own
+    // right.
     smull_x(&code[0], 8, 0, 1);
     add_x(&code[4], 9, 8, 31);
-    assert(run_reg_dead(code, 8, 8) == 0);
+    assert(run_named_reg_dead(code, 8, 8,
+        "SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL") == 0);
 
     // accumulator == product (xc == xt aliasing): add x8, x8, x8.
     smull_x(&code[0], 8, 0, 1);
@@ -10143,10 +10150,13 @@ static void test_add_ldr_register_offset(void)
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: ADD with Rm = XZR (degenerate; not folded).
+    // Negative: ADD with Rm = XZR (degenerate; not folded). Named:
+    // that ADD is a ZR-operand spelling and check_zr_operand_alu
+    // reports it, which is exactly what makes it degenerate.
     add_x_lsl(&code[0], 3, 1, 31, 0);
     ldr_x_uimm0(&code[4], 3, 3);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8,
+        "ADD + LDR foldable to register-offset LDR") == 0);
 
     // Negative: ADD writing XZR (Rd=31, dead code).
     add_x_lsl(&code[0], 31, 1, 2, 0);
@@ -11782,6 +11792,94 @@ static void vec_bsl(uint8_t out[4], unsigned q, unsigned rd,
 
 // The vector twin of the self-op identity. Every case is 1-for-1 with
 // no liveness argument, so run_helper_check counts it directly.
+// Logical and ADD/SUB shifted-register encoders with an explicit Rm,
+// so a test can put the zero register there. opc/N pick the member of
+// the logical class; S picks the flag-setting variants, which this
+// check must decline.
+static void log_sr(uint8_t out[4], unsigned sf, unsigned opc, unsigned n,
+                   unsigned rd, unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x0A000000u | ((sf & 1u) << 31) | ((opc & 3u) << 29)
+        | ((n & 1u) << 21) | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void addsub_sr(uint8_t out[4], unsigned sf, unsigned is_sub,
+                      unsigned s_bit, unsigned rd, unsigned rn,
+                      unsigned rm)
+{
+    write_le32(out, 0x0B000000u | ((sf & 1u) << 31) | ((is_sub & 1u) << 30)
+        | ((s_bit & 1u) << 29) | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// An ALU op whose Rm is the zero register collapses. The canonical
+// degenerate spellings put ZR in Rn instead, so the whole alias table
+// stays out without being enumerated.
+static void test_zr_operand_alu(void)
+{
+    uint8_t code[4];
+    const unsigned ZR = 31;
+
+    // Collapses to a copy of Rn.
+    log_sr(&code[0], 0, 1, 0, 0, 1, ZR);        // orr w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+    log_sr(&code[0], 1, 1, 0, 0, 1, ZR);        // orr x0, x1, xzr
+    assert(run_helper_check(code, 4) == 1);
+    log_sr(&code[0], 0, 2, 0, 0, 1, ZR);        // eor w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+    log_sr(&code[0], 0, 0, 1, 0, 1, ZR);        // bic w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+    addsub_sr(&code[0], 0, 0, 0, 0, 1, ZR);     // add w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+    addsub_sr(&code[0], 0, 1, 0, 0, 1, ZR);     // sub w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+
+    // Collapses to zero.
+    log_sr(&code[0], 0, 0, 0, 0, 1, ZR);        // and w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+    mul_w(&code[0], 0, 1, ZR);                  // mul w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+
+    // Collapses to all-ones, and to NOT Rn.
+    log_sr(&code[0], 0, 1, 1, 0, 1, ZR);        // orn w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+    log_sr(&code[0], 0, 2, 1, 0, 1, ZR);        // eon w0, w1, wzr
+    assert(run_helper_check(code, 4) == 1);
+
+    // N) The canonical spellings, which all put ZR in Rn. Flagging any
+    //    of these would report the assembler's own output for `mov`,
+    //    `neg` and `mvn`.
+    log_sr(&code[0], 0, 1, 0, 0, ZR, 1);        // mov w0, w1
+    assert(run_helper_check(code, 4) == 0);
+    addsub_sr(&code[0], 0, 1, 0, 0, ZR, 1);     // neg w0, w1
+    assert(run_helper_check(code, 4) == 0);
+    log_sr(&code[0], 0, 1, 1, 0, ZR, 1);        // mvn w0, w1
+    assert(run_helper_check(code, 4) == 0);
+
+    // N) The S-variants. Their flag write is a second result the
+    //    rewrite would drop, so they belong to the dead-flag candidate
+    //    rather than here. This is not hypothetical: the first version
+    //    of the ADD/SUB mask left the S bit free and reported three
+    //    `adds` in Go, which is how the corpus figure came out at 95
+    //    instead of the swept 90.
+    addsub_sr(&code[0], 0, 0, 1, 0, 1, ZR);     // adds w0, w1, wzr
+    assert(run_helper_check(code, 4) == 0);
+    addsub_sr(&code[0], 0, 1, 1, 0, 1, ZR);     // subs w0, w1, wzr
+    assert(run_helper_check(code, 4) == 0);
+    log_sr(&code[0], 0, 3, 0, 0, 1, ZR);        // ands w0, w1, wzr
+    assert(run_helper_check(code, 4) == 0);
+
+    // N) A ZR destination writes nothing at all; that is the
+    //    dead-ZR-write candidate, which the corpus measures at zero.
+    log_sr(&code[0], 0, 1, 0, ZR, 1, ZR);
+    assert(run_helper_check(code, 4) == 0);
+
+    // N) A real Rm is not this shape.
+    log_sr(&code[0], 0, 1, 0, 0, 1, 2);         // orr w0, w1, w2
+    assert(run_helper_check(code, 4) == 0);
+}
+
 static void test_vector_self_op(void)
 {
     uint8_t code[8];
@@ -15482,6 +15580,7 @@ int main(void)
     test_add_sub_zero();
     test_self_op();
     test_vector_self_op();
+    test_zr_operand_alu();
     test_umov_lane0_fmov();
     test_and_lo32_mov();
     test_csel_self();
