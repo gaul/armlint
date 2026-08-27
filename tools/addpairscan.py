@@ -19,6 +19,20 @@ cannot express at all. This tool splits the two and reports the tiers
 the checker distinguishes (structural kill vs deferred liveness scan),
 so the figures in TODO.md and analyses.md can be reproduced.
 
+The overflow half carries its own operand condition, and for two days
+it was reported without one: a pair whose offset does not fit imm7 is
+only a candidate if BOTH halves of the split encode as single
+accesses, each in one of its two spellings. Applying that drops the
+corpus figure from 17,565 to 14,818. The unconditioned count is still
+printed beside it, because the older number appears in TODO.md and the
+difference should read as a missing test rather than a disagreement.
+
+The scratch-register distribution is printed for the split candidates
+because it decides whether the rewrite is worth anything. Freeing the
+scratch is half this candidate's justification, and in gc-compiled
+code the register is `x27` -- REGTMP, reserved for the assembler and
+never allocatable -- so there it frees nothing.
+
 The in-range half is implemented (check_add_ldr_imm_offset's pair arm);
 the counts here are CANDIDATES, an upper bound on what armlint reports
 once the liveness scan has had its say. Run armlint itself for the
@@ -77,6 +91,19 @@ def _s7(v):
     return np.where(v & 64, v.astype(np.int64) - 128, v.astype(np.int64))
 
 
+def _single_encodes(off, scale):
+    """True where a single access can carry `off` bytes.
+
+    The assembler picks between the two spellings per instruction, so
+    either one suffices: unsigned-offset (non-negative, a multiple of
+    the transfer size, scaled value within imm12) or unscaled LDUR /
+    STUR (a signed byte count within imm9).
+    """
+    scaled = (off >= 0) & ((off % scale) == 0) & ((off // scale) <= 4095)
+    unscaled = (off >= -256) & (off <= 255)
+    return scaled | unscaled
+
+
 def scan(path):
     w, _base = text_words(path)
     a, b = w[:-1], w[1:]
@@ -90,6 +117,7 @@ def scan(path):
                << np.where((a >> np.uint32(22)) & np.uint32(1), 12, 0))
 
     res = collections.Counter()
+    scratch = collections.Counter()
     for name, mask, val, scale, is_load, _ref in PAIRS:
         sel = is_add & ((b & np.uint32(mask)) == np.uint32(val)) \
             & (((b >> np.uint32(5)) & np.uint32(0x1F)) == a_rd)
@@ -121,8 +149,18 @@ def scan(path):
             # rewritten store would read the deleted sum.
             res["fold 2->1 (deferred)"] += int((fits & ~aliases).sum())
             res["rejected (store reads the sum)"] += int((fits & aliases).sum())
-        res["split 2->2 (offset overflows imm7)"] += int((~fits).sum())
-    return res
+        # The overflow half is only a candidate when BOTH halves of the
+        # split encode: the first element at `combined`, the second one
+        # transfer size further on. Without this the bucket counts
+        # pairs that cannot be split at all.
+        ov = ~fits
+        splittable = ov & _single_encodes(combined, scale) \
+            & _single_encodes(combined + scale, scale)
+        res["split 2->2 (encodable)"] += int(splittable.sum())
+        res["split 2->2 (unconditioned)"] += int(ov.sum())
+        for r in rd[np.asarray(splittable).nonzero()[0]]:
+            scratch[int(r)] += 1
+    return res, scratch
 
 
 def selftest():
@@ -179,9 +217,11 @@ def main():
         ap.error("give at least one binary, or --selftest")
 
     order = ["fold 2->1 (structural)", "fold 2->1 (deferred)",
-             "split 2->2 (offset overflows imm7)",
+             "split 2->2 (encodable)",
+             "split 2->2 (unconditioned)",
              "rejected (store reads the sum)"]
     grand = collections.Counter()
+    grand_scratch = collections.Counter()
     width = max(len(k) for k in order) + 2
     names = [os.path.basename(p) for p in args.binaries]
     cols = max(11, max(len(n) for n in names) + 2)
@@ -189,12 +229,24 @@ def main():
           + f"{'TOTAL':>10}")
     per = []
     for p in args.binaries:
-        r = scan(p)
+        r, sc = scan(p)
         per.append(r)
         grand.update(r)
+        grand_scratch.update(sc)
     for k in order:
         row = "".join(f"{r[k]:>{cols},}" for r in per)
         print(f"{k:{width}}{row}{grand[k]:>10,}")
+
+    # Which register the split would free, over the encodable
+    # candidates. Half this candidate's justification is freeing the
+    # scratch, and gc's x27 (REGTMP) is not allocatable, so a
+    # distribution dominated by it means the rewrite buys only the
+    # dependency-chain cycle.
+    if grand_scratch:
+        total = sum(grand_scratch.values())
+        top = ", ".join(f"x{r} {n:,} ({100.0 * n / total:.0f}%)"
+                        for r, n in grand_scratch.most_common(4))
+        print(f"\nscratch register freed by the split: {top}")
     return 0
 
 
