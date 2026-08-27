@@ -2064,6 +2064,47 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// An ADD-immediate whose EVERY use is an access that can absorb the
+// immediate. check_add_ldr_imm_offset folds such an ADD into the one
+// access next to it and gives up as soon as the base is read again --
+// correctly, since the ADD would have to survive for the second
+// consumer and the rewrite would save nothing. This check takes the
+// other half of that population: when every consumer in the base's
+// live range can be rebased, all of them are, and the ADD goes away.
+//
+//     add  x8, x0, #0x120
+//     ldur w1, [x8, #-4]     ->  ldur w1, [x0, #0x11c]
+//     ldr  w2, [x8, #4]      ->  ldr  w2, [x0, #0x124]
+//
+// Three instructions become two -- the same saving the single-access
+// fold reports, off a shape it cannot see. Two uses are the minimum
+// that pays; at one use the finding belongs to that check, and this
+// one stays silent so the two never both report a site.
+//
+// "Every use" is what has to be proven, and it is why this needs a
+// forward scan where the other folds need only adjacency. The scan
+// runs to whichever comes first: the base overwritten (the fold is
+// safe, every use is behind us), any other read of it (a use that
+// does not fold), a control transfer, or the window expiring. It also
+// watches the ADD's SOURCE register, which the rewritten accesses
+// read at their own offsets instead of at the ADD -- anything that
+// moves it in between, a stack adjustment under an SP base included,
+// invalidates the rebase.
+//
+// Rebasable means an access whose displacement is a plain immediate:
+// the integer and SIMD&FP single accesses in both the unsigned-offset
+// and the unscaled spelling, and the signed-offset pairs. Covering
+// all of them matters more here than it does for a single-access
+// fold, because ONE unrecognized use fails the whole site.
+//
+// One tracked ADD at a time: a second arriving while one is live
+// replaces it, so interleaved bases report only the inner one -- a
+// false negative, never a wrong finding.
+bool check_add_ldr_str_multi_fold(armlint_state *state,
+                                  const cs_insn *insn,
+                                  size_t offset,
+                                  armlint_finding *out);
+
 // Detect an X-form ADD-immediate immediately followed by a
 // zero-offset STLR/STLRB/STLRH whose base register is the ADD's Rd.
 // With FEAT_LRCPC2's unscaled store-release the pair folds to a

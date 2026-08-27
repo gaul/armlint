@@ -2922,7 +2922,11 @@ so quietly materialized through a scratch register instead.
   access off the same base at 10.2% of unscaled sites against 4.4% of
   scaled ones). The remaining ~8,000 are visible to the check and
   refused on soundness, which is a different backlog entry from being
-  unable to see them.
+  unable to see them. One specific reason accounts for much of it --
+  the base having a second consumer, which forces the deferred scan to
+  refuse -- and that is what the multi-use fold below now claims,
+  3,188 sites drawn from this backlog and from the scaled, SIMD&FP and
+  pair populations alongside it.
 
 ## ADD + LDP/STP foldable to immediate-offset LDP/STP
 
@@ -2996,6 +3000,104 @@ so quietly materialized through a scratch register instead.
   offset too large for `imm7`; those split into two singles rather
   than one pair and are tracked in [TODO.md](TODO.md) as a
   latency-only, size-neutral rewrite.
+
+## ADD foldable into every access it feeds
+
+* `add xt, xn, #a ; <access> [xt, #b] ; <access> [xt, #c] ; ...` ->
+  the accesses rebased on `xn` at `a+b`, `a+c`, ... and the ADD
+  deleted. The other half of the single-access fold's population: that
+  check folds an ADD into the one access next to it and gives up as
+  soon as the base is read again -- correctly, since the ADD would
+  have to survive for the second consumer and the rewrite would save
+  nothing. But when *every* consumer in the base's live range can be
+  rebased, all of them are, and the ADD goes away. Three instructions
+  become two, the same saving, off a shape the adjacency rule cannot
+  see:
+
+  ```
+  add  x8, x0, #0x120
+  ldur w1, [x8, #-4]     ->  ldur w1, [x0, #0x11c]
+  ldr  w2, [x8, #4]      ->  ldr  w2, [x0, #0x124]
+  ```
+
+* Two uses is the minimum reported. At one use the finding belongs to
+  `check_add_ldr_imm_offset`, and this check stays silent so a site is
+  never reported twice. The two are disjoint by construction, not by
+  arrangement: at two or more uses the single-access check's deferred
+  liveness scan sees the base read again and discards, which is
+  exactly the population this one picks up.
+* Rebasable means an access whose displacement is a plain immediate:
+  the integer and SIMD&FP single accesses in both the unsigned-offset
+  and the unscaled spelling, and the signed-offset pairs. Covering all
+  of them matters more here than for a single-access fold, because one
+  unrecognized use fails the whole site -- the SIMD&FP and pair forms
+  are not an extension of this check but a precondition for it, since
+  the dominant real shape is a block of `q`-register spills. The
+  writeback (pre- and post-index) and register-offset forms are absent
+  by design: a writeback also updates the base, so deleting the ADD
+  would drop an observable update, and a register-offset address is
+  not a constant the ADD's immediate can join.
+* The range test is per-use and per-form. A single access takes
+  whichever of its two spellings fits, since the assembler picks
+  between them; the pair forms have no unsigned-offset spelling at
+  all, so there the sum must be on the transfer-size grid and fit
+  signed 7 bits once scaled.
+* Proving *every* use is what this needs a forward scan for, where the
+  other folds need only adjacency. The scan runs to whichever comes
+  first: the base overwritten (the fold is safe, every use is behind
+  us), any other read of it (a use that does not fold, so the ADD must
+  stay), a control transfer, or the window expiring. The window counts
+  only instructions that are neither uses nor the kill, so a long run
+  of consecutive accesses never exhausts it -- the corpus has a
+  20-use site.
+* The ADD's **source** is watched too, which no adjacency-based fold
+  has to do. Every rewritten access reads `xn` at its own offset
+  instead of at the ADD, so anything that writes `xn` in between
+  invalidates the rebase. When the source is SP the register-liveness
+  scan cannot help: `arm64_gpr_num` maps SP (like the zero register)
+  to -1, so `insn_reg_access` never reports it, and the encodings that
+  can name SP as a destination are matched directly instead -- ADD/SUB
+  immediate and extended-register with `Rd = 31` and `S = 0`, and the
+  writeback addressing forms with `Rn = 31`. A dynamic stack
+  allocation between the base copy and its uses would otherwise be
+  silently dropped.
+* Side entries: `insn_count` spans the ADD through the **last use**,
+  not the rendered lines, and the central gate
+  (`armlint_finding_has_side_entry`) then covers exactly that range.
+  That is not conservatism -- a branch landing anywhere between the
+  ADD and the last use reaches a rewritten access on a path that never
+  added the immediate, so the address would differ. A branch past the
+  last use is harmless, and the span ends there.
+* One tracked ADD at a time. A second arriving while one is live
+  replaces it, so interleaved bases report only the inner one. Like
+  `defer_dead_mov`'s single slot this is false-negative-only, and it
+  costs little in practice: the measured yield landed within 0.1% of
+  the estimate made without the restriction.
+* Corpus: 3,188 findings across 28.4M instructions (2,375
+  librustc_driver, 708 go, 66 dyld, 23 bash, 9 libcrypto, 7 ssh). By
+  what produces the base: **2,644** are stack frames (`add xt, sp,
+  #a`), **468** are global addresses off an ADRP, and 76 are plain
+  pointer arithmetic. Uses per site: 2 at 2,174 sites, 3 at 664, 4 at
+  170, 5 at 65, 6 at 64, and a tail to 20.
+* The stack-frame majority is a single LLVM shape. `LocalStackSlotAllocation`
+  inserts a virtual base register when a frame index's *estimated*
+  offset looks out of addressing range, and the estimate is made
+  before the frame layout is final; when the real offset turns out to
+  fit, the base register stays. The tell is that the ADD's immediate
+  is usually off the transfer-size grid, which is what forced the
+  accesses into the unscaled spelling in the first place -- rebasing
+  puts them all back on it:
+
+  ```
+  add  x8, sp, #0x2a8
+  stur q0, [x8, #0x68]   ->  str q0, [sp, #0x310]
+  stur q0, [x8, #0x78]   ->  str q0, [sp, #0x320]
+  ... eight more, then x8 is overwritten
+  ```
+
+  Not a toolchain-forced shape: nothing about the ISA or the object
+  format requires the scratch base, and the rewrite is a pure
+  deletion.
 
 ## LDR/STR (or LDP/STP) + ADD/SUB foldable to post-indexed form
 

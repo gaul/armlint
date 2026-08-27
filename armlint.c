@@ -34,6 +34,10 @@ typedef struct {
 // bounded so the ALU, the gap, and the zero test fit a finding's
 // ARMLINT_FINDING_LINES.
 #define ZS_GAP_MAX 2u
+// Accesses the multi-use fold renders before summarizing the rest.
+// One finding line goes to the ADD itself, leaving the others for its
+// consumers.
+#define MF_MAX_LINES (ARMLINT_FINDING_LINES - 1)
 
 struct armlint_state {
     // MOV chain (MOVZ/MOVN followed by zero or more MOVKs).
@@ -778,6 +782,28 @@ struct armlint_state {
     size_t addi_pending_offset;
     char addi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // check_add_ldr_str_multi_fold's tracked ADD-immediate. Same
+    // producer as addi_pending above, but followed across a bounded
+    // window instead of a single instruction, so a base with SEVERAL
+    // consumers can fold: mf_uses counts the rebasable accesses seen
+    // so far, mf_lines holds the first few for rendering, and
+    // mf_last_offset is the most recent one -- which fixes the
+    // finding's span, and with it the side-entry gate. One slot: an
+    // ADD arriving while another is tracked replaces it, dropping the
+    // earlier one (a false-negative-only simplification, as in
+    // defer_dead_mov).
+    bool mf_active;
+    unsigned mf_rd;
+    unsigned mf_rn;
+    uint32_t mf_imm;
+    size_t mf_offset;
+    size_t mf_last_offset;
+    unsigned mf_window;
+    unsigned mf_uses;
+    bool mf_src_dead;
+    char mf_add_disasm[ARMLINT_FINDING_LINE_LEN];
+    char mf_lines[MF_MAX_LINES][ARMLINT_FINDING_LINE_LEN];
+
     // Pending X-form ADD-immediate (non-S-variant) awaiting an
     // adjacent STLR/STLRB/STLRH consumer whose base register equals
     // Rd of the ADD. With FEAT_LRCPC2 the pair folds to a single
@@ -1448,6 +1474,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lsx_active = false;
     state->add_pending = false;
     state->addi_pending = false;
+    state->mf_active = false;
     state->asl_pending = false;
     state->lspi_pending = false;
     state->lspr_pending = false;
@@ -14468,6 +14495,396 @@ bool check_add_ldr_imm_offset(armlint_state *state,
     return produced;
 }
 
+// === Multi-use ADD fold ===
+//
+// One member of the multi-use fold's use set. lg2size is the log2 of
+// the PER-REGISTER transfer size -- the unit both the unsigned-offset
+// imm12 and the pair's imm7 are scaled by. rt_aliases is true only
+// for an integer access naming the base among its data registers:
+// SIMD&FP data registers live in the other file and can never alias
+// an integer base.
+typedef struct {
+    int32_t byte_off;
+    unsigned lg2size;
+    bool is_load;
+    bool is_pair;
+    bool rt_aliases;
+} rebase_access;
+
+// Decode SIMD&FP LDUR/STUR (unscaled, signed imm9) -- the unscaled
+// twin of decode_fp_ldr_str_uimm, which sees only the unsigned-offset
+// spelling. Same opc/size split for the transfer size; bits 25..24 =
+// 00 with bit 21 = 0 and bits 11..10 = 00 select the unscaled slot
+// out of the class that also holds the pre/post-index and
+// register-offset forms.
+static bool decode_fp_ldst_simm9(uint32_t op, bool *out_is_load,
+                                 unsigned *out_lg2size, int32_t *out_off,
+                                 unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0x3F200C00u) != 0x3C000000u) {
+        return false;
+    }
+    unsigned size = (op >> 30) & 0x3u;
+    unsigned opc = (op >> 22) & 0x3u;
+    unsigned lg2 = size + ((opc & 0x2u) << 1);
+    if (lg2 > 4u) {
+        return false;   // opc[1] with size != 00 is unallocated
+    }
+    *out_is_load = (opc & 1u) != 0;
+    *out_lg2size = lg2;
+    *out_off = simm9_of(op);
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
+// True when `op` is an access based on `base` whose displacement is a
+// plain immediate -- one the multi-use fold could rewrite onto a
+// different base. Covers every such form: the integer and SIMD&FP
+// single accesses in both the unsigned-offset and the unscaled
+// spelling, and the signed-offset load/store pairs. The writeback
+// (pre- and post-index) and register-offset forms are absent by
+// design, not oversight: a writeback also updates the base, so
+// deleting the ADD would drop an observable update, and a
+// register-offset address is not a constant the ADD's immediate can
+// join. Whether the combined offset actually ENCODES is the caller's
+// question -- it depends on the ADD's immediate, which this does not
+// see.
+static bool decode_rebasable_access(uint32_t op, unsigned base,
+                                    rebase_access *out)
+{
+    unsigned size = 0, imm12 = 0, lg2 = 0, rn = 0, rt = 0, rt2 = 0;
+    const char *mnem;
+    char rt_wx;
+    bool is_store = false, is_load = false, is_fp = false, is_sw = false;
+    int32_t off = 0;
+    int imm7 = 0;
+
+    out->is_pair = false;
+    if (decode_int_load_uimm(op, &size, &mnem, &rt_wx, &imm12, &rn, &rt)) {
+        out->byte_off = (int32_t)((uint32_t)imm12 << size);
+        out->lg2size = size;
+        out->is_load = true;
+        out->rt_aliases = rt == base;
+    } else if (decode_str_uimm_any_size(op, &size, &imm12, &rn, &rt)) {
+        out->byte_off = (int32_t)((uint32_t)imm12 << size);
+        out->lg2size = size;
+        out->is_load = false;
+        out->rt_aliases = rt == base;
+    } else if (decode_int_ldst_simm9(op, &size, &mnem, &rt_wx, &is_store,
+                                     &off, &rn, &rt)) {
+        out->byte_off = off;
+        out->lg2size = size;
+        out->is_load = !is_store;
+        out->rt_aliases = rt == base;
+    } else if (decode_fp_ldr_str_uimm(op, &is_load, &lg2, &imm12, &rn,
+                                      &rt)) {
+        out->byte_off = (int32_t)((uint32_t)imm12 << lg2);
+        out->lg2size = lg2;
+        out->is_load = is_load;
+        out->rt_aliases = false;
+    } else if (decode_fp_ldst_simm9(op, &is_load, &lg2, &off, &rn, &rt)) {
+        out->byte_off = off;
+        out->lg2size = lg2;
+        out->is_load = is_load;
+        out->rt_aliases = false;
+    } else if (decode_pair_soff(op, &is_load, &is_fp, &is_sw, &lg2,
+                                &imm7, &rn, &rt, &rt2)) {
+        out->byte_off = imm7 * (int32_t)(1u << lg2);
+        out->lg2size = lg2;
+        out->is_load = is_load;
+        out->is_pair = true;
+        out->rt_aliases = !is_fp && (rt == base || rt2 == base);
+    } else {
+        return false;
+    }
+    return rn == base;
+}
+
+// True when the rewritten access can carry `combined` -- the ADD's
+// immediate plus the access's own displacement. A single access takes
+// whichever of its two spellings fits, since the assembler picks
+// between them: unsigned-offset (non-negative, a multiple of the
+// transfer size, scaled value within imm12) or unscaled (a byte count
+// within imm9). The pair forms have no unsigned-offset spelling at
+// all -- imm7 is signed and scaled -- so there the sum must be a
+// multiple of the transfer size and fit signed 7 bits once scaled.
+//
+// int32_t holds every intermediate: the ADD's immediate is at most
+// 0xFFF000, and a displacement at most 4095 * 8 or -1024.
+static bool rebase_offset_encodable(const rebase_access *acc,
+                                    int32_t combined)
+{
+    int32_t unit = (int32_t)(1u << acc->lg2size);
+    if ((combined % unit) == 0) {
+        // Exact division in both signs once the alignment holds.
+        int32_t scaled = combined / unit;
+        if (acc->is_pair) {
+            return scaled >= -64 && scaled <= 63;
+        }
+        if (combined >= 0 && scaled <= 4095) {
+            return true;
+        }
+    } else if (acc->is_pair) {
+        return false;
+    }
+    return combined >= -256 && combined <= 255;
+}
+
+// True when `op` may write SP. The register-liveness scan cannot
+// answer this: arm64_gpr_num maps SP (like the zero register) to -1,
+// so insn_reg_access never reports either. A fold that rebases
+// accesses onto SP has to watch for SP moving underneath them -- a
+// dynamic stack allocation between the base copy and its uses would
+// otherwise be silently dropped -- so the encodings that can name SP
+// as a destination are matched here directly. Erring toward true is
+// harmless: it only abandons a fold.
+static bool insn_writes_sp(uint32_t op)
+{
+    // ADD/SUB (immediate) with S = 0, the tagged ADDG/SUBG included:
+    // Rd = 31 is SP. With S = 1 -- ADDS/SUBS, so CMN/CMP -- Rd = 31
+    // is the zero register instead and nothing is written.
+    if ((op & 0x1F000000u) == 0x11000000u && ((op >> 29) & 1u) == 0u
+            && (op & 0x1Fu) == 31u) {
+        return true;
+    }
+    // ADD/SUB (extended register) with S = 0: the one register form
+    // that can name SP as a destination. The shifted-register forms
+    // read Rd = 31 as the zero register.
+    if ((op & 0x1FE00000u) == 0x0B200000u && ((op >> 29) & 1u) == 0u
+            && (op & 0x1Fu) == 31u) {
+        return true;
+    }
+    // Load/store with writeback updates its base register, which is
+    // SP when Rn = 31. Single accesses: bits 25..24 = 00 and bit 21 =
+    // 0 with bit 10 = 1 picks the pre- and post-index forms out of
+    // the class that also holds the unscaled (bits 11..10 = 00) and
+    // register-offset (bit 21 = 1) slots.
+    if ((op & 0x3B200400u) == 0x38000400u && ((op >> 5) & 0x1Fu) == 31u) {
+        return true;
+    }
+    // Pairs: within the load/store pair class (bits 29..27 = 101, bit
+    // 25 = 0) bit 23 separates the writeback forms -- post-index 001,
+    // pre-index 011 -- from the ones that leave the base alone,
+    // no-allocate 000 and signed offset 010.
+    if ((op & 0x3A800000u) == 0x28800000u && ((op >> 5) & 0x1Fu) == 31u) {
+        return true;
+    }
+    return false;
+}
+
+// True when this instruction moves the register the rebased accesses
+// would read -- the tracked ADD's SOURCE. Every rewritten access
+// reads it at its own offset instead of at the ADD, so anything that
+// writes it in between invalidates the rebase.
+static bool mf_source_clobbered(const armlint_state *state,
+                                const cs_insn *insn, uint32_t op)
+{
+    if (state->mf_rn == 31) {
+        return insn_writes_sp(op);
+    }
+    return insn_writes_reg(insn, (int)state->mf_rn);
+}
+
+// Render the tracked ADD's new base, "sp" or "xN".
+static void mf_base_name(const armlint_state *state, char *buf,
+                         size_t bufsz)
+{
+    if (state->mf_rn == 31) {
+        snprintf(buf, bufsz, "sp");
+    } else {
+        snprintf(buf, bufsz, "x%u", state->mf_rn);
+    }
+}
+
+// Record one rebasable use. The rendering pairs the instruction as it
+// stands with the address it would carry after the fold -- the
+// mnemonic and data registers do not change, only the base and the
+// displacement, so naming the new location alone says everything the
+// rewrite does. Uses past MF_MAX_LINES are counted but not rendered;
+// mf_finish summarizes them.
+static void mf_record_use(armlint_state *state, const cs_insn *insn,
+                          size_t offset, int32_t combined)
+{
+    state->mf_last_offset = offset;
+    if (state->mf_uses < MF_MAX_LINES) {
+        char base_buf[8];
+        char newloc[24];
+        mf_base_name(state, base_buf, sizeof(base_buf));
+        if (combined == 0) {
+            snprintf(newloc, sizeof(newloc), "[%s]", base_buf);
+        } else if (combined < 0) {
+            snprintf(newloc, sizeof(newloc), "[%s, #-0x%x]", base_buf,
+                (unsigned)(-combined));
+        } else {
+            snprintf(newloc, sizeof(newloc), "[%s, #0x%x]", base_buf,
+                (unsigned)combined);
+        }
+        snprintf(state->mf_lines[state->mf_uses],
+            sizeof(state->mf_lines[0]), "%s %s  -> %s",
+            insn->mnemonic, insn->op_str, newloc);
+    }
+    state->mf_uses++;
+}
+
+// Emit the tracked ADD's finding, now that its base is provably dead.
+// Two uses are the minimum that pays: at one use this IS
+// check_add_ldr_imm_offset's fold, reported there.
+//
+// insn_count spans the ADD through the LAST use, not the rendered
+// lines -- a span the driver's side-entry gate then covers exactly.
+// That is not conservatism: a branch landing anywhere between the ADD
+// and the last use reaches a rewritten access on a path that never
+// added the immediate, and the address would differ. A branch past
+// the last use is harmless, and the span ends there.
+static bool mf_finish(armlint_state *state, armlint_finding *out)
+{
+    if (state->mf_uses < 2) {
+        return false;
+    }
+    char base_buf[8];
+    mf_base_name(state, base_buf, sizeof(base_buf));
+
+    out->name = "ADD foldable into every access it feeds";
+    out->start_offset = state->mf_offset;
+    out->insn_count = (unsigned)
+        ((state->mf_last_offset - state->mf_offset) / 4u + 1u);
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail),
+        "-> rebase %u accesses on %s, deleting the add",
+        state->mf_uses, base_buf);
+    snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+        state->mf_add_disasm);
+
+    unsigned shown = state->mf_uses;
+    if (shown > MF_MAX_LINES) {
+        shown = MF_MAX_LINES - 1;   // keep a line for the summary
+    }
+    for (unsigned i = 0; i < shown; i++) {
+        snprintf(out->lines[1 + i], sizeof(out->lines[0]), "%s",
+            state->mf_lines[i]);
+    }
+    if (state->mf_uses > shown) {
+        snprintf(out->lines[1 + shown], sizeof(out->lines[0]),
+            "... and %u more", state->mf_uses - shown);
+    }
+    return true;
+}
+
+bool check_add_ldr_str_multi_fold(armlint_state *state,
+                                  const cs_insn *insn,
+                                  size_t offset,
+                                  armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->mf_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    bool produced = false;
+
+    if (state->mf_active) {
+        // dead: the base is provably overwritten here, so every use
+        // is behind us and the fold is complete. give_up: something
+        // makes the rewrite unsound or unprofitable.
+        bool dead = false;
+        bool give_up = false;
+        rebase_access acc;
+
+        if (decode_rebasable_access(op, state->mf_rd, &acc)) {
+            int32_t combined = (int32_t)state->mf_imm + acc.byte_off;
+            if (state->mf_src_dead) {
+                // The register the rebase reads has already moved, so
+                // this use cannot follow it there.
+                give_up = true;
+            } else if (!rebase_offset_encodable(&acc, combined)) {
+                // A use whose rewritten offset has no encoding. The
+                // ADD has to stay for it, so nothing is saved.
+                give_up = true;
+            } else if (!acc.is_load && acc.rt_aliases) {
+                // A store whose data register is the base: the
+                // rewritten store would read the deleted sum.
+                give_up = true;
+            } else {
+                mf_record_use(state, insn, offset, combined);
+                if (acc.is_load && acc.rt_aliases) {
+                    // A load into the base overwrites it right here.
+                    // (For a pair load naming it among the two
+                    // destinations, the no-writeback form reads the
+                    // base once before writing either.)
+                    dead = true;
+                } else if (mf_source_clobbered(state, insn, op)) {
+                    // This access rewrote the register the rebase
+                    // reads -- a load into it, say. It read the old
+                    // value first, so it folds; nothing after it can.
+                    state->mf_src_dead = true;
+                }
+            }
+        } else {
+            switch (classify_reg_liveness(insn, (int)state->mf_rd)) {
+            case LIV_OVERWRITE:
+                dead = true;
+                break;
+            case LIV_READ:
+                // A use that is not a rebasable access -- address
+                // arithmetic, a register-offset or writeback access,
+                // a store OF the base. The ADD must stay.
+            case LIV_TERM_SAFE:
+            case LIV_TERM_UNSAFE:
+                // Straight-line code ends: the base may be live at
+                // the target, and a later block's uses are not ours
+                // to see.
+                give_up = true;
+                break;
+            case LIV_UNKNOWN:
+                // A source clobber does not end the scan. Uses
+                // already behind us read the source before it moved
+                // and still rebase; only later ones are ruled out,
+                // and the base's death can still release the finding.
+                if (mf_source_clobbered(state, insn, op)) {
+                    state->mf_src_dead = true;
+                }
+                if (state->mf_window == 0 || --state->mf_window == 0) {
+                    give_up = true;
+                }
+                break;
+            }
+        }
+
+        if (dead) {
+            produced = mf_finish(state, out);
+            state->mf_active = false;
+        } else if (give_up) {
+            state->mf_active = false;
+        }
+    }
+
+    // Open on an X-form ADD-immediate, admitted exactly as
+    // check_add_ldr_imm_offset admits one: Rd = 31 would mean SP, and
+    // a zero immediate is the redundant ADD that check_add_sub_zero
+    // owns -- except from SP, where it is the MOV-from-SP alias whose
+    // base copy folds the same way.
+    unsigned a_rd, a_rn;
+    uint32_t a_imm;
+    if (decode_add_imm_x(op, &a_rd, &a_rn, &a_imm)
+            && a_rd != 31 && (a_imm != 0 || a_rn == 31)) {
+        state->mf_active = true;
+        state->mf_rd = a_rd;
+        state->mf_rn = a_rn;
+        state->mf_imm = a_imm;
+        state->mf_offset = offset;
+        state->mf_last_offset = offset;
+        state->mf_window = LIVENESS_WINDOW;
+        state->mf_uses = 0;
+        state->mf_src_dead = false;
+        snprintf(state->mf_add_disasm, sizeof(state->mf_add_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
 // Decode STLR/STLRB/STLRH (zero-offset store-release): size(2)
 // 001000 100 11111 o0(1) 11111 Rn Rt with o0 = 1 (o0 = 0 is STLLR,
 // the LORegions variant, which has no unscaled counterpart). Sizes
@@ -15307,6 +15724,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_sxtw_ldr_fold,
     check_ldr_sext_fold,
     check_add_ldr_imm_offset,
+    check_add_ldr_str_multi_fold,
     check_add_stlr_fold,
     check_ldr_str_add_post_indexed,
     check_add_ldr_str_pre_indexed,

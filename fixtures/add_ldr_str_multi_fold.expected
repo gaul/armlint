@@ -1,0 +1,63 @@
+ADD foldable into every access it feeds at offset: 0x0 <_main>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
+  add x8, x0, #0x120
+  ldr x1, [x8]  -> [x0, #0x120]
+  ldr x8, [x8, #0x10]  -> [x0, #0x130]
+
+ADD foldable into every access it feeds at offset: 0xc <_main+0xc>: -> rebase 2 accesses on x10, deleting the add (3 instructions)
+  add x10, x10, #0x458
+  ldr x11, [x10]  -> [x10, #0x458]
+  ldr w10, [x10, #8]  -> [x10, #0x460]
+
+ADD foldable into every access it feeds at offset: 0x18 <_main+0x18>: -> rebase 2 accesses on x1, deleting the add (3 instructions)
+  add x8, x1, #0x10
+  str x0, [x8]  -> [x1, #0x10]
+  str x2, [x8, #0x18]  -> [x1, #0x28]
+
+ADD foldable into every access it feeds at offset: 0x28 <_main+0x28>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
+  add x8, x0, #0x120
+  ldur x1, [x8, #-8]  -> [x0, #0x118]
+  ldr x8, [x8, #8]  -> [x0, #0x128]
+
+ADD foldable into every access it feeds at offset: 0x34 <_main+0x34>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
+  add x8, x0, #0x10
+  ldur x1, [x8, #-0x18]  -> [x0, #-0x8]
+  ldr x8, [x8, #8]  -> [x0, #0x18]
+
+ADD foldable into every access it feeds at offset: 0x40 <_main+0x40>: -> rebase 4 accesses on sp, deleting the add (6 instructions)
+  add x8, sp, #0x2a8
+  stur q0, [x8, #0x68]  -> [sp, #0x310]
+  stur q0, [x8, #0x78]  -> [sp, #0x320]
+  stur q0, [x8, #0x88]  -> [sp, #0x330]
+  stur q0, [x8, #0x98]  -> [sp, #0x340]
+
+ADD foldable into every access it feeds at offset: 0x5c <_main+0x5c>: -> rebase 2 accesses on sp, deleting the add (3 instructions)
+  add x9, sp, #0x38
+  stp xzr, xzr, [x9]  -> [sp, #0x38]
+  stp xzr, xzr, [x9, #0x20]  -> [sp, #0x58]
+
+ADD foldable into every access it feeds at offset: 0x6c <_main+0x6c>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
+  add x8, x0, #0x40
+  ldr x1, [x8]  -> [x0, #0x40]
+  ldp x8, x9, [x8, #0x20]  -> [x0, #0x60]
+
+ADD foldable into every access it feeds at offset: 0x78 <_main+0x78>: -> rebase 5 accesses on sp, deleting the add (6 instructions)
+  add x9, sp, #0x100
+  stp xzr, xzr, [x9]  -> [sp, #0x100]
+  stp xzr, xzr, [x9, #0x20]  -> [sp, #0x120]
+  stp xzr, xzr, [x9, #0x40]  -> [sp, #0x140]
+  ... and 2 more
+
+ADD foldable into every access it feeds at offset: 0xf8 <_main+0xf8>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
+  add x8, x0, #0x10
+  str q0, [x8]  -> [x0, #0x10]
+  str q1, [x8, #0x20]  -> [x0, #0x30]
+
+ADD foldable into every access it feeds at offset: 0x120 <_main+0x120>: -> rebase 2 accesses on sp, deleting the add (4 instructions)
+  add x8, sp, #0x10
+  str q0, [x8]  -> [sp, #0x10]
+  str q1, [x8, #0x20]  -> [sp, #0x30]
+
+Optimization opportunities by type:
+      11  ADD foldable into every access it feeds
+
+11 optimization opportunities in 81 instructions

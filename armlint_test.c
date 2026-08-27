@@ -12471,6 +12471,198 @@ static void test_add_ldr_imm_offset(void)
     assert(run_reg_dead(code, 12, 8) == 0);
 }
 
+// Encode STUR Qt, [Xn, #simm9] (SIMD&FP, unscaled). Base 0x3C800000 --
+// the same size/opc split as str_q_uimm, in the unscaled slot.
+static void stur_q(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
+{
+    uint32_t op = 0x3C800000u
+        | (((uint32_t)imm9 & 0x1FFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// The multi-use fold's positives all end with an overwrite of the
+// base, so they run through run_reg_dead. Its negatives are built
+// from SIMD&FP accesses wherever one use would otherwise be enough:
+// check_add_ldr_imm_offset covers the single-access integer fold and
+// would answer 1 where this check answers 0, and these assertions are
+// about THIS check being silent.
+static void test_add_ldr_str_multi_fold(void)
+{
+    uint8_t code[32];
+
+    // Canonical: an ADD whose two loads both rebase, the second one
+    // killing the base.
+    //   add x8, x0, #0x120
+    //   ldr x1, [x8]          -> ldr x1, [x0, #0x120]
+    //   ldr x8, [x8, #0x10]   -> ldr x8, [x0, #0x130]
+    add_x_imm(&code[0], 8, 0, 0x120);
+    ldr_x_uimm0(&code[4], 1, 8);
+    ldr_x_uimm_with(&code[8], 8, 8, 2);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Two stores: nothing overwrites the base on the spot, so the
+    // finding waits for the appended kill.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_x_uimm(&code[4], 0, 8, 0);
+    str_x_uimm(&code[8], 2, 8, 3);      // +0x18
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // Rd == Rn: deleting the ADD leaves the source holding its old
+    // value, which is exactly what the rebased accesses want. This is
+    // the dominant real shape.
+    add_x_imm(&code[0], 8, 8, 0x458);
+    ldr_x_uimm0(&code[4], 1, 8);
+    ldr_x_uimm_with(&code[8], 8, 8, 2);
+    assert(run_helper_check(code, 12) == 1);
+
+    // Mixed spellings: an unscaled use beside a scaled one. Which
+    // spelling the assembler picked says nothing about the fold.
+    add_x_imm(&code[0], 8, 0, 0x120);
+    ldur_x(&code[4], 1, 8, -8);         // -> [x0, #0x118]
+    ldr_x_uimm_with(&code[8], 8, 8, 1); // -> [x0, #0x128]
+    assert(run_helper_check(code, 12) == 1);
+
+    // A sum the unsigned-offset form cannot reach folds through the
+    // unscaled one: 0x10 - 0x18 is negative.
+    add_x_imm(&code[0], 8, 0, 0x10);
+    ldur_x(&code[4], 1, 8, -0x18);      // -> [x0, #-0x8]
+    ldr_x_uimm_with(&code[8], 8, 8, 1); // -> [x0, #0x18]
+    assert(run_helper_check(code, 12) == 1);
+
+    // SIMD&FP uses, unscaled: the stack-zeroing shape, an ADD
+    // materializing a frame base that every store could have reached
+    // from SP itself. The ADD's own immediate is off the 16-byte
+    // grid, which is why the compiler had to spell these STUR --
+    // rebasing puts every one of them back on it.
+    add_x_imm(&code[0], 8, 31, 0x2a8);
+    stur_q(&code[4], 0, 8, 0x68);       // -> [sp, #0x310]
+    stur_q(&code[8], 0, 8, 0x78);       // -> [sp, #0x320]
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // SIMD&FP uses, unsigned-offset. Non-adjacent on purpose:
+    // consecutive stores would also be check_ldp_stp_coalesce's, and
+    // these assertions count findings from the whole registry.
+    add_x_imm(&code[0], 8, 31, 0x100);
+    str_q_fp(&code[4], 0, 8, 1);        // -> [sp, #0x110]
+    str_q_fp(&code[8], 1, 8, 3);        // -> [sp, #0x130]
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // Pair uses. The pair forms have no unsigned-offset spelling, so
+    // their range test is the signed imm7 one.
+    add_x_imm(&code[0], 8, 31, 0x38);
+    stp_x_soff(&code[4], 31, 31, 8, 0);   // -> [sp, #0x38]
+    stp_x_soff(&code[8], 31, 31, 8, 2);   // -> [sp, #0x48]
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // An integer pair load naming the base among its destinations
+    // kills it on the spot: the no-writeback form reads the base once
+    // before writing either destination.
+    add_x_imm(&code[0], 8, 0, 0x40);
+    ldr_x_uimm0(&code[4], 1, 8);          // -> [x0, #0x40]
+    ldp_x_soff(&code[8], 8, 9, 8, 4);     // -> [x0, #0x60]
+    assert(run_helper_check(code, 12) == 1);
+
+    // Negative: one use. That is check_add_ldr_imm_offset's fold, and
+    // this check stays silent so a site is never reported twice. (An
+    // FP store, which that check does not cover, so the 0 is this
+    // check's alone.)
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // Negative: two uses, but the second one's sum has no encoding --
+    // 0xFFF0 + 0x10 scaled by 16 is 4096, one past imm12. The ADD has
+    // to stay for it, so nothing is saved.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    str_q_fp(&code[8], 1, 8, 0xFFF);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // ... and the same site one unit lower, which does encode.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    str_q_fp(&code[8], 1, 8, 0xFFE);
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // Negative: a pair use out of imm7 range. 0x400 + 0x1F8 scaled by
+    // 8 is 127, past the signed 7-bit limit -- and unlike a single
+    // access there is no unscaled spelling to fall back on.
+    add_x_imm(&code[0], 8, 31, 0x400);
+    stp_x_soff(&code[4], 31, 31, 8, 0);
+    stp_x_soff(&code[8], 31, 31, 8, 63);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Negative: a use that is not a rebasable access. The ADD must
+    // survive for it.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    str_q_fp(&code[8], 1, 8, 2);
+    add_x_imm(&code[12], 9, 8, 1);
+    assert(run_reg_dead(code, 16, 8) == 0);
+
+    // Negative: a store OF the base reads the sum the fold deletes.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    str_x_uimm(&code[8], 8, 8, 3);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Negative: a pre-indexed access on the base. Same encoding group
+    // as LDUR, but it writes the sum back, so deleting the ADD would
+    // drop an observable update. (Rt != Rn: Rt == Rn is
+    // UNPREDICTABLE and Capstone refuses it.)
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    ldr_x_preidx(&code[8], 5, 8, 8);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Negative: the ADD's SOURCE moves between the uses. Every
+    // rebased access reads it at its own offset instead of at the
+    // ADD, so the second store would land somewhere else entirely.
+    add_x_imm(&code[0], 8, 0, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    movz_x(&code[8], 0, 5, 0);
+    str_q_fp(&code[12], 1, 8, 1);
+    assert(run_reg_dead(code, 16, 8) == 0);
+
+    // ... and the other control: a source clobber AFTER the last use
+    // costs nothing. Both stores read the source before it moved, so
+    // both still rebase and the ADD still dies.
+    add_x_imm(&code[0], 8, 0, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    str_q_fp(&code[8], 1, 8, 2);
+    movz_x(&code[12], 0, 5, 0);
+    assert(run_reg_dead(code, 16, 8) == 1);
+
+    // Negative: the same, with SP as the source. arm64_gpr_num maps
+    // SP to -1, so the register-liveness scan is blind to it and the
+    // stack adjustment has to be caught from the encoding.
+    add_x_imm(&code[0], 8, 31, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    sub_x_imm(&code[8], 31, 31, 0x20);
+    str_q_fp(&code[12], 1, 8, 1);
+    assert(run_reg_dead(code, 16, 8) == 0);
+
+    // ... and the control that proves the SP case above is the stack
+    // adjustment and not the gap: the same fragment with a
+    // flag-setting compare in that slot folds.
+    add_x_imm(&code[0], 8, 31, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    cmp_x_imm(&code[8], 0, 0x20);       // Rd 31 here is XZR, not SP
+    str_q_fp(&code[12], 1, 8, 1);
+    assert(run_reg_dead(code, 16, 8) == 1);
+
+    // Negative: straight-line code ends before the base is proven
+    // dead. Uses in a later block are not ours to see.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    str_q_fp(&code[8], 1, 8, 2);
+    ret_(&code[12]);
+    assert(run_helper_check(code, 16) == 0);
+}
+
+
 static void test_add_ldp_stp_imm_offset(void)
 {
     uint8_t code[16];
@@ -14666,6 +14858,7 @@ int main(void)
     test_sxtw_ldr_fold();
     test_ldr_sext_fold();
     test_add_ldr_imm_offset();
+    test_add_ldr_str_multi_fold();
     test_add_ldp_stp_imm_offset();
     test_add_stlr_fold();
     test_aut_ret();
