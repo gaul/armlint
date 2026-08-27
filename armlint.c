@@ -3143,12 +3143,16 @@ static int arm64_gpr_num(unsigned reg)
 
 // True for the A64 GPR-writing instructions that also READ their
 // destination: MOVK (opc 11 of the move-wide class, inserting into the
-// untouched halfwords) and BFM proper (opc 01 of the bitfield class --
-// the BFI/BFXIL aliases, preserving bits of Rd). Every other member of
-// both classes (MOVZ/MOVN; SBFM/UBFM and all their shift, extract and
-// extend aliases) fully overwrites Rd. Capstone's operand access flags
-// cannot make this distinction -- it marks whole classes read+write --
-// so the raw encoding is the arbiter.
+// untouched halfwords), BFM proper (opc 01 of the bitfield class --
+// the BFI/BFXIL aliases, preserving bits of Rd), and the pointer
+// authentication transforms, which rewrite Rd in place. Every other
+// member of those classes (MOVZ/MOVN; SBFM/UBFM and all their shift,
+// extract and extend aliases; PACGA) fully overwrites Rd. Capstone's
+// operand access flags cannot make the first two distinctions -- it
+// marks whole classes read+write -- so the raw encoding is the
+// arbiter. For the PAC group Capstone is right and this function is
+// what would otherwise throw the read away, since insn_reg_access
+// honors a read on a written operand only when this says so.
 static bool insn_reads_gpr_dest(uint32_t op)
 {
     if ((op & 0x1F800000u) == 0x12800000u) {
@@ -3156,6 +3160,19 @@ static bool insn_reads_gpr_dest(uint32_t op)
     }
     if ((op & 0x1F800000u) == 0x13000000u) {
         return ((op >> 29) & 0x3u) == 1u;       // BFM (BFI/BFXIL)
+    }
+    // Pointer authentication, data-processing (1 source):
+    // 1 1 0 11010110 00001 opcode Rn Rd, with opcode 0x00..0x11
+    // covering PACIA..AUTDB, their Z variants and XPACI/XPACD. Every
+    // one transforms Rd IN PLACE -- signs it, authenticates it, or
+    // strips its PAC -- so the destination is a source too, and a
+    // producer deleted ahead of one would change what it signs.
+    // Capstone gets this right (it marks the operand R+W); the
+    // read-flag discard in insn_reg_access is what would lose it.
+    // PACGA is deliberately not here: it lives in the 2-source group
+    // and genuinely overwrites Rd from Rn and Rm.
+    if ((op & 0xFFFF0000u) == 0xDAC10000u) {
+        return ((op >> 10) & 0x3Fu) <= 0x11u;
     }
     return false;
 }
@@ -3282,6 +3299,16 @@ static void insn_reg_access(const cs_insn *insn, int reg,
                 || (int)rt == reg || (int)(rt + 1u) == reg) {
             *reads = true;
         }
+    }
+
+    // The PACIA1716 family transforms X17 using X16 as its modifier.
+    // Capstone lists X17 in both implicit lists, which is right, and
+    // also lists X16 as WRITTEN, which is not -- X16 is read-only
+    // there. Claim the read, the same conservative recovery the
+    // atomics get above: it stops a scan rather than proving a kill.
+    if (reg == 16 && (op == 0xD503211Fu || op == 0xD503215Fu
+                      || op == 0xD503219Fu || op == 0xD50321DFu)) {
+        *reads = true;
     }
 }
 

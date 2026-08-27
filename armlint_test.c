@@ -7853,6 +7853,33 @@ static void ldr_x_uimm_for_test(uint8_t out[4], unsigned rt, unsigned rn,
     write_le32(out, op);
 }
 
+// Pointer authentication, data-processing (1 source):
+// 1 1 0 11010110 00001 opcode Rn Rd. opcode picks the key and the
+// operation -- 0x00 PACIA .. 0x07 AUTDB, 0x08..0x0F their Z variants
+// (Rn = 31), 0x10 XPACI, 0x11 XPACD. All of them transform Rd in
+// place.
+static void pac_dp1(uint8_t out[4], unsigned opcode, unsigned rn,
+                    unsigned rd)
+{
+    uint32_t op = 0xDAC10000u
+        | ((opcode & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+// PACGA Xd, Xn, Xm -- the odd one out: it lives in the 2-source group
+// and computes a fresh MAC into Rd from Rn and Rm, so Rd really is
+// overwritten. Base 0x9AC03000.
+static void pacga(uint8_t out[4], unsigned rd, unsigned rn, unsigned rm)
+{
+    uint32_t op = 0x9AC03000u
+        | ((rm & 0x1Fu) << 16)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
 static void test_mov_zero_to_xzr(void)
 {
     uint8_t code[16];
@@ -7980,6 +8007,55 @@ static void test_mov_zero_to_xzr(void)
     movz_x(&code[0], 0, 0, 0);
     ands_x(&code[4], 31, 2, 0);
     assert(run_x0_dead(code, 8) == 1);
+
+    // -- Neither is a pointer-authentication transform. --
+    //
+    // PACIA/AUTDB/XPACD and the rest of the data-processing (1 source)
+    // PAC group rewrite their destination IN PLACE: they sign it,
+    // authenticate it, or strip its PAC. Capstone marks the operand
+    // R+W, correctly; what loses the read is insn_reg_access's own
+    // discard of read flags on written operands, which only MOVK and
+    // BFM used to survive. Deleting a producer ahead of one of these
+    // would change the value it signs.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    pac_dp1(&code[8], 0x00, 2, 0);      // pacia x0, x2
+    assert(run_x0_dead(code, 12) == 0);
+
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    pac_dp1(&code[8], 0x07, 2, 0);      // autdb x0, x2
+    assert(run_x0_dead(code, 12) == 0);
+
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    pac_dp1(&code[8], 0x11, 31, 0);     // xpacd x0
+    assert(run_x0_dead(code, 12) == 0);
+
+    // A PAC of some OTHER register leaves the fold alone.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    pac_dp1(&code[8], 0x00, 2, 3);      // pacia x3, x2
+    assert(run_x0_dead(code, 12) == 1);
+
+    // PACGA is the control that keeps the rule scoped to the 1-source
+    // group: it computes a fresh MAC into Rd, so it really is a kill.
+    // (Capstone claims a read of Rd here too, and this is the one
+    // place that claim is wrong -- which is why the encoding, not the
+    // operand flag, decides.)
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    pacga(&code[8], 0, 1, 2);           // pacga x0, x1, x2
+    assert(run_helper_check(code, 12) == 1);
+
+    // The PACIA1716 family names no operands at all: it transforms x17
+    // using x16 as the modifier, and Capstone reports both implicitly.
+    // It lists x16 as WRITTEN, which is wrong -- x16 is read-only
+    // there -- so without the correction this reads as a kill of x16.
+    movz_x(&code[0], 16, 0, 0);
+    str_x_uimm(&code[4], 16, 1, 0);
+    write_le32(&code[8], 0xD503211Fu);  // pacia1716
+    assert(run_reg_dead(code, 12, 16) == 0);
 
     // -- A compare is not a kill. --
     //

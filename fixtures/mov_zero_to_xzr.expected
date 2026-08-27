@@ -92,24 +92,32 @@ MOV #0 + use foldable to ZR at offset: 0xe4 <_main+0xe4>: -> str xzr, [x1] (2 in
   movz x0, #0x0
   str x0, [x1]
 
-MOV #0 + use foldable to ZR at offset: 0xf0 <_main+0xf0>: -> csel x3, xzr, x2, ne (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x108 <_main+0x108>: -> str xzr, [x1] (2 instructions)
+  movz x0, #0x0
+  str x0, [x1]
+
+MOV #0 + use foldable to ZR at offset: 0x114 <_main+0x114>: -> str xzr, [x1] (2 instructions)
+  movz x0, #0x0
+  str x0, [x1]
+
+MOV #0 + use foldable to ZR at offset: 0x130 <_main+0x130>: -> csel x3, xzr, x2, ne (2 instructions)
   movz x0, #0x0
   csel x3, x0, x2, ne
 
-MOV #0 + use foldable to ZR at offset: 0xf8 <_main+0xf8>: -> csneg w3, w2, wzr, lt (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x138 <_main+0x138>: -> csneg w3, w2, wzr, lt (2 instructions)
   movz w0, #0x0
   csneg w3, w2, w0, lt
 
-MOV #0 + use foldable to ZR at offset: 0x100 <_main+0x100>: -> ccmp xzr, x2, #0x4, ne (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x140 <_main+0x140>: -> ccmp xzr, x2, #0x4, ne (2 instructions)
   movz x0, #0x0
   ccmp x0, x2, #0x4, ne
 
-CSEL same-operand identity at offset: 0x10c <_main+0x10c>: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
+CSEL same-operand identity at offset: 0x14c <_main+0x14c>: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
   csel x3, x0, x0, ne
 
 Optimization opportunities by type:
-      22  MOV #0 + use foldable to ZR
+      24  MOV #0 + use foldable to ZR
        6  compare whose flags are overwritten unread
        1  CSEL same-operand identity
 
-29 optimization opportunities in 69 instructions
+31 optimization opportunities in 85 instructions

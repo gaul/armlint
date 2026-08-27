@@ -140,6 +140,44 @@ _main:
     str     x0, [x1]                // -> str xzr, [x1]
     cmp     x2, x3
 
+    // Pointer authentication is not a kill either. PACIA/AUTDB/XPACD
+    // and the rest of the data-processing (1 source) PAC group rewrite
+    // their destination IN PLACE -- sign it, authenticate it, strip
+    // its PAC -- so a producer deleted ahead of one would change the
+    // value it signs. .arch rather than an arm64e sidecar, so the
+    // fixture still builds for ELF.
+    .arch armv8.3-a
+
+    // N9) Signing the zeroed register reads it.
+    mov     x0, #0
+    str     x0, [x1]
+    pacia   x0, x2
+
+    // N10) So does stripping it.
+    mov     x0, #0
+    str     x0, [x1]
+    xpacd   x0
+
+    // P) A PAC of some other register leaves the fold alone.
+    mov     x0, #0
+    str     x0, [x1]                // -> str xzr, [x1]
+    pacia   x3, x2
+
+    // P) PACGA is the exception that keeps the rule scoped to the
+    //    1-source group: it computes a fresh MAC into Rd from Rn and
+    //    Rm, so it really is a kill and the fold commits here.
+    mov     x0, #0
+    str     x0, [x1]                // -> str xzr, [x1]
+    pacga   x0, x1, x2
+
+    // N11) PACIA1716 names no operands: it transforms x17 using x16 as
+    //      the modifier. Capstone reports both implicitly but lists
+    //      x16 as WRITTEN, which is wrong -- x16 is read-only there.
+    mov     x16, #0
+    str     x16, [x1]
+    pacia1716
+    mov     x16, #1
+
     // P) CSEL with the zero in the then-slot.
     mov     x0, #0
     csel    x3, x0, x2, ne          // -> csel x3, xzr, x2, ne
@@ -154,7 +192,7 @@ _main:
     mov     x0, #0
     ccmp    x0, x2, #4, ne          // -> ccmp xzr, x2, #4, ne
 
-    // N9) Both select slots zero: csel_self owns that shape.
+    // N12) Both select slots zero: csel_self owns that shape.
     mov     x0, #0
     csel    x3, x0, x0, ne
 

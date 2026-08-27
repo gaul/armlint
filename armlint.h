@@ -56,6 +56,14 @@ bool is_bitmask_immediate(uint64_t imm, unsigned reg_width);
 // a watched register into a proof that the register is dead, so
 // insn_writes_no_gpr recognizes the S-variant forms whose Rd is 31 and
 // demotes their operands back to reads.
+//
+// The mirror case is a read Capstone reports and armlint throws away.
+// insn_reg_access honors a read flag on a WRITTEN operand only when
+// insn_reads_gpr_dest confirms the encoding really is a
+// read-modify-write, because Capstone marks whole encoding classes
+// read+write. That list has to name every genuine RMW: MOVK, BFM, and
+// the pointer authentication transforms, which sign, authenticate or
+// strip Rd in place.
 typedef enum {
     LIV_UNKNOWN,        // no effect on NZCV; keep scanning
     LIV_OVERWRITE,      // writes all NZCV without reading them first
