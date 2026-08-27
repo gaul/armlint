@@ -47,6 +47,15 @@ bool is_bitmask_immediate(uint64_t imm, unsigned reg_width);
 // misses MRS NZCV -- precisely the readers that must not be dropped.
 // The cross-check therefore treats Capstone as a one-directional partial
 // oracle (see the test for the exact properties).
+//
+// The register-side scan (classify_reg_liveness) does trust Capstone's
+// operand access flags, and has its own correction for the same reason.
+// Capstone drops the XZR destination of CMP/CMN/TST and leaves the first
+// SOURCE operand in slot 0, where it marks it CS_AC_WRITE -- the
+// convention for slot 0. Taken at face value that turns every compare of
+// a watched register into a proof that the register is dead, so
+// insn_writes_no_gpr recognizes the S-variant forms whose Rd is 31 and
+// demotes their operands back to reads.
 typedef enum {
     LIV_UNKNOWN,        // no effect on NZCV; keep scanning
     LIV_OVERWRITE,      // writes all NZCV without reading them first

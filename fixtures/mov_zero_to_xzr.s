@@ -113,6 +113,33 @@ _main:
     mov     x0, #0
     stur    x0, [x0, #-8]
 
+    // N7) A compare of the zeroed register READS it, however Capstone
+    //     flags the operand. CMP/CMN/TST drop their XZR destination,
+    //     leaving the first source in slot 0 -- where it is marked
+    //     written, the slot-0 convention. Believing that flag hands
+    //     back a fold that deletes the zero this compare still reads.
+    mov     x0, #0
+    str     x0, [x1]
+    cmp     x0, #1
+
+    // N8) The same for the register form, and for TST in the logical-
+    //     immediate class, which spells its S-variant as opc = 11
+    //     rather than as a separate S bit.
+    mov     x0, #0
+    str     x0, [x1]
+    cmn     x0, x2
+
+    mov     x0, #0
+    str     x0, [x1]
+    tst     x0, #8
+
+    // P) The rule is about the compare's OPERANDS, not about compares:
+    //    one that never names the zeroed register leaves the fold
+    //    alone.
+    mov     x0, #0
+    str     x0, [x1]                // -> str xzr, [x1]
+    cmp     x2, x3
+
     // P) CSEL with the zero in the then-slot.
     mov     x0, #0
     csel    x3, x0, x2, ne          // -> csel x3, xzr, x2, ne
@@ -127,7 +154,7 @@ _main:
     mov     x0, #0
     ccmp    x0, x2, #4, ne          // -> ccmp xzr, x2, #4, ne
 
-    // N7) Both select slots zero: csel_self owns that shape.
+    // N9) Both select slots zero: csel_self owns that shape.
     mov     x0, #0
     csel    x3, x0, x0, ne
 

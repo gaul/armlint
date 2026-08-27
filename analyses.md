@@ -2523,14 +2523,17 @@ so quietly materialized through a scratch register instead.
   unscaled decoder covers loads as well, and only stores are taken: a
   load into `mov_rd` overwrites the zero rather than reading it, so
   there is no ZR to substitute.
-* Corpus: **835** findings across 28.4M instructions. The store arm
-  accounts for 217 of them -- 199 in the unsigned-offset spelling and
-  **18** in the unscaled one, all 18 in librustc_driver. Both realize
-  at about the same rate off their candidate pools (199 of 3,235 and
-  18 of 225, 6.2% against 8.0%), which is the point: what was missing
+* Corpus: **525** findings across 28.4M instructions. The store arm
+  accounts for 195 of them -- 184 in the unsigned-offset spelling and
+  **11** in the unscaled one, all 11 in librustc_driver. Both realize
+  at about the same rate off their candidate pools (184 of 3,235 and
+  11 of 225, 5.7% against 4.9%), which is the point: what was missing
   was the *spelling*, not a different deadness story, and what still
   gates both is the forward liveness scan proving the zero register
-  dead. The dominant unscaled shape is LLVM clearing trailing bytes
+  dead. (These figures are post-`insn_writes_no_gpr`. This check was
+  the largest victim of the compare-is-not-a-kill bug, losing 310 of
+  835 -- 285 of them in the SUB arm, where `mov x0, #0 ; sub x3, x0,
+  x2` is routinely followed by a compare of `x0`.) The dominant unscaled shape is LLVM clearing trailing bytes
   off a frame pointer, where the negative displacement leaves the
   assembler no choice:
 

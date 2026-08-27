@@ -76,24 +76,40 @@ MOV #0 + use foldable to ZR at offset: 0x88 <_main+0x88>: -> tst x2, xzr (2 inst
   movz x0, #0x0
   tst x2, x0
 
-MOV #0 + use foldable to ZR at offset: 0xc0 <_main+0xc0>: -> csel x3, xzr, x2, ne (2 instructions)
+compare whose flags are overwritten unread at offset: 0x8c <_main+0x8c>: -> delete; NZCV overwritten unread by cmp x0, #1 (1 instructions)
+  tst x2, x0
+
+compare whose flags are overwritten unread at offset: 0xc8 <_main+0xc8>: -> delete; NZCV overwritten unread by cmn x0, x2 (1 instructions)
+  cmp x0, #1
+
+compare whose flags are overwritten unread at offset: 0xd4 <_main+0xd4>: -> delete; NZCV overwritten unread by tst x0, #8 (1 instructions)
+  cmn x0, x2
+
+compare whose flags are overwritten unread at offset: 0xe0 <_main+0xe0>: -> delete; NZCV overwritten unread by cmp x2, x3 (1 instructions)
+  tst x0, #8
+
+MOV #0 + use foldable to ZR at offset: 0xe4 <_main+0xe4>: -> str xzr, [x1] (2 instructions)
+  movz x0, #0x0
+  str x0, [x1]
+
+MOV #0 + use foldable to ZR at offset: 0xf0 <_main+0xf0>: -> csel x3, xzr, x2, ne (2 instructions)
   movz x0, #0x0
   csel x3, x0, x2, ne
 
-MOV #0 + use foldable to ZR at offset: 0xc8 <_main+0xc8>: -> csneg w3, w2, wzr, lt (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0xf8 <_main+0xf8>: -> csneg w3, w2, wzr, lt (2 instructions)
   movz w0, #0x0
   csneg w3, w2, w0, lt
 
-MOV #0 + use foldable to ZR at offset: 0xd0 <_main+0xd0>: -> ccmp xzr, x2, #0x4, ne (2 instructions)
+MOV #0 + use foldable to ZR at offset: 0x100 <_main+0x100>: -> ccmp xzr, x2, #0x4, ne (2 instructions)
   movz x0, #0x0
   ccmp x0, x2, #0x4, ne
 
-CSEL same-operand identity at offset: 0xdc <_main+0xdc>: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
+CSEL same-operand identity at offset: 0x10c <_main+0x10c>: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
   csel x3, x0, x0, ne
 
 Optimization opportunities by type:
-      21  MOV #0 + use foldable to ZR
-       2  compare whose flags are overwritten unread
+      22  MOV #0 + use foldable to ZR
+       6  compare whose flags are overwritten unread
        1  CSEL same-operand identity
 
-24 optimization opportunities in 57 instructions
+29 optimization opportunities in 69 instructions

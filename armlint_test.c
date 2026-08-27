@@ -7981,6 +7981,62 @@ static void test_mov_zero_to_xzr(void)
     ands_x(&code[4], 31, 2, 0);
     assert(run_x0_dead(code, 8) == 1);
 
+    // -- A compare is not a kill. --
+    //
+    // Capstone drops the XZR destination of CMP/CMN/TST and leaves the
+    // first SOURCE operand in slot 0, where it marks it written -- the
+    // slot-0 convention. Believing that flag makes the liveness scan
+    // read `cmp x0, #1` as an overwrite of x0 and hand back a fold
+    // that deletes the zero the compare still reads.
+    // insn_writes_no_gpr recognizes the S-variant forms whose Rd is 31
+    // and demotes every operand back to a read.
+    //
+    // Each case appends a REAL kill after the compare (run_x0_dead),
+    // so a 0 here is the intervening read refusing, not a missing
+    // kill. All four spellings of the shape are covered: the two
+    // compares in immediate and register form, and TST in both the
+    // shifted-register and logical-immediate classes, which encode the
+    // S-variant as opc = 11 rather than as a separate S bit.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    cmp_x_imm(&code[8], 0, 1);          // cmp x0, #1
+    assert(run_x0_dead(code, 12) == 0);
+
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    cmp_x_reg_sr(&code[8], 0, 2);       // cmp x0, x2
+    assert(run_x0_dead(code, 12) == 0);
+
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    cmn_x_reg_sr(&code[8], 0, 2);       // cmn x0, x2
+    assert(run_x0_dead(code, 12) == 0);
+
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    tst_x_reg(&code[8], 0, 2);          // tst x0, x2
+    assert(run_x0_dead(code, 12) == 0);
+
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    tst_x_bit(&code[8], 0, 3);          // tst x0, #8
+    assert(run_x0_dead(code, 12) == 0);
+
+    // The rule is about the compare's OPERANDS, not about compares: one
+    // that never names the zero register leaves the fold alone.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    cmp_x_reg_sr(&code[8], 2, 3);       // cmp x2, x3
+    assert(run_x0_dead(code, 12) == 1);
+
+    // ... and an S-variant with a REAL destination still kills, which
+    // is what keeps the fix from demoting every flag-setting op. No
+    // appended kill: this instruction is the kill.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    subs_w_imm(&code[8], 0, 2, 1);      // subs w0, w2, #1 -- writes w0
+    assert(run_helper_check(code, 12) == 1);
+
     // Liveness: a later read of the zero register makes it live, so dropping
     // the MOV would change behavior -- the finding is (soundly) suppressed.
     // This is the loop-induction false positive the scan removes.

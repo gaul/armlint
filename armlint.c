@@ -3160,6 +3160,40 @@ static bool insn_reads_gpr_dest(uint32_t op)
     return false;
 }
 
+// True when `op` writes NO general-purpose register at all: the
+// S-variant ALU and logical forms with Rd = 31, whose only effect is on
+// NZCV. These are spelled CMP, CMN and TST, and Capstone drops the XZR
+// destination from the operand list, leaving the first SOURCE operand
+// in slot 0 -- where it then marks it CS_AC_WRITE, the convention for
+// slot 0. Believing that flag turns `cmp x8, #1` into a kill of x8 and
+// lets a deferred fold delete a producer whose value the compare still
+// reads. Rd = 31 means SP rather than ZR in the S = 0 forms of the same
+// classes, so the S bit is part of every test here.
+static bool insn_writes_no_gpr(uint32_t op)
+{
+    if ((op & 0x1Fu) != 31u) {
+        return false;
+    }
+    unsigned s_bit = (op >> 29) & 1u;
+    // ADD/SUB immediate, shifted register, extended register.
+    if ((op & 0x1F000000u) == 0x11000000u
+            || (op & 0x1F200000u) == 0x0B000000u
+            || (op & 0x1F200000u) == 0x0B200000u) {
+        return s_bit == 1u;
+    }
+    // ADC/SBC: sf op S 11010000 Rm 000000 Rn Rd.
+    if ((op & 0x1FE0FC00u) == 0x1A000000u) {
+        return s_bit == 1u;
+    }
+    // Logical shifted-register and immediate: the S-variant is opc = 11
+    // (ANDS, and BICS via the N bit), not a separate S bit.
+    if ((op & 0x1F000000u) == 0x0A000000u
+            || (op & 0x1F800000u) == 0x12000000u) {
+        return ((op >> 29) & 0x3u) == 3u;
+    }
+    return false;
+}
+
 // Determine whether `insn` reads and/or writes GPR `reg` (a 0..30 encoding
 // number), from the Capstone detail: explicit operand access flags, memory
 // base/index registers (always reads), and the implicit register lists. With
@@ -3175,6 +3209,8 @@ static void insn_reg_access(const cs_insn *insn, int reg,
         *reads = true;
         return;
     }
+    // A compare's operands are all sources however Capstone flags them.
+    bool no_gpr_write = insn_writes_no_gpr(op);
     const cs_arm64 *a = &detail->arm64;
     for (int i = 0; i < a->op_count; i++) {
         const cs_arm64_op *o = &a->operands[i];
@@ -3189,12 +3225,12 @@ static void insn_reg_access(const cs_insn *insn, int reg,
                 // destination, so an RMW keeps the register live -- a
                 // deleted producer would change its result -- while real
                 // kills stay kills.
-                if (o->access & CS_AC_WRITE) {
+                if ((o->access & CS_AC_WRITE) && !no_gpr_write) {
                     *writes = true;
                     if (insn_reads_gpr_dest(op)) {
                         *reads = true;
                     }
-                } else if (o->access & CS_AC_READ) {
+                } else if (o->access & (CS_AC_READ | CS_AC_WRITE)) {
                     *reads = true;
                 }
             }
