@@ -12178,9 +12178,35 @@ static void test_add_sub_imm_chain(void)
     addsub_imm(&code[4], 1, false, 0, 1, 8, 0);
     assert(run_chain_check(code, 8) == 0);
 
-    // Strict adjacency.
+    // A gap is fine: the fold is about the two constants, not about
+    // the two instructions being neighbours. The scan runs a window,
+    // and the finding spans producer through consumer so the
+    // side-entry gate covers what is between them.
     addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
     write_le32(&code[4], 0xD503201Fu);          // nop
+    addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 12) == 1);
+
+    // N) ... but not if the gap READS the intermediate: the producer
+    //    has to stay for that use, so nothing is saved.
+    addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
+    add_x(&code[4], 5, 8, 6);                   // reads x8
+    addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 12) == 0);
+
+    // N) ... nor if the gap moves the producer's SOURCE. The rewrite
+    //    reads x9 at the consumer's position instead of at the
+    //    producer, so the folded constant would come off the wrong
+    //    base.
+    addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
+    movz_x(&code[4], 9, 7, 0);                  // clobbers x9
+    addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 12) == 0);
+
+    // N) ... nor across a control transfer, where a consumer in the
+    //    next block is not ours to fold.
+    addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
+    ret_(&code[4]);
     addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
     assert(run_chain_check(code, 12) == 0);
 

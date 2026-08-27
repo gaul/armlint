@@ -77,3 +77,38 @@ _main:
 1:
     add     x2, x2, #8
     ret
+
+    // A gap between the two adjustments is fine: the fold is about
+    // the two constants, not about the instructions being neighbours.
+    // The scan runs a window, and the finding spans producer through
+    // consumer so the side-entry gate covers what lies between them.
+    add     x8, x0, #0x10
+    mov     x9, #7
+    add     x8, x8, #0x20           // -> add x8, x0, #0x30
+
+    // The same across a gap with a fresh destination, which defers on
+    // the intermediate until the trailing mov kills it.
+    add     x10, x0, #0x10
+    mov     x9, #7
+    add     x11, x10, #0x20         // -> add x11, x0, #0x30
+    mov     x10, #1
+
+    // Negative: the gap READS the intermediate, so the producer has
+    // to stay for that use and nothing is saved.
+    add     x12, x0, #0x10
+    add     x5, x12, x6
+    add     x12, x12, #0x20
+
+    // Negative: the gap moves the producer's SOURCE. The rewrite
+    // reads x0 at the consumer's position instead of at the producer,
+    // so the folded constant would come off the wrong base.
+    add     x13, x0, #0x10
+    mov     x0, #7
+    add     x13, x13, #0x20
+
+    // Negative: a control transfer in the gap. A consumer in the next
+    // block is not ours to fold.
+    add     x14, x1, #0x10
+    ret
+    add     x14, x14, #0x20
+    ret

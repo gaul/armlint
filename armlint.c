@@ -979,6 +979,9 @@ struct armlint_state {
     unsigned asc_rn;
     int32_t asc_imm;
     size_t asc_offset;
+    // Instructions left before the gapped chain gives up. The
+    // adjacent case is gap 0 and never consults it.
+    unsigned asc_window;
     char asc_disasm[ARMLINT_FINDING_LINE_LEN];
 
     // Pending scalar FMUL (S or D) awaiting an adjacent in-place FNEG
@@ -1657,6 +1660,7 @@ static bool decode_int_ldst_simm9(uint32_t op, unsigned *out_size,
                                   bool *out_is_store, int32_t *out_off,
                                   unsigned *out_rn, unsigned *out_rt);
 static const char *unscaled_mnem(const char *mnem);
+static bool insn_writes_sp(uint32_t op);
 static bool decode_cvtf_from_gpr(uint32_t op, bool *out_src_64,
                                  bool *out_is_double,
                                  bool *out_is_unsigned,
@@ -7349,7 +7353,13 @@ bool check_add_sub_imm_chain(armlint_state *state, const cs_insn *insn,
 
                 out->name = "ADD/SUB immediate chain foldable to one";
                 out->start_offset = state->asc_offset;
-                out->insn_count = 2;
+                // Spans the producer through the consumer, so the
+                // central side-entry gate covers the gap: a branch
+                // landing between them reaches the second adjustment
+                // on a path that never made the first, and the folded
+                // constant would be wrong there.
+                out->insn_count = (unsigned)
+                    ((offset - state->asc_offset) / 4u + 1u);
                 clear_finding_strings(out);
                 if (sum == 0) {
                     // The adjustments cancel; what is left is a copy.
@@ -7379,8 +7389,50 @@ bool check_add_sub_imm_chain(armlint_state *state, const cs_insn *insn,
                 }
             }
         }
-        // Strict adjacency: clear regardless of match.
-        state->asc_active = false;
+        if (produced || state->asc_active) {
+            // A match closes the window whether or not it produced a
+            // finding: the consumer read the intermediate, so no later
+            // instruction can be the second half of THIS chain.
+            bool matched = decode_add_sub_imm(op, &c_sf, &c_rd, &c_rn,
+                                              &c_imm)
+                && c_rn == state->asc_rd;
+            if (matched) {
+                state->asc_active = false;
+            } else {
+                switch (classify_reg_liveness(insn, (int)state->asc_rd)) {
+                case LIV_READ:
+                    // The intermediate is used by something that is
+                    // not the second adjustment, so the producer has
+                    // to stay and nothing is saved.
+                case LIV_OVERWRITE:
+                    // The intermediate is gone; there is no chain
+                    // left to close.
+                case LIV_TERM_SAFE:
+                case LIV_TERM_UNSAFE:
+                    // Straight-line code ends. A consumer in a later
+                    // block is not ours to fold, and the gate cannot
+                    // reason about the path that got there.
+                    state->asc_active = false;
+                    break;
+                case LIV_UNKNOWN:
+                    // The rewrite reads the producer's SOURCE at the
+                    // consumer's position instead of at the producer,
+                    // so anything moving it in between invalidates
+                    // the folded constant. SP needs the encoding
+                    // test: arm64_gpr_num maps it to -1 and the
+                    // liveness scan is blind to it.
+                    if (state->asc_rn == 31u
+                            ? insn_writes_sp(op)
+                            : insn_writes_reg(insn, (int)state->asc_rn)) {
+                        state->asc_active = false;
+                    } else if (state->asc_window == 0
+                            || --state->asc_window == 0) {
+                        state->asc_active = false;
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     // (2) Open: a non-flag-setting ADD/SUB immediate whose destination
@@ -7408,6 +7460,7 @@ bool check_add_sub_imm_chain(armlint_state *state, const cs_insn *insn,
         state->asc_rn = p_rn;
         state->asc_imm = p_imm;
         state->asc_offset = offset;
+        state->asc_window = LIVENESS_WINDOW;
         snprintf(state->asc_disasm, sizeof(state->asc_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     }

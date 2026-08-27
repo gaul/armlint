@@ -1039,6 +1039,31 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   either side is not a chain but a redundant instruction, left to
   [`ADD/SUB #0 is redundant`](#addsub-0-is-redundant) so no window is
   reported twice.
+* **The two adjustments need not be adjacent.** The fold is about the
+  two constants, not about the instructions being neighbours, so the
+  scan runs a bounded window rather than a single slot. It gives up on
+  whichever comes first: a read of the intermediate (the producer must
+  stay for that use, so nothing is saved), an overwrite of it (there is
+  no chain left to close), a control transfer, or the window expiring.
+* The window watches the producer's **source** as well, which no
+  adjacency-based fold has to. The rewritten instruction reads it at
+  the consumer's position rather than at the producer, so anything
+  moving it in between makes the folded constant come off the wrong
+  base. When the source is SP the register-liveness scan cannot help --
+  `arm64_gpr_num` maps SP to -1 -- so the encodings that write it are
+  matched directly, the same recovery the multi-use ADD fold makes.
+* `insn_count` spans producer through consumer rather than a fixed 2,
+  so the central side-entry gate covers the gap exactly: a branch
+  landing between them reaches the second adjustment on a path that
+  never made the first.
+* One tracked chain at a time. An unrelated ADD/SUB immediate inside
+  the gap replaces the pending one, so a chain straddling another is a
+  false negative, never a wrong finding.
+* The gap is worth **+771** findings on the corpus (26,893 -> 27,664),
+  770 of them in librustc_driver. The swept candidate population --
+  two adjustments on the same register with the intermediate untouched
+  across the gap and no control transfer between -- is 6,039, so about
+  one in eight survives the deadness proof and the side-entry gate.
 * **Where the shape comes from.** Two unrelated LLVM behaviours
   produce it in roughly equal measure. Classifying librustc_driver's
   26,929 findings by what feeds the opening instruction: 13,607
