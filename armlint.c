@@ -7630,6 +7630,130 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// Decode the ASIMD three-same LOGICAL group with both source registers
+// equal: 0 Q U 01110 size 1 Rm 00011 1 Rn Rd. U and size together pick
+// the member -- U=0 gives AND/BIC/ORR/ORN by size, U=1 gives
+// EOR/BSL/BIT/BIF. Only the U=0 set and EOR are decoded here: BSL, BIT
+// and BIF read the destination as a third source, so they are a
+// different shape (and `bsl vd, vn, vn` collapses to a MOV of Vn
+// whatever Vd held, which is worth its own row rather than this one).
+static bool decode_vec_logical_self(uint32_t op, unsigned *out_q,
+                                    unsigned *out_kind, unsigned *out_rd,
+                                    unsigned *out_rn)
+{
+    if ((op & 0x9F20FC00u) != 0x0E201C00u) {
+        return false;
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    if (rm != rn) {
+        return false;
+    }
+    unsigned u = (op >> 29) & 1u;
+    unsigned size = (op >> 22) & 0x3u;
+    // 0 = collapses to zero, 1 = collapses to the operand, 2 = neither.
+    if (u == 1u) {
+        if (size != 0u) {
+            return false;               // BSL/BIT/BIF
+        }
+        *out_kind = 0u;                 // EOR Vn, Vn -> 0
+    } else {
+        switch (size) {
+        case 0: *out_kind = 1u; break;  // AND Vn, Vn -> Vn
+        case 1: *out_kind = 0u; break;  // BIC Vn, Vn -> 0
+        case 2: *out_kind = 1u; break;  // ORR Vn, Vn -> Vn
+        default:
+            // ORN Vn, Vn is all-ones, a different rewrite (MOVI with a
+            // 0xFF immediate) and absent from the mining corpus.
+            return false;
+        }
+    }
+    *out_q = (op >> 30) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = rn;
+    return true;
+}
+
+// Decode ASIMD three-same SUB with both sources equal:
+// 0 Q 1 01110 size 1 Rm 100001 Rn Rd. Every element size collapses to
+// zero, so size is free.
+static bool decode_vec_sub_self(uint32_t op, unsigned *out_q,
+                                unsigned *out_rd, unsigned *out_rn)
+{
+    if ((op & 0xBF20FC00u) != 0x2E208400u) {
+        return false;
+    }
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    if (rm != rn) {
+        return false;
+    }
+    *out_q = (op >> 30) & 1u;
+    *out_rd = op & 0x1Fu;
+    *out_rn = rn;
+    return true;
+}
+
+bool check_vector_self_op(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    (void)state;
+
+    if (insn->size != 4) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    unsigned q, kind, rd, rn;
+    if (!decode_vec_logical_self(op, &q, &kind, &rd, &rn)) {
+        if (!decode_vec_sub_self(op, &q, &rd, &rn)) {
+            return false;
+        }
+        kind = 0u;                      // SUB Vn, Vn -> 0
+    }
+
+    // An identity whose destination IS the operand is a pure no-op; one
+    // with a different destination is a register copy. The copy case is
+    // a finding for AND, but NOT for ORR: `orr Vd, Vn, Vn` with
+    // Rd != Rn is the canonical spelling of the vector MOV, which the
+    // assembler emits for every `mov vd.16b, vn.16b`. Counting it
+    // inflated a first pass over this shape from 353 to 2,158.
+    bool in_place = rd == rn;
+    bool is_orr = (op & 0x9F20FC00u) == 0x0E201C00u
+        && ((op >> 29) & 1u) == 0u && ((op >> 22) & 0x3u) == 2u;
+    if (kind == 1u && !in_place && is_orr) {
+        return false;
+    }
+
+    const char *arr = q ? "16b" : "8b";
+
+    out->name = "vector self-op identity";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+
+    if (kind == 0u) {
+        // Zero. MOVI with a 2D arrangement is the spelling the cores
+        // eliminate at register rename -- it is on Neoverse V2's
+        // "Zero Latency MOVs" list and on Apple Firestorm's eliminated
+        // set, while the self-op is on neither and occupies a vector
+        // pipe slot. The 2D form is right for a D-form source too:
+        // every AArch64 SIMD instruction with a 64-bit arrangement
+        // zeroes the upper half of its destination anyway.
+        snprintf(out->detail, sizeof(out->detail),
+            "-> movi v%u.2d, #0", rd);
+    } else if (in_place) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> delete: writes v%u its own value", rd);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> mov v%u.%s, v%u.%s", rd, arr, rn, arr);
+    }
+    snprintf(out->lines[0], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return true;
+}
+
 // Decode UMOV Wd, Vn.<T>[index] / UMOV Xd, Vn.D[index]:
 //   0 Q 001110000 imm5 001111 Rn Rd
 //
@@ -15908,6 +16032,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_add_sub_imm_chain,
     check_add_sub_zero,
     check_self_op,
+    check_vector_self_op,
     check_umov_lane0_fmov,
     check_csel_self,
     check_fcsel_self,

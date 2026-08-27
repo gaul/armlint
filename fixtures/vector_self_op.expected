@@ -1,0 +1,31 @@
+vector self-op identity at offset: 0x0 <_main>: -> movi v26.2d, #0 (1 instructions)
+  eor v26.16b, v26.16b, v26.16b
+
+vector self-op identity at offset: 0x4 <_main+0x4>: -> movi v4.2d, #0 (1 instructions)
+  eor v4.16b, v0.16b, v0.16b
+
+vector self-op identity at offset: 0x8 <_main+0x8>: -> movi v4.2d, #0 (1 instructions)
+  eor v4.8b, v0.8b, v0.8b
+
+vector self-op identity at offset: 0xc <_main+0xc>: -> movi v4.2d, #0 (1 instructions)
+  bic v4.16b, v0.16b, v0.16b
+
+vector self-op identity at offset: 0x10 <_main+0x10>: -> movi v4.2d, #0 (1 instructions)
+  sub v4.16b, v0.16b, v0.16b
+
+vector self-op identity at offset: 0x14 <_main+0x14>: -> movi v4.2d, #0 (1 instructions)
+  sub v4.2d, v0.2d, v0.2d
+
+vector self-op identity at offset: 0x18 <_main+0x18>: -> mov v4.16b, v0.16b (1 instructions)
+  and v4.16b, v0.16b, v0.16b
+
+vector self-op identity at offset: 0x1c <_main+0x1c>: -> delete: writes v0 its own value (1 instructions)
+  and v0.16b, v0.16b, v0.16b
+
+vector self-op identity at offset: 0x20 <_main+0x20>: -> delete: writes v7 its own value (1 instructions)
+  mov v7.16b, v7.16b
+
+Optimization opportunities by type:
+       9  vector self-op identity
+
+9 optimization opportunities in 16 instructions

@@ -666,6 +666,59 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   is the canonical x86 zero idiom; the canonical AArch64 form is
   `MOV Rd, XZR`.
 
+## vector self-op identity (`AND/ORR/EOR/SUB/BIC Vd, Vn, Vn`)
+
+* The vector twin of the scalar self-op check above, on the ASIMD
+  three-same forms whose two source registers are the same:
+
+  ```
+  eor v26.16b, v26.16b, v26.16b  ->  movi v26.2d, #0
+  and v0.16b,  v1.16b,  v1.16b   ->  mov  v0.16b, v1.16b
+  orr v0.16b,  v0.16b,  v0.16b   ->  delete
+  ```
+
+* `EOR`, `BIC` and `SUB` collapse to zero; `AND` and `ORR` give the
+  operand back. `ORN` gives all-ones, which needs a different rewrite
+  (a `MOVI` with a 0xFF immediate) and does not occur in the corpus, so
+  it is decoded and declined rather than mis-reported. `BSL`/`BIT`/`BIF`
+  share `EOR`'s U bit, separated by size, but read the destination as a
+  third source -- a different shape.
+* **One member must never be flagged.** `orr Vd, Vn, Vn` with
+  `Rd != Rn` *is* the canonical spelling of the vector `MOV`: the
+  assembler emits it for every `mov vd.16b, vn.16b`. Only its in-place
+  form, writing a register its own value, is a finding. Counting the
+  copies inflated a first pass over this shape from 353 to **2,158**,
+  a 6x overcount.
+* The `MOVI` rewrite uses a `2D` arrangement whatever the source's was.
+  That is right for a `D`-form self-op too: every AArch64 SIMD
+  instruction with a 64-bit arrangement zeroes the upper half of its
+  destination, so the two are the same value.
+* No liveness argument, and no side-entry question. The rewrite is
+  1-for-1 into the same destination with the same value; nothing is
+  deleted except in the in-place identity case, and no flags, memory or
+  FP exceptions are involved. A branch landing on the instruction is
+  harmless because the semantics do not change.
+* **What it saves is issue, not size.** `MOVI` with a zero immediate is
+  on Neoverse V2's "Zero Latency MOVs" list (SWOG section 4.12, whose
+  members "do not utilize the scheduling and execution resources of the
+  machine") and on Apple Firestorm's rename-eliminated set. The self-op
+  is on neither: V2's tables charge the ASIMD logical group latency 2,
+  throughput 4 on the V pipe, the same as a general `MOVI`, and the
+  zero form is carved out of that cost while `eor Vn, Vn` is not. Every
+  site in the corpus is in place, so the self-op also carries a false
+  dependency on the register's own previous value. Neoverse N1's guide
+  documents no such elimination at all -- its section 4 has no
+  zero-latency list -- so this is "cheaper on newer cores, neutral on
+  older", the same shape as
+  [the low-32 fold](#low-32-zero-extension-foldable-to-mov-wd-wn).
+* Corpus: **353** findings across 28.4M instructions (315 libcrypto, 28
+  go, 10 dyld) -- exactly the swept population, because this candidate
+  has neither an encodability condition nor a deadness gate to lose
+  sites to. 351 are `eor Vd, Vd, Vd` and 2 are in-place `orr`; no
+  `sub` or `and` self-op occurs. 315 of the 353 are in one function,
+  OpenSSL's `_asm_aescbc_sha1_hmac`, where they zero accumulators four
+  at a time inside the stitched AES-CBC + SHA1-HMAC loop.
+
 ## adjacent LDR/STR foldable into LDP/STP
 
 * Two `LDR Wt, [Rn, #imm]` (or X-form) to consecutive offsets fold

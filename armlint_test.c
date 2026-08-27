@@ -204,6 +204,51 @@ static int run_features_check(const uint8_t *code, size_t code_size,
 
 // Drive the real check_instructions loop -- the only place the V8POOL
 // constant-pool skip lives -- over a raw buffer.
+// run_features_check restricted to one finding name. Needed where a
+// fragment built for one feature-gated check also, legitimately, trips
+// another: a `eor vd, vn, vn` written to show the SHA3 fold declining
+// is itself a vector self-op.
+static int run_named_features_check(const uint8_t *code, size_t code_size,
+                                    unsigned features, const char *name)
+{
+    cs_insn *insns = NULL;
+    size_t count = cs_disasm(g_handle, code, code_size, 0, 0, &insns);
+    if (count != code_size / 4) {
+        if (insns != NULL) {
+            cs_free(insns, count);
+        }
+        return -1;
+    }
+
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+    armlint_state_set_features(state, features);
+
+    int findings = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t offset = (size_t)insns[i].address;
+        for (size_t k = 0; k < armlint_check_registry_count; k++) {
+            armlint_finding f;
+            if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && strcmp(f.name, name) == 0) {
+                findings++;
+            }
+        }
+    }
+
+    armlint_finding f;
+    if (armlint_flush(state, &f)
+            && !armlint_finding_has_side_entry(state, &f)
+            && strcmp(f.name, name) == 0) {
+        findings++;
+    }
+
+    armlint_state_destroy(state);
+    cs_free(insns, count);
+    return findings;
+}
+
 static int run_driver_check(const uint8_t *code, size_t code_size,
                             unsigned features)
 {
@@ -11703,6 +11748,105 @@ static void vec_and(uint8_t out[4], unsigned rd, unsigned rn,
         | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
 }
 
+static void vec_orr(uint8_t out[4], unsigned q, unsigned rd,
+                    unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x0EA01C00u | ((q & 1u) << 30)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void vec_orn(uint8_t out[4], unsigned q, unsigned rd,
+                    unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x0EE01C00u | ((q & 1u) << 30)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// SUB (vector, three-same): size at bits 23..22 picks the element
+// width and every one of them collapses to zero.
+static void vec_sub(uint8_t out[4], unsigned q, unsigned size,
+                    unsigned rd, unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x2E208400u | ((q & 1u) << 30) | ((size & 3u) << 22)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// BSL (vector): shares EOR's U bit, separated by size. It reads the
+// destination as a third source, so it is a different shape.
+static void vec_bsl(uint8_t out[4], unsigned q, unsigned rd,
+                    unsigned rn, unsigned rm)
+{
+    write_le32(out, 0x2E601C00u | ((q & 1u) << 30)
+        | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// The vector twin of the self-op identity. Every case is 1-for-1 with
+// no liveness argument, so run_helper_check counts it directly.
+static void test_vector_self_op(void)
+{
+    uint8_t code[8];
+    const char *name = "vector self-op identity";
+
+    // Collapses to zero. The corpus shape, and all 351 of its sites are
+    // in place: eor v26.16b, v26.16b, v26.16b.
+    vec_eor(&code[0], 1, 26, 26, 26);       // -> movi v26.2d, #0
+    assert(run_helper_check(code, 4) == 1);
+    vec_eor(&code[0], 1, 4, 0, 0);          // fresh destination
+    assert(run_helper_check(code, 4) == 1);
+    vec_eor(&code[0], 0, 4, 0, 0);          // D-form source, same rewrite
+    assert(run_helper_check(code, 4) == 1);
+
+    // BIC and SUB reach zero too; SUB at every element size.
+    vec_bic(&code[0], 1, 4, 0, 0);
+    assert(run_helper_check(code, 4) == 1);
+    for (unsigned size = 0; size < 4; size++) {
+        vec_sub(&code[0], 1, size, 4, 0, 0);
+        assert(run_helper_check(code, 4) == 1);
+    }
+
+    // AND with a fresh destination is a register copy.
+    vec_and(&code[0], 4, 0, 0);             // -> mov v4.16b, v0.16b
+    assert(run_helper_check(code, 4) == 1);
+
+    // In place, AND and ORR write a register its own value: deletable.
+    vec_and(&code[0], 0, 0, 0);
+    assert(run_helper_check(code, 4) == 1);
+    vec_orr(&code[0], 1, 7, 7, 7);
+    assert(run_helper_check(code, 4) == 1);
+
+    // N) The one member that must never be flagged: `orr Vd, Vn, Vn`
+    //    with Rd != Rn IS the canonical vector MOV, emitted for every
+    //    `mov vd.16b, vn.16b`. Counting these inflated a first pass
+    //    over this shape from 353 to 2,158.
+    vec_orr(&code[0], 1, 4, 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+    vec_orr(&code[0], 0, 4, 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // N) Sources differ: not a self-op at all.
+    vec_eor(&code[0], 1, 4, 0, 1);
+    assert(run_helper_check(code, 4) == 0);
+    vec_and(&code[0], 4, 0, 1);
+    assert(run_helper_check(code, 4) == 0);
+
+    // N) ORN of a register with itself is all-ones, not zero and not
+    //    the operand -- a different rewrite, and absent from the
+    //    corpus. Left out rather than mis-reported.
+    vec_orn(&code[0], 1, 4, 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // N) BSL shares EOR's U bit but reads the destination as a third
+    //    source, so it is a different shape even with Vn == Vm.
+    vec_bsl(&code[0], 1, 4, 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+
+    // The scalar twin still owns the general-register forms; this
+    // check must not also claim them.
+    eor_x(&code[0], 3, 5, 5);
+    assert(run_named_check(code, 4, name) == 0);
+    assert(run_helper_check(code, 4) == 1);
+}
+
 static void test_sha3_fold(void)
 {
     uint8_t code[16];
@@ -11746,10 +11890,13 @@ static void test_sha3_fold(void)
     assert(run_sha3_check(code, 8) == 0);
 
     // Both consumer sources are the temp: the EOR cancels to zero,
-    // which no three-operand form reproduces.
+    // which no three-operand form reproduces. Named, because the
+    // consumer is a vector self-op and check_vector_self_op reports it
+    // -- correctly, and on the very shape this case is built from.
     vec_eor(&code[0], 1, 0, 1, 2);
     vec_eor(&code[4], 1, 4, 0, 0);
-    assert(run_sha3_check(code, 8) == 0);
+    assert(run_named_features_check(code, 8, ARMLINT_FEATURE_SHA3,
+        "EOR + EOR foldable to EOR3 (SHA3)") == 0);
 
     // The consumer must read the temp at all.
     vec_eor(&code[0], 1, 0, 1, 2);
@@ -15334,6 +15481,7 @@ int main(void)
     test_dead_compare();
     test_add_sub_zero();
     test_self_op();
+    test_vector_self_op();
     test_umov_lane0_fmov();
     test_and_lo32_mov();
     test_csel_self();

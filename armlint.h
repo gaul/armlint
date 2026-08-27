@@ -791,6 +791,39 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
 bool check_self_op(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out);
 
+// The vector twin of check_self_op: an ASIMD three-same operation whose
+// two source registers are the same, so the result is a constant or the
+// operand back.
+//
+//   eor v26.16b, v26.16b, v26.16b  ->  movi v26.2d, #0
+//   and v0.16b,  v1.16b,  v1.16b   ->  mov  v0.16b, v1.16b
+//   orr v0.16b,  v0.16b,  v0.16b   ->  delete
+//
+// EOR, BIC and SUB collapse to zero; AND and ORR give the operand back.
+// ORN gives all-ones, a different rewrite, and is absent from the
+// mining corpus. BSL/BIT/BIF share EOR's U bit but read the
+// destination as a third source, so they are a different shape.
+//
+// One member must NOT be flagged: `orr Vd, Vn, Vn` with Rd != Rn is the
+// canonical spelling of the vector MOV, emitted for every
+// `mov vd.16b, vn.16b`. Only its in-place form -- writing a register
+// its own value -- is a finding. Counting the copies inflated a first
+// pass over this shape from 353 to 2,158.
+//
+// Like the scalar check this is 1-for-1 with no liveness argument: the
+// destination and its value are unchanged, nothing is deleted except in
+// the in-place identity case, and no flags or memory are touched. What
+// it buys is not size but issue: MOVI with a zero immediate is on
+// Neoverse V2's "Zero Latency MOVs" list (section 4.12) and on Apple
+// Firestorm's rename-eliminated set, while the self-op is on neither
+// and occupies a vector pipe slot -- and, being in place at every site
+// in the corpus, carries a false dependency on the register's own
+// previous value. Neoverse N1's guide documents no such elimination, so
+// this is "cheaper on newer cores, neutral on older", like
+// check_and_lo32_mov.
+bool check_vector_self_op(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect UMOV of lane 0 -- umov w0, v1.s[0], umov x0, v1.d[0], and
 // under ARMLINT_FEATURE_FP16 umov w0, v1.h[0] -- which move exactly
 // the bits FMOV Wd, Sn / Xd, Dn / Wd, Hn already reach, Sn/Dn/Hn being
