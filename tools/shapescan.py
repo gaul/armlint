@@ -12,6 +12,12 @@ throws away. `adrp` + `add` is the standing example: 753,648 adjacent
 dependent pairs in the corpus, of which 43,434 have a target inside
 ADR's +-1MB reach.
 
+Where a condition was added after the unconditioned figure had already
+been published, both are reported as sibling rows -- see the two
+`cond-branch +8 over b L` entries, 507 against 2,437. The older number
+appears in TODO.md, and the difference should read as a missing test
+rather than as the tool disagreeing with the docs.
+
 Usage:
     tools/shapescan.py --selftest             # verify every mask
     tools/shapescan.py BINARY...              # ranked population table
@@ -503,12 +509,46 @@ def s_ldp_via_scratch(c):
         & (rn(b) == rd(a)) & (rd(a) != 31)
 
 
-def s_branch_over_b(c):
+def _branch_over_b(c):
+    """The `cond +8 ; b L` shape, saying nothing about where L is.
+
+    Returns (matched, is_narrow); is_narrow marks the TBZ/TBNZ members,
+    whose displacement field is four bits shorter than the others'.
+    """
     a, b = c.a, c.b
     i19 = _sext(((a >> np.uint32(5)) & np.uint32(0x7FFFF)).astype(np.int64), 19)
     i14 = _sext(((a >> np.uint32(5)) & np.uint32(0x3FFF)).astype(np.int64), 14)
-    over = ((m(a, "bcond") | m(a, "cbz")) & (i19 == 2)) | (m(a, "tbz") & (i14 == 2))
-    return over & m(b, "b_uncond")
+    narrow = m(a, "tbz") & (i14 == 2)
+    wide = (m(a, "bcond") | m(a, "cbz")) & (i19 == 2)
+    return (wide | narrow) & m(b, "b_uncond"), narrow
+
+
+def s_branch_over_b(c):
+    """... and whether the inverted branch can still reach it.
+
+    The fold moves the target from the unconditional branch's imm26
+    (+-128MB) onto the conditional's own field: imm19 (+-1MB) for
+    B.cond and CBZ/CBNZ, imm14 (+-32KB) for TBZ/TBNZ. A target outside
+    the narrower range cannot be expressed at all, so the site is not a
+    candidate however sound the rewrite would otherwise be.
+
+    This bites hardest exactly where the shape is most common. The
+    `tbz +8 ; b L` idiom exists BECAUSE the compiler needed a target
+    beyond TBZ's reach, so folding it back is impossible almost by
+    construction: 43 of librustc_driver's 1,803 such sites reach,
+    against 464 of 634 for the imm19 forms.
+    """
+    hit, narrow = _branch_over_b(c)
+    # The rewritten conditional sits where the original one did, so it
+    # spans one instruction more than the unconditional branch did.
+    disp = _sext((c.b & np.uint32(0x3FFFFFF)).astype(np.int64), 26) + 1
+    lim = np.where(narrow, np.int64(1) << 13, np.int64(1) << 18)
+    return hit & (disp >= -lim) & (disp <= lim - 1)
+
+
+def s_branch_over_b_any(c):
+    """The shape with no range test -- the figure published before it."""
+    return _branch_over_b(c)[0]
 
 
 def s_dup_by_element(c):
@@ -543,6 +583,7 @@ SHAPES = [
     ("add/sub #a ; add/sub #b, sum encodes + temp dies", True, s_addsub_structural),
     ("add scratch,#big ; ldp/stp [scratch]", True, s_ldp_via_scratch),
     ("cond-branch +8 over b L (issue #7)", True, s_branch_over_b),
+    ("cond-branch +8 over b L (target unchecked)", True, s_branch_over_b_any),
     ("umov Wd,Vn.s[0] / Xd,Vn.d[0] -> fmov", False, s_umov),
     ("vector self-op -> movi #0 / mov", False, s_vector_selfop),
     ("ZR-operand ALU spelling -> mov / mov #0", False, s_zr_operand),
