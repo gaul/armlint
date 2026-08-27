@@ -2847,6 +2847,17 @@ so quietly materialized through a scratch register instead.
   read the deleted sum). The canonical stack-spill-through-a-temp --
   `add x8, sp, #32 ; str x0, [x8]` -> `str x0, [sp, #0x20]` -- is
   the flagship store shape.
+* Both register files are matched. An access's data register has no
+  bearing on its address arithmetic, so the SIMD&FP forms fold on the
+  same terms as the integer ones, with the log2 transfer size coming
+  from the encoding -- 16 bytes for a `Q`, 8 for a `D` -- and setting
+  the grid the combined offset must land on. Two things do turn on the
+  register file, and both cut the same way: a SIMD&FP data register can
+  never alias the integer base, so it is neither the
+  read-the-deleted-sum case that blocks a store fold nor the
+  load-into-its-own-base that proves the sum dead on the spot. Every
+  SIMD&FP site defers to the forward liveness scan; there is no
+  structural tier there at all.
 * Both spellings of the access are decoded. AArch64 gives every
   base-plus-offset access two encodings -- the unsigned-offset form,
   whose `imm12` is scaled by the transfer size and cannot go negative,
@@ -2905,9 +2916,18 @@ so quietly materialized through a scratch register instead.
   window after the first may be a branch target); this check gates
   at close anyway so a doomed pairing never occupies the shared
   deferral slot.
-* Corpus: 5,564 findings across 28.4M instructions (4,479
-  librustc_driver, 902 bash, 76 dyld, 55 libcrypto, 51 ssh, 1 go).
-  Teaching the check the unscaled spelling added 126 of those. That is
+* Corpus: 7,394 findings across 28.4M instructions (6,304
+  librustc_driver, 903 bash, 77 dyld, 58 libcrypto, 51 ssh, 1 go).
+  Two coverage fixes account for 1,956 of those: teaching the check
+  the unscaled spelling added 126, and teaching it the SIMD&FP
+  register class added 1,830. The second cost 18 pair findings it did
+  not intend to: the newly-matched SIMD&FP accesses open deferrals of
+  their own, and `defer_dead_mov`'s single slot silently drops an
+  earlier one when a second arrives, so a pending ADD + LDP finding
+  waiting on its kill can now be evicted by an FP access two
+  instructions later. Net +1,812, and the eviction is the tracked
+  multi-slot item in [TODO.md](TODO.md) rather than anything specific
+  to this check. The unscaled figure is
   far below what the candidate population suggests -- 23,503 adjacent
   ADD + LDUR/STUR pairs exist in the corpus, 9,124 of them with a sum
   that encodes -- and the gap is structural, not a further blind spot.

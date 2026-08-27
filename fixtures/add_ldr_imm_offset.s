@@ -155,6 +155,43 @@ _main:
     str     x0, [x8]                // -> stur x0, [x1, #4]
     mov     x8, #7
 
+    // SIMD&FP consumers. The address arithmetic does not care which
+    // register file the data lands in; only the deadness proof does,
+    // and a V-register destination can never supply it.
+
+    // P) Scaled FP load. Rt is a V register, so it cannot overwrite
+    //    the address register -- this defers like a store, and the
+    //    trailing mov proves x8 dead.
+    add     x8, x1, #16
+    ldr     q0, [x8]                // -> ldr q0, [x1, #0x10]
+    mov     x8, #8
+
+    // P) A D-register store: the grid the sum must land on is 8, not
+    //    16, because the transfer size comes from the encoding.
+    add     x8, x1, #8
+    str     d3, [x8, #16]           // -> str d3, [x1, #0x18]
+    mov     x8, #9
+
+    // P) Unscaled FP in, scaled out. The ADD's immediate is off the
+    //    16-byte grid, which is why the store was spelled STUR; the
+    //    sum lands back on it. This is the dominant real shape.
+    add     x8, sp, #0x2a8
+    stur    q0, [x8, #0x68]         // -> str q0, [sp, #0x310]
+    mov     x8, #10
+
+    // P) An FP load whose Rt NUMBER equals the address register still
+    //    defers: q8 is in the other file and leaves x8 untouched, so
+    //    nothing here proves the sum dead on the spot.
+    add     x8, x1, #16
+    ldr     q8, [x8]                // -> ldr q8, [x1, #0x10]
+    mov     x8, #11
+
+    // N9) Out of range for a Q access: 0xfff0 + 16 scaled by 16 is
+    //     4096, one past imm12, and far past imm9.
+    add     x8, x1, #16
+    str     q0, [x8, #0xfff0]
+    mov     x8, #12
+
     // N10) Store data == address register: the rewrite would read
     //      the deleted sum; never folds.
     add     x8, x1, #16

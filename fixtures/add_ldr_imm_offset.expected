@@ -90,8 +90,24 @@ ADD + STR foldable to immediate-offset STR at offset: 0xfc <_main+0xfc>: -> stur
   add x8, x1, #0x4
   str x0, [x8]
 
-Optimization opportunities by type:
-      18  ADD + LDR foldable to immediate-offset LDR
-       5  ADD + STR foldable to immediate-offset STR
+ADD + LDR foldable to immediate-offset LDR at offset: 0x108 <_main+0x108>: -> ldr q0, [x1, #0x10] (2 instructions)
+  add x8, x1, #0x10
+  ldr q0, [x8]
 
-23 optimization opportunities in 76 instructions
+ADD + STR foldable to immediate-offset STR at offset: 0x114 <_main+0x114>: -> str d3, [x1, #0x18] (2 instructions)
+  add x8, x1, #0x8
+  str d3, [x8, #0x10]
+
+ADD + STR foldable to immediate-offset STR at offset: 0x120 <_main+0x120>: -> str q0, [sp, #0x310] (2 instructions)
+  add x8, sp, #0x2a8
+  stur q0, [x8, #0x68]
+
+ADD + LDR foldable to immediate-offset LDR at offset: 0x12c <_main+0x12c>: -> ldr q8, [x1, #0x10] (2 instructions)
+  add x8, x1, #0x10
+  ldr q8, [x8]
+
+Optimization opportunities by type:
+      20  ADD + LDR foldable to immediate-offset LDR
+       7  ADD + STR foldable to immediate-offset STR
+
+27 optimization opportunities in 91 instructions

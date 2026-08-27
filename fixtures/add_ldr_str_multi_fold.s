@@ -80,9 +80,12 @@ _main:
     // Negatives:
     // N1) One use. That is check_add_ldr_imm_offset's fold, reported
     //     there; this check stays silent so no site is reported
-    //     twice. (An FP store, which that check does not cover, so
-    //     this block is silent entirely.)
+    //     twice. The use sits one instruction past the ADD, where
+    //     that check's strict adjacency refuses it too, so this block
+    //     is silent entirely -- adjacent, it is a finding from the
+    //     other check.
     add     x8, x1, #16
+    mov     x9, #7
     str     q0, [x8]
     mov     x8, #4
 

@@ -2060,6 +2060,21 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
 // a path that never added it. The gate needs the branch-target map
 // built by armlint_state_set_buffer; without a buffer it is off.
 // Indirect branches (BR, jump tables) remain invisible to it.
+//
+// Both register files are matched. An access's data register has no
+// bearing on its address arithmetic, so the SIMD&FP forms fold on the
+// same terms as the integer ones -- in both spellings, with the log2
+// transfer size coming from the encoding (16 bytes for a Q, 8 for a
+// D) and setting the grid the combined offset must land on. Two
+// things do turn on the register file, and both cut the same way: a
+// SIMD&FP data register can never alias the integer base, so it is
+// neither the read-the-deleted-sum case that blocks a store fold nor
+// the load-into-its-own-base that proves the sum dead on the spot.
+// Every SIMD&FP site therefore defers to the forward liveness scan.
+// The pair arm has always read both files, because the pair forms
+// share one encoding class with a V bit; this arm reached its
+// consumer through integer-only decoders until it was taught
+// otherwise, which had cost 1,830 sites in the mining corpus.
 bool check_add_ldr_imm_offset(armlint_state *state,
                               const cs_insn *insn,
                               size_t offset, armlint_finding *out);

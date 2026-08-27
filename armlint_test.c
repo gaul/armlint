@@ -1657,6 +1657,18 @@ static inline void str_d_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned i
 static inline void ldr_q_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x3DC00000u, rt, rn, imm); }
 static inline void str_q_fp(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm) { encode_ldr_imm(out, 0x3D800000u, rt, rn, imm); }
 
+// SIMD&FP LDUR/STUR, the unscaled twin of the above: same size/opc
+// split for the transfer size, in the imm9 slot. Q form only -- the
+// one the spill shapes use.
+static void stur_q(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
+{
+    uint32_t op = 0x3C800000u
+        | (((uint32_t)imm9 & 0x1FFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 // Load/store pair, signed-offset (no-writeback) form:
 // opc(2) 101 V 010 L imm7 Rt2 Rn Rt. imm7 is in per-register
 // transfer-size units (x4 for W/S and LDPSW, x8 for X/D, x16 for Q).
@@ -12469,17 +12481,72 @@ static void test_add_ldr_imm_offset(void)
     str_x_uimm(&code[4], 0, 8, 0);
     add_x(&code[8], 5, 8, 6);
     assert(run_reg_dead(code, 12, 8) == 0);
-}
 
-// Encode STUR Qt, [Xn, #simm9] (SIMD&FP, unscaled). Base 0x3C800000 --
-// the same size/opc split as str_q_uimm, in the unscaled slot.
-static void stur_q(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
-{
-    uint32_t op = 0x3C800000u
-        | (((uint32_t)imm9 & 0x1FFu) << 12)
-        | ((rn & 0x1Fu) << 5)
-        | (rt & 0x1Fu);
-    write_le32(out, op);
+    // SIMD&FP consumers. The address arithmetic does not care which
+    // register file the data lands in, and the pair arm has always
+    // read both; this arm reached its consumer through integer-only
+    // decoders until it was taught otherwise.
+
+    // P) Scaled FP load. Its Rt is a V register, so it cannot
+    //    overwrite the address register and the finding defers --
+    //    run_reg_dead supplies the kill.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    ldr_q_fp(&code[4], 0, 8, 0);            // -> ldr q0, [x1, #0x10]
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // P) Scaled FP store.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 1);            // -> str q0, [x1, #0x20]
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // P) A sub-word FP size: the transfer size comes from the
+    //    decoder's lg2size, so the grid the sum must land on is 8 for
+    //    a D register, not 16.
+    add_x_imm(&code[0], 8, 1, 0x8);
+    str_d_fp(&code[4], 3, 8, 2);            // -> str d3, [x1, #0x18]
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // P) Unscaled FP in, scaled out. The ADD's immediate is off the
+    //    16-byte grid, which is why the store had to be spelled STUR;
+    //    the sum is back on it.
+    add_x_imm(&code[0], 8, 31, 0x2a8);
+    stur_q(&code[4], 0, 8, 0x68);           // -> str q0, [sp, #0x310]
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // P) Unscaled FP in, unscaled out: the sum is off the grid too.
+    add_x_imm(&code[0], 8, 1, 0x4);
+    stur_q(&code[4], 0, 8, 0x10);           // -> stur q0, [x1, #0x14]
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // N) Out of range for a Q access: 0xfff0 + 0x10 scaled by 16 is
+    //    4096, one past imm12, and far past imm9.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0xFFF);
+    assert(run_reg_dead(code, 8, 8) == 0);
+
+    // N) An FP load whose Rt NUMBER equals the address register must
+    //    not take the structural tier: q8 is in the other file and
+    //    leaves x8 untouched, so nothing here proves the sum dead and
+    //    the deferral finds no kill. (Claiming otherwise would report
+    //    a fold that deletes a still-live ADD.)
+    add_x_imm(&code[0], 8, 1, 0x10);
+    ldr_q_fp(&code[4], 8, 8, 0);
+    assert(run_helper_check(code, 8) == 0);
+
+    // P) ... and the same pair with a real kill appended does fold,
+    //     which is what makes the negative above about the register
+    //     file and not about the offset.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    ldr_q_fp(&code[4], 8, 8, 0);            // -> ldr q8, [x1, #0x10]
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // P) An FP store whose Rt number equals the address register is
+    //    not the read-the-deleted-sum case either, for the same
+    //    reason -- it folds.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 8, 8, 0);            // -> str q8, [x1, #0x10]
+    assert(run_reg_dead(code, 8, 8) == 1);
+
 }
 
 // The multi-use fold's positives all end with an overwrite of the
@@ -12565,12 +12632,15 @@ static void test_add_ldr_str_multi_fold(void)
     assert(run_helper_check(code, 12) == 1);
 
     // Negative: one use. That is check_add_ldr_imm_offset's fold, and
-    // this check stays silent so a site is never reported twice. (An
-    // FP store, which that check does not cover, so the 0 is this
-    // check's alone.)
+    // this check stays silent so a site is never reported twice. The
+    // use sits one instruction past the ADD, where that check's
+    // strict adjacency refuses it too, so the 0 belongs to this check
+    // alone. (Adjacent, the same fragment is a finding -- from the
+    // other check; see test_add_ldr_imm_offset.)
     add_x_imm(&code[0], 8, 1, 0x10);
-    str_q_fp(&code[4], 0, 8, 0);
-    assert(run_reg_dead(code, 8, 8) == 0);
+    movz_x(&code[4], 9, 7, 0);
+    str_q_fp(&code[8], 0, 8, 0);
+    assert(run_reg_dead(code, 12, 8) == 0);
 
     // Negative: two uses, but the second one's sum has no encoding --
     // 0xFFF0 + 0x10 scaled by 16 is 4096, one past imm12. The ADD has

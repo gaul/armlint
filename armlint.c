@@ -14239,13 +14239,18 @@ bool check_add_ldr_imm_offset(armlint_state *state,
 
     bool produced = false;
 
-    // (1) Try to close: is this an integer load or store, in either
-    //     the unsigned-offset or the unscaled spelling, consuming the
-    //     pending ADD as its base? Both are decoded to a signed byte
-    //     displacement so the two mix freely -- a scaled ADD folding
-    //     into an LDUR is as ordinary as folding into an LDR, and
-    //     which spelling the assembler happened to choose for the
-    //     access says nothing about whether the sum folds.
+    // (1) Try to close: is this a load or store consuming the pending
+    //     ADD as its base? All four combinations of the two spellings
+    //     -- unsigned-offset and unscaled -- and the two register
+    //     files are decoded, to a signed byte displacement and a log2
+    //     transfer size, so they mix freely. Which spelling the
+    //     assembler happened to choose says nothing about whether the
+    //     sum folds, and neither does which file the data register
+    //     lives in: the address arithmetic is the same either way.
+    //     (The pair arm below has always read both files, because the
+    //     pair forms share one encoding class with a V bit. This arm
+    //     reached its consumer through integer-only decoders and so
+    //     did not, which cost 1,830 sites in the mining corpus.)
     //     Sign-extending
     //     loads overwrite the full X register named by Rt just like
     //     plain LDR, and every accepted pair has an unsigned-offset
@@ -14262,7 +14267,13 @@ bool check_add_ldr_imm_offset(armlint_state *state,
         char rt_wx;
         bool is_store = false;
         bool ls_unscaled = false;
+        bool ls_is_fp = false;
+        bool fp_is_load = false;
         int32_t ls_byte_imm = 0;
+        // size is the log2 transfer size throughout -- the integer
+        // decoders' size field and the SIMD&FP decoders' lg2size are
+        // the same quantity, which is what lets the range test and the
+        // rendering below stay common to both files.
         bool matched = decode_int_load_uimm(op, &size, &ls_mnem, &rt_wx,
                                             &imm12, &ls_rn, &ls_rt);
         if (matched) {
@@ -14278,16 +14289,35 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                                          &ls_rn, &ls_rt)) {
             matched = true;
             ls_unscaled = true;
+        } else if (decode_fp_ldr_str_uimm(op, &fp_is_load, &size,
+                                          &imm12, &ls_rn, &ls_rt)) {
+            matched = true;
+            ls_is_fp = true;
+            is_store = !fp_is_load;
+            ls_mnem = ls_mnemonic(true, fp_is_load, size);
+            ls_byte_imm = (int32_t)((uint32_t)imm12 << size);
+        } else if (decode_fp_ldr_str_simm9(op, &fp_is_load, &size,
+                                           &ls_byte_imm, &ls_rn,
+                                           &ls_rt)) {
+            matched = true;
+            ls_is_fp = true;
+            ls_unscaled = true;
+            is_store = !fp_is_load;
+            ls_mnem = ls_mnemonic(true, fp_is_load, size);
         }
         // A store whose data register is the ADD's Rd cannot fold:
-        // the rewritten store would read the deleted sum. A memory op
+        // the rewritten store would read the deleted sum. The test is
+        // for integer stores only -- a SIMD&FP data register lives in
+        // the other file and can never alias the integer base, so
+        // matching Rt numbers there mean nothing. A memory op
         // that is itself a direct-branch target cannot either: the
         // side entry skips the ADD (rotated loops and list walks
         // branch straight to the load), so the folded form would
         // apply the immediate on a path that never added it.
         if (matched
                 && ls_rn == state->addi_pending_rd
-                && !(is_store && ls_rt == state->addi_pending_rd)
+                && !(is_store && !ls_is_fp
+                    && ls_rt == state->addi_pending_rd)
                 && !offset_is_branch_target(state, offset)) {
             // The rewritten access has to encode, in one spelling
             // or the other. An unscaled input can be negative and need
@@ -14312,7 +14342,12 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 // Rt = 31 is WZR/XZR here (a zero store, or a load to
                 // the discard register), never SP.
                 char rt_buf[8];
-                format_reg(rt_buf, sizeof(rt_buf), rt_wx, ls_rt);
+                if (ls_is_fp) {
+                    format_ls_rt(rt_buf, sizeof(rt_buf), true, size,
+                        ls_rt);
+                } else {
+                    format_reg(rt_buf, sizeof(rt_buf), rt_wx, ls_rt);
+                }
                 // A sum that is negative or off the access-size grid
                 // has no unsigned-offset spelling and must render as
                 // the unscaled form; the input's own spelling has no
@@ -14352,7 +14387,14 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 format_mem_off(out->lines[1], sizeof(out->lines[1]), "",
                     ls_unscaled ? unscaled_mnem(ls_mnem) : ls_mnem,
                     rt_buf, ls_base, ls_byte_imm);
-                if (!is_store && ls_rt == state->addi_pending_rd) {
+                // The structural tier is a load into its OWN base,
+                // which proves the sum dead on the spot. It is
+                // unreachable in the SIMD&FP file: the destination is
+                // a V register, so it never overwrites the integer
+                // base however the two register numbers compare, and
+                // every such site defers instead.
+                if (!is_store && !ls_is_fp
+                        && ls_rt == state->addi_pending_rd) {
                     produced = true;
                 } else {
                     defer_dead_mov(state, out, state->addi_pending_rd);
@@ -14511,33 +14553,6 @@ typedef struct {
     bool rt_aliases;
 } rebase_access;
 
-// Decode SIMD&FP LDUR/STUR (unscaled, signed imm9) -- the unscaled
-// twin of decode_fp_ldr_str_uimm, which sees only the unsigned-offset
-// spelling. Same opc/size split for the transfer size; bits 25..24 =
-// 00 with bit 21 = 0 and bits 11..10 = 00 select the unscaled slot
-// out of the class that also holds the pre/post-index and
-// register-offset forms.
-static bool decode_fp_ldst_simm9(uint32_t op, bool *out_is_load,
-                                 unsigned *out_lg2size, int32_t *out_off,
-                                 unsigned *out_rn, unsigned *out_rt)
-{
-    if ((op & 0x3F200C00u) != 0x3C000000u) {
-        return false;
-    }
-    unsigned size = (op >> 30) & 0x3u;
-    unsigned opc = (op >> 22) & 0x3u;
-    unsigned lg2 = size + ((opc & 0x2u) << 1);
-    if (lg2 > 4u) {
-        return false;   // opc[1] with size != 00 is unallocated
-    }
-    *out_is_load = (opc & 1u) != 0;
-    *out_lg2size = lg2;
-    *out_off = simm9_of(op);
-    *out_rn = (op >> 5) & 0x1Fu;
-    *out_rt = op & 0x1Fu;
-    return true;
-}
-
 // True when `op` is an access based on `base` whose displacement is a
 // plain immediate -- one the multi-use fold could rewrite onto a
 // different base. Covers every such form: the integer and SIMD&FP
@@ -14583,7 +14598,8 @@ static bool decode_rebasable_access(uint32_t op, unsigned base,
         out->lg2size = lg2;
         out->is_load = is_load;
         out->rt_aliases = false;
-    } else if (decode_fp_ldst_simm9(op, &is_load, &lg2, &off, &rn, &rt)) {
+    } else if (decode_fp_ldr_str_simm9(op, &is_load, &lg2, &off,
+                                       &rn, &rt)) {
         out->byte_off = off;
         out->lg2size = lg2;
         out->is_load = is_load;
