@@ -39,6 +39,38 @@ can carry, it has its own scanner held to the same discipline:
 that folds 2-for-1 and the half whose offset overflows the pair's
 imm7, and carries its own `--selftest`.
 
+## Coverage gaps in shipped checks
+
+The `--selftest` discipline above proves a *scanner's* masks cover
+every spelling of their shape. It says nothing about which spellings
+and register classes a *check's* decoder chain accepts, and that is a
+separate hole with the same failure mode: a check reports a plausible
+number off a fraction of its own population, and nothing looks wrong.
+Two of the three rows below were found only by measuring a shipped
+check against the shape it claims to cover, the same way a77f2fa's
+LDUR blindness was.
+
+The first two were measured by lowering `check_add_ldr_str_multi_fold`'s
+minimum-uses threshold from 2 to 1 and re-running the corpus, which
+reuses that check's real deadness proof and side-entry gate instead of
+approximating them. That yields **10,493** single-use sites against the
+**8,428** `check_add_ldr_imm_offset` reports, and the residue splits
+cleanly by what the older check cannot see:
+
+```
+int      adjacent   5529      covered
+fp-pair  adjacent   2340      covered (its pair arm reads both files)
+int-pair adjacent    226      covered
+fp       adjacent   1782  <-  single SIMD&FP access: integer-only
+gapped   (all)       616  <-  strict adjacency refuses these
+```
+
+| Pattern | Rewrite | Notes |
+| --- | --- | --- |
+| Single SIMD&FP access under `check_add_ldr_imm_offset` | as the integer fold | **1,782.** The same bug as the LDUR blindness, one register class over: the check decodes both *spellings* of its consumer since 986f735, but only the integer *class*. `add x8, x8, #0x1e8 ; ldr q0, [x8]` in dyld is the shape. Its own pair arm already reads both register files (2,340 of the covered sites are SIMD&FP pairs), which is what makes the single-access omission an oversight rather than a decision. Nearly free now: `decode_rebasable_access` decodes every one of these |
+| Non-adjacent single use of an ADD base | as the adjacent fold | **616** (270 integer single, 224 SIMD&FP pair, 118 SIMD&FP single, 4 integer pair). `check_add_ldr_imm_offset` clears its pending slot on any non-matching instruction; the use is often one or two instructions further on with something unrelated in between. The multi-use fold already scans a window and would need only the threshold relaxed, but not the two checks both claiming a site |
+| `mov #0` + unscaled store under `check_mov_zero_to_xzr` | `stur xzr, [...]` | **225 candidate sites** against the 3,235 in the unsigned-offset spelling it does see (817 findings realized corpus-wide, over a candidate pool that also includes the ALU operands). The store consumer goes through `decode_str_uimm_any_size` alone, so a zero store the assembler spelled `STUR` is invisible. A two-line decoder swap: `decode_int_ldst_simm9` already exists |
+
 ## Flag-fold leftovers
 
 | Pattern | Rewrite | Notes |
