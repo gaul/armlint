@@ -476,10 +476,13 @@ backlog, built separately with `make tools`:
   population from a pair count. `adrp` + `add` is the standing
   example: 753,648 adjacent dependent pairs across the corpus, of
   which 43,434 have a target inside ADR's reach. Run
-  `tools/shapescan.py --selftest` first: it assembles one reference
-  instance of every mask with clang and checks that each matches its
-  own instruction and no other, which is the only thing standing
-  between a hand-derived mask and a plausible-looking wrong number.
+  `tools/shapescan.py --selftest` first: it assembles every reference
+  instance with clang and checks each mask in both directions -- that
+  it matches no instruction belonging to another mask, and that it
+  matches every spelling of its own listed in `ALSO`. The second half
+  is the one that matters most, because a mask too narrow to see the
+  `stur`, the `ldp q`, or the 64-bit form of its shape reports a small
+  number rather than a wrong one, and nothing looks broken.
   `-e SHAPE` prints example sites. Needs numpy.
 * `tools/addpairscan.py` sizes the ADD-immediate + `LDP`/`STP` family,
   which one shape mask cannot split honestly: the half whose combined

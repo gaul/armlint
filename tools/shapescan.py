@@ -17,16 +17,27 @@ Usage:
     tools/shapescan.py BINARY...              # ranked population table
     tools/shapescan.py -e SHAPE BINARY        # print example sites
 
---selftest is not optional hygiene. Every population this tool prints
-rests on a hand-derived mask, and a mask that is one bit too loose
-silently matches a neighbouring instruction in the same encoding class.
-The self-test assembles one reference instance of each mask with clang
-and checks two things: that the mask matches its own instruction, and
-that it matches no *other* instruction in the reference set. Both
-failure modes have happened here -- a MOVI mask that also caught
-USHLL, an "is this a pure register write" class that included the BFM
-aliases (which merge into their destination, so they read it) -- and
-each inflated a reported population by 40x or more.
+--selftest is not optional hygiene, and it has two halves.
+
+The precision half assembles a reference instance of each mask with
+clang and checks that the mask matches its own instruction and no
+*other* instruction in the reference set. A mask one bit too loose
+silently matches a neighbouring instruction in the same encoding
+class: a MOVI mask that also caught USHLL, an "is this a pure register
+write" class that included the BFM aliases (which merge into their
+destination, so they read it). Each inflated a reported population by
+40x or more.
+
+The recall half, ALSO below, is the other direction, and the more
+dangerous one, because its failures are silent. AArch64 spells most
+operations more than one way -- both register widths, scaled and
+unscaled addressing, integer and SIMD&FP register classes -- and a
+mask pinned to one spelling reports a small number rather than a wrong
+one, so nothing looks broken. ALSO names every spelling a mask is
+meant to cover and the self-test requires each to match. Adding it
+found six masks that were counting a fraction of their shape: LDP/STP
+that saw no SIMD&FP pair, STR that saw no STUR, and the degenerate
+copy spellings that saw only the 32-bit form.
 
 Requires numpy. --selftest additionally requires clang and otool.
 """
@@ -131,7 +142,8 @@ def text_words(path):
 #
 # Every entry is (mask, value, reference assembly). The reference is
 # what --selftest assembles to prove the mask both matches the
-# instruction it names and matches nothing else in this table.
+# instruction it names and matches nothing else in this table. Any
+# further spelling the mask must also cover goes in ALSO below.
 
 MASKS = {
     # Data processing, register forms. Rm = 31 is the zero register.
@@ -144,8 +156,13 @@ MASKS = {
     # Degenerate width/copy spellings.
     "and_lo32":   (0xFFFFFC00, 0x92407C00, "and x0, x1, #0xffffffff"),
     "ubfx_lo32":  (0xFFFFFC00, 0xD3407C00, "ubfx x0, x1, #0, #32"),
+    # LSL #0 and EXTR #0 need one entry per width: the W form is
+    # UBFM/EXTR with N = 0 and imms = 31, the X form N = 1 and imms =
+    # 63, so no single mask spans them.
     "lsl0_w":     (0xFFFFFC00, 0x53007C00, "lsl w0, w1, #0"),
+    "lsl0_x":     (0xFFFFFC00, 0xD340FC00, "lsl x0, x1, #0"),
     "extr_w0":    (0xFFFFFC00, 0x13810000, "extr w0, w1, w1, #0"),
+    "extr_x0":    (0xFFFFFC00, 0x93C10000, "extr x0, x1, x1, #0"),
     # Cross-file moves.
     "umov_s0":    (0xFFFFFC00, 0x0E043C00, "umov w0, v1.s[0]"),
     "umov_d0":    (0xFFFFFC00, 0x4E083C00, "umov x0, v1.d[0]"),
@@ -174,8 +191,19 @@ MASKS = {
     "sub_imm":    (0x7F800000, 0x51000000, "sub w0, w1, #4"),
     "ldp":        (0x7EC00000, 0x28400000, "ldp x0, x1, [x2]"),
     "stp":        (0x7EC00000, 0x28000000, "stp x0, x1, [x2]"),
-    "str_imm_w":  (0xFFC00000, 0xB9000000, "str w0, [x1, #4]"),
-    "str_imm_x":  (0xFFC00000, 0xF9000000, "str x0, [x1, #8]"),
+    # The integer masks pin V = 0, so they see no SIMD&FP pair at all --
+    # and a Q-register spill through a scratch ADD is the shape LLVM
+    # emits most. opc is bits 31..30 and runs 00/01/10 for S/D/Q, so
+    # neither bit can be pinned; opc = 11 is unallocated and unreachable.
+    "ldp_fp":     (0x3EC00000, 0x2C400000, "ldp q0, q1, [x2, #32]"),
+    "stp_fp":     (0x3EC00000, 0x2C000000, "stp q0, q1, [x2, #32]"),
+    # A store is a store in all four addressing forms. Pinning bits
+    # 25..24 to the unsigned-offset spelling is the mistake that hid
+    # LDUR/STUR from the LDP/STP coalescer for as long as it did, so
+    # these leave 25..24 (and the register-offset bit 21) free and pin
+    # only size, V and opc.
+    "str_w_any":  (0xFCC00000, 0xB8000000, "str w0, [x1, #4]"),
+    "str_x_any":  (0xFCC00000, 0xF8000000, "str x0, [x1, #8]"),
     # Vector three-same logic. U (bit 29) and size (23..22) separate
     # AND/BIC/ORR/ORN from EOR/BSL/BIT/BIF; both must be pinned.
     "v_and":      (0xBFE0FC00, 0x0E201C00, "and v0.16b, v1.16b, v2.16b"),
@@ -190,10 +218,85 @@ MASKS = {
     "v_dup_elem": (0xBF20FC00, 0x0E000400, "dup v0.4s, v1.s[1]"),
     # MOVI/MVNI need bits 28..19 pinned: a mask that stops at bit 23
     # also matches USHLL/SHLL, which sit in the neighbouring
-    # shift-by-immediate class. Bit 29 is the op bit that separates the
-    # two, so it has to be pinned as well or MVNI reads as MOVI.
+    # shift-by-immediate class. Bit 29 is the op bit, so it has to be
+    # pinned as well or MVNI reads as MOVI.
     "v_movi":     (0xBFF80C00, 0x0F000400, "movi v0.4s, #1"),
+    # op (bit 29) alone does not separate MOVI from MVNI: with cmode =
+    # 1110 an op of 1 is the 64-bit MOVI (`movi v0.2d, #0`), and with
+    # cmode = 1111 it is the vector FMOV. So this entry is the op = 1
+    # half of the immediate-move class, not MVNI alone. Both shapes
+    # that use it take the union with v_movi, so the count is right;
+    # the name is the approximation.
     "v_mvni":     (0xBFF80C00, 0x2F000400, "mvni v0.4s, #1"),
+}
+
+
+# === Recall references ===
+#
+# The spellings each mask must ALSO match. The collision half of
+# --selftest proves a mask is not too loose; nothing proves a mask is
+# not too NARROW unless a second spelling of the same operation is
+# assembled and required to match, because a narrow mask fails by
+# reporting a small population rather than a wrong one.
+#
+# The rule for adding an entry: it must be a genuinely different
+# encoding of an instruction the shape's rewrite would accept, not a
+# different assembler spelling of the same bits. `ubfm x0, x1, #0, #31`
+# adds nothing over `ubfx x0, x1, #0, #32`; `stur w0, [x1, #-4]` adds a
+# whole addressing class.
+
+ALSO = {
+    # sf is free in the ZR-operand and ZR-destination masks, so both
+    # register widths must land.
+    "orr_zr":     ("orr x0, x1, xzr",),
+    "add_zr":     ("add x0, x1, xzr",),
+    "sub_zr":     ("sub x0, x1, xzr",),
+    "eor_zr":     ("eor x0, x1, xzr",),
+    "and_zr":     ("and x0, x1, xzr",),
+    "mul_zr":     ("mul x0, x1, xzr",),
+    "add_to_zr":  ("add xzr, x1, x2",),
+    "sub_to_zr":  ("sub xzr, x1, x2",),
+    "orr_to_zr":  ("orr xzr, x1, x2",),
+    "eor_to_zr":  ("eor xzr, x1, x2",),
+    "and_to_zr":  ("and xzr, x1, x2",),
+    "madd_to_zr": ("madd xzr, x1, x2, x3",),
+    "csel_to_zr": ("csel xzr, x1, x2, ne",),
+    # cond (bits 3..0) is free below the bit-4 pin that keeps BC.cond out.
+    "bcond":      ("b.ne .",),
+    # op (bit 24) and sf are both free: CBNZ and TBNZ count too.
+    "cbz":        ("cbnz x0, .",),
+    "tbz":        ("tbnz x0, #40, .",),
+    # Both widths, and the lsl #12 shift (bit 22).
+    "add_imm":    ("add x0, x1, #4", "add x0, x1, #4, lsl #12"),
+    "sub_imm":    ("sub x0, x1, #4", "sub x0, x1, #4, lsl #12"),
+    # Integer pairs are W or X; opc = 01 is LDPSW, which has its own
+    # fold and is deliberately out of this entry.
+    "ldp":        ("ldp w0, w1, [x2]",),
+    "stp":        ("stp w0, w1, [x2]",),
+    "ldp_fp":     ("ldp s0, s1, [x2]", "ldp d0, d1, [x2, #16]"),
+    "stp_fp":     ("stp s0, s1, [x2]", "stp d0, d1, [x2, #16]"),
+    # All four addressing forms of the same store.
+    "str_w_any":  ("stur w0, [x1, #-4]", "str w0, [x1], #4",
+                   "str w0, [x1, #4]!", "str w0, [x1, x2]"),
+    "str_x_any":  ("stur x0, [x1, #-8]", "str x0, [x1], #8",
+                   "str x0, [x1, #8]!", "str x0, [x1, x2]"),
+    # Q (bit 30) is free in the three-same classes, and size (23..22) in
+    # those that pin only the opcode.
+    "v_and":      ("and v0.8b, v1.8b, v2.8b",),
+    "v_bic":      ("bic v0.8b, v1.8b, v2.8b",),
+    "v_orr":      ("orr v0.8b, v1.8b, v2.8b",),
+    "v_eor":      ("eor v0.8b, v1.8b, v2.8b",),
+    "v_sub":      ("sub v0.16b, v1.16b, v2.16b", "sub v0.2d, v1.2d, v2.2d"),
+    "v_mul":      ("mul v0.8b, v1.8b, v2.8b",),
+    "v_fmul":     ("fmul v0.2d, v1.2d, v2.2d",),
+    "v_mla":      ("mla v0.8h, v1.8h, v2.8h",),
+    "v_fmla":     ("fmla v0.2d, v1.2d, v2.2d",),
+    "v_dup_elem": ("dup v0.2d, v1.d[1]", "dup v0.8b, v1.b[3]"),
+    # cmode (bits 15..12) is free, which is the whole immediate range.
+    "v_movi":     ("movi v0.16b, #1", "movi v0.8h, #1",
+                   "movi v0.4s, #1, lsl #8"),
+    "v_mvni":     ("mvni v0.8h, #1", "mvni v0.4s, #1, lsl #8",
+                   "movi v0.2d, #0"),
 }
 
 
@@ -250,7 +353,8 @@ def s_and_lo32(c):
 
 def s_degenerate_copy(c):
     w = c.w
-    return m(w, "lsl0_w") | (m(w, "extr_w0") & (rm(w) == rn(w)))
+    return any_of(w, "lsl0_w", "lsl0_x") \
+        | (any_of(w, "extr_w0", "extr_x0") & (rm(w) == rn(w)))
 
 
 def s_umov(c):
@@ -373,7 +477,7 @@ def s_adrp_add_in_range(c):
 
 def s_ldp_via_scratch(c):
     a, b = c.a, c.b
-    return m(a, "add_imm") & any_of(b, "ldp", "stp") \
+    return m(a, "add_imm") & any_of(b, "ldp", "stp", "ldp_fp", "stp_fp") \
         & (rn(b) == rd(a)) & (rd(a) != 31)
 
 
@@ -406,8 +510,8 @@ def s_fmov_roundtrip(c):
 
 def s_fcvtzs_str(c):
     a, b = c.a, c.b
-    return any_of(a, "fcvtzs_ws", "fcvtzs_xd") & any_of(b, "str_imm_w", "str_imm_x") \
-        & (rd(b) == rd(a))
+    return any_of(a, "fcvtzs_ws", "fcvtzs_xd") \
+        & any_of(b, "str_w_any", "str_x_any") & (rd(b) == rd(a))
 
 
 # label -> (is_pair, predicate). Labels match the TODO.md rows.
@@ -434,10 +538,9 @@ SHAPES = [
 
 # === Self-test ===
 
-def selftest():
-    labels = list(MASKS)
-    src = ["    .text", "    .arch armv8.5-a", "Lz:"]
-    src += ["    " + MASKS[k][2] for k in labels]
+def _assemble(lines):
+    """Assemble one instruction per line; return their encodings."""
+    src = ["    .text", "    .arch armv8.5-a", "Lz:"] + ["    " + l for l in lines]
     with tempfile.TemporaryDirectory() as td:
         asm, obj = os.path.join(td, "s.s"), os.path.join(td, "s.o")
         with open(asm, "w") as f:
@@ -446,32 +549,54 @@ def selftest():
                             capture_output=True, text=True)
         if cc.returncode:
             print(cc.stderr, file=sys.stderr)
-            return 1
+            return None
         dump = subprocess.run(["otool", "-t", obj], capture_output=True, text=True)
         words = []
         for line in dump.stdout.splitlines()[2:]:
             words += [int(x, 16) for x in line.split()[1:]]
-    if len(words) != len(labels):
-        print(f"selftest: assembled {len(words)} words for {len(labels)} masks",
+    if len(words) != len(lines):
+        print(f"selftest: assembled {len(words)} words for {len(lines)} lines",
               file=sys.stderr)
+        return None
+    return words
+
+
+def selftest():
+    """Check every mask for recall (ALSO) and precision (collisions)."""
+    refs = []                       # (owning key, assembly)
+    for key in MASKS:
+        refs.append((key, MASKS[key][2]))
+        for extra in ALSO.get(key, ()):
+            refs.append((key, extra))
+    unknown = set(ALSO) - set(MASKS)
+    if unknown:
+        print(f"selftest: ALSO names masks that do not exist: "
+              f"{', '.join(sorted(unknown))}", file=sys.stderr)
+        return 1
+    words = _assemble([a for _k, a in refs])
+    if words is None:
         return 1
 
     failures = 0
-    for key, word in zip(labels, words):
+    for key in MASKS:
         mask, val, ref = MASKS[key]
-        matches = (word & mask) == val
-        collide = [k2 for k2, w2 in zip(labels, words)
-                   if k2 != key and (w2 & mask) == val]
-        ok = matches and not collide
+        mine = [(a, w) for (o, a), w in zip(refs, words) if o == key]
+        misses = [(a, w) for a, w in mine if (w & mask) != val]
+        collide = [(o, a) for (o, a), w in zip(refs, words)
+                   if o != key and (w & mask) == val]
+        ok = not misses and not collide
         failures += not ok
-        note = ""
-        if not matches:
-            note = f"  -- does not match its own encoding 0x{word:08X}"
-        elif collide:
-            note = f"  -- also matches {', '.join(collide)}"
-        print(f"  {'ok  ' if ok else 'FAIL'} {key:14s} {ref:32s}"
-              f"&0x{mask:08X}==0x{val:08X}{note}")
-    print(f"\n{len(labels) - failures}/{len(labels)} masks verified")
+        extra = f"  +{len(mine) - 1}" if len(mine) > 1 else "    "
+        print(f"  {'ok  ' if ok else 'FAIL'} {key:12s} {ref:34s}"
+              f"&0x{mask:08X}==0x{val:08X}{extra}")
+        for a, w in misses:
+            print(f"         misses {a!r} (0x{w:08X})")
+        for o, a in collide:
+            print(f"         also matches {a!r}, which belongs to {o}")
+
+    print(f"\n{len(MASKS) - failures}/{len(MASKS)} masks verified against "
+          f"{len(refs)} reference instructions "
+          f"({len(refs) - len(MASKS)} of them recall references)")
     return 1 if failures else 0
 
 

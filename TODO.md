@@ -21,6 +21,18 @@ population below was spot-checked against real disassembly -- both
 steps caught mask and modelling errors that had inflated earlier
 counts by one to three orders of magnitude.
 
+`--selftest` verifies masks in both directions. The collision half
+catches a mask that is too loose, which fails loudly by reporting an
+absurd number. The recall half catches a mask that is too narrow,
+which fails silently: it reports a plausible small number, and nothing
+looks wrong. Every population below is therefore an undercount until
+some reference instruction proves each spelling of its shape is
+matched -- both register widths, scaled and unscaled addressing,
+integer and SIMD&FP register classes. The recall half was added after
+the LDUR/STUR blindness in the LDP/STP coalescer (a77f2fa) showed the
+same class of error could sit in the scanners; it immediately found
+six such masks here, one of which had been undercounting by 3.9x.
+
 Where a candidate needed operand conditions finer than one shape mask
 can carry, it has its own scanner held to the same discipline:
 `tools/addpairscan.py` splits the ADD + LDP/STP family into the half
@@ -100,7 +112,7 @@ here with measured populations so it is not re-investigated.
 | Render `mov xd, #0` (not `mov xd, xzr`) and `movi v0.2d, #0` (not `movi d0, #0`) | Apple eliminates only those spellings at rename; rendering tweaks to existing checks |
 | Loaded value as base not offset (`[x9, x8]` → `[x8, x9]` when x8 was just loaded) | Apple guide §4.6.7: 1 cycle of address-generation latency |
 | PAC audit v2: non-SP LR stores (jmp_buf/context saves; rare -- 0 in bash/dyld, lives in libsystem_c), the compact `ldrb`-scaled jump-table variant (`adr` + `ldrb` + `add …, lsl #2` + `br`; seen in Homebrew arm64 libcapstone, unmatched by the ldrsw classifier) | Auto-arm on arm64e slices: **done** for both `-a pac` and `-m pauth`. Jump-table classification for the dominant `ldrsw` idiom: **done** (jt_advance in check_pac_raw_indirect empties the arm64e raw-BR worklist). Zero-discriminator forward edges: **done** (check_pac_zero_disc_indirect flags `braaz`/`blraaz`/`brabz`/`blrabz`; census ssh 109, sshd 39, zsh 443, ls 2, bash 85, dyld 169) |
-| LDP/STP synthesized through a scratch ADD (`add x27, xN, #big ; ldp x3, x4, [x27]`) → two plain `ldr`/`str` with the offset folded in | Size-neutral 2-for-2 that drops the ADD from the address dependency chain and frees the scratch; gc emits it whenever a pair offset exceeds ±504 or is 8-misaligned, LLVM for big Q-register spill offsets; requires the split offsets to encode (scaled imm12, or LDUR/STUR range). 2026-08 sweep, re-measured: **17,565** sites whose combined offset overflows the pair's imm7 (10,659 go, 6,825 librustc_driver, under 80 elsewhere). The in-range half of this family -- 8,775 sites that fold 2-for-**1** rather than 2-for-2 -- turned out to be the bigger prize and is now **done** (check_add_ldr_imm_offset's pair arm; see [analyses.md](analyses.md#add--ldpstp-foldable-to-immediate-offset-ldpstp)). What remains here is only the out-of-range residue, where the win is latency and a freed scratch rather than a shorter sequence |
+| LDP/STP synthesized through a scratch ADD (`add x27, xN, #big ; ldp x3, x4, [x27]`) → two plain `ldr`/`str` with the offset folded in | Size-neutral 2-for-2 that drops the ADD from the address dependency chain and frees the scratch; gc emits it whenever a pair offset exceeds ±504 or is 8-misaligned, LLVM for big Q-register spill offsets; requires the split offsets to encode (scaled imm12, or LDUR/STUR range). 2026-08 sweep, re-measured: **17,565** sites whose combined offset overflows the pair's imm7 (10,659 go, 6,825 librustc_driver, under 80 elsewhere). shapescan's total for the whole family was **16,838** until the `--selftest` recall half showed its `ldp`/`stp` masks pinned V = 0 and so saw no SIMD&FP pair at all -- exactly the Q-register spill this row names. Corrected it is **26,340** (librustc_driver 3,176 -> 12,296, a 3.9x undercount), which reconciles with addpairscan's independent split to the site: 8,775 in range + 17,565 overflow = 26,340. The old figure was visibly impossible -- a family total below its own overflow half -- and went unquestioned for two days. The in-range half of this family -- 8,775 sites that fold 2-for-**1** rather than 2-for-2 -- turned out to be the bigger prize and is now **done** (check_add_ldr_imm_offset's pair arm; see [analyses.md](analyses.md#add--ldpstp-foldable-to-immediate-offset-ldpstp)). What remains here is only the out-of-range residue, where the win is latency and a freed scratch rather than a shorter sequence |
 
 ## Window candidates (2026-07 corpus sweep)
 
