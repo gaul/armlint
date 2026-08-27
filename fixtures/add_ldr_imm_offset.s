@@ -37,14 +37,43 @@ _main:
     add     x3, x1, #16
     ldr     x3, [x3, #8]
 
-    // Negatives:
-    // N1) Misaligned for X access (#4 not a multiple of 8).
+    // 9) A sum off the access-size grid has no unsigned-offset
+    // spelling; the unscaled form takes it unchanged.
     add     x3, x1, #4
+    ldr     x3, [x3]                // -> ldur x3, [x1, #4]
+
+    // 10) Same for a W access.
+    add     x3, x1, #2
+    ldr     w3, [x3]                // -> ldur w3, [x1, #2]
+
+    // Unscaled inputs. Which spelling the assembler chose for the
+    // access says nothing about whether the sum folds; the output
+    // spelling is chosen from the sum alone.
+
+    // 11) Unscaled in, scaled out.
+    add     x3, x1, #16
+    ldur    x3, [x3, #-8]           // -> ldr x3, [x1, #8]
+
+    // 12) Unscaled in, unscaled out: the sum goes negative, which the
+    // unsigned-offset form cannot express at all.
+    add     x3, x1, #16
+    ldur    x3, [x3, #-32]          // -> ldur x3, [x1, #-16]
+
+    // 13) The unscaled offset cancels the ADD exactly.
+    add     x3, x1, #24
+    ldur    x3, [x3, #-24]          // -> ldr x3, [x1]
+
+    // Negatives:
+    // N1) Misaligned AND past the unscaled +255 ceiling: 260 is not a
+    //     multiple of 8, so neither spelling encodes it.
+    add     x3, x1, #260
     ldr     x3, [x3]
 
-    // N2) Misaligned for W access (#2 not a multiple of 4).
-    add     x3, x1, #2
-    ldr     w3, [x3]
+    // N2) Pre-indexed load. Same encoding group as LDUR, but it writes
+    //     the sum back to the base, so deleting the ADD would drop an
+    //     observable update.
+    add     x3, x1, #16
+    ldr     x5, [x3, #8]!
 
     // N3) Too large for X-form encoding: 0x8000 / 8 = 4096 > 4095.
     add     x3, x1, #32768
@@ -66,7 +95,9 @@ _main:
     add     x3, x1, #0x7000
     ldr     x3, [x3, #0x1000]
 
-    // N7) SUB-imm: no negative encoding in LDR-uimm.
+    // N7) SUB-imm: the pending slot opens only on ADD-immediate. The
+    //     sum would encode now that the unscaled form is understood,
+    //     but the check does not look for a SUB producer.
     sub     x3, x1, #16
     ldr     x3, [x3]
 
@@ -113,6 +144,16 @@ _main:
     mov     x8, sp
     str     xzr, [x8, #8]           // -> str xzr, [sp, #8]
     mov     x8, #3
+
+    // P) Unscaled store, folding to the scaled spelling.
+    add     x8, x1, #16
+    stur    x0, [x8, #-8]           // -> str x0, [x1, #8]
+    mov     x8, #6
+
+    // P) A misaligned sum under a scaled store folds to STUR.
+    add     x8, x1, #4
+    str     x0, [x8]                // -> stur x0, [x1, #4]
+    mov     x8, #7
 
     // N10) Store data == address register: the rewrite would read
     //      the deleted sum; never folds.

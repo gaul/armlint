@@ -2847,11 +2847,28 @@ so quietly materialized through a scratch register instead.
   read the deleted sum). The canonical stack-spill-through-a-temp --
   `add x8, sp, #32 ; str x0, [x8]` -> `str x0, [sp, #0x20]` -- is
   the flagship store shape.
-* Encoding constraint: the combined byte offset must be a multiple
-  of the LDR's access size and its scaled value must fit in 12
-  bits. The LDR's own imm12 is already a multiple of access_size,
-  so alignment is determined solely by the ADD's byte immediate.
-  The ADD's `sh=1` form (`imm12 << 12`) is supported.
+* Both spellings of the access are decoded. AArch64 gives every
+  base-plus-offset access two encodings -- the unsigned-offset form,
+  whose `imm12` is scaled by the transfer size and cannot go negative,
+  and the unscaled `LDUR`/`STUR` form, whose `imm9` is a signed byte
+  count -- and an assembler picks per instruction. Which one it picked
+  says nothing about whether the sum folds, so both decode to a signed
+  byte displacement and mix freely.
+* Encoding constraint: the combined byte offset must encode in one
+  spelling or the other -- non-negative, on the access-size grid and
+  under `4095 * size` for the scaled form, or within `-256..255` for
+  the unscaled one. Neither property can be inferred from the ADD's
+  immediate the way it could when every input was scaled, because an
+  unscaled input carries no alignment guarantee; the sum itself is
+  tested. That also admits sums the old test refused: a misaligned ADD
+  immediate under a *scaled* access lands outside `imm12` but inside
+  `imm9`, so `add x3, x1, #4 ; ldr x3, [x3]` folds to
+  `ldur x3, [x1, #4]`. The output spelling is chosen from the sum
+  alone. The ADD's `sh=1` form (`imm12 << 12`) is supported.
+  The `-256` floor is unreachable from this producer -- ADD-immediate
+  is non-negative and `imm9` bottoms out at `-256`, so the sum never
+  goes below it -- but the guard states the encoding's range rather
+  than this caller's reach.
 * Rn = SP (Rn = 31 in ADD-imm) is intentionally flagged: ADD-imm
   and LDR-uimm both encode 31 as SP, so the canonical stack-
   relative load pattern (`add xt, sp, #imm ; ldr xt, [xt]`) folds
@@ -2861,8 +2878,12 @@ so quietly materialized through a scratch register instead.
   that is the redundant ADD `check_add_sub_zero` owns. Rd = SP in
   the ADD is excluded -- folding would discard the observable SP
   update.
-* SUB-immediate is not folded: the LDR unsigned-offset form has
-  no negative-immediate encoding.
+* SUB-immediate is not folded. The reason used to be that the LDR
+  unsigned-offset form has no negative-immediate encoding; with the
+  unscaled spelling understood that is no longer true, and the only
+  remaining reason is that the pending slot opens on ADD-immediate
+  alone. A SUB producer whose sum lands in `imm9` would fold; it is
+  simply not looked for.
 * Side entries: a memory op that is itself the target of a direct
   branch (B/BL, B.cond/BC.cond, CBZ/CBNZ, TBZ/TBNZ) never closes a
   fold. The entering path skips the ADD -- the list-walk idiom
@@ -2884,6 +2905,24 @@ so quietly materialized through a scratch register instead.
   window after the first may be a branch target); this check gates
   at close anyway so a doomed pairing never occupies the shared
   deferral slot.
+* Corpus: 5,564 findings across 28.4M instructions (4,479
+  librustc_driver, 902 bash, 76 dyld, 55 libcrypto, 51 ssh, 1 go).
+  Teaching the check the unscaled spelling added 126 of those. That is
+  far below what the candidate population suggests -- 23,503 adjacent
+  ADD + LDUR/STUR pairs exist in the corpus, 9,124 of them with a sum
+  that encodes -- and the gap is structural, not a further blind spot.
+  The immediate tier is a load into its own base (`add x3, x1, #16 ;
+  ldr x3, [x3]`), which proves the sum dead on the spot; everything
+  else defers to the forward liveness scan, which usually refuses. That
+  tier is **21.3%** of the encodable scaled population and **1.4%** of
+  the unscaled one, because the two spellings sit in different idioms:
+  a scaled offset is the compute-an-address-and-dereference-it shape,
+  while the unscaled one appears on field accesses off a long-lived
+  base that the ADD does not consume (the next instruction is another
+  access off the same base at 10.2% of unscaled sites against 4.4% of
+  scaled ones). The remaining ~8,000 are visible to the check and
+  refused on soundness, which is a different backlog entry from being
+  unable to see them.
 
 ## ADD + LDP/STP foldable to immediate-offset LDP/STP
 
@@ -2900,8 +2939,11 @@ so quietly materialized through a scratch register instead.
   shape that dominates real code is an ADD forward and a negative
   `imm7` back, cancelling to a bare base --
   `add x19, x26, #0xb8 ; ldp x21, x20, [x19, #-0xb8]` ->
-  `ldp x21, x20, [x26]` -- which the single-access fold cannot express
-  at all, because `LDR`/`STR`-uimm has no negative offset.
+  `ldp x21, x20, [x26]`. The single-access fold reaches a negative sum
+  only through the unscaled `LDUR`/`STUR` spelling, whose `imm9` stops
+  at `-256`; a pair's `imm7` is pre-scaled, so it reaches `-512` for X
+  and `-1024` for Q. Beyond that the pair form is simply a different
+  slot, not a wider one.
 * Encoding constraint: `imm7` is already a multiple of the transfer
   size, so the combined offset's alignment is decided solely by the
   ADD's byte immediate, and the SCALED total must fit signed 7 bits

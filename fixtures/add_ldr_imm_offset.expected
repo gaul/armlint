@@ -30,40 +30,68 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x38 <_main+0x38>: -> ldr 
   add x3, x1, #0x10
   ldr x3, [x3, #0x8]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x60 <_main+0x60>: -> ldr x7, [x1, #0x10] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0x40 <_main+0x40>: -> ldur x3, [x1, #0x4] (2 instructions)
+  add x3, x1, #0x4
+  ldr x3, [x3]
+
+ADD + LDR foldable to immediate-offset LDR at offset: 0x48 <_main+0x48>: -> ldur w3, [x1, #0x2] (2 instructions)
+  add x3, x1, #0x2
+  ldr w3, [x3]
+
+ADD + LDR foldable to immediate-offset LDR at offset: 0x50 <_main+0x50>: -> ldr x3, [x1, #0x8] (2 instructions)
+  add x3, x1, #0x10
+  ldur x3, [x3, #-0x8]
+
+ADD + LDR foldable to immediate-offset LDR at offset: 0x58 <_main+0x58>: -> ldur x3, [x1, #-0x10] (2 instructions)
+  add x3, x1, #0x10
+  ldur x3, [x3, #-0x20]
+
+ADD + LDR foldable to immediate-offset LDR at offset: 0x60 <_main+0x60>: -> ldr x3, [x1] (2 instructions)
+  add x3, x1, #0x18
+  ldur x3, [x3, #-0x18]
+
+ADD + LDR foldable to immediate-offset LDR at offset: 0x88 <_main+0x88>: -> ldr x7, [x1, #0x10] (2 instructions)
   add x3, x1, #0x10
   ldr x7, [x3]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x84 <_main+0x84>: -> ldrsw x3, [x1, #0xc] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0xac <_main+0xac>: -> ldrsw x3, [x1, #0xc] (2 instructions)
   add x3, x1, #0x8
   ldrsw x3, [x3, #0x4]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x8c <_main+0x8c>: -> ldr x8, [sp] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0xb4 <_main+0xb4>: -> ldr x8, [sp] (2 instructions)
   mov x8, sp
   ldr x8, [x8]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x94 <_main+0x94>: -> ldr x8, [sp, #0x10] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0xbc <_main+0xbc>: -> ldr x8, [sp, #0x10] (2 instructions)
   mov x8, sp
   ldr x8, [x8, #0x10]
 
-ADD + LDR foldable to immediate-offset LDR at offset: 0x9c <_main+0x9c>: -> ldr x0, [sp] (2 instructions)
+ADD + LDR foldable to immediate-offset LDR at offset: 0xc4 <_main+0xc4>: -> ldr x0, [sp] (2 instructions)
   mov x8, sp
   ldr x0, [x8]
 
-ADD + STR foldable to immediate-offset STR at offset: 0xa4 <_main+0xa4>: -> str x0, [x1, #0x10] (2 instructions)
+ADD + STR foldable to immediate-offset STR at offset: 0xcc <_main+0xcc>: -> str x0, [x1, #0x10] (2 instructions)
   add x8, x1, #0x10
   str x0, [x8]
 
-ADD + STR foldable to immediate-offset STR at offset: 0xb0 <_main+0xb0>: -> str x0, [sp, #0x20] (2 instructions)
+ADD + STR foldable to immediate-offset STR at offset: 0xd8 <_main+0xd8>: -> str x0, [sp, #0x20] (2 instructions)
   add x8, sp, #0x20
   str x0, [x8]
 
-ADD + STR foldable to immediate-offset STR at offset: 0xbc <_main+0xbc>: -> str xzr, [sp, #0x8] (2 instructions)
+ADD + STR foldable to immediate-offset STR at offset: 0xe4 <_main+0xe4>: -> str xzr, [sp, #0x8] (2 instructions)
   mov x8, sp
   str xzr, [x8, #0x8]
 
-Optimization opportunities by type:
-      13  ADD + LDR foldable to immediate-offset LDR
-       3  ADD + STR foldable to immediate-offset STR
+ADD + STR foldable to immediate-offset STR at offset: 0xf0 <_main+0xf0>: -> str x0, [x1, #0x8] (2 instructions)
+  add x8, x1, #0x10
+  stur x0, [x8, #-0x8]
 
-16 optimization opportunities in 60 instructions
+ADD + STR foldable to immediate-offset STR at offset: 0xfc <_main+0xfc>: -> stur x0, [x1, #0x4] (2 instructions)
+  add x8, x1, #0x4
+  str x0, [x8]
+
+Optimization opportunities by type:
+      18  ADD + LDR foldable to immediate-offset LDR
+       5  ADD + STR foldable to immediate-offset STR
+
+23 optimization opportunities in 76 instructions

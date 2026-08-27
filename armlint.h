@@ -2004,11 +2004,33 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
 // same way (PRFM is excluded: its Rt is a prefetch operation, not a
 // destination).
 //
-// Encoding constraint: the combined byte offset must be a multiple of
-// the access size and its scaled value must fit in 12 bits. The
-// access's own imm12 is already a multiple of access_size, so
-// alignment is determined solely by the ADD's byte immediate. The
-// ADD's sh=1 form (imm12 << 12) is supported.
+// Both spellings of the access are decoded. AArch64 encodes a
+// base-plus-offset access either with an imm12 scaled by the transfer
+// size (non-negative) or with the unscaled LDUR/STUR form's signed
+// imm9 byte count, and an assembler picks per instruction. Which one
+// it picked says nothing about whether the sum folds, so both decode
+// to a signed byte displacement and mix freely:
+//   add xt, xn, #16 ; ldur xt, [xt, #-8]  -> ldr  xt, [xn, #8]
+//   add xt, xn, #16 ; ldur xt, [xt, #-32] -> ldur xt, [xn, #-16]
+//
+// Encoding constraint: the combined byte offset must encode in one
+// spelling or the other -- non-negative, on the access-size grid and
+// under 4095 * size for the scaled form, or within -256..255 for the
+// unscaled one. An unscaled input carries no alignment guarantee, so
+// neither property can be inferred from the ADD's immediate and the
+// sum itself is tested. That also admits sums the old scaled-only
+// test refused: a misaligned ADD immediate under a scaled access
+// lands outside imm12 but inside imm9, so "add x3, x1, #4 ;
+// ldr x3, [x3]" folds to "ldur x3, [x1, #4]". The output spelling is
+// chosen from the sum alone, and the ADD's sh=1 form (imm12 << 12) is
+// supported. The -256 floor is unreachable from this producer --
+// ADD-immediate is non-negative and imm9 bottoms out at -256 -- but
+// the guard states the encoding's range, not this caller's reach.
+//
+// The pre-indexed, post-indexed and register-offset members of the
+// unscaled encoding group are excluded: the first two write the sum
+// back to the base, so deleting the ADD would drop an observable
+// update, and the third has no immediate slot to fold into.
 //
 // Soundness: the rewrite deletes the ADD, so its Rd must be dead
 // afterward. A load whose Rt equals the ADD's Rd proves that

@@ -13484,6 +13484,51 @@ static bool classify_int_store(unsigned size, unsigned opc,
     return true;
 }
 
+// Unscaled (LDUR/STUR) counterpart of decode_int_load_uimm and
+// decode_str_uimm_any_size, covering loads and stores in one decode
+// because the two spellings differ only in opc. AArch64 gives every
+// base+offset access two encodings -- the unsigned-offset form, whose
+// imm12 is scaled by the transfer size and cannot go negative, and
+// this one, whose imm9 is a signed byte count -- and assemblers pick
+// per instruction, so a consumer that decodes only the scaled form
+// goes blind wherever the offset is negative or misaligned. That is
+// exactly where the unscaled form exists to reach.
+//
+// Mask 0x3F200C00 / value 0x38000000 fixes bits 29..24 to the
+// load/store register class with V = 0 and the 25..24 = 00 addressing
+// group, then bit 21 clear and bits 11..10 zero pick the plain
+// unscaled member out of that group: the pre-indexed, post-indexed and
+// register-offset members write back or take a register operand and
+// are not interchangeable with a plain base-plus-offset access. size
+// and opc stay free; classification splits loads from stores and
+// rejects PRFM and the unallocated slots exactly as the scaled
+// decoders do.
+static bool decode_int_ldst_simm9(uint32_t op, unsigned *out_size,
+                                  const char **out_mnem, char *out_rt_wx,
+                                  bool *out_is_store, int32_t *out_off,
+                                  unsigned *out_rn, unsigned *out_rt)
+{
+    if ((op & 0x3F200C00u) != 0x38000000u) {
+        return false;
+    }
+    unsigned size = (op >> 30) & 0x3u;
+    unsigned opc = (op >> 22) & 0x3u;
+    bool is_store = (opc == 0u);
+    if (is_store) {
+        if (!classify_int_store(size, opc, out_mnem, out_rt_wx)) {
+            return false;
+        }
+    } else if (!classify_int_load(size, opc, out_mnem, out_rt_wx)) {
+        return false;
+    }
+    *out_size = size;
+    *out_is_store = is_store;
+    *out_off = simm9_of(op);
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rt = op & 0x1Fu;
+    return true;
+}
+
 // Decode X-form ADD (immediate), non-S-variant. ADD-imm uses
 // sf 0 0 100010 sh imm12 Rn Rd; sf=1, op=0, S=0 -> base 0x91000000,
 // mask 0xFF800000 (bits 31..23). sh (bit 22) is a free field: when
@@ -14138,7 +14183,7 @@ static void format_pair_rt(char *buf, size_t bufsz, bool is_fp,
 // prefix is "-> " for a suggested rewrite and "" for a quoted
 // original. Only the signed-offset forms reach here; the writeback
 // spellings belong to the pre-/post-index checks.
-static void format_pair_mem(char *buf, size_t bufsz, const char *prefix,
+static void format_mem_off(char *buf, size_t bufsz, const char *prefix,
                             const char *mnem, const char *rts,
                             const char *base, int32_t byte_off)
 {
@@ -14167,8 +14212,14 @@ bool check_add_ldr_imm_offset(armlint_state *state,
 
     bool produced = false;
 
-    // (1) Try to close: is this an unsigned-offset integer load or
-    //     store consuming the pending ADD as its base? Sign-extending
+    // (1) Try to close: is this an integer load or store, in either
+    //     the unsigned-offset or the unscaled spelling, consuming the
+    //     pending ADD as its base? Both are decoded to a signed byte
+    //     displacement so the two mix freely -- a scaled ADD folding
+    //     into an LDUR is as ordinary as folding into an LDR, and
+    //     which spelling the assembler happened to choose for the
+    //     access says nothing about whether the sum folds.
+    //     Sign-extending
     //     loads overwrite the full X register named by Rt just like
     //     plain LDR, and every accepted pair has an unsigned-offset
     //     LDRS*/STR* form, so the fold carries over. The rewrite
@@ -14183,14 +14234,23 @@ bool check_add_ldr_imm_offset(armlint_state *state,
         const char *ls_mnem;
         char rt_wx;
         bool is_store = false;
+        bool ls_unscaled = false;
+        int32_t ls_byte_imm = 0;
         bool matched = decode_int_load_uimm(op, &size, &ls_mnem, &rt_wx,
                                             &imm12, &ls_rn, &ls_rt);
-        if (!matched
-                && decode_str_uimm_any_size(op, &size, &imm12,
+        if (matched) {
+            ls_byte_imm = (int32_t)((uint32_t)imm12 << size);
+        } else if (decode_str_uimm_any_size(op, &size, &imm12,
                                             &ls_rn, &ls_rt)
                 && classify_int_store(size, 0u, &ls_mnem, &rt_wx)) {
             matched = true;
             is_store = true;
+            ls_byte_imm = (int32_t)((uint32_t)imm12 << size);
+        } else if (decode_int_ldst_simm9(op, &size, &ls_mnem, &rt_wx,
+                                         &is_store, &ls_byte_imm,
+                                         &ls_rn, &ls_rt)) {
+            matched = true;
+            ls_unscaled = true;
         }
         // A store whose data register is the ADD's Rd cannot fold:
         // the rewritten store would read the deleted sum. A memory op
@@ -14202,22 +14262,36 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 && ls_rn == state->addi_pending_rd
                 && !(is_store && ls_rt == state->addi_pending_rd)
                 && !offset_is_branch_target(state, offset)) {
-            // The access's own byte offset is imm12 * access_size,
-            // already a multiple of access_size by construction. So the
-            // combined offset's alignment depends only on the ADD's imm,
-            // and the scaled total must fit in 12 bits. ls_byte_imm +
-            // add_imm cannot overflow uint32_t: add_imm <= 0xFFF000 (24
-            // bits) and ls_byte_imm <= 4095 * 8 = 0x7FF8 (15 bits).
+            // The rewritten access has to encode, in one spelling
+            // or the other. An unscaled input can be negative and need
+            // not be a multiple of the access size, so neither property
+            // can be inferred from the ADD's immediate the way it could
+            // when every input was scaled: test the combined offset
+            // itself. That also admits sums a scaled input can reach
+            // and the old test refused -- a misaligned ADD immediate
+            // under a scaled access lands outside imm12 but inside
+            // imm9, and folds to the unscaled form.
+            //
+            // int32_t holds every intermediate: add_imm <= 0xFFF000 (24
+            // bits) and ls_byte_imm is within [-256, 4095 * 8].
             unsigned access_size = 1u << size;
-            uint32_t add_imm = state->addi_pending_imm;
-            uint32_t ls_byte_imm = (uint32_t)imm12 * access_size;
-            uint32_t combined = add_imm + ls_byte_imm;
-            if ((add_imm & (access_size - 1u)) == 0
-                    && (combined >> size) <= 0xFFFu) {
+            int32_t add_imm = (int32_t)state->addi_pending_imm;
+            int32_t combined = add_imm + ls_byte_imm;
+            bool fits_scaled = combined >= 0
+                && (combined % (int32_t)access_size) == 0
+                && (combined / (int32_t)access_size) <= 4095;
+            bool fits_unscaled = combined >= -256 && combined <= 255;
+            if (fits_scaled || fits_unscaled) {
                 // Rt = 31 is WZR/XZR here (a zero store, or a load to
                 // the discard register), never SP.
                 char rt_buf[8];
                 format_reg(rt_buf, sizeof(rt_buf), rt_wx, ls_rt);
+                // A sum that is negative or off the access-size grid
+                // has no unsigned-offset spelling and must render as
+                // the unscaled form; the input's own spelling has no
+                // say in it.
+                const char *new_mnem = fits_scaled
+                    ? ls_mnem : unscaled_mnem(ls_mnem);
                 out->name = is_store
                     ? "ADD + STR foldable to immediate-offset STR"
                     : "ADD + LDR foldable to immediate-offset LDR";
@@ -14225,34 +14299,32 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 out->insn_count = 2;
                 clear_finding_strings(out);
 
-                // combined == 0 is reachable only via the MOV-from-SP
-                // alias (imm == 0 requires Rn = SP) with a zero-offset
-                // access; render the bare [sp] form.
-                if (combined == 0) {
-                    snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %s, [sp]",
-                        ls_mnem, rt_buf);
-                } else if (state->addi_pending_rn == 31) {
-                    snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %s, [sp, #0x%x]",
-                        ls_mnem, rt_buf, combined);
+                // combined == 0 renders as the bare [base] form, which
+                // format_mem_off handles. It is reachable through the
+                // MOV-from-SP alias with a zero-offset access, and now
+                // also through an unscaled offset that cancels the ADD.
+                char base_buf[8];
+                if (state->addi_pending_rn == 31) {
+                    snprintf(base_buf, sizeof(base_buf), "sp");
                 } else {
-                    snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %s, [x%u, #0x%x]",
-                        ls_mnem, rt_buf,
-                        state->addi_pending_rn, combined);
+                    snprintf(base_buf, sizeof(base_buf), "x%u",
+                        state->addi_pending_rn);
                 }
+                format_mem_off(out->detail, sizeof(out->detail),
+                    "-> ", new_mnem, rt_buf, base_buf, combined);
+
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->addi_pending_disasm);
-                if (ls_byte_imm == 0) {
-                    snprintf(out->lines[1], sizeof(out->lines[1]),
-                        "%s %s, [x%u]",
-                        ls_mnem, rt_buf, ls_rn);
-                } else {
-                    snprintf(out->lines[1], sizeof(out->lines[1]),
-                        "%s %s, [x%u, #0x%x]",
-                        ls_mnem, rt_buf, ls_rn, ls_byte_imm);
-                }
+                char ls_base[8];
+                snprintf(ls_base, sizeof(ls_base), "x%u", ls_rn);
+                // classify_int_load/_store name the scaled mnemonic
+                // whichever spelling was decoded, so an unscaled input
+                // has to be renamed back before it is echoed: a line
+                // reading "ldr x3, [x3, #-0x8]" is not the instruction
+                // that was there, and does not assemble.
+                format_mem_off(out->lines[1], sizeof(out->lines[1]), "",
+                    ls_unscaled ? unscaled_mnem(ls_mnem) : ls_mnem,
+                    rt_buf, ls_base, ls_byte_imm);
                 if (!is_store && ls_rt == state->addi_pending_rd) {
                     produced = true;
                 } else {
@@ -14327,14 +14399,14 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                     snprintf(base_buf, sizeof(base_buf), "x%u",
                         state->addi_pending_rn);
                 }
-                format_pair_mem(out->detail, sizeof(out->detail),
+                format_mem_off(out->detail, sizeof(out->detail),
                     "-> ", mnem, rts, base_buf, combined);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->addi_pending_disasm);
                 char pair_base[8];
                 snprintf(pair_base, sizeof(pair_base), "x%u", p_rn);
-                format_pair_mem(out->lines[1], sizeof(out->lines[1]),
+                format_mem_off(out->lines[1], sizeof(out->lines[1]),
                     "", mnem, rts, pair_base, pair_byte_imm);
 
                 // An integer pair LOAD whose destination list covers

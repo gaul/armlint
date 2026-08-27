@@ -12043,6 +12043,41 @@ static void test_extend_add_sub_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// Encode LDUR Xt, [Xn, #simm9] (unscaled, signed byte offset).
+// Base 0xF8400000: size=11, 111, V=0, 25..24=00, opc=01; bit 21 clear
+// and bits 11..10 zero select the plain unscaled form out of that
+// addressing group.
+static void ldur_x(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
+{
+    uint32_t op = 0xF8400000u
+        | (((uint32_t)imm9 & 0x1FFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Encode STUR Xt, [Xn, #simm9]. Base 0xF8000000 (opc = 00).
+static void stur_x(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
+{
+    uint32_t op = 0xF8000000u
+        | (((uint32_t)imm9 & 0x1FFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Encode LDR Xt, [Xn, #simm9]! (pre-indexed): same group as LDUR but
+// bits 11..10 = 11. It writes back to the base, so it is not
+// interchangeable with a plain base-plus-offset access.
+static void ldr_x_preidx(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
+{
+    uint32_t op = 0xF8400C00u
+        | (((uint32_t)imm9 & 0x1FFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 // Encode ADD (immediate), X-form, with the sh bit set (imm12 << 12).
 // Base 0x91000000 carries sf=1, op=0, S=0; OR 0x00400000 sets sh=1.
 static void add_x_imm_sh(uint8_t out[4], unsigned rd, unsigned rn,
@@ -12105,19 +12140,79 @@ static void test_add_ldr_imm_offset(void)
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 1);
 
-    // Negative: misaligned for X access. #4 is not a multiple of 8.
+    // A sum off the access-size grid has no unsigned-offset
+    // spelling, but imm9 is a plain byte count and does not care:
+    // these fold to the unscaled form. They were negatives while the
+    // check knew only the scaled spelling.
+    // add x3, x1, #4 ; ldr x3, [x3] -> ldur x3, [x1, #4].
     add_x_imm(&code[0], 3, 1, 4);
+    ldr_x_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // W access, #2 not a multiple of 4 -> ldur w3, [x1, #2].
+    add_x_imm(&code[0], 3, 1, 2);
+    ldr_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // H access, #1 not a multiple of 2 -> ldurh w3, [x1, #1].
+    add_x_imm(&code[0], 3, 1, 1);
+    ldrh_w_uimm0(&code[4], 3, 3);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: misaligned AND outside imm9. #0x104 is 260, not a
+    // multiple of 8 and past the unscaled +255 limit, so neither
+    // spelling encodes it.
+    add_x_imm(&code[0], 3, 1, 0x104);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: misaligned for W access. #2 is not a multiple of 4.
-    add_x_imm(&code[0], 3, 1, 2);
-    ldr_w_uimm0(&code[4], 3, 3);
+    // -- Unscaled inputs. Which spelling the assembler chose for the
+    //    access says nothing about whether the sum folds, and the
+    //    output spelling is chosen from the sum alone. --
+
+    // Unscaled in, scaled out: add x3, x1, #16 ; ldur x3, [x3, #-8]
+    //   -> ldr x3, [x1, #8].
+    add_x_imm(&code[0], 3, 1, 16);
+    ldur_x(&code[4], 3, 3, -8);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Unscaled in, unscaled out: the sum goes negative, which the
+    // unsigned-offset form cannot express at all.
+    // add x3, x1, #16 ; ldur x3, [x3, #-32] -> ldur x3, [x1, #-16].
+    add_x_imm(&code[0], 3, 1, 16);
+    ldur_x(&code[4], 3, 3, -32);
+    assert(run_helper_check(code, 8) == 1);
+
+    // The unscaled offset cancels the ADD exactly: -> ldr x3, [x1].
+    add_x_imm(&code[0], 3, 1, 24);
+    ldur_x(&code[4], 3, 3, -24);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Unscaled store, deferred through the liveness scan because a
+    // store leaves the address register alive: add x8, x1, #16 ;
+    // stur x0, [x8, #-8] ; (x8 dies) -> str x0, [x1, #8].
+    add_x_imm(&code[0], 8, 1, 16);
+    stur_x(&code[4], 0, 8, -8);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Negative: an unscaled input whose sum escapes both spellings.
+    // 0x100 + 5 = 261 is past the unscaled +255 ceiling and is not a
+    // multiple of 8, so no scaled form encodes it either.
+    // (The -256 floor is unreachable from this producer: ADD-imm is
+    // non-negative and imm9 bottoms out at -256, so the sum never
+    // goes below it. The guard is kept because it states the
+    // encoding's range rather than this caller's reach.)
+    add_x_imm(&code[0], 3, 1, 0x100);
+    ldur_x(&code[4], 3, 3, 5);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: misaligned for H access. #1 is not a multiple of 2.
-    add_x_imm(&code[0], 3, 1, 1);
-    ldrh_w_uimm0(&code[4], 3, 3);
+    // Negative: pre-indexed LDR. Same encoding group as LDUR, but it
+    // writes the sum back to the base, so deleting the ADD would drop
+    // an observable update. (Rt must differ from Rn here: a writeback
+    // load into its own base is CONSTRAINED UNPREDICTABLE and does not
+    // disassemble.)
+    add_x_imm(&code[0], 3, 1, 16);
+    ldr_x_preidx(&code[4], 5, 3, 8);
     assert(run_helper_check(code, 8) == 0);
 
     // Negative: LDR base != ADD's Rd.
@@ -12143,8 +12238,10 @@ static void test_add_ldr_imm_offset(void)
     ldr_x_uimm_with(&code[4], 3, 3, 0x200);  // 0x200 * 8 = 0x1000; sum 0x8000
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: SUB-imm instead of ADD-imm (would need negative LDR
-    // offset, which the unsigned-offset form cannot encode).
+    // Negative: SUB-imm instead of ADD-imm. The pending slot opens
+    // only on ADD-immediate; a SUB producer would fold to a negative
+    // unscaled offset, which the check could now express but does not
+    // yet look for.
     sub_x_imm(&code[0], 3, 1, 16);
     ldr_x_uimm0(&code[4], 3, 3);
     assert(run_helper_check(code, 8) == 0);
@@ -12221,12 +12318,13 @@ static void test_add_ldr_imm_offset(void)
     ldr_x_uimm0(&code[4], 8, 8);
     assert(run_helper_check(code, 8) == 1);
 
-    // -- Boundary tests, per access size. The fit guard is
-    //    (combined >> size) <= 0xFFF, so the largest valid combined
-    //    byte offset is 4095 * (1 << size) and 4096 * (1 << size)
-    //    is the smallest invalid one. Each pair is constructed so
-    //    the alignment guard passes (the ADD's immediate is a
-    //    multiple of the access size). --
+    // -- Boundary tests, per access size. The scaled guard is
+    //    combined / (1 << size) <= 4095, so the largest valid combined
+    //    byte offset is 4095 * (1 << size) and 4096 * (1 << size) is
+    //    the smallest invalid one. Each pair is constructed so the
+    //    sum is a multiple of the access size, and every over-limit
+    //    sum here is far past the unscaled +255 ceiling too, so
+    //    neither spelling rescues it. --
 
     // X-form (scale 8): at-limit 32760 = 0x7000 + 0x7F8*8 = 0x7FF8.
     add_x_imm_sh(&code[0], 3, 1, 0x7);          // 0x7000
@@ -12276,9 +12374,16 @@ static void test_add_ldr_imm_offset(void)
     ldrsw_x(&code[4], 3, 3, 1);
     assert(run_helper_check(code, 8) == 1);
 
-    // add x3, x1, #2 ; ldrsw x3, [x3] -- the ADD immediate is not a
-    // multiple of LDRSW's 4-byte access size; no fold.
+    // add x3, x1, #2 ; ldrsw x3, [x3] -- 2 is not a multiple of
+    // LDRSW's 4-byte access size, so no scaled form encodes it, but
+    // imm9 does: -> ldursw x3, [x1, #2].
     add_x_imm(&code[0], 3, 1, 2);
+    ldrsw_x(&code[4], 3, 3, 0);
+    assert(run_helper_check(code, 8) == 1);
+
+    // Negative: the same shape pushed past imm9. 0x102 is 258, not a
+    // multiple of 4 and past +255.
+    add_x_imm(&code[0], 3, 1, 0x102);
     ldrsw_x(&code[4], 3, 3, 0);
     assert(run_helper_check(code, 8) == 0);
 
@@ -12328,9 +12433,15 @@ static void test_add_ldr_imm_offset(void)
     str_x_uimm(&code[4], 31, 8, 0);
     assert(run_reg_dead(code, 8, 8) == 1);
 
-    // Misaligned ADD immediate for the store's access size never
-    // folds (4 is not a multiple of 8).
+    // A misaligned sum has no scaled store spelling, but STUR takes
+    // it: add x8, x1, #4 ; str x0, [x8] -> stur x0, [x1, #4].
     add_x_imm(&code[0], 8, 1, 4);
+    str_x_uimm(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Negative: misaligned and past imm9, so neither store spelling
+    // encodes it.
+    add_x_imm(&code[0], 8, 1, 0x104);
     str_x_uimm(&code[4], 0, 8, 0);
     assert(run_reg_dead(code, 8, 8) == 0);
 
