@@ -3124,7 +3124,7 @@ static bool advance_one_pending_cond(uint32_t op, bool *active,
 // or -1 for the zero register, SP, and non-GPRs (which carry no tracked
 // value). W0..W30 and X0..X28 are contiguous in the Capstone enum; X29/X30 are
 // the FP/LR aliases.
-static int arm64_gpr_num(unsigned reg)
+int arm64_gpr_num(unsigned reg)
 {
     if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W30) {
         return (int)(reg - ARM64_REG_W0);
@@ -3173,6 +3173,13 @@ static bool insn_reads_gpr_dest(uint32_t op)
     // and genuinely overwrites Rd from Rn and Rm.
     if ((op & 0xFFFF0000u) == 0xDAC10000u) {
         return ((op >> 10) & 0x3Fu) <= 0x11u;
+    }
+    // LDG loads an allocation tag into Xt's tag bits and leaves its
+    // address bits untouched, so Xt is a source as well. (STG and the
+    // rest of the MTE stores read Xt outright, which Capstone reports
+    // as a plain read and needs nothing here.)
+    if ((op & 0xFFE00C00u) == 0xD9600000u) {
+        return true;
     }
     return false;
 }
@@ -3301,6 +3308,73 @@ static void insn_reg_access(const cs_insn *insn, int reg,
         }
     }
 
+    // Variable shifts -- LSLV/LSRV/ASRV/RORV, spelled lsl/lsr/asr/ror
+    // with a register amount. Capstone 6 drops the Rm operand from the
+    // list entirely (`ror w0, w1, w2` comes back as two operands), so
+    // the shift amount would look untouched and a producer feeding it
+    // could be deleted. Capstone 5 reports it correctly; recovering it
+    // from the encoding costs nothing there and makes the scan immune
+    // to the version. Bits 15..12 = 0010 separate this group from UDIV
+    // and SDIV (0000) and the CRC32 family (0100) in the same class.
+    if ((op & 0x7FE0F000u) == 0x1AC02000u
+            && (int)((op >> 16) & 0x1Fu) == reg) {
+        *reads = true;
+    }
+
+    // SVE scalar forms that read the GPR they write. The counting
+    // family -- INCB/INCH/INCW/INCD/INCP, their DEC twins and the
+    // saturating SQ/UQ variants -- computes Xdn = Xdn +- count, and
+    // CLASTA/CLASTB with a scalar destination conditionally replaces
+    // Rdn with a vector element and otherwise leaves it alone. Both
+    // are in the SVE encoding space, where no scalar A64 instruction
+    // lives, so the masks cannot collide with one. Capstone 5 decodes
+    // them and reports no register access at all; 6 reports the read.
+    if ((op & 0xDE208000u) == 0x04208000u
+            || (op & 0xFF3EE000u) == 0x0530A000u) {
+        if ((int)(op & 0x1Fu) == reg) {
+            *reads = true;
+        }
+    }
+
+    // FEAT_MOPS copy and set triples pass their whole state through
+    // registers: Rd (the destination pointer), Rs (the source pointer
+    // for CPY, the value for SET) and Rn (the remaining count). Every
+    // stage reads them and writes them back advanced. Capstone 5
+    // reports no access at all for these, and 6 lists the pointers in
+    // the implicit WRITES only -- either way a scan can walk past a
+    // read and let a later overwrite prove the register dead. Recover
+    // the fields and claim conservative reads, exactly as the atomics
+    // below: it stops a scan rather than proving a kill. Same mask the
+    // NZCV classifier uses for the family. An Rs of 31 is the SET
+    // aliases' XZR value operand and never matches a watched register.
+    if ((op & 0xFB200C00u) == 0x19000400u) {
+        unsigned rd = op & 0x1Fu;
+        unsigned rs = (op >> 16) & 0x1Fu;
+        unsigned rn = (op >> 5) & 0x1Fu;
+        if ((int)rd == reg || (int)rs == reg || (int)rn == reg) {
+            *reads = true;
+        }
+    }
+
+    // SIMD load/store with a REGISTER post-index: the Rm field is the
+    // increment amount, read and never written -- the base Rn is what
+    // the writeback updates. Capstone 5 marks Rm CS_AC_WRITE on the
+    // single-structure forms (`st1 {v0.b}[0], [x1], x0`), leaves it
+    // flagless on the multi-register ones, and gets it right on the
+    // rest; believing the write turns the increment into a kill.
+    // Rm = 31 is the immediate-offset spelling and names no register.
+    // Both post-index classes are matched: multiple structures (bit 24
+    // clear) and single structure (bit 24 set), with bit 23 selecting
+    // the post-indexed member of each. Capstone 6 reports all of these
+    // correctly; this is a 5.x correction.
+    if ((op & 0xBE800000u) == 0x0C800000u) {
+        unsigned rm = (op >> 16) & 0x1Fu;
+        if (rm != 31u && (int)rm == reg) {
+            *reads = true;
+            *writes = false;
+        }
+    }
+
     // The PACIA1716 family transforms X17 using X16 as its modifier.
     // Capstone lists X17 in both implicit lists, which is right, and
     // also lists X16 as WRITTEN, which is not -- X16 is read-only
@@ -3318,7 +3392,7 @@ static void insn_reg_access(const cs_insn *insn, int reg,
 // read means it is dead from here (LIV_OVERWRITE). Any branch, call, or return
 // leaves straight-line code -- the register may be live at the target or be a
 // return value -- so stop conservatively (LIV_TERM_UNSAFE).
-static liveness_t classify_reg_liveness(const cs_insn *insn, int reg)
+liveness_t classify_reg_liveness(const cs_insn *insn, int reg)
 {
     uint32_t op = insn_word(insn);
     // Control transfers: B.cond, B/BL, CBZ/CBNZ, TBZ/TBNZ, BR/BLR/RET.

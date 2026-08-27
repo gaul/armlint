@@ -120,8 +120,9 @@ jobs:
           CAPSTONE_LIBS="$CAPSTONE6_LIBS" test
 
   liveness-sweep:
-    # Exhaustive classify_liveness-vs-Capstone cross-check over the entire
-    # 2^32 encoding space (several minutes single-threaded; split across
+    # Exhaustive liveness-vs-Capstone cross-check over the entire
+    # 2^32 encoding space -- both the NZCV classifier and its
+    # register-side twin, off one decode per word (several minutes single-threaded; split across
     # the runner's cores via ARMLINT_LIVENESS_SWEEP_THREADS). Too slow
     # for every PR, so it runs on pushes to master, on a weekly schedule,
     # and on demand; the per-PR `make test` still runs the fast curated
@@ -138,7 +139,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Build and run the exhaustive NZCV liveness sweep
+      - name: Build and run the exhaustive liveness sweeps
         run: >
           ARMLINT_LIVENESS_SWEEP=1
           ARMLINT_LIVENESS_SWEEP_THREADS="$(nproc)"
@@ -150,9 +151,13 @@ jobs:
     # FEAT_MOPS main/epilogue stages plus BC.cond, CFINV/XAFLAG/AXFLAG,
     # RMIF, and SETF8/SETF16 -- so property A of the cross-check has real
     # teeth here (this configuration is what exposed the MOPS liveness
-    # gap). ~25 minutes locally single-threaded (up to an hour on CI
-    # runners); ARMLINT_LIVENESS_SWEEP_THREADS divides that across the
-    # cores.
+    # gap, in both the NZCV classifier and later its register-side
+    # twin). The register half needs both versions for the opposite
+    # reason too: 5.x marks a compare's source, a PAC modifier and a
+    # SIMD post-index increment as written, and those corrections are
+    # only exercised where the broken model is. ~25 minutes locally
+    # single-threaded (up to an hour on CI runners);
+    # ARMLINT_LIVENESS_SWEEP_THREADS divides that across the cores.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04-arm
     env:
@@ -179,7 +184,7 @@ jobs:
             cmake --build capstone6/build -j"$(nproc)"
           fi
 
-      - name: Build and run the exhaustive NZCV liveness sweep
+      - name: Build and run the exhaustive liveness sweeps
         run: >
           ARMLINT_LIVENESS_SWEEP=1
           ARMLINT_LIVENESS_SWEEP_THREADS="$(nproc)"

@@ -227,11 +227,17 @@ regenerate the
 snapshots with `make integration-test-regen` and review the diff
 before committing.
 
-Setting `ARMLINT_LIVENESS_SWEEP=1` extends the unit tests'
-NZCV-liveness cross-check against Capstone to the entire 2^32 encoding
-space -- minutes of single-threaded CPU time, so CI runs it on pushes
-rather than PRs. `ARMLINT_LIVENESS_SWEEP_THREADS` divides the sweep
-across that many worker threads:
+Setting `ARMLINT_LIVENESS_SWEEP=1` extends the unit tests' liveness
+cross-checks against Capstone to the entire 2^32 encoding space --
+minutes of single-threaded CPU time, so CI runs it on pushes rather
+than PRs. Both classifiers are covered off one decode per word: the
+NZCV one (`classify_liveness`) and the register one
+(`classify_reg_liveness`), whose property is that a register Capstone
+reports as read must never be classified as dead or as no-effect.
+Three Capstone over-reports are documented and skipped; everything
+else is a defect on one side or the other, and the register half found
+four on its first run. `ARMLINT_LIVENESS_SWEEP_THREADS` divides the
+sweep across that many worker threads:
 
 ```sh
 ARMLINT_LIVENESS_SWEEP=1 ARMLINT_LIVENESS_SWEEP_THREADS="$(sysctl -n hw.ncpu)" \
@@ -259,7 +265,13 @@ make CAPSTONE_CFLAGS="-I$PWD/capstone6/include -DCAPSTONE_AARCH64_COMPAT_HEADER"
 
 The overrides must be `make` arguments (not environment variables) to
 beat the Makefile's `pkg-config` defaults. The unit tests and the
-`ARMLINT_LIVENESS_SWEEP=1` sweep pass under both major versions;
+`ARMLINT_LIVENESS_SWEEP=1` sweep pass under both major versions, and
+running the sweep under **both** is the point rather than a
+formality: the two model AArch64 register access differently, so each
+version corroborates cases the other cannot. Capstone 6's model is the
+sharper oracle -- it is what caught armlint treating a FEAT_MOPS main
+stage as a kill of its own source pointer -- while 5.x is what armlint
+ships against and so is what its corrections are written for;
 `make integration-test` is expected to show a handful of cosmetic
 snapshot diffs under v6 (it prints shift/bitfield immediates in
 decimal and drops `#` on `adr`/`ldr`-literal operands), so the

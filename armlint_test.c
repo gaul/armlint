@@ -8057,6 +8057,25 @@ static void test_mov_zero_to_xzr(void)
     write_le32(&code[8], 0xD503211Fu);  // pacia1716
     assert(run_reg_dead(code, 12, 16) == 0);
 
+    // -- Neither is a SIMD post-index increment. --
+    //
+    // In `st1 {v0.b}[0], [x2], x0` the Rm field is the amount the base
+    // is advanced by: read, never written. Capstone 5 marks it R+W on
+    // the single-structure forms, which turns the increment into a
+    // kill. Found by the exhaustive register-liveness sweep, not by
+    // reading the code.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    write_le32(&code[8], 0x0D800040u);  // st1 {v0.b}[0], [x2], x0
+    assert(run_x0_dead(code, 12) == 0);
+
+    // The immediate-offset spelling of the same store names no Rm and
+    // leaves the fold alone.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    write_le32(&code[8], 0x0D9F0040u);  // st1 {v0.b}[0], [x2], #1
+    assert(run_x0_dead(code, 12) == 1);
+
     // -- A compare is not a kill. --
     //
     // Capstone drops the XZR destination of CMP/CMN/TST and leaves the
@@ -14603,6 +14622,88 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
                 word, insn->mnemonic, insn->op_str,
                 (int)reads, (int)writes, (int)liv);
     }
+
+    // The register-side twin, over the same decode and the same
+    // register lists. Only GPRs 0..30 are watched by any scan, and only
+    // the registers this instruction actually names can matter, so the
+    // per-word cost is a short loop rather than 31 classifications.
+    //
+    //   R) If Capstone reports a read of Rn, classify_reg_liveness must
+    //      stop the scan: LIV_READ, or LIV_TERM_UNSAFE for a control
+    //      transfer whose taken edge the scan does not follow. Neither
+    //      LIV_OVERWRITE nor LIV_UNKNOWN is acceptable -- OVERWRITE
+    //      proves the register dead at an instruction that reads it, and
+    //      UNKNOWN walks the scan past the read so a LATER overwrite
+    //      proves it dead instead. The second is the subtler half and
+    //      the one that matches how real defects here present: an
+    //      instruction Capstone reports no access for at all.
+    //
+    // Capstone's write set is deliberately not consulted, exactly as on
+    // the NZCV side: it over-reports (5.x puts x16 in PACIA1716's
+    // writes, 6 puts x1 in CAS's), and a missed kill is a false
+    // negative rather than a wrong finding.
+    // Three documented over-reports, the register-side analogue of the
+    // CBZ/TBZ noise above. In each the instruction's DESTINATION shows
+    // up in Capstone's read set although the architecture says it is
+    // written and not read, so armlint is the correct party and the
+    // oracle is skipped for that one register rather than the
+    // classifier being made conservative. The exhaustive sweep found
+    // all three; between them they account for every violation left in
+    // the 2^32 space once the real defect was fixed.
+    //
+    //   * The bitfield class. Capstone 5 marks the whole class R+W,
+    //     which is right for BFM (BFI/BFXIL merge into Rd) and wrong
+    //     for SBFM/UBFM and their shift and extend aliases, which
+    //     fully overwrite it. BFM is deliberately NOT skipped -- it is
+    //     a genuine read and keeps its teeth. Capstone 6 splits the
+    //     operands and reports both correctly.
+    //   * PACGA, which computes a fresh code into Rd from Rn and Rm and
+    //     returns it with the low half zeroed. Capstone 5 only.
+    //   * SYSL, whose Xt receives the system instruction's result.
+    //     Over-reported by BOTH 5 and 6, in 6 as a read with no write.
+    // Scope: the SVE and SME vector spaces are excluded. armlint models
+    // neither, and Capstone 5 -- the version it ships against -- cannot
+    // decode most of them, so its driver skips those words as data and
+    // flushes state. Capstone 6 does decode them, and under 6 this
+    // property reports ~20M violations across the SME outer-product,
+    // gather/scatter and ZA-tile families: real disagreements, but
+    // about instructions no armlint check can currently reach. The
+    // SCALAR members of those spaces are NOT excluded and are modelled
+    // for real (SVE INCB/DECB and CLASTA/CLASTB read the GPR they
+    // write, handled in insn_reg_access), because Capstone 5 does
+    // decode those and they turn up in hand-written crypto. Widening
+    // this to the vector space is v6-migration work; see TODO.md.
+    if ((word & 0xFE000000u) == 0x04000000u          // SVE
+            || (word & 0xFF000000u) == 0x25000000u   // SVE predicate
+            || (word & 0xFE000000u) == 0xC0000000u   // SME data
+            || (word & 0xFE000000u) == 0xE0000000u   // SME memory
+            || (word & 0xBF204000u) == 0x19200000u) {// LSE128/FEAT_THE
+        return bad ? 1 : 0;
+    }
+
+    unsigned rd = word & 0x1Fu;
+    bool over_reports_dest =
+        ((word & 0x1F800000u) == 0x13000000u
+            && ((word >> 29) & 0x3u) != 1u)         // SBFM/UBFM, not BFM
+        || (word & 0xFFE0FC00u) == 0x9AC03000u      // PACGA
+        || (word & 0xFFF80000u) == 0xD5280000u;     // SYSL
+    for (uint8_t i = 0; i < nread; i++) {
+        int reg = arm64_gpr_num(regs_read[i]);
+        if (reg < 0) {
+            continue;
+        }
+        if (over_reports_dest && reg == (int)rd) {
+            continue;
+        }
+        liveness_t rl = classify_reg_liveness(insn, reg);
+        if (rl == LIV_READ || rl == LIV_TERM_UNSAFE) {
+            continue;
+        }
+        fprintf(stderr, "reg liveness cross-check failed: %08x  %s %s  "
+                "capstone reads x%d, classify_reg_liveness=%d\n",
+                word, insn->mnemonic, insn->op_str, reg, (int)rl);
+        bad = true;
+    }
     return bad ? 1 : 0;
 }
 
@@ -14832,6 +14933,99 @@ static void test_liveness_matches_capstone(void)
         assert(atomic_load(&violations) == 0);
         free(threads);
         free(workers);
+    }
+
+    cs_free(insn, 1);
+}
+
+// The register-side twin of test_liveness_matches_capstone. The
+// curated table pins one representative of every way an instruction can
+// affect a watched GPR, and leads with the three places Capstone 5's
+// operand access flags are wrong -- each of which shipped as a
+// false-positive class before the sweep beside this test existed.
+//
+// Every case is asserted twice: directly, against the classification
+// armlint must produce, and through liveness_check_word, which re-derives
+// the answer from Capstone's own register lists. The first has teeth
+// where Capstone is the broken party; the second is what the exhaustive
+// sweep generalizes to the whole encoding space.
+static void test_reg_liveness_matches_capstone(void)
+{
+    static const struct {
+        uint32_t word; int reg; liveness_t want; const char *name;
+    } cases[] = {
+        // Capstone 5 marks the first operand of a compare CS_AC_WRITE:
+        // it drops the XZR destination and slot 0 gets the write flag by
+        // convention. Believing it deletes a producer the compare reads.
+        { 0xF100051Fu, 8, LIV_READ, "cmp x8, #1" },
+        { 0xEB09011Fu, 8, LIV_READ, "cmp x8, x9" },
+        { 0xEB09011Fu, 9, LIV_READ, "cmp x8, x9 (Rm)" },
+        { 0xEA09011Fu, 8, LIV_READ, "tst x8, x9" },
+        { 0xB100051Fu, 8, LIV_READ, "cmn x8, #1" },
+        // ... but an S-variant with a real destination still kills.
+        { 0xF1000440u, 0, LIV_OVERWRITE, "subs x0, x2, #1" },
+        // Pointer authentication transforms Rd in place. Capstone marks
+        // the operand R+W correctly; insn_reads_gpr_dest is what would
+        // otherwise discard the read.
+        { 0xDAC10020u, 0, LIV_READ, "pacia x0, x1" },
+        { 0xDAC147F1u, 17, LIV_READ, "xpacd x17" },
+        { 0xDAC11E30u, 16, LIV_READ, "autdb x16, x17" },
+        // PACGA is the control: 2-source group, Rd genuinely written.
+        { 0x9AC23020u, 0, LIV_OVERWRITE, "pacga x0, x1, x2" },
+        // PACIA1716 transforms x17 using x16; Capstone 5 lists x16 in
+        // the implicit WRITES, where it is only ever read.
+        { 0xD503211Fu, 16, LIV_READ, "pacia1716 (x16)" },
+        { 0xD503211Fu, 17, LIV_READ, "pacia1716 (x17)" },
+        // A SIMD register post-index: Rm is the increment, read only.
+        // Capstone 5 marks it R+W on the single-structure forms.
+        { 0x0D800020u, 0, LIV_READ, "st1 {v0.b}[0], [x1], x0" },
+        { 0x4C807020u, 0, LIV_READ, "st1 {v0.16b}, [x1], x0" },
+        { 0x0D9F0020u, 31, LIV_UNKNOWN, "st1 ... , [x1], #1 (no Rm)" },
+        // Atomics: Capstone 5 reports no access flags at all, so
+        // insn_reg_access recovers the registers from the encoding.
+        { 0xF8200022u, 0, LIV_READ, "ldadd x0, x2, [x1]" },
+        { 0xC8A07C22u, 0, LIV_READ, "cas x0, x2, [x1]" },
+        // Genuine read-modify-writes armlint has always known about.
+        { 0xF2800028u, 8, LIV_READ, "movk x8, #1" },
+        { 0xB37F0528u, 8, LIV_READ, "bfi x8, x9, #1, #2" },
+        // Plain kills and plain reads.
+        { 0xAA0103E0u, 0, LIV_OVERWRITE, "mov x0, x1" },
+        { 0xAA0103E0u, 1, LIV_READ, "mov x0, x1 (source)" },
+        { 0xD2800021u, 1, LIV_OVERWRITE, "movz x1, #1" },
+        { 0xD37DF189u, 9, LIV_OVERWRITE, "lsl x9, x12, #3" },
+        { 0xF9400020u, 0, LIV_OVERWRITE, "ldr x0, [x1]" },
+        { 0xF9400020u, 1, LIV_READ, "ldr x0, [x1] (base)" },
+        { 0xF9000020u, 0, LIV_READ, "str x0, [x1]" },
+        // Terminators stop the scan whatever the register.
+        { 0xD65F03C0u, 30, LIV_TERM_UNSAFE, "ret" },
+        { 0x14000000u, 0, LIV_TERM_UNSAFE, "b" },
+        { 0x34000000u, 0, LIV_TERM_UNSAFE, "cbz x0" },
+        // Untouched registers keep the scan going.
+        { 0xD503201Fu, 5, LIV_UNKNOWN, "nop" },
+        { 0xAA0103E0u, 7, LIV_UNKNOWN, "mov x0, x1 (unrelated)" },
+    };
+
+    cs_insn *insn = cs_malloc(g_handle);
+    assert(insn != NULL);
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const uint8_t *code = (const uint8_t *)&cases[i].word;
+        size_t size = sizeof(cases[i].word);
+        uint64_t addr = 0;
+        cs_insn *one = insn;
+        if (!cs_disasm_iter(g_handle, &code, &size, &addr, one)) {
+            fprintf(stderr, "reg liveness case %s (%08x) does not decode\n",
+                    cases[i].name, cases[i].word);
+            assert(0);
+        }
+        liveness_t got = classify_reg_liveness(one, cases[i].reg);
+        if (got != cases[i].want) {
+            fprintf(stderr, "classify_reg_liveness(%08x [%s], x%d) = %d, "
+                    "want %d\n", cases[i].word, cases[i].name,
+                    cases[i].reg, (int)got, (int)cases[i].want);
+            assert(0);
+        }
+        assert(liveness_check_word(g_handle, insn, cases[i].word) == 0);
     }
 
     cs_free(insn, 1);
@@ -15205,6 +15399,7 @@ int main(void)
     test_branch_target_side_entry();
     test_central_side_entry_gate();
     test_liveness_matches_capstone();
+    test_reg_liveness_matches_capstone();
     test_mops_flag_liveness();
     test_census();
     test_census_coverage();

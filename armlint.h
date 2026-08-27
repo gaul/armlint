@@ -74,6 +74,31 @@ typedef enum {
 
 liveness_t classify_liveness(uint32_t op);
 
+// The register-side twin of classify_liveness: how a single instruction
+// affects the liveness of ONE general-purpose register, used by the
+// forward scans that prove a producer's destination dead before
+// deleting it. Exposed for the same reason -- so the test suite can
+// cross-validate it against Capstone (test_reg_liveness_matches_capstone
+// and the exhaustive sweep beside it).
+//
+// The register side trusts Capstone more than the NZCV side does: it
+// takes the operand access flags rather than re-deriving them, with
+// two corrections applied in insn_reg_access for the places 5.x gets
+// them wrong. That makes the cross-check MORE valuable here, not less
+// -- the classifier and its oracle share a source, so a disagreement
+// is nearly always a real defect on one side. Both corrections were
+// found that way.
+//
+// `reg` is a 0..30 GPR encoding number, as returned by arm64_gpr_num.
+liveness_t classify_reg_liveness(const cs_insn *insn, int reg);
+
+// Map a Capstone AArch64 register id to its 0..30 GPR encoding number,
+// or -1 for the zero register, SP, and every non-GPR. Exposed so the
+// cross-check can walk Capstone's register lists in armlint's own
+// numbering rather than reimplementing the mapping and drifting from
+// it.
+int arm64_gpr_num(unsigned reg);
+
 // State carried across instructions for sequence-based checks. Owned by
 // the caller; created once per scan and reset between non-contiguous
 // regions (e.g. between executable sections).
