@@ -389,6 +389,18 @@ def _pure_writer(x):
     BFM (BFI/BFXIL) is deliberately absent: it merges into its
     destination, so the destination is a source too. Including it makes
     every bitfield-insert chain look like a dead write.
+
+    These masks are built inline rather than through MASKS, so
+    --selftest never sees them -- which is how the CSEL mask below kept
+    a loose bit for two days. Anything added here is unverified by
+    construction; prefer a registry entry when the shape has one.
+
+    A mask must also pin the bits that separate its class from
+    UNALLOCATED space, not just from its neighbours. --selftest cannot
+    help with that half even for a registry mask: its precision test
+    asks whether a mask matches some *other reference instruction*, and
+    an unallocated encoding is in nobody's reference set. It passes,
+    and the scanner reports data as code.
     """
     k = m(x, "add_imm") | m(x, "sub_imm")
     k |= (x & np.uint32(0x7F800000)) == np.uint32(0x52800000)   # movz
@@ -401,8 +413,18 @@ def _pure_writer(x):
     k |= (x & np.uint32(0x7F208000)) == np.uint32(0x1B008000)   # msub
     for base in (0x53000000, 0x13000000):
         k |= (x & np.uint32(0x7F800000)) == np.uint32(base)     # ubfm/sbfm
+    # CSEL family: sf op S 11010100 Rm cond op2 Rn Rd, with op2 at bits
+    # 11..10 selecting CSEL/CSINV (00) and CSINC/CSNEG (01). op2 = 1x is
+    # unallocated, so bit 11 belongs in the mask -- armlint.c's own
+    # matcher (check_mov_zero_to_xzr arm (d)) has always pinned it.
+    # Leaving it free matched 0x5A827999, which is not an instruction at
+    # all: it is SHA-1's round constant K1, four copies of it in the
+    # literal pool at the head of libcrypto's and dyld's __text. That
+    # accounted for 6 of this shape's 10 reported sites, none of which
+    # armlint could ever report -- Capstone refuses the word, so the
+    # driver skips it as data.
     for base in (0x1A800000, 0x5A800000):
-        k |= (x & np.uint32(0x7FE00000)) == np.uint32(base)     # csel family
+        k |= (x & np.uint32(0x7FE00800)) == np.uint32(base)     # csel family
     return k
 
 
@@ -416,7 +438,7 @@ def _reads(x, reg):
         | ((x & np.uint32(0x7F208000)) == np.uint32(0x1B008000))
     has_rm |= has_ra
     for base in (0x1A800000, 0x5A800000):
-        has_rm |= (x & np.uint32(0x7FE00000)) == np.uint32(base)
+        has_rm |= (x & np.uint32(0x7FE00800)) == np.uint32(base)
     return ((~movw) & (rn(x) == reg)) | (has_rm & (rm(x) == reg)) \
         | (has_ra & (ra(x) == reg))
 

@@ -33,6 +33,17 @@ the LDUR/STUR blindness in the LDP/STP coalescer (a77f2fa) showed the
 same class of error could sit in the scanners; it immediately found
 six such masks here, one of which had been undercounting by 3.9x.
 
+Neither half catches a mask that leaks into **unallocated** encoding
+space. The collision half asks whether a mask matches some *other
+reference instruction*, and an unallocated word is in nobody's
+reference set, so the mask passes and the scanner reports data as
+code. That is what put six phantom sites into the dead-write row
+below. Two habits follow: pin the bits that separate a class from the
+unallocated slots inside it, not just from its neighbours, and prefer
+a `MASKS` registry entry to an inline mask -- `--selftest` only ever
+sees the registry, so anything built inline (as `_pure_writer`'s set
+was) is unverified by construction.
+
 Where a candidate needed operand conditions finer than one shape mask
 can carry, it has its own scanner held to the same discipline:
 `tools/addpairscan.py` splits the ADD + LDP/STP family into the half
@@ -115,7 +126,6 @@ here with measured populations so it is not re-investigated.
 | `b.cond`/`cbz`/`tbz` `+8` over `b L` | `b.!cond L` | Implemented in 119c22e and reverted: sound (103/103 byte-verified), but clang/Mach-O emits the pair for conditional tail calls -- Mach-O has no conditional-branch relocation, so the spelling is forced and unfixable by recompiling. 2026-08 sweep: **2,437** (2,270 librustc_driver, 84 libcrypto, 59 go). Issue #7 has the /bin/bash census (12/12 tail calls) and reinstatement options: opt-in/informational class, or suppress cross-symbol transfers via LC_FUNCTION_STARTS and keep only intra-function pairs (the function-starts/nlist parsing now exists in main.c -- symbolized findings use it -- so the suppression needs only the boundary check) |
 | constant-condition `b.cond` after zero-test | `b` or delete | `cmp Rn, #0` pins C = 1, V = 0, so `b.hs` is always-taken and `b.lo`/`b.vs` never; `cbz wzr` always; `b.al` always; `cmp x, x` pins Z. 2026-08 sweep: **13** across 28.4M instructions (all in librustc_driver), counting `b.al`/`b.nv` and ZR-operand `cbz`/`cbnz`/`tbz`/`tbnz` |
 | side-effect-free write to ZR destination | delete | Non-S ALU, MADD family, CSEL family, bitfield ops with Rd = 31; loads excluded (memory side effects). 2026-08 sweep: **0** across 28.4M instructions -- compilers do not emit these |
-| pure write immediately clobbered | delete the first | Same destination written twice with no intervening read; covers duplicated instructions. 2026-08 sweep: **10** across 28.4M instructions. A first pass reported 6,424 -- all of them BFM aliases (`bfi`/`bfxil`), which merge into their destination and so read it. Any implementation must treat BFM as read-modify-write; `UBFM`/`SBFM` do overwrite |
 
 ## One-for-one canonicalizations
 
@@ -182,14 +192,17 @@ populations below are the real beyond-adjacency mass.
 
 ## Investigated and closed (2026-08 sweep)
 
-Candidates that never earned a row above, measured and rejected.
-Recorded so they are not re-investigated; two of them looked large
-before the operand conditions were applied.
+Candidates measured and rejected, recorded so they are not
+re-investigated. Several looked large before the operand conditions
+were applied, and the dead-write row is the sharper warning: it looked
+large, then small, then wrong, and only the third pass showed most of
+what was left was a constant table being read as code.
 
 | Pattern | Rewrite | Measured |
 | --- | --- | --- |
 | Interleaved copy `ldr Rt,[Rn,#a] ; str Rt,[Rm,#b] ; ldr Rt2,[Rn,#a+s] ; str Rt2,[Rm,#b+s]` | `ldp`/`stp` (4 -> 2) | **27** across 28.4M instructions (10 Q, 12 X/W cross-base, 5 X same-base). The strict-adjacency LDP/STP coalescer cannot see these -- the load/store interleave hides both same-direction pairs -- and the pair count that motivated the look was large (`ldr x,[sp+i] ; str x,[sp+i]` is the 11th most frequent dependent pair in librustc_driver at 29,271). But LLVM's `AArch64LoadStoreOptimizer` has already paired essentially all of them; what remains adjacent-and-interleaved is noise. Would also have needed an alias argument for the cross-base majority, since the rewrite moves the second load ahead of the first store |
 | `sub sp, sp, #N ; stp Xt, Xt2, [sp]` | `stp Xt, Xt2, [sp, #-N]!` | **0 of 79,127** pairs. Only 2 have the zero pair-offset that pre-indexing requires, and neither has an `N` that encodes in imm7. Compilers already use the writeback prologue where it applies (`stp x29, x30, [sp, #-16]!`); where they emit the separate `sub sp`, the callee-saves sit at a non-zero offset by design and no pre-index expression exists. The pair count looks inviting -- 74,761 in librustc_driver alone -- and is entirely unfoldable |
+| pure write immediately clobbered | delete the first | **4** across 28.4M instructions, all in go, and **2** of those are direct-branch targets that the side-entry gate would reject -- so 2 realizable findings corpus-wide. Two modelling errors had to come out first. A first pass reported 6,424, every one a BFM alias (`bfi`/`bfxil`), which merges into its destination and so reads it; `UBFM`/`SBFM` do overwrite. Pinning that gave **10**, of which **6 were not instructions**: the word `0x5A827999` -- SHA-1's round constant K1, four copies in the literal pool at the head of libcrypto's and dyld's `__text` -- matched because the CSEL mask left `op2` (bits 11..10) free, and `op2 = 1x` is unallocated. Capstone refuses the word, so armlint skips it as data and could never have reported those; mask fixed. The two survivors are both toolchain-forced: an unreachable trap block (two `adrp`+`add` addresses discarded, then `mov x0, xzr ; str x0, [x0]` to force a fault) and go's frame-pointer-chain shim (`sub x29, sp, #0x8 ; mov x29, xzr`). Not a model floor either -- adding ADRP to the pure-writer set, which is sound and was missing, gives 25 sites, still all go, 22 of them gated, 3 surviving. Zero anywhere LLVM generated the code, which is what dead-code elimination and register allocation are for; this is a go-assembler template artifact, not a general lint |
 | Unscaled (`LDUR`/`STUR`) consumers in the writeback folds | `ldr Rt, [Rn], #a` / `ldr Rt, [Rn, #a]!` | **0 and 0.** `check_ldr_str_add_post_indexed` and `check_add_ldr_str_pre_indexed` decode only the unsigned-offset spelling of their access, the same blindness `check_add_ldr_imm_offset` had -- but here it is unreachable, so there is nothing to fix. A writeback fold needs the access's own displacement to be zero, and no assembler spells a zero offset `LDUR`: it uses `LDR`. Measured on the corpus with the real operand conditions applied, both populations are empty |
 | Writeback and register-offset stores under `check_mov_zero_to_xzr` | `str xzr, [...]` | **5 and 10** candidate sites across the corpus, about one realized finding at the store arm's rate. The ZR substitution is sound in both -- only Rt changes, so the base update and the index are irrelevant to it -- and both are refused only because the arm reuses decoders built to answer a different question (is this address interchangeable with a plain base-plus-offset one?). A real false negative, and too small to spend a decoder on |
 
