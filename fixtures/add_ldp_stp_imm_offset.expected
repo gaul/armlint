@@ -30,6 +30,10 @@ ADD + LDP foldable to immediate-offset LDP at offset: 0x38 <_main+0x38>: -> ldp 
   add x8, x1, #0x1f8
   ldp x8, x20, [x8]
 
+ADD foldable into every access it feeds at offset: 0x60 <_main+0x60>: -> rebase the access on x1, deleting the add (3 instructions)
+  add x8, x1, #0x10
+  ldp x8, x20, [x8]  -> [x1, #0x10]
+
 ADD + STP foldable to immediate-offset STP at offset: 0x6c <_main+0x6c>: -> stp x3, x4, [x1, #0x10] (2 instructions)
   add x8, x1, #0x10
   stp x3, x4, [x8]
@@ -49,5 +53,6 @@ ADD + STP foldable to immediate-offset STP at offset: 0x90 <_main+0x90>: -> stp 
 Optimization opportunities by type:
        9  ADD + LDP foldable to immediate-offset LDP
        3  ADD + STP foldable to immediate-offset STP
+       1  ADD foldable into every access it feeds
 
-12 optimization opportunities in 50 instructions
+13 optimization opportunities in 50 instructions

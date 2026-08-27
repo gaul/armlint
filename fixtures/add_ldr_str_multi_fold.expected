@@ -47,17 +47,30 @@ ADD foldable into every access it feeds at offset: 0x78 <_main+0x78>: -> rebase 
   stp xzr, xzr, [x9, #0x40]  -> [sp, #0x140]
   ... and 2 more
 
-ADD foldable into every access it feeds at offset: 0xfc <_main+0xfc>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
+ADD foldable into every access it feeds at offset: 0x94 <_main+0x94>: -> rebase the access on x1, deleting the add (3 instructions)
+  add x8, x1, #0x10
+  str q0, [x8]  -> [x1, #0x10]
+
+ADD foldable into every access it feeds at offset: 0xa4 <_main+0xa4>: -> rebase the access on sp, deleting the add (4 instructions)
+  add x8, sp, #0x1d0
+  stp x0, x1, [x8, #0x10]  -> [sp, #0x1e0]
+
+ADD + STR foldable to immediate-offset STR at offset: 0xb8 <_main+0xb8>: -> str q0, [x1, #0x10] (2 instructions)
+  add x8, x1, #0x10
+  str q0, [x8]
+
+ADD foldable into every access it feeds at offset: 0x12c <_main+0x12c>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
   add x8, x0, #0x10
   str q0, [x8]  -> [x0, #0x10]
   str q1, [x8, #0x20]  -> [x0, #0x30]
 
-ADD foldable into every access it feeds at offset: 0x124 <_main+0x124>: -> rebase 2 accesses on sp, deleting the add (4 instructions)
+ADD foldable into every access it feeds at offset: 0x154 <_main+0x154>: -> rebase 2 accesses on sp, deleting the add (4 instructions)
   add x8, sp, #0x10
   str q0, [x8]  -> [sp, #0x10]
   str q1, [x8, #0x20]  -> [sp, #0x30]
 
 Optimization opportunities by type:
-      11  ADD foldable into every access it feeds
+      13  ADD foldable into every access it feeds
+       1  ADD + STR foldable to immediate-offset STR
 
-11 optimization opportunities in 82 instructions
+14 optimization opportunities in 94 instructions

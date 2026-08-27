@@ -54,6 +54,10 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x88 <_main+0x88>: -> ldr 
   add x3, x1, #0x10
   ldr x7, [x3]
 
+ADD foldable into every access it feeds at offset: 0xa0 <_main+0xa0>: -> rebase the access on x1, deleting the add (3 instructions)
+  add x3, x1, #0x10
+  ldr x3, [x3]  -> [x1, #0x10]
+
 ADD + LDR foldable to immediate-offset LDR at offset: 0xac <_main+0xac>: -> ldrsw x3, [x1, #0xc] (2 instructions)
   add x3, x1, #0x8
   ldrsw x3, [x3, #0x4]
@@ -109,5 +113,6 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x12c <_main+0x12c>: -> ld
 Optimization opportunities by type:
       20  ADD + LDR foldable to immediate-offset LDR
        7  ADD + STR foldable to immediate-offset STR
+       1  ADD foldable into every access it feeds
 
-27 optimization opportunities in 91 instructions
+28 optimization opportunities in 91 instructions

@@ -2947,6 +2947,12 @@ so quietly materialized through a scratch register instead.
   refuse -- and that is what the multi-use fold below now claims,
   3,188 sites drawn from this backlog and from the scaled, SIMD&FP and
   pair populations alongside it.
+* Strict adjacency is the other boundary, and it is a boundary between
+  the two checks rather than a condition on the rewrite. The pending
+  slot clears on any instruction that is not the consumer, so a base
+  whose sole use sits even one instruction further on is invisible
+  here; the multi-use fold's window reaches it and reports it under
+  that name, 616 more sites.
 
 ## ADD + LDP/STP foldable to immediate-offset LDP/STP
 
@@ -3040,12 +3046,25 @@ so quietly materialized through a scratch register instead.
   ldr  w2, [x8, #4]      ->  ldr  w2, [x0, #0x124]
   ```
 
-* Two uses is the minimum reported. At one use the finding belongs to
-  `check_add_ldr_imm_offset`, and this check stays silent so a site is
-  never reported twice. The two are disjoint by construction, not by
-  arrangement: at two or more uses the single-access check's deferred
-  liveness scan sees the base read again and discards, which is
-  exactly the population this one picks up.
+* A **sole** use reports here too, provided it is not the instruction
+  directly after the ADD. One use pays exactly as well as many -- the
+  ADD goes either way, so the saving is one instruction -- and the
+  only question is whose finding it is. That one position is the whole
+  of `check_add_ldr_imm_offset`'s reach: it clears its pending slot on
+  anything that is not the consumer. So the two split by position and
+  stay disjoint by construction, not by arrangement -- at one use this
+  check refuses the adjacent site, and at two or more the other one's
+  deferred liveness scan sees the base read again and discards.
+* The split is by position, not by outcome, which leaves a narrow
+  false negative. An adjacent sole use that `check_add_ldr_imm_offset`
+  opens a deferral for and then loses -- to an evicted slot or an
+  expired window -- is refused here too rather than picked up as a
+  second chance. Reporting a site twice is the worse failure.
+* The gapped sole use is also what makes the side-entry span below
+  earn its keep. With two or more uses the instructions between them
+  are almost always uses themselves; with one use across a gap the
+  finding covers instructions it does not mention, and a branch into
+  that gap rejects it.
 * Rebasable means an access whose displacement is a plain immediate:
   the integer and SIMD&FP single accesses in both the unsigned-offset
   and the unscaled spelling, and the signed-offset pairs. Covering all
@@ -3093,12 +3112,30 @@ so quietly materialized through a scratch register instead.
   `defer_dead_mov`'s single slot this is false-negative-only, and it
   costs little in practice: the measured yield landed within 0.1% of
   the estimate made without the restriction.
-* Corpus: 3,188 findings across 28.4M instructions (2,375
-  librustc_driver, 708 go, 66 dyld, 23 bash, 9 libcrypto, 7 ssh). By
-  what produces the base: **2,644** are stack frames (`add xt, sp,
-  #a`), **468** are global addresses off an ADRP, and 76 are plain
-  pointer arithmetic. Uses per site: 2 at 2,174 sites, 3 at 664, 4 at
-  170, 5 at 65, 6 at 64, and a tail to 20.
+* Corpus: 3,804 findings across 28.4M instructions (2,935
+  librustc_driver, 708 go, 70 dyld, 68 bash, 16 libcrypto, 7 ssh).
+  Uses per site: 1 at 616 sites, 2 at 2,174, 3 at 664, 4 at 170, 5 at
+  65, 6 at 64, and a tail to 20. By what produces the base, **2,644**
+  of the multi-use sites are stack frames (`add xt, sp, #a`), 468 are
+  global addresses off an ADRP, and 76 are plain pointer arithmetic.
+* The sole-use population inverts that. Of its 616 sites **318** are
+  ADRP globals, 213 stack frames and 85 pointer arithmetic -- the one
+  shape where a base is computed for exactly one access is a global's
+  page offset, and the tail of the LLVM frame shape is the part where
+  the virtual base register ended up feeding a single slot. They also
+  sit close: **553 of the 616 are gapped by exactly one instruction**,
+  and in 412 of those the gap is itself a load or store. That is a
+  scheduler covering the address's latency with independent work, and
+  it is the entire reason `check_add_ldr_imm_offset` cannot see them:
+
+  ```
+  add x8, sp, #0x1d0
+  movi v0.2d, #0             <- the value the store needs
+  stp  q0, q0, [x8, #0x10]   ->  stp q0, q0, [sp, #0x1e0]
+  ```
+
+  By what the use is: 270 integer single accesses, 224 SIMD&FP pairs,
+  118 SIMD&FP singles, 4 integer pairs.
 * The stack-frame majority is a single LLVM shape. `LocalStackSlotAllocation`
   inserts a virtual base register when a frame index's *estimated*
   offset looks out of addressing range, and the estimate is made

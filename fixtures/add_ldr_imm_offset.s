@@ -101,7 +101,10 @@ _main:
     sub     x3, x1, #16
     ldr     x3, [x3]
 
-    // N8) Intervening instruction.
+    // N8) Intervening instruction. Negative for this check only:
+    //     check_add_ldr_str_multi_fold reaches the use across the gap
+    //     and reports the same rewrite, which is why a finding under
+    //     that name appears below.
     add     x3, x1, #16
     add     x5, x5, x6
     ldr     x3, [x3]

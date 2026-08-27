@@ -2092,9 +2092,23 @@ bool check_add_ldr_imm_offset(armlint_state *state,
 //     ldr  w2, [x8, #4]      ->  ldr  w2, [x0, #0x124]
 //
 // Three instructions become two -- the same saving the single-access
-// fold reports, off a shape it cannot see. Two uses are the minimum
-// that pays; at one use the finding belongs to that check, and this
-// one stays silent so the two never both report a site.
+// fold reports, off a shape it cannot see.
+//
+// A SOLE use also reports here, provided it is not the instruction
+// directly after the ADD. That one position is the whole of
+// check_add_ldr_imm_offset's reach: it clears its pending slot on
+// anything that is not the consumer, so a use even one instruction
+// further on is invisible to it.
+//
+//     add  x8, sp, #0x1e0
+//     mov  w0, #0x1                  (unrelated)
+//     str  q0, [x8]          ->  str q0, [sp, #0x1e0]
+//
+// The window this check already runs is what reaches it; nothing
+// about the rewrite changes. The two checks stay disjoint by
+// position: this one refuses the adjacent sole use, and at two or
+// more uses the other one's deferred scan sees the base read again
+// and discards.
 //
 // "Every use" is what has to be proven, and it is why this needs a
 // forward scan where the other folds need only adjacency. The scan

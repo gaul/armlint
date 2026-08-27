@@ -438,6 +438,19 @@ static int run_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
     return run_check(bytes, len + 4);
 }
 
+// run_reg_dead restricted to one finding name, the pairing
+// run_named_check is to run_check. The multi-use fold's negatives
+// include shapes check_add_ldr_imm_offset legitimately reports -- a
+// sole use sitting directly after its ADD is that check's fold -- so
+// a bare count answers 1 where the question is whether THIS check
+// stayed silent.
+static int run_named_reg_dead(uint8_t *bytes, size_t len, unsigned reg,
+                              const char *name)
+{
+    movz_x(&bytes[len], reg, 1, 0);
+    return run_named_check(bytes, len + 4, name);
+}
+
 // The MOV #0 and MOV-constant fixtures all materialize into x0.
 static int run_x0_dead(uint8_t *bytes, size_t len)
 {
@@ -12280,11 +12293,18 @@ static void test_add_ldr_imm_offset(void)
     ldr_x_uimm0(&code[4], 31, 31);
     assert(run_helper_check(code, 8) == 0);
 
-    // Negative: intervening instruction breaks adjacency.
+    // Negative: intervening instruction breaks adjacency. The fold
+    // itself is fine at a distance -- check_add_ldr_str_multi_fold
+    // scans a window and reports exactly this site -- so the
+    // assertion has to name the check, or it would count that one's
+    // finding. Adjacency is the boundary between the two, not a
+    // condition on the rewrite.
     add_x_imm(&code[0], 3, 1, 16);
     add_x(&code[4], 5, 5, 6);
     ldr_x_uimm0(&code[8], 3, 3);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_named_check(code, 12,
+        "ADD + LDR foldable to immediate-offset LDR") == 0);
+    assert(run_helper_check(code, 12) == 1);
 
     // Negative: trailing ADD with no following LDR. Pending state
     // expires at flush; no finding emitted.
@@ -12550,13 +12570,17 @@ static void test_add_ldr_imm_offset(void)
 }
 
 // The multi-use fold's positives all end with an overwrite of the
-// base, so they run through run_reg_dead. Its negatives are built
-// from SIMD&FP accesses wherever one use would otherwise be enough:
-// check_add_ldr_imm_offset covers the single-access integer fold and
-// would answer 1 where this check answers 0, and these assertions are
-// about THIS check being silent.
+// base, so they run through run_reg_dead. Where a fragment is one
+// check_add_ldr_imm_offset would also report -- a sole use directly
+// after the ADD -- the assertion goes through run_named_* instead,
+// since a bare count would answer for that check and the question
+// here is whether THIS one stayed silent. Everywhere else a bare
+// count is enough: at two or more uses the other check's deferral is
+// discarded on the second read of the base, so only this one can
+// speak.
 static void test_add_ldr_str_multi_fold(void)
 {
+    const char *mf_name = "ADD foldable into every access it feeds";
     uint8_t code[32];
 
     // Canonical: an ADD whose two loads both rebase, the second one
@@ -12631,16 +12655,59 @@ static void test_add_ldr_str_multi_fold(void)
     ldp_x_soff(&code[8], 8, 9, 8, 4);     // -> [x0, #0x60]
     assert(run_helper_check(code, 12) == 1);
 
-    // Negative: one use. That is check_add_ldr_imm_offset's fold, and
-    // this check stays silent so a site is never reported twice. The
-    // use sits one instruction past the ADD, where that check's
-    // strict adjacency refuses it too, so the 0 belongs to this check
-    // alone. (Adjacent, the same fragment is a finding -- from the
-    // other check; see test_add_ldr_imm_offset.)
+    // A SOLE use, one instruction past the ADD. One use pays exactly
+    // as well as many -- the ADD goes either way -- and the only
+    // question is whose finding it is. check_add_ldr_imm_offset
+    // clears its pending slot on anything that is not the consumer,
+    // so it never sees this one and the report is ours. The
+    // scheduler's habit of covering the address latency with an
+    // unrelated instruction is what puts most real sites here.
     add_x_imm(&code[0], 8, 1, 0x10);
     movz_x(&code[4], 9, 7, 0);
+    str_q_fp(&code[8], 0, 8, 0);            // -> str q0, [x1, #0x10]
+    assert(run_reg_dead(code, 12, 8) == 1);
+
+    // The same across a wider gap, on the shape that dominates the
+    // corpus: a frame base whose one consumer is a pair store, with
+    // the value it stores materialized in between.
+    add_x_imm(&code[0], 8, 31, 0x1d0);
+    movz_x(&code[4], 0, 7, 0);
+    movz_x(&code[8], 1, 9, 0);
+    stp_x_soff(&code[12], 0, 1, 8, 2);      // -> stp x0, x1, [sp, #0x1e0]
+    assert(run_reg_dead(code, 16, 8) == 1);
+
+    // Negative: a sole use ADJACENT to the ADD. That is
+    // check_add_ldr_imm_offset's whole reach and its finding, so this
+    // check stays silent and the site is never reported twice. The
+    // bare count is 1 -- from that check -- which is what makes this
+    // an ownership assertion rather than a claim the fold fails.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    assert(run_named_reg_dead(code, 8, 8, mf_name) == 0);
+    add_x_imm(&code[0], 8, 1, 0x10);
+    str_q_fp(&code[4], 0, 8, 0);
+    assert(run_reg_dead(code, 8, 8) == 1);
+
+    // Negative: a sole gapped use whose gap moves the ADD's source.
+    // The rebased access would read x1 at its own offset, and x1 is
+    // no longer what the ADD added to.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    movz_x(&code[4], 1, 7, 0);
     str_q_fp(&code[8], 0, 8, 0);
     assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Negative: a sole use the scan never reaches, because straight-
+    // line code ends in the gap.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    ret_(&code[4]);
+    str_q_fp(&code[8], 0, 8, 0);
+    assert(run_reg_dead(code, 12, 8) == 0);
+
+    // Negative: no uses at all. The base dies unread, which is
+    // check_dead_add's business and not a fold.
+    add_x_imm(&code[0], 8, 1, 0x10);
+    movz_x(&code[4], 9, 7, 0);
+    assert(run_named_reg_dead(code, 8, 8, mf_name) == 0);
 
     // Negative: two uses, but the second one's sum has no encoding --
     // 0xFFF0 + 0x10 scaled by 16 is 4096, one past imm12. The ADD has

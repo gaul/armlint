@@ -63,7 +63,12 @@ _main:
     add     sp, x1, #16
     ldp     x8, x20, [sp]
 
-    // N5) Intervening instruction breaks adjacency.
+    // N5) Intervening instruction breaks adjacency -- for THIS check.
+    //     The fold is sound at a distance, and
+    //     check_add_ldr_str_multi_fold scans a window and reports the
+    //     site; adjacency is where the two checks divide, not a
+    //     condition on the rewrite. Hence a finding below under that
+    //     name and none under this one.
     add     x8, x1, #16
     mov     x9, #5
     ldp     x8, x20, [x8]

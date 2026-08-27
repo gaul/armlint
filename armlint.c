@@ -14744,18 +14744,39 @@ static void mf_record_use(armlint_state *state, const cs_insn *insn,
 }
 
 // Emit the tracked ADD's finding, now that its base is provably dead.
-// Two uses are the minimum that pays: at one use this IS
-// check_add_ldr_imm_offset's fold, reported there.
+// One use pays exactly as well as many -- either way the ADD goes and
+// the accesses carry its immediate, so the saving is one instruction
+// -- and the only thing that decides whether a sole use is reported
+// here is whether check_add_ldr_imm_offset already has it. That check
+// clears its pending slot on any instruction that is not the
+// consumer, so it holds the sole use sitting DIRECTLY after the ADD
+// and nothing else. A sole use even one instruction further on is
+// invisible to it and is ours. Two or more uses are ours wherever the
+// first one sits, for the complementary reason: the second read of
+// the base discards that check's deferral.
+//
+// The split is by position, not by outcome, which leaves a narrow
+// false negative: an adjacent sole use that the other check opens a
+// deferral for and then loses -- to an evicted slot or an expired
+// window -- is refused here too rather than picked up as a
+// second-chance. Reporting a site twice is the worse failure.
 //
 // insn_count spans the ADD through the LAST use, not the rendered
 // lines -- a span the driver's side-entry gate then covers exactly.
 // That is not conservatism: a branch landing anywhere between the ADD
 // and the last use reaches a rewritten access on a path that never
 // added the immediate, and the address would differ. A branch past
-// the last use is harmless, and the span ends there.
+// the last use is harmless, and the span ends there. The gapped sole
+// use is what makes that span earn its keep: the instructions between
+// the ADD and its one consumer are inside the finding, so a branch
+// into the gap rejects it.
 static bool mf_finish(armlint_state *state, armlint_finding *out)
 {
-    if (state->mf_uses < 2) {
+    if (state->mf_uses == 0) {
+        return false;
+    }
+    if (state->mf_uses == 1
+            && state->mf_last_offset == state->mf_offset + 4u) {
         return false;
     }
     char base_buf[8];
@@ -14766,9 +14787,14 @@ static bool mf_finish(armlint_state *state, armlint_finding *out)
     out->insn_count = (unsigned)
         ((state->mf_last_offset - state->mf_offset) / 4u + 1u);
     clear_finding_strings(out);
-    snprintf(out->detail, sizeof(out->detail),
-        "-> rebase %u accesses on %s, deleting the add",
-        state->mf_uses, base_buf);
+    if (state->mf_uses == 1) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> rebase the access on %s, deleting the add", base_buf);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> rebase %u accesses on %s, deleting the add",
+            state->mf_uses, base_buf);
+    }
     snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
         state->mf_add_disasm);
 
