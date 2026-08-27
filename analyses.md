@@ -2486,8 +2486,9 @@ so quietly materialized through a scratch register instead.
 
 * `mov xd, #0 ; <use xd>` instead of `<use xzr>`. Five consumer
   families:
-  * `STR` (B/H/W/X, unsigned-offset) with `Rt == mov_rd`
-    -> `str <wzr/xzr>, [...]`. Saves the MOV when Rt-only.
+  * An integer **store** (B/H/W/X) with `Rt == mov_rd`, in either
+    spelling -> `st(u)r <wzr/xzr>, [...]`. Saves the MOV when
+    Rt-only.
   * `ADD/SUB/ADDS/SUBS` (shifted-register, LSL #0) with Rn or Rm
     == mov_rd -> the same op with that operand as ZR. `CMP`/`CMN`
     aliases are rendered when Rd == ZR + S-variant.
@@ -2511,6 +2512,42 @@ so quietly materialized through a scratch register instead.
 * The Rn (base) slot of STR is intentionally excluded: register 31
   in addressing means SP, not ZR, so replacing the base would
   silently change semantics.
+* Both spellings of the store are decoded. The unsigned-offset form
+  scales its imm12 by the transfer size and cannot go negative; the
+  unscaled `STUR` form carries a signed byte count. Nothing about this
+  rewrite turns on which one the assembler picked -- only the data
+  register changes, and the address is copied through untouched -- so
+  reading one and not the other was a blind spot, the same class of
+  error as the LDUR blindness in the
+  [pair coalescer](#adjacent-ldrstr-foldable-into-ldpstp). The
+  unscaled decoder covers loads as well, and only stores are taken: a
+  load into `mov_rd` overwrites the zero rather than reading it, so
+  there is no ZR to substitute.
+* Corpus: **835** findings across 28.4M instructions. The store arm
+  accounts for 217 of them -- 199 in the unsigned-offset spelling and
+  **18** in the unscaled one, all 18 in librustc_driver. Both realize
+  at about the same rate off their candidate pools (199 of 3,235 and
+  18 of 225, 6.2% against 8.0%), which is the point: what was missing
+  was the *spelling*, not a different deadness story, and what still
+  gates both is the forward liveness scan proving the zero register
+  dead. The dominant unscaled shape is LLVM clearing trailing bytes
+  off a frame pointer, where the negative displacement leaves the
+  assembler no choice:
+
+  ```
+  movz w14, #0
+  sturb w14, [x12, #-3]   ->  sturb wzr, [x12, #-3]
+  ```
+
+  In librustc_driver the same unrolled clear emits `sturb` at -3, -2
+  and -1 and then `strb` at 0 -- so the check had been reporting the
+  last of four and passing over the other three.
+* Two store addressing forms remain unread, the writeback and
+  register-offset ones, where the ZR substitution would also be sound
+  (only Rt changes, so the base update and the index are irrelevant
+  to it). Measured rather than assumed: **5** and **10** candidate
+  sites corpus-wide, which at the realization rate above is about one
+  finding. Recorded in [TODO.md](TODO.md) and not implemented.
 * Side entries dominate this check's false positives on optimized
   code -- by selection: were the pair straight-line, the compiler
   would have used ZR directly, so the findings that survive skew

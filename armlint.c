@@ -1650,6 +1650,13 @@ static bool decode_asr_imm(uint32_t op, unsigned *out_sf,
 static bool defer_dead_mov(armlint_state *state, const armlint_finding *out,
                            unsigned reg);
 static void format_reg(char *buf, size_t bufsz, char w_or_x, unsigned reg);
+static bool classify_int_store(unsigned size, unsigned opc,
+                               const char **out_mnem, char *out_rt_wx);
+static bool decode_int_ldst_simm9(uint32_t op, unsigned *out_size,
+                                  const char **out_mnem, char *out_rt_wx,
+                                  bool *out_is_store, int32_t *out_off,
+                                  unsigned *out_rn, unsigned *out_rt);
+static const char *unscaled_mnem(const char *mnem);
 static bool decode_cvtf_from_gpr(uint32_t op, bool *out_src_64,
                                  bool *out_is_double,
                                  bool *out_is_unsigned,
@@ -12451,34 +12458,63 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
 
     uint32_t op = insn_word(insn);
 
-    // (a) STR (any size, unsigned-offset) with Rt == mov_rd. The base
-    // Rn must NOT also be mov_rd: only the Rt data slot is rewritten to
-    // ZR, so a store whose base is the zeroed register still reads it as
-    // an address. The forward-liveness scan begins after the store and
-    // never sees that base read, so it could wrongly prove the MOV dead
-    // -- deleting `mov xN, #0` would then change `str xN, [xN]`'s address
-    // from 0 to whatever xN held before.
+    // (a) An integer STORE (any size) with Rt == mov_rd, in either
+    // spelling: the unsigned-offset form, whose imm12 is scaled by the
+    // transfer size and cannot go negative, and the unscaled STUR
+    // form, whose imm9 is a signed byte count. Which one the assembler
+    // picked has nothing to do with this rewrite -- only the data
+    // register changes, the address is copied through untouched, and
+    // ZR is encodable in Rt either way -- so seeing one and not the
+    // other is a blind spot rather than a policy.
+    //
+    // Only stores. The unscaled decoder covers loads too, and a load
+    // into mov_rd overwrites the zero rather than reading it; there is
+    // no ZR to substitute, and the dead MOV is another check's.
+    //
+    // The base Rn must NOT also be mov_rd: only the Rt data slot is
+    // rewritten to ZR, so a store whose base is the zeroed register
+    // still reads it as an address. The forward-liveness scan begins
+    // after the store and never sees that base read, so it could
+    // wrongly prove the MOV dead -- deleting `mov xN, #0` would then
+    // change `str xN, [xN]`'s address from 0 to whatever xN held
+    // before.
     {
-        unsigned size, imm12, rn, rt;
+        unsigned size, imm12, rn = 0, rt = 0;
+        const char *str_mnem = NULL;
+        char rt_wx = 'w';
+        int32_t byte_off = 0;
+        bool is_store = false;
+        bool matched = false;
         if (decode_str_uimm_any_size(op, &size, &imm12, &rn, &rt)
-                && rt == state->mov_rd
-                && rn != state->mov_rd) {
-            const char *str_mnem;
-            char rt_wx;
-            unsigned scale_shift;
-            switch (size) {
-                case 0: str_mnem = "strb"; rt_wx = 'w'; scale_shift = 0; break;
-                case 1: str_mnem = "strh"; rt_wx = 'w'; scale_shift = 1; break;
-                case 2: str_mnem = "str";  rt_wx = 'w'; scale_shift = 2; break;
-                case 3: str_mnem = "str";  rt_wx = 'x'; scale_shift = 3; break;
-                default: return false;
-            }
-            unsigned bytes = imm12 << scale_shift;
+                && classify_int_store(size, 0u, &str_mnem, &rt_wx)) {
+            matched = true;
+            byte_off = (int32_t)((uint32_t)imm12 << size);
+        } else if (decode_int_ldst_simm9(op, &size, &str_mnem, &rt_wx,
+                                         &is_store, &byte_off, &rn, &rt)
+                && is_store) {
+            matched = true;
+            // The shared decoder names the scaled spelling; this one
+            // renders as STUR/STURB/STURH.
+            str_mnem = unscaled_mnem(str_mnem);
+        }
+        if (matched && rt == state->mov_rd && rn != state->mov_rd) {
             char base_buf[8];
             if (rn == 31) {
                 snprintf(base_buf, sizeof(base_buf), "sp");
             } else {
                 snprintf(base_buf, sizeof(base_buf), "x%u", rn);
+            }
+            // One address rendering for both spellings and all three
+            // signs; the rewrite never touches it.
+            char addr_buf[24];
+            if (byte_off == 0) {
+                snprintf(addr_buf, sizeof(addr_buf), "[%s]", base_buf);
+            } else if (byte_off < 0) {
+                snprintf(addr_buf, sizeof(addr_buf), "[%s, #-0x%x]",
+                    base_buf, (unsigned)(-byte_off));
+            } else {
+                snprintf(addr_buf, sizeof(addr_buf), "[%s, #0x%x]",
+                    base_buf, (unsigned)byte_off);
             }
 
             out->name = "MOV #0 + use foldable to ZR";
@@ -12487,19 +12523,10 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
             clear_finding_strings(out);
 
             char consumer_line[ARMLINT_FINDING_LINE_LEN];
-            if (bytes == 0) {
-                snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %czr, [%s]", str_mnem, rt_wx, base_buf);
-                snprintf(consumer_line, sizeof(consumer_line),
-                    "%s %c%u, [%s]", str_mnem, rt_wx, rt, base_buf);
-            } else {
-                snprintf(out->detail, sizeof(out->detail),
-                    "-> %s %czr, [%s, #0x%x]",
-                    str_mnem, rt_wx, base_buf, bytes);
-                snprintf(consumer_line, sizeof(consumer_line),
-                    "%s %c%u, [%s, #0x%x]",
-                    str_mnem, rt_wx, rt, base_buf, bytes);
-            }
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %czr, %s", str_mnem, rt_wx, addr_buf);
+            snprintf(consumer_line, sizeof(consumer_line),
+                "%s %c%u, %s", str_mnem, rt_wx, rt, addr_buf);
             mov_zero_finding_render_lines(state, out, consumer_line);
             return mov_zero_defer(state, out);
         }

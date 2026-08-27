@@ -1682,6 +1682,40 @@ static void stur_q(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
     write_le32(out, op);
 }
 
+// Integer STUR/STURB/STURH Rt, [Xn, #simm9]: base 0x38000000 with
+// opc = 00 and size in bits 31..30 selecting B/H/W/X, the same size
+// field the scaled STR family uses. imm9 is a signed BYTE count, not
+// scaled -- which is the whole reason the spelling exists.
+static void stur_int(uint8_t out[4], unsigned size, unsigned rt,
+                     unsigned rn, int imm9)
+{
+    uint32_t op = 0x38000000u
+        | ((size & 3u) << 30)
+        | (((uint32_t)imm9 & 0x1FFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
+// Encode STUR Xt, [Xn, #simm9].
+static void stur_x(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
+{
+    stur_int(out, 3, rt, rn, imm9);
+}
+
+// Encode LDUR Xt, [Xn, #simm9] -- the load spelling of the same
+// group, opc = 01 (base 0xF8400000). Bit 21 clear and bits 11..10
+// zero select the plain unscaled member, not the writeback or
+// register-offset ones.
+static void ldur_x(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
+{
+    uint32_t op = 0xF8400000u
+        | (((uint32_t)imm9 & 0x1FFu) << 12)
+        | ((rn & 0x1Fu) << 5)
+        | (rt & 0x1Fu);
+    write_le32(out, op);
+}
+
 // Load/store pair, signed-offset (no-writeback) form:
 // opc(2) 101 V 010 L imm7 Rt2 Rn Rt. imm7 is in per-register
 // transfer-size units (x4 for W/S and LDPSW, x8 for X/D, x16 for Q).
@@ -7862,6 +7896,38 @@ static void test_mov_zero_to_xzr(void)
     str_w(&code[4], 0, 1, 0);
     assert(run_x0_dead(code, 8) == 1);
 
+    // The unscaled spelling of the same store. Only the data register
+    // changes here -- the address is copied through untouched -- so
+    // which spelling the assembler picked has nothing to do with the
+    // rewrite, and a negative offset is exactly where it had no
+    // choice.
+    movz_x(&code[0], 0, 0, 0);
+    stur_x(&code[4], 0, 1, -8);     // -> stur xzr, [x1, #-0x8]
+    assert(run_x0_dead(code, 8) == 1);
+
+    // STURB at an offset off the transfer-size grid -- the other
+    // reason the unsigned-offset form cannot express an address.
+    movz_w(&code[0], 0, 0);
+    stur_int(&code[4], 0, 0, 1, -3);    // -> sturb wzr, [x1, #-0x3]
+    assert(run_x0_dead(code, 8) == 1);
+
+    // STURH, and STUR W: every size in the family folds, since the
+    // size field only picks how much of the zero is written.
+    movz_w(&code[0], 0, 0);
+    stur_int(&code[4], 1, 0, 1, 5);     // -> sturh wzr, [x1, #0x5]
+    assert(run_x0_dead(code, 8) == 1);
+    movz_w(&code[0], 0, 0);
+    stur_int(&code[4], 2, 0, 1, -4);    // -> stur wzr, [x1, #-0x4]
+    assert(run_x0_dead(code, 8) == 1);
+
+    // A zero-offset STUR is legal to encode and renders without a
+    // displacement, the same as its scaled twin. No assembler spells
+    // it this way -- it uses STR -- but the decoder does not get to
+    // assume that.
+    movz_x(&code[0], 0, 0, 0);
+    stur_x(&code[4], 0, 1, 0);      // -> stur xzr, [x1]
+    assert(run_x0_dead(code, 8) == 1);
+
     // (b) ADD/SUB shifted-LSL0:
     // ADD with Rm = mov_rd -> use XZR.
     movz_x(&code[0], 0, 0, 0);
@@ -7960,6 +8026,25 @@ static void test_mov_zero_to_xzr(void)
     movz_x(&code[0], 0, 0, 0);
     ldr_x_uimm_for_test(&code[4], 2, 1, 0);  // LDR X2, [X1] -- no read of X0
     assert(run_helper_check(code, 8) == 0);
+
+    // The unscaled arm needs that rejection explicitly: its decoder
+    // covers loads and stores in one call, so only the is_store test
+    // keeps an LDUR out. Rt here IS the zeroed register, which is the
+    // case a missing test would let through -- and the load
+    // overwrites the zero rather than reading it, so there is no ZR
+    // to substitute.
+    movz_x(&code[0], 0, 0, 0);
+    ldur_x(&code[4], 0, 1, -8);     // LDUR X0, [X1, #-8]
+    assert(run_x0_dead(code, 8) == 0);
+
+    // Unscaled store whose base is the zeroed register: the same hole
+    // as the scaled case above, and the same guard closes it. Only Rt
+    // is rewritten, so the base still reads x0, and the trailing
+    // overwrite is what would trip a missing guard into emitting.
+    movz_x(&code[0], 0, 0, 0);
+    stur_x(&code[4], 0, 0, -8);     // STUR X0, [X0, #-8]
+    movz_x(&code[8], 0, 42, 0);
+    assert(run_helper_check(code, 12) == 0);
 
     // Intervening instruction closes the chain.
     movz_x(&code[0], 0, 0, 0);
@@ -12066,29 +12151,6 @@ static void test_extend_add_sub_fold(void)
     uxtb_w(&code[0], 0, 1);
     add_w(&code[4], 0, 31, 0);
     assert(run_helper_check(code, 8) == 0);
-}
-
-// Encode LDUR Xt, [Xn, #simm9] (unscaled, signed byte offset).
-// Base 0xF8400000: size=11, 111, V=0, 25..24=00, opc=01; bit 21 clear
-// and bits 11..10 zero select the plain unscaled form out of that
-// addressing group.
-static void ldur_x(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
-{
-    uint32_t op = 0xF8400000u
-        | (((uint32_t)imm9 & 0x1FFu) << 12)
-        | ((rn & 0x1Fu) << 5)
-        | (rt & 0x1Fu);
-    write_le32(out, op);
-}
-
-// Encode STUR Xt, [Xn, #simm9]. Base 0xF8000000 (opc = 00).
-static void stur_x(uint8_t out[4], unsigned rt, unsigned rn, int imm9)
-{
-    uint32_t op = 0xF8000000u
-        | (((uint32_t)imm9 & 0x1FFu) << 12)
-        | ((rn & 0x1Fu) << 5)
-        | (rt & 0x1Fu);
-    write_le32(out, op);
 }
 
 // Encode LDR Xt, [Xn, #simm9]! (pre-indexed): same group as LDUR but

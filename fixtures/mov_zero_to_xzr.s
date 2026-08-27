@@ -29,35 +29,58 @@ _main:
     mov     x0, #0
     str     x0, [sp, #8]            // -> str xzr, [sp, #8]
 
-    // 7) ADD with Rm = mov.
+    // The same stores in the unscaled spelling. Only the data
+    // register changes in this rewrite -- the address is copied
+    // through untouched -- so which spelling the assembler picked has
+    // nothing to do with it, and these are exactly the addresses the
+    // unsigned-offset form cannot express.
+
+    // 7) STUR X: a negative displacement.
+    mov     x0, #0
+    stur    x0, [x1, #-8]           // -> stur xzr, [x1, #-8]
+
+    // 8) STURB off the transfer-size grid, the shape LLVM emits when
+    //    it clears three trailing bytes of a struct.
+    mov     w0, #0
+    sturb   w0, [x1, #-3]           // -> sturb wzr, [x1, #-3]
+
+    // 9) STURH.
+    mov     w0, #0
+    sturh   w0, [x1, #5]            // -> sturh wzr, [x1, #5]
+
+    // 10) STUR W off a frame pointer, the dominant real shape.
+    mov     w0, #0
+    stur    w0, [x29, #-100]        // -> stur wzr, [x29, #-100]
+
+    // 11) ADD with Rm = mov.
     mov     x0, #0
     add     x3, x2, x0              // -> add x3, x2, xzr
 
-    // 8) SUB-from-zero (Rn = mov).
+    // 12) SUB-from-zero (Rn = mov).
     mov     x0, #0
     sub     x3, x0, x2              // -> sub x3, xzr, x2 (= neg x3, x2)
 
-    // 9) CMP (Rm = mov).
+    // 13) CMP (Rm = mov).
     mov     x0, #0
     cmp     x2, x0                  // -> cmp x2, xzr (= cmp x2, #0)
 
-    // 10) CMN.
+    // 14) CMN.
     mov     x0, #0
     cmn     x2, x0                  // -> cmn x2, xzr
 
-    // 11) AND.
+    // 15) AND.
     mov     x0, #0
     and     x3, x2, x0              // -> and x3, x2, xzr (= MOV X3, XZR)
 
-    // 12) ORR -> MOV alias.
+    // 16) ORR -> MOV alias.
     mov     x0, #0
     orr     x3, x2, x0              // -> orr x3, x2, xzr (= MOV X3, X2)
 
-    // 13) EOR.
+    // 17) EOR.
     mov     x0, #0
     eor     x3, x2, x0              // -> eor x3, x2, xzr (= MOV X3, X2)
 
-    // 14) TST.
+    // 18) TST.
     mov     x0, #0
     tst     x2, x0                  // -> tst x2, xzr
 
@@ -78,6 +101,18 @@ _main:
     mov     x0, #0
     add     x3, x1, x2
 
+    // N5) LDUR into the zeroed register. The unscaled decoder covers
+    //     loads and stores in one call, so only the is_store test
+    //     keeps this out -- and a load overwrites the zero rather
+    //     than reading it, leaving no ZR to substitute.
+    mov     x0, #0
+    ldur    x0, [x1, #-8]
+
+    // N6) Unscaled store whose base is the zeroed register: the same
+    //     hole as N3, and the same guard closes it.
+    mov     x0, #0
+    stur    x0, [x0, #-8]
+
     // P) CSEL with the zero in the then-slot.
     mov     x0, #0
     csel    x3, x0, x2, ne          // -> csel x3, xzr, x2, ne
@@ -92,7 +127,7 @@ _main:
     mov     x0, #0
     ccmp    x0, x2, #4, ne          // -> ccmp xzr, x2, #4, ne
 
-    // N5) Both select slots zero: csel_self owns that shape.
+    // N7) Both select slots zero: csel_self owns that shape.
     mov     x0, #0
     csel    x3, x0, x0, ne
 

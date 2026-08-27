@@ -1603,8 +1603,9 @@ bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
 // followed by an instruction that reads that register. The read can
 // be replaced by XZR/WZR (the architectural zero register), making
 // the MOV dead. Five consumer families are covered:
-//   - STR (B/H/W/X, unsigned-offset) with Rt == mov_rd
-//       -> str <wzr/xzr>, [...]
+//   - An integer STORE (B/H/W/X) with Rt == mov_rd, in either
+//     spelling -- unsigned-offset STR or unscaled STUR
+//       -> st(u)r <wzr/xzr>, [...]
 //   - ADD/SUB/ADDS/SUBS (shifted-register, LSL #0) with Rn or Rm ==
 //     mov_rd  -> the same op with that operand replaced by ZR. CMP /
 //     CMN aliases (S-variant + Rd == ZR) are rendered as the alias.
@@ -1632,6 +1633,20 @@ bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
 // not dead and must not be dropped -- both base cases are excluded.
 // For arithmetic/logical shifted-register forms, Rn = Rm = 31 both
 // denote ZR, so either operand is foldable.
+//
+// That the store arm reads both spellings is a correction, not a
+// feature: it decoded the unsigned-offset form alone until 2026-08,
+// which made a zero store the assembler had spelled STUR invisible.
+// Nothing about this rewrite turns on the spelling -- only the data
+// register changes, and the address is copied through untouched --
+// and the missing half is where the offset is negative or off the
+// transfer-size grid, which is what LLVM emits clearing trailing
+// bytes off a frame pointer. The unscaled decoder covers loads too;
+// only stores are taken, since a load into mov_rd overwrites the
+// zero rather than reading it. Still unread are the writeback and
+// register-offset store forms, where the ZR substitution would also
+// be sound: 15 candidate sites across the mining corpus, measured
+// and left in TODO.md rather than implemented.
 bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 

@@ -75,11 +75,22 @@ implemented in the other one, whose strict adjacency needs no
 un-clobbered-source condition where a window does. A prediction is
 exact only when it is made by the machinery that will realize it.
 
+The third row was measured a third way -- by counting the encoding
+shape in the corpus, with no deadness proof applied -- and its 225 was
+never a prediction of findings, only of candidates. It shipped as 18,
+which is right: its already-covered twin realizes 199 of 3,235, and
+the two rates agree to within two points. All three rows are now
+closed. What the class had in common is worth keeping: every one was a
+check reporting a plausible number off a fraction of its own
+population, with nothing in the output to say so, and every one was
+found by measuring a shipped check against the shape it claims rather
+than by reading it.
+
 | Pattern | Rewrite | Notes |
 | --- | --- | --- |
 | ~~Single SIMD&FP access under `check_add_ldr_imm_offset`~~ | ~~as the integer fold~~ | **Done, 2026-08-27: +1,830 findings** (predicted 1,782; the overshoot is this check's adjacency, which needs no un-clobbered-source condition where the multi-use fold's window does). The same bug as the LDUR blindness, one register class over: the check decoded both *spellings* of its consumer since 986f735, but only the integer *class*. Its own pair arm already read both files, which is what made the single-access omission an oversight rather than a decision. Cost 18 ADD + LDP findings to the single deferral slot -- see the multi-slot row above |
 | ~~Non-adjacent single use of an ADD base~~ | ~~as the adjacent fold~~ | **Done, 2026-08-27: +616 findings**, the predicted count exactly (270 integer single, 224 SIMD&FP pair, 118 SIMD&FP single, 4 integer pair) and no other check's count moved by one. `check_add_ldr_imm_offset` clears its pending slot on any non-matching instruction, so it holds the sole use sitting DIRECTLY after the ADD and nothing else; `check_add_ldr_str_multi_fold` already scanned a window, and relaxing its minimum from two uses to one -- refusing only the adjacent sole use, which is the other check's -- was the whole change. **553 of the 616 are gapped by exactly one instruction**, and in 412 of those the gap is itself a load or store: a scheduler covering the address latency with independent work. Splitting by position rather than by outcome leaves a narrow false negative -- an adjacent sole use whose deferral the other check loses to an evicted slot is not picked up here as a second chance -- which is the right trade against reporting a site twice |
-| `mov #0` + unscaled store under `check_mov_zero_to_xzr` | `stur xzr, [...]` | **225 candidate sites** against the 3,235 in the unsigned-offset spelling it does see (817 findings realized corpus-wide, over a candidate pool that also includes the ALU operands). The store consumer goes through `decode_str_uimm_any_size` alone, so a zero store the assembler spelled `STUR` is invisible. A two-line decoder swap: `decode_int_ldst_simm9` already exists |
+| ~~`mov #0` + unscaled store under `check_mov_zero_to_xzr`~~ | ~~`stur xzr, [...]`~~ | **Done, 2026-08-27: +18 findings** (817 -> 835), all in librustc_driver. The 225 figure was a candidate pool, not a prediction: the store arm realizes 199 findings off the 3,235 unsigned-offset candidates it already saw, 6.2%, and the new spelling realizes 18 off 225, 8.0% -- the same rate, which is the point. What was missing was the spelling, not a different deadness story, and what still gates both is the forward liveness scan proving the zero register dead. The dominant shape is LLVM clearing trailing bytes off a frame pointer (`movz w14, #0 ; sturb w14, [x12, #-3]`), where a negative displacement leaves the assembler no choice; in librustc_driver the unrolled clear emits `sturb` at -3, -2, -1 then `strb` at 0, so the check had been reporting the last of four |
 
 ## Flag-fold leftovers
 
@@ -180,6 +191,7 @@ before the operand conditions were applied.
 | Interleaved copy `ldr Rt,[Rn,#a] ; str Rt,[Rm,#b] ; ldr Rt2,[Rn,#a+s] ; str Rt2,[Rm,#b+s]` | `ldp`/`stp` (4 -> 2) | **27** across 28.4M instructions (10 Q, 12 X/W cross-base, 5 X same-base). The strict-adjacency LDP/STP coalescer cannot see these -- the load/store interleave hides both same-direction pairs -- and the pair count that motivated the look was large (`ldr x,[sp+i] ; str x,[sp+i]` is the 11th most frequent dependent pair in librustc_driver at 29,271). But LLVM's `AArch64LoadStoreOptimizer` has already paired essentially all of them; what remains adjacent-and-interleaved is noise. Would also have needed an alias argument for the cross-base majority, since the rewrite moves the second load ahead of the first store |
 | `sub sp, sp, #N ; stp Xt, Xt2, [sp]` | `stp Xt, Xt2, [sp, #-N]!` | **0 of 79,127** pairs. Only 2 have the zero pair-offset that pre-indexing requires, and neither has an `N` that encodes in imm7. Compilers already use the writeback prologue where it applies (`stp x29, x30, [sp, #-16]!`); where they emit the separate `sub sp`, the callee-saves sit at a non-zero offset by design and no pre-index expression exists. The pair count looks inviting -- 74,761 in librustc_driver alone -- and is entirely unfoldable |
 | Unscaled (`LDUR`/`STUR`) consumers in the writeback folds | `ldr Rt, [Rn], #a` / `ldr Rt, [Rn, #a]!` | **0 and 0.** `check_ldr_str_add_post_indexed` and `check_add_ldr_str_pre_indexed` decode only the unsigned-offset spelling of their access, the same blindness `check_add_ldr_imm_offset` had -- but here it is unreachable, so there is nothing to fix. A writeback fold needs the access's own displacement to be zero, and no assembler spells a zero offset `LDUR`: it uses `LDR`. Measured on the corpus with the real operand conditions applied, both populations are empty |
+| Writeback and register-offset stores under `check_mov_zero_to_xzr` | `str xzr, [...]` | **5 and 10** candidate sites across the corpus, about one realized finding at the store arm's rate. The ZR substitution is sound in both -- only Rt changes, so the base update and the index are irrelevant to it -- and both are refused only because the arm reuses decoders built to answer a different question (is this address interchangeable with a plain base-plus-offset one?). A real false negative, and too small to spend a decoder on |
 
 ## Infrastructure
 
