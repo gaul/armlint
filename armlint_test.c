@@ -14864,7 +14864,10 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
     }
     bool reads = false, writes = false;
     cs_regs regs_read, regs_write;
-    uint8_t nread, nwrite;
+    // Zeroed because cs_regs_access leaves both counts untouched when
+    // it returns an error, and only the NZCV loops below sit inside the
+    // CS_ERR_OK guard -- the register-side loop reads nread outside it.
+    uint8_t nread = 0, nwrite = 0;
     if (cs_regs_access(handle, insn, regs_read, &nread,
                        regs_write, &nwrite) == CS_ERR_OK) {
         for (uint8_t i = 0; i < nread; i++) {
