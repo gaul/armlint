@@ -250,12 +250,19 @@ ARMLINT_LIVENESS_SWEEP=1 ARMLINT_LIVENESS_SWEEP_THREADS="$(sysctl -n hw.ncpu)" \
 
 Capstone 6 (in alpha as of mid-2026) rewrote the AArch64 module from
 LLVM. armlint compiles against it unchanged via Capstone's
-compatibility header, and CI tracks the pinned pre-release below. To
-reproduce locally:
+compatibility header, and CI tracks the pinned revision below. It is a
+commit rather than the newest tag (6.0.0-Alpha10) because that tag
+still leaves `insn->alias_id` stale on non-alias instructions, which
+makes the sweep's oracle report a phantom `x30` read after every
+`ret`. To reproduce locally:
 
 ```sh
-git clone --depth 1 --branch 6.0.0-Alpha10 \
-    https://github.com/capstone-engine/capstone.git capstone6
+git init capstone6
+git -C capstone6 remote add origin \
+    https://github.com/capstone-engine/capstone.git
+git -C capstone6 fetch --depth 1 origin \
+    862b59717d54769036f89fd9f780f634e030cf56
+git -C capstone6 checkout FETCH_HEAD
 cmake -B capstone6/build -S capstone6 -DCMAKE_BUILD_TYPE=Release
 cmake --build capstone6/build -j8
 make clean   # never mix objects built against different Capstone ABIs

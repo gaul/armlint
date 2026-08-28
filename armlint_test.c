@@ -14958,6 +14958,33 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
             && ((word >> 29) & 0x3u) != 1u)         // SBFM/UBFM, not BFM
         || (word & 0xFFE0FC00u) == 0x9AC03000u      // PACGA
         || (word & 0xFFF80000u) == 0xD5280000u;     // SYSL
+    // Capstone 6 derives one implicit read from insn->alias_id: the RET
+    // alias contributes x30. Through 6.0.0-Alpha10 map_set_alias_id
+    // returned early WITHOUT clearing alias_id when the instruction is
+    // not an alias, and this sweep decodes into a single reused cs_insn
+    // -- so every non-alias following a `ret` inherited a phantom x30
+    // read. That fired 2^24 times on PRFM (literal), the one opcode
+    // chunk that is wholly decodable AND wholly non-alias, so nothing
+    // inside it ever reset the field. Upstream cd4bb2a3 fixed it and CI
+    // pins past that.
+    //
+    // The read set is usable as an oracle only while that holds, so
+    // assert it rather than working around it. Excusing the phantom
+    // would silently narrow the oracle -- x30 would stop being checked
+    // on every non-alias -- and would keep a Capstone regression
+    // looking like an armlint defect. A non-alias carrying ALIAS_RET is
+    // the broken state exactly, so this cannot fire against a correct
+    // Capstone, and against a broken one it names the cause at the
+    // first word instead of after millions of phantom violations.
+#if CS_API_MAJOR >= 6
+    if (!insn->is_alias && insn->alias_id == AARCH64_INS_ALIAS_RET) {
+        fprintf(stderr, "capstone regression: alias_id left at "
+                "ALIAS_RET on non-alias %08x  %s %s -- it must be "
+                "cleared per instruction (upstream cd4bb2a3)\n",
+                word, insn->mnemonic, insn->op_str);
+        assert(0);
+    }
+#endif
     for (uint8_t i = 0; i < nread; i++) {
         int reg = arm64_gpr_num(regs_read[i]);
         if (reg < 0) {

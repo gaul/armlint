@@ -80,10 +80,16 @@ jobs:
     # revisit when v6 reaches beta/stable.
     runs-on: ubuntu-26.04-arm
     env:
-      # v6 pre-release tags have no `v` prefix. Bumped deliberately, not
+      # A commit, not the 6.0.0-Alpha10 tag: that tag predates upstream
+      # cd4bb2a3, which stopped map_set_alias_id from leaving
+      # insn->alias_id at the PREVIOUS instruction's value when this one
+      # is not an alias -- through it, AArch64_reg_access reported a
+      # phantom x30 read on every non-alias decoded after a `ret`, which
+      # is what the sweep below tripped over. Alpha10 is still the newest
+      # tag, so there is nothing to bump to. Bumped deliberately, not
       # automatically: rendering and decode behavior can shift between
-      # alphas, which is exactly what this job is meant to surface.
-      CAPSTONE6_TAG: 6.0.0-Alpha10
+      # revisions, which is exactly what this job is meant to surface.
+      CAPSTONE6_REV: 862b59717d54769036f89fd9f780f634e030cf56
       # Must be passed as make ARGUMENTS, not environment: the Makefile
       # assigns CAPSTONE_CFLAGS/CAPSTONE_LIBS with :=, which beats the
       # environment but yields to the command line.
@@ -98,13 +104,18 @@ jobs:
         uses: actions/cache@v6
         with:
           path: capstone6
-          key: capstone6-${{ env.CAPSTONE6_TAG }}-${{ runner.arch }}
+          key: capstone6-${{ env.CAPSTONE6_REV }}-${{ runner.arch }}
 
       - name: Build Capstone 6 from source
         run: |
           if [ ! -f capstone6/build/libcapstone.a ]; then
-            git clone --depth 1 --branch "$CAPSTONE6_TAG" \
-              https://github.com/capstone-engine/capstone.git capstone6
+            # `clone --branch` accepts only refs, so fetch the pinned
+            # commit directly; github.com serves any reachable SHA.
+            git init -q capstone6
+            git -C capstone6 remote add origin \
+              https://github.com/capstone-engine/capstone.git
+            git -C capstone6 fetch -q --depth 1 origin "$CAPSTONE6_REV"
+            git -C capstone6 checkout -q FETCH_HEAD
             cmake -B capstone6/build -S capstone6 -DCMAKE_BUILD_TYPE=Release
             cmake --build capstone6/build -j"$(nproc)"
           fi
@@ -161,7 +172,8 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04-arm
     env:
-      CAPSTONE6_TAG: 6.0.0-Alpha10
+      # Keep in step with build-capstone6, which explains the pin.
+      CAPSTONE6_REV: 862b59717d54769036f89fd9f780f634e030cf56
       CAPSTONE6_CFLAGS: >-
         -I${{ github.workspace }}/capstone6/include
         -DCAPSTONE_AARCH64_COMPAT_HEADER
@@ -173,13 +185,18 @@ jobs:
         uses: actions/cache@v6
         with:
           path: capstone6
-          key: capstone6-${{ env.CAPSTONE6_TAG }}-${{ runner.arch }}
+          key: capstone6-${{ env.CAPSTONE6_REV }}-${{ runner.arch }}
 
       - name: Build Capstone 6 from source
         run: |
           if [ ! -f capstone6/build/libcapstone.a ]; then
-            git clone --depth 1 --branch "$CAPSTONE6_TAG" \
-              https://github.com/capstone-engine/capstone.git capstone6
+            # `clone --branch` accepts only refs, so fetch the pinned
+            # commit directly; github.com serves any reachable SHA.
+            git init -q capstone6
+            git -C capstone6 remote add origin \
+              https://github.com/capstone-engine/capstone.git
+            git -C capstone6 fetch -q --depth 1 origin "$CAPSTONE6_REV"
+            git -C capstone6 checkout -q FETCH_HEAD
             cmake -B capstone6/build -S capstone6 -DCMAKE_BUILD_TYPE=Release
             cmake --build capstone6/build -j"$(nproc)"
           fi
