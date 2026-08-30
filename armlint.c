@@ -266,6 +266,18 @@ struct armlint_state {
     size_t rcc_offset;
     char rcc_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Register copy (ORR Rd, ZR, Rm, or the SP-read alias
+    // ADD Rd, SP, #0) pending an adjacent in-place ADD/SUB immediate
+    // on its destination -- the consumer can read the copy's source
+    // directly, and because it overwrites the destination the copy
+    // itself deletes. cpa_rn uses ADD/SUB's Rn convention: 31 is SP.
+    bool cpa_active;
+    bool cpa_is_64bit;
+    unsigned cpa_rd;
+    unsigned cpa_rn;
+    size_t cpa_offset;
+    char cpa_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
     // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
     bool sgn_active;
@@ -9650,6 +9662,101 @@ bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
     return found;
 }
 
+// In-place ADD/SUB immediate on a register the previous instruction
+// copied:
+//     mov x19, x29           (orr x19, xzr, x29)
+//     sub x19, x19, #0x48
+// The subtract can read the copy's source directly -- SUB x19, x29,
+// #0x48 -- and because it overwrites the destination, the copied
+// value's only reader is the consumer itself: adjacency rules out an
+// intervening read, the central side-entry gate rules out a branch
+// onto the consumer, and MOV and non-S ADD/SUB leave NZCV alone. So
+// unlike the immediate-form MOV folds, whose constant register must
+// be proven dead by the forward scan, this fold deletes the copy with
+// no deferral at all.
+//
+// Two producer spellings: the canonical GPR copy ORR Rd, ZR, Rm, and
+// the SP-read alias ADD Rd, SP, #0 (`mov Rd, sp`), whose source drops
+// straight into ADD/SUB's own Rn = 31-is-SP encoding. SP-writing
+// copies do not open: deleting one changes which values SP
+// transiently holds, and an asynchronous observer can see the
+// transient. Copies from ZR are constant materializations (other
+// checks' rows). The consumer keeps its immediate unchanged, shifted
+// or not, so encodability is inherited rather than tested; #0
+// consumers stay in the ADD/SUB #0 row; the S-variants are excluded
+// with the shared decoder. Width follows the copy-chain rule: an X
+// consumer of a W copy would observe the zeroed upper half, which the
+// original source does not hold.
+bool check_copy_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->cpa_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    unsigned sf = 0;
+    unsigned rd = 0;
+    unsigned rn = 0;
+    int32_t imm = 0;
+    bool is_add_sub = decode_add_sub_imm(op, &sf, &rd, &rn, &imm);
+
+    bool found = false;
+    if (state->cpa_active && is_add_sub && imm != 0
+            && rd == state->cpa_rd && rn == state->cpa_rd
+            && (state->cpa_is_64bit || sf == 0)) {
+        char w = (sf != 0) ? 'x' : 'w';
+        const char *mnem = imm < 0 ? "sub" : "add";
+        uint32_t mag = imm < 0 ? (uint32_t)-imm : (uint32_t)imm;
+
+        char src[8];
+        if (state->cpa_rn == 31) {
+            snprintf(src, sizeof(src), "%s", (sf != 0) ? "sp" : "wsp");
+        } else {
+            snprintf(src, sizeof(src), "%c%u", w, state->cpa_rn);
+        }
+
+        out->name = "MOV + ADD/SUB foldable to the original source";
+        out->start_offset = state->cpa_offset;
+        out->insn_count = 2;
+        clear_finding_strings(out);
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, %s, #0x%x", mnem, w, rd, src, mag);
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s", state->cpa_disasm);
+        snprintf(out->lines[1], sizeof(out->lines[1]),
+            "%s %s", insn->mnemonic, insn->op_str);
+        found = true;
+    }
+
+    // Open or refresh the producer. A firing consumer never matches
+    // either spelling (it is an ADD/SUB with a nonzero immediate), so
+    // it falls through to the clear.
+    unsigned l_sf, l_opc, l_n, l_rd, l_rn, l_rm;
+    if (decode_logic_shifted_lsl0(op, &l_sf, &l_opc, &l_n,
+                                  &l_rd, &l_rn, &l_rm)
+            && l_opc == 1 && l_n == 0 && l_rn == 31
+            && l_rm != 31 && l_rd != 31 && l_rd != l_rm) {
+        state->cpa_is_64bit = (l_sf != 0);
+        state->cpa_rd = l_rd;
+        state->cpa_rn = l_rm;
+    } else if (is_add_sub && imm == 0 && rn == 31 && rd != 31) {
+        state->cpa_is_64bit = (sf != 0);
+        state->cpa_rd = rd;
+        state->cpa_rn = 31;
+    } else {
+        state->cpa_active = false;
+        return found;
+    }
+    state->cpa_active = true;
+    state->cpa_offset = offset;
+    snprintf(state->cpa_disasm, sizeof(state->cpa_disasm),
+        "%s %s", insn->mnemonic, insn->op_str);
+    return found;
+}
+
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
 //   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
 // Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
@@ -16154,6 +16261,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_cage_orr_add,
     check_cheap_const_copy,
     check_reg_copy_chain,
+    check_copy_add_sub_fold,
     check_cset_recompare,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,

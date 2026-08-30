@@ -1575,6 +1575,50 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `check_add_sub_zero`); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
 
+## MOV + ADD/SUB foldable to the original source
+
+* An in-place ADD/SUB immediate on a register the previous
+  instruction copied can read the copy's source instead, and the copy
+  deletes:
+
+  ```
+  mov x19, x29          ->  sub x19, x29, #0x48
+  sub x19, x19, #0x48
+  ```
+
+* **The deadness argument is structural, not scanned.** The consumer
+  overwrites the destination, so the copied value's only reader is
+  the consumer itself: adjacency rules out an intervening read, the
+  central side-entry gate rules out a branch onto the consumer, and
+  MOV and non-S ADD/SUB leave NZCV alone. Unlike the immediate-form
+  fold above, whose constant register must be proven dead by the
+  forward scan, nothing defers.
+* Two producer spellings, per the recall rule: the canonical GPR copy
+  `ORR Rd, ZR, Rm`, and the SP-read alias `ADD Rd, SP, #0` (`mov Rd,
+  sp`), whose source drops straight into ADD/SUB's own Rn = 31-is-SP
+  encoding. SP-writing movs do not open: deleting one changes which
+  values SP transiently holds, and an asynchronous observer (signal,
+  profiler) can see the transient. Copies from ZR are constant
+  materializations (the MOV #0 and cheap-constant rows' territory).
+* Width follows the copy-chain rule: an X consumer of a W copy would
+  observe the zeroed upper half, which the original source does not
+  hold; a W consumer of an X copy reads the low half of the same
+  value and folds. The consumer keeps its immediate unchanged --
+  shifted or not -- so encodability is inherited rather than tested.
+  `#0` consumers stay in the ADD/SUB #0 row, and the S-variants are
+  excluded with the shared non-flag-setting decoder.
+* The corpus is JIT code, not the Mach-O sweep: the shape came out of
+  adjacent-pair mining of SpiderMonkey's JetStream 3 dump (54.7M JIT
+  instructions), and the realized count there is **126,224** --
+  120,822 in the Baseline tier, nearly all one emitter, the
+  frame-pointer helper `mov x19, x29 ; sub x19, x19, #0x48` that runs
+  before every VM call, plus 5,342 in Ion (the pseudo-SP
+  re-derivation `mov x20, sp ; add x20, x20, #imm` and relatives).
+  The AOT counterpoint is exact: `/bin/bash`, `/usr/bin/ssh` and
+  `/usr/lib/dyld` carry **0** instances between them -- LLVM's copy
+  propagation never leaves the shape behind, so this is a JIT-emitter
+  check.
+
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when

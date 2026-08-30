@@ -7685,6 +7685,91 @@ static void test_reg_copy_chain(void)
     assert(run_buffer_check(code, 12) == 0);
 }
 
+static void test_copy_add_sub_fold(void)
+{
+    uint8_t code[16];
+    const char *name = "MOV + ADD/SUB foldable to the original source";
+
+    // The SpiderMonkey Baseline frame-pointer shape: the subtract can
+    // read the copied source, and overwriting x19 kills the copy.
+    mov_x_reg(&code[0], 19, 29);
+    sub_x_imm(&code[4], 19, 19, 0x48);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // ADD consumer, W width.
+    mov_w_reg(&code[0], 1, 0);
+    add_w_imm(&code[4], 1, 1, 4);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // A W consumer of an X copy reads the low half of the same value.
+    mov_x_reg(&code[0], 1, 0);
+    add_w_imm(&code[4], 1, 1, 4);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // An X consumer of a W copy observes the zeroed upper half -- no
+    // finding.
+    mov_w_reg(&code[0], 1, 0);
+    add_x_imm(&code[4], 1, 1, 4);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // The shifted immediate (sh=1, LSL #12) folds unchanged.
+    mov_x_reg(&code[0], 1, 0);
+    encode_addsub_imm(&code[4], 0x91400000u, 1, 1, 1);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // The SP-read alias as the producer: mov x20, sp ; add #16.
+    encode_addsub_imm(&code[0], 0x91000000u, 20, 31, 0);
+    add_x_imm(&code[4], 20, 20, 16);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // An SP-writing MOV never opens: the transient SP value is
+    // architecturally observable.
+    encode_addsub_imm(&code[0], 0x91000000u, 31, 0, 0);   // mov sp, x0
+    encode_addsub_imm(&code[4], 0x91000000u, 31, 31, 16); // add sp, sp, #16
+    assert(run_named_check(code, 8, name) == 0);
+
+    // #0 consumers are the ADD/SUB #0 check's row.
+    mov_x_reg(&code[0], 1, 0);
+    add_x_imm(&code[4], 1, 1, 0);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // The consumer must be in-place on the copy's destination: not on
+    // another register, not on the copy's source, and not Rn-only (the
+    // copy may stay live there; both instructions would remain).
+    mov_x_reg(&code[0], 1, 0);
+    add_x_imm(&code[4], 2, 2, 4);
+    assert(run_named_check(code, 8, name) == 0);
+    mov_x_reg(&code[0], 1, 0);
+    add_x_imm(&code[4], 0, 0, 4);
+    assert(run_named_check(code, 8, name) == 0);
+    mov_x_reg(&code[0], 1, 0);
+    add_x_imm(&code[4], 2, 1, 4);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // Copies from ZR are constant materializations, not producers.
+    mov_x_reg(&code[0], 1, 31);
+    add_x_imm(&code[4], 1, 1, 4);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // The S-variants are excluded with the shared decoder.
+    mov_w_reg(&code[0], 1, 0);
+    subs_w_imm(&code[4], 1, 1, 4);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // A non-consumer between the two breaks adjacency.
+    mov_x_reg(&code[0], 1, 0);
+    movz_x(&code[4], 9, 1, 0);
+    add_x_imm(&code[8], 1, 1, 4);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // Side entry onto the consumer suppresses the finding (central
+    // side-entry gate, needs the buffer-aware harness).
+    mov_x_reg(&code[0], 1, 0);
+    add_x_imm(&code[4], 1, 1, 4);
+    cbz_cbnz(&code[8], 1, 0, 9, -1);   // cbz x9, back to the add
+    assert(run_buffer_check(code, 12) == 0);
+}
+
 static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
@@ -15654,6 +15739,7 @@ int main(void)
     test_mov_cage_orr_add();
     test_cheap_const_copy();
     test_reg_copy_chain();
+    test_copy_add_sub_fold();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

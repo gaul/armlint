@@ -1,0 +1,24 @@
+MOV + ADD/SUB foldable to the original source at offset: 0x0 <_main>: -> sub x19, x29, #0x48 (2 instructions)
+  mov x19, x29
+  sub x19, x19, #0x48
+
+MOV + ADD/SUB foldable to the original source at offset: 0x8 <_main+0x8>: -> add w1, w0, #0x4 (2 instructions)
+  mov w1, w0
+  add w1, w1, #4
+
+MOV + ADD/SUB foldable to the original source at offset: 0x10 <_main+0x10>: -> add w2, w3, #0x8 (2 instructions)
+  mov x2, x3
+  add w2, w2, #8
+
+MOV + ADD/SUB foldable to the original source at offset: 0x18 <_main+0x18>: -> add x4, x5, #0x1000 (2 instructions)
+  mov x4, x5
+  add x4, x4, #1, lsl #12
+
+MOV + ADD/SUB foldable to the original source at offset: 0x20 <_main+0x20>: -> add x20, sp, #0x10 (2 instructions)
+  mov x20, sp
+  add x20, x20, #0x10
+
+Optimization opportunities by type:
+       5  MOV + ADD/SUB foldable to the original source
+
+5 optimization opportunities in 23 instructions

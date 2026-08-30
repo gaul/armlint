@@ -1119,6 +1119,24 @@ bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
 bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect an in-place ADD/SUB immediate on a register the previous
+// instruction copied -- the consumer can read the copy's source
+// instead and the copy deletes:
+//     mov x19, x29
+//     sub x19, x19, #0x48    -> sub x19, x29, #0x48
+// The deadness argument is structural: the consumer overwrites the
+// destination, adjacency rules out an intervening read, and the
+// central side-entry gate covers a branch onto the consumer, so
+// nothing defers. Producers are the canonical ORR copy and the
+// SP-read alias ADD Rd, SP, #0 (`mov Rd, sp`), whose source drops
+// into ADD/SUB's own Rn = 31-is-SP encoding; SP-writing movs stay out
+// because the transient SP value is architecturally observable. An X
+// consumer of a W copy is rejected (zeroed upper half); #0 consumers
+// belong to the ADD/SUB #0 check; the S-variants are excluded with
+// the shared non-flag-setting decoder.
+bool check_copy_add_sub_fold(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 // Detect a CSET whose 0/1 result is re-compared against zero for a
 // conditional select while the original comparison is still in the
 // flags -- the zero-test's flags are then a pure function of the
