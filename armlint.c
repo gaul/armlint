@@ -278,6 +278,13 @@ struct armlint_state {
     size_t cpa_offset;
     char cpa_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // MOV (to SP) alias ADD/SUB SP, Rn, #0 pending an adjacent SP
+    // write that does not read SP -- then the MOV's value is
+    // overwritten unread and the MOV is dead at the data-flow level.
+    bool spm_active;
+    size_t spm_offset;
+    char spm_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
     // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
     bool sgn_active;
@@ -9757,6 +9764,80 @@ bool check_copy_add_sub_fold(armlint_state *state, const cs_insn *insn,
     return found;
 }
 
+// A MOV to SP whose value the very next instruction overwrites without
+// reading it:
+//     mov sp, x20
+//     sub sp, x20, #0x10     (reads x20, not sp)
+// No instruction ever reads what the MOV wrote, so it is dead at the
+// data-flow level. Because the finding deletes the FIRST instruction
+// of the pair, the central side-entry gate does not apply: a branch
+// onto the overwriter skips the MOV on that path anyway, so this is a
+// single-instruction window, immune by construction.
+//
+// SP keeps the rewrite advisory rather than mechanical. For an
+// ordinary register the deletion would be unconditional -- nothing may
+// depend on the register state of asynchronously interrupted code --
+// but the kernel acts on SP when it delivers a signal, writing the
+// frame below it, so the one-instruction transient the deletion
+// removes is load-bearing, not merely observable. Whether the older
+// SP value still covers live data is the runtime's stack-discipline
+// invariant, which no two-instruction window proves; the finding text
+// says so. This is the same asymmetry that keeps SP writes out of the
+// ZR-operand and copy-fold checks.
+//
+// Scope matches the measured population (SpiderMonkey's pseudo-SP
+// sync helpers colliding): producers are the MOV (to SP) alias
+// ADD/SUB SP, Rn, #0; killers are ADD/SUB immediate writing SP
+// without reading it (Rd = 31, Rn != 31, any immediate). A killer
+// with #0 is itself the next producer, so a run of duplicate syncs
+// reports one finding per dead link. Recorded rather than done:
+// ADD/SUB (extended register) SP destinations, non-MOV SP-writing
+// producers, and a gap-tolerant window.
+bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->spm_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    unsigned sf = 0;
+    unsigned rd = 0;
+    unsigned rn = 0;
+    int32_t imm = 0;
+    bool is_add_sub = decode_add_sub_imm(op, &sf, &rd, &rn, &imm);
+
+    bool found = false;
+    if (state->spm_active && is_add_sub && rd == 31 && rn != 31) {
+        out->name = "MOV to SP overwritten unread";
+        out->start_offset = state->spm_offset;
+        out->insn_count = 1;
+        clear_finding_strings(out);
+        snprintf(out->detail, sizeof(out->detail),
+            "-> delete; sp is rewritten unread (the transient is the "
+            "runtime's stack contract)");
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s", state->spm_disasm);
+        snprintf(out->lines[1], sizeof(out->lines[1]),
+            "%s %s", insn->mnemonic, insn->op_str);
+        found = true;
+    }
+
+    // Open or refresh the producer: any MOV (to SP) alias, a firing
+    // killer with #0 included.
+    if (is_add_sub && rd == 31 && imm == 0) {
+        state->spm_active = true;
+        state->spm_offset = offset;
+        snprintf(state->spm_disasm, sizeof(state->spm_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    } else {
+        state->spm_active = false;
+    }
+    return found;
+}
+
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
 //   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
 // Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
@@ -16262,6 +16343,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cheap_const_copy,
     check_reg_copy_chain,
     check_copy_add_sub_fold,
+    check_sp_mov_overwritten,
     check_cset_recompare,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,

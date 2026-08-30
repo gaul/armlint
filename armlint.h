@@ -1137,6 +1137,24 @@ bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
 bool check_copy_add_sub_fold(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out);
 
+// Detect a MOV to SP whose value the very next instruction overwrites
+// without reading it:
+//     mov sp, x20
+//     sub sp, x20, #0x10     -> delete the mov
+// Dead at the data-flow level; reported as a single-instruction
+// window, since deleting the first instruction of the pair is
+// unaffected by a side entry onto the overwriter. The rewrite is
+// advisory for SP: the kernel writes signal frames below SP, so the
+// transient the deletion removes is load-bearing, and whether the
+// older SP value still covers live data is the runtime's
+// stack-discipline invariant -- the finding text carries that caveat.
+// Producers are the MOV (to SP) alias ADD/SUB SP, Rn, #0; killers are
+// ADD/SUB immediate writing SP without reading it. A killer with #0
+// is itself the next producer, so duplicate-sync runs report one
+// finding per dead link.
+bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out);
+
 // Detect a CSET whose 0/1 result is re-compared against zero for a
 // conditional select while the original comparison is still in the
 // flags -- the zero-test's flags are then a pure function of the

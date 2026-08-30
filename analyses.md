@@ -1619,6 +1619,57 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   propagation never leaves the shape behind, so this is a JIT-emitter
   check.
 
+## MOV to SP overwritten unread
+
+* A MOV to SP whose value the very next instruction overwrites
+  without reading it is dead at the data-flow level:
+
+  ```
+  mov sp, x20           ->  delete
+  sub sp, x20, #0x10        (reads x20, not sp)
+  ```
+
+* **The finding deletes the first instruction of the pair, so the
+  side-entry gate does not apply.** Every other two-instruction fold
+  replaces the window and must suppress when the second slot is a
+  branch target; here a side entry skips the MOV on that path anyway,
+  so the finding is a single-instruction window, immune by
+  construction -- the fixture pins a branch onto the overwriter to
+  hold the distinction, and the realized corpus count comes out
+  *above* the pair-mined estimate for exactly this reason (the miner
+  skipped branch-target pairs; the check correctly keeps them).
+* **SP is why the rewrite is advisory rather than mechanical.** For an
+  ordinary register the deletion would be unconditional: a signal
+  handler can observe any GPR through ucontext, but nothing may depend
+  on the register state of asynchronously interrupted code -- the
+  model under which every compiler deletes dead code. SP is
+  load-bearing rather than merely observable: the kernel writes the
+  signal frame below it, so the one-instruction transient the deletion
+  removes participates in delivery itself. Whether the older SP value
+  is still at-or-below live data is the runtime's stack-discipline
+  invariant, which no two-instruction window proves, and the finding
+  text carries that caveat. This is the same asymmetry that keeps SP
+  writes out of the ZR-operand and copy-fold checks.
+* Scope matches the measured population. Producers are the MOV (to SP)
+  alias `ADD/SUB SP, Rn, #0`; killers are ADD/SUB immediate writing SP
+  without reading it (`Rd = 31`, `Rn != 31`, any immediate). A killer
+  with `#0` is itself the next producer, so a run of duplicate syncs
+  reports one finding per dead link. Recorded rather than done:
+  ADD/SUB (extended register) SP destinations, non-MOV SP-writing
+  producers (a pre-sync `sub sp, x20, #8` overwritten by a sync), and
+  a gap-tolerant window across instructions that touch neither SP nor
+  control flow.
+* The population is JIT sync traffic: SpiderMonkey's pseudo-SP
+  discipline emits `sp = x20` defensively from independent
+  macro-assembler helpers, and adjacent helpers collide. JetStream 3
+  corpus: **78,156** findings (47,355 Baseline, 30,778 Ion, 23
+  trampoline) against a pair-mined estimate of 75,392; the Octane-era
+  estimate was ~3.3K, the suite mix explaining the gap. AOT is not
+  quite zero this time: `/bin/bash` and `/usr/bin/ssh` carry none, but
+  `/usr/lib/dyld` has exactly one -- `mov sp, x8 ; sub sp, x29, #0x50`
+  in `RemoteNotificationResponder::notifyMonitorOfImageListChanges`,
+  an alloca-restore immediately re-derived from the frame pointer.
+
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when

@@ -1,0 +1,16 @@
+MOV to SP overwritten unread at offset: 0x0 <_main>: -> delete; sp is rewritten unread (the transient is the runtime's stack contract) (1 instructions)
+  mov sp, x20
+  sub sp, x20, #0x10
+
+MOV to SP overwritten unread at offset: 0x8 <_main+0x8>: -> delete; sp is rewritten unread (the transient is the runtime's stack contract) (1 instructions)
+  mov sp, x20
+  mov sp, x20
+
+MOV to SP overwritten unread at offset: 0x14 <_main+0x14>: -> delete; sp is rewritten unread (the transient is the runtime's stack contract) (1 instructions)
+  mov sp, x21
+  sub sp, x21, #0x20
+
+Optimization opportunities by type:
+       3  MOV to SP overwritten unread
+
+3 optimization opportunities in 16 instructions

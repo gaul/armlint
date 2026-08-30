@@ -7770,6 +7770,60 @@ static void test_copy_add_sub_fold(void)
     assert(run_buffer_check(code, 12) == 0);
 }
 
+static void test_sp_mov_overwritten(void)
+{
+    uint8_t code[16];
+    const char *name = "MOV to SP overwritten unread";
+
+    // The JIT sync-then-lower-sync shape: sp is rewritten from x20
+    // without ever being read.
+    encode_addsub_imm(&code[0], 0x91000000u, 31, 20, 0);   // mov sp, x20
+    encode_addsub_imm(&code[4], 0xD1000000u, 31, 20, 16);  // sub sp, x20, #16
+    assert(run_named_check(code, 8, name) == 1);
+
+    // Back-to-back duplicate syncs.
+    encode_addsub_imm(&code[0], 0x91000000u, 31, 20, 0);
+    encode_addsub_imm(&code[4], 0x91000000u, 31, 20, 0);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // A run of three reports one finding per dead link.
+    encode_addsub_imm(&code[0], 0x91000000u, 31, 20, 0);
+    encode_addsub_imm(&code[4], 0x91000000u, 31, 20, 0);
+    encode_addsub_imm(&code[8], 0x91000000u, 31, 20, 0);
+    assert(run_named_check(code, 12, name) == 2);
+
+    // W form: mov wsp, w0 ; sub wsp, w1, #4.
+    encode_addsub_imm(&code[0], 0x11000000u, 31, 0, 0);
+    encode_addsub_imm(&code[4], 0x51000000u, 31, 1, 4);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // The overwriter must not read sp: add sp, sp, #16 keeps the MOV
+    // live.
+    encode_addsub_imm(&code[0], 0x91000000u, 31, 20, 0);
+    encode_addsub_imm(&code[4], 0x91000000u, 31, 31, 16);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // An intervening instruction breaks adjacency (a gap-tolerant
+    // variant is recorded, not done).
+    encode_addsub_imm(&code[0], 0x91000000u, 31, 20, 0);
+    movz_x(&code[4], 9, 1, 0);
+    encode_addsub_imm(&code[8], 0xD1000000u, 31, 20, 16);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // Ordinary-register movs are not this check's producers.
+    mov_x_reg(&code[0], 19, 29);
+    sub_x_imm(&code[4], 19, 19, 0x48);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // Deleting the FIRST instruction needs no side-entry gate: a
+    // branch onto the overwriter still yields the finding (contrast
+    // with the two-instruction folds above).
+    encode_addsub_imm(&code[0], 0x91000000u, 31, 20, 0);
+    encode_addsub_imm(&code[4], 0xD1000000u, 31, 20, 16);
+    cbz_cbnz(&code[8], 1, 0, 9, -1);   // cbz x9, back to the sub
+    assert(run_buffer_check(code, 12) == 1);
+}
+
 static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
@@ -15740,6 +15794,7 @@ int main(void)
     test_cheap_const_copy();
     test_reg_copy_chain();
     test_copy_add_sub_fold();
+    test_sp_mov_overwritten();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();
