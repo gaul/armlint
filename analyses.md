@@ -1670,6 +1670,58 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   in `RemoteNotificationResponder::notifyMonitorOfImageListChanges`,
   an alloca-restore immediately re-derived from the frame pointer.
 
+## ADD/SUB recomputed while its registers are unchanged
+
+* A register-register ADD/SUB re-executed while its destination and
+  both sources are unwritten recomputes a value the register already
+  holds, and deletes -- nothing is rewritten, so there are no
+  encodability questions:
+
+  ```
+  add  x16, x0, x2      ; input + pos
+  ldrb w1, [x16, #1]    ; checks that read but write none of
+  cmp  w1, #0x78        ; the three registers
+  b.ne fail
+  add  x16, x0, x2      ->  delete; x16 still holds x0 + x2
+  ```
+
+* **This is a value-integrity scan, not an adjacent pair.** The
+  tracked registers must still hold the earlier result when the
+  recompute appears, so ANY write to Rd, Rn or Rm invalidates --
+  read-modify-writes included, the ranking `insn_writes_reg` exists
+  to provide -- as does a call, an unconditional transfer, an
+  exception instruction, and any branch target: a side entry reaches
+  the recompute without the first ADD having executed. That last rule
+  is the mirror image of the SP check above, which deletes the
+  *first* instruction of its pair and is side-entry-immune; this one
+  deletes the *second*, so side entries are the binding constraint.
+  Conditional branches do not invalidate -- the fall-through path
+  keeps its registers.
+* Matching is by exact instruction word, which settles width, operand
+  order and shift agreement for free. Producers require all three
+  registers real, with the destination not among the inputs (a
+  self-input ADD changes its own operand each execution and is never
+  redundant). The S-variants are excluded: re-executing ADDS
+  recomputes the same flags only if nothing wrote NZCV in between, a
+  condition this check does not track. One producer slot, newest
+  wins. Recorded rather than done: shifted and extended-register
+  forms, a multi-slot cache, the flags-dead ADDS variant, and the
+  other pure ALU ops -- the general direction is local value
+  numbering, and each op class carries its own purity argument.
+* The population is one emitter: irregexp's lookahead character loads
+  re-form `input + pos` for every nonzero character offset, while the
+  checks in between read but never write the triple (the zero-offset
+  loads use the register-offset form and skip the scratch entirely).
+  SpiderMonkey's JetStream 3 RegExp tier: **8,836** findings --
+  exactly the count an independent measurement script produced from
+  the text dumps before the check existed, single-slot cache and
+  full-map bookkeeping agreeing because each block re-forms a single
+  triple. Ion and Baseline: **0** (Ion CSEs addresses at the MIR
+  level and its guard targets kill the windows; Baseline's frame
+  traffic is fp-relative). `/bin/bash`, `/usr/bin/ssh`,
+  `/usr/lib/dyld`: **0**. The same emitter ships in V8's arm64 port,
+  so the check transfers to that corpus as-is.
+
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when

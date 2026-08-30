@@ -1155,6 +1155,23 @@ bool check_copy_add_sub_fold(armlint_state *state, const cs_insn *insn,
 bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// Detect a register-register ADD/SUB re-executed while its three
+// registers are unchanged -- the recompute produces a value the
+// destination already holds and deletes:
+//     add  x16, x0, x2
+//     ...checks that write none of the three...
+//     add  x16, x0, x2       -> delete
+// A value-integrity scan rather than an adjacent pair: any write to
+// Rd/Rn/Rm invalidates (read-modify-writes included), as does a call,
+// an unconditional transfer, an exception instruction, or a branch
+// target (a side entry reaches the recompute without the first ADD
+// having executed -- this check deletes the SECOND instruction, the
+// opposite exposure from the SP check above). Matching is by exact
+// instruction word; self-input producers and the S-variants are
+// excluded. One producer slot, newest wins.
+bool check_add_recompute(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect a CSET whose 0/1 result is re-compared against zero for a
 // conditional select while the original comparison is still in the
 // flags -- the zero-test's flags are then a pure function of the

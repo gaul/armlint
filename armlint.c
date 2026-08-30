@@ -285,6 +285,19 @@ struct armlint_state {
     size_t spm_offset;
     char spm_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // A register-register ADD/SUB whose result may still be live: the
+    // bit-identical instruction seen again with Rd, Rn and Rm all
+    // unwritten since -- and no side entry, call, or unconditional
+    // transfer in between -- recomputes a value the register already
+    // holds. One slot, newest producer wins.
+    bool arc_active;
+    uint32_t arc_op;
+    unsigned arc_rd;
+    unsigned arc_rn;
+    unsigned arc_rm;
+    size_t arc_offset;
+    char arc_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
     // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
     bool sgn_active;
@@ -9838,6 +9851,107 @@ bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
     return found;
 }
 
+// A register-register ADD/SUB re-executed while nothing has changed:
+//     add  x16, x0, x2       ; input + pos
+//     ldrb w1, [x16, #1]     ; checks that read but write none of the
+//     cmp  w1, #0x78         ; three registers
+//     b.ne fail
+//     add  x16, x0, x2       ; recomputes a sum x16 still holds
+// The second ADD is deleted outright; nothing is rewritten, so there
+// are no encodability questions. Unlike the adjacent-pair checks this
+// is a value-integrity scan: the tracked registers must still hold
+// the earlier result when the recompute appears, so ANY write to Rd,
+// Rn or Rm invalidates (read-modify-writes included -- the ranking
+// insn_writes_reg exists to provide), as does a call or unconditional
+// transfer (the callee may write anything; past a B/BR/RET the next
+// instruction is reachable only as a branch target), an exception
+// instruction, and any branch target (a side entry reaches the
+// recompute without the first ADD having executed -- the opposite
+// exposure from the SP check above, which deletes the FIRST
+// instruction of its pair and is side-entry-immune; this one deletes
+// the SECOND). Conditional branches do not invalidate: the
+// fall-through path keeps its registers.
+//
+// Matching is by exact instruction word, so width and operand order
+// are handled for free. Producers require Rd, Rn, Rm all real
+// registers with Rd not among the inputs (a self-input ADD changes
+// its own operand each execution and is never redundant), and the
+// S-variants are excluded: re-executing ADDS recomputes the same
+// flags only if nothing wrote NZCV in between, a condition this check
+// does not track. One producer slot, newest wins -- the motivating
+// corpus (irregexp's lookahead loads, an emitter V8 shares) re-forms
+// a single input+pos sum per block. Recorded rather than done:
+// shifted and extended-register forms, a multi-slot cache, and the
+// other pure ALU ops.
+bool check_add_recompute(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->arc_active = false;
+        return false;
+    }
+
+    // A side entry reaches this instruction without the cached ADD
+    // having executed. Without a buffer there is no target map and
+    // the gate stays off, like the central side-entry check.
+    if (state->arc_active && offset_is_branch_target(state, offset)) {
+        state->arc_active = false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    unsigned sf, rd, rn, rm;
+    bool is_sub, is_s;
+    bool is_alu = decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                              &rd, &rn, &rm)
+        && !is_s && rd != 31 && rn != 31 && rm != 31
+        && rd != rn && rd != rm;
+
+    bool found = false;
+    if (state->arc_active && is_alu && op == state->arc_op) {
+        char w = (sf != 0) ? 'x' : 'w';
+        out->name = "ADD/SUB recomputed while its registers are unchanged";
+        out->start_offset = offset;
+        out->insn_count = 1;
+        clear_finding_strings(out);
+        snprintf(out->detail, sizeof(out->detail),
+            "-> delete; %c%u still holds %c%u %s %c%u (from 0x%zx bytes back)",
+            w, rd, w, rn, is_sub ? "-" : "+", w, rm,
+            offset - state->arc_offset);
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s", state->arc_disasm);
+        snprintf(out->lines[1], sizeof(out->lines[1]),
+            "%s %s", insn->mnemonic, insn->op_str);
+        found = true;
+        // The register still holds the sum: a third recompute reports
+        // against this one, so only the offset refreshes.
+        state->arc_offset = offset;
+    } else if (is_alu) {
+        state->arc_active = true;
+        state->arc_op = op;
+        state->arc_rd = rd;
+        state->arc_rn = rn;
+        state->arc_rm = rm;
+        state->arc_offset = offset;
+        snprintf(state->arc_disasm, sizeof(state->arc_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    } else if (state->arc_active) {
+        // B/BL (bit 31 free covers both), the unconditional
+        // branch-register class (BR/BLR/RET and their PAC variants),
+        // and exception generation end the tracked region; otherwise
+        // any write to the three registers kills the value.
+        if ((op & 0x7C000000u) == 0x14000000u
+                || (op & 0xFE000000u) == 0xD6000000u
+                || (op & 0xFF000000u) == 0xD4000000u
+                || insn_writes_reg(insn, (int)state->arc_rd)
+                || insn_writes_reg(insn, (int)state->arc_rn)
+                || insn_writes_reg(insn, (int)state->arc_rm)) {
+            state->arc_active = false;
+        }
+    }
+    return found;
+}
+
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
 //   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
 // Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
@@ -16344,6 +16458,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_reg_copy_chain,
     check_copy_add_sub_fold,
     check_sp_mov_overwritten,
+    check_add_recompute,
     check_cset_recompare,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,

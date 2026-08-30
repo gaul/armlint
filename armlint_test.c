@@ -7824,6 +7824,80 @@ static void test_sp_mov_overwritten(void)
     assert(run_buffer_check(code, 12) == 1);
 }
 
+static void test_add_recompute(void)
+{
+    uint8_t code[16];
+    const char *name =
+        "ADD/SUB recomputed while its registers are unchanged";
+
+    // The irregexp lookahead shape: input+pos re-formed while x16, x0
+    // and x2 are all untouched (the compare only reads and writes
+    // flags).
+    add_x(&code[0], 16, 0, 2);
+    cmp_x_imm(&code[4], 1, 0x30);
+    add_x(&code[8], 16, 0, 2);
+    assert(run_named_check(code, 12, name) == 1);
+
+    // Adjacent duplicate, and one finding per recompute in a run.
+    add_x(&code[0], 16, 0, 2);
+    add_x(&code[4], 16, 0, 2);
+    assert(run_named_check(code, 8, name) == 1);
+    add_x(&code[0], 16, 0, 2);
+    add_x(&code[4], 16, 0, 2);
+    add_x(&code[8], 16, 0, 2);
+    assert(run_named_check(code, 12, name) == 2);
+
+    // SUB and W spellings match by exact word.
+    sub_x(&code[0], 5, 6, 7);
+    sub_x(&code[4], 5, 6, 7);
+    assert(run_named_check(code, 8, name) == 1);
+    add_w(&code[0], 16, 0, 2);
+    add_w(&code[4], 16, 0, 2);
+    assert(run_named_check(code, 8, name) == 1);
+
+    // A width change is a different word: the second replaces the
+    // slot instead of matching.
+    add_w(&code[0], 16, 0, 2);
+    add_x(&code[4], 16, 0, 2);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // A write to a source register kills the tracked value; so does a
+    // write to the destination.
+    add_x(&code[0], 16, 0, 2);
+    movz_x(&code[4], 0, 1, 0);
+    add_x(&code[8], 16, 0, 2);
+    assert(run_named_check(code, 12, name) == 0);
+    add_x(&code[0], 16, 0, 2);
+    movz_x(&code[4], 16, 1, 0);
+    add_x(&code[8], 16, 0, 2);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // A destination that is also an input changes per execution --
+    // never cached.
+    add_x(&code[0], 0, 0, 2);
+    add_x(&code[4], 0, 0, 2);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // The S-variant's flag write is a second effect this check does
+    // not track.
+    encode_sr(&code[0], 0xAB000000u, 16, 0, 2);   // adds x16, x0, x2
+    encode_sr(&code[4], 0xAB000000u, 16, 0, 2);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // A call between the two may write anything.
+    add_x(&code[0], 16, 0, 2);
+    bl_(&code[4], 16);
+    add_x(&code[8], 16, 0, 2);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // Side entry onto the recompute: the cached ADD never executed on
+    // the entering path (buffer-aware harness for the target map).
+    add_x(&code[0], 16, 0, 2);
+    add_x(&code[4], 16, 0, 2);
+    cbz_cbnz(&code[8], 1, 0, 9, -1);   // cbz x9, back to the second add
+    assert(run_buffer_check(code, 12) == 0);
+}
+
 static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
@@ -15795,6 +15869,7 @@ int main(void)
     test_reg_copy_chain();
     test_copy_add_sub_fold();
     test_sp_mov_overwritten();
+    test_add_recompute();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

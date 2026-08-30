@@ -1,0 +1,12 @@
+ADD/SUB recomputed while its registers are unchanged at offset: 0x1c <_main+0x1c>: -> delete; x16 still holds x0 + x2 (from 0x1c bytes back) (1 instructions)
+  add x16, x0, x2
+  add x16, x0, x2
+
+ADD/SUB recomputed while its registers are unchanged at offset: 0x2c <_main+0x2c>: -> delete; x5 still holds x6 - x7 (from 0x8 bytes back) (1 instructions)
+  sub x5, x6, x7
+  sub x5, x6, x7
+
+Optimization opportunities by type:
+       2  ADD/SUB recomputed while its registers are unchanged
+
+2 optimization opportunities in 23 instructions

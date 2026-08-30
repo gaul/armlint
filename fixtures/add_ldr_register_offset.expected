@@ -30,9 +30,17 @@ ADD + LDR foldable to register-offset LDR at offset: 0x50 <_main+0x50>: -> ldr x
   add x3, x1, x2
   ldr x7, [x3]
 
+ADD/SUB recomputed while its registers are unchanged at offset: 0x58 <_main+0x58>: -> delete; x3 still holds x1 + x2 (from 0x8 bytes back) (1 instructions)
+  add x3, x1, x2
+  add x3, x1, x2
+
 ADD + LDR foldable to register-offset LDR at offset: 0x74 <_main+0x74>: -> ldrsw x3, [x1, x2, lsl #2] (2 instructions)
   add x3, x1, x2, lsl #2
   ldrsw x3, [x3]
+
+ADD/SUB recomputed while its registers are unchanged at offset: 0x84 <_main+0x84>: -> delete; x3 still holds x1 + x2 (from 0x8 bytes back) (1 instructions)
+  add x3, x1, x2
+  add x3, x1, x2
 
 ADD + STR foldable to register-offset STR at offset: 0x84 <_main+0x84>: -> str x0, [x1, x2] (2 instructions)
   add x3, x1, x2
@@ -49,5 +57,6 @@ ADD + STR foldable to register-offset STR at offset: 0x9c <_main+0x9c>: -> str x
 Optimization opportunities by type:
        9  ADD + LDR foldable to register-offset LDR
        3  ADD + STR foldable to register-offset STR
+       2  ADD/SUB recomputed while its registers are unchanged
 
-12 optimization opportunities in 46 instructions
+14 optimization opportunities in 46 instructions

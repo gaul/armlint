@@ -105,6 +105,10 @@ ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0xbc <_main+0xbc>: -
 compare whose flags are overwritten unread at offset: 0xd8 <_main+0xd8>: -> delete; NZCV overwritten unread by cmp w0, #0 (1 instructions)
   cmp w5, #0
 
+ADD/SUB recomputed while its registers are unchanged at offset: 0xe4 <_main+0xe4>: -> delete; w0 still holds w1 + w2 (from 0x10 bytes back) (1 instructions)
+  add w0, w1, w2
+  add w0, w1, w2
+
 compare-zero branch foldable into CBZ/CBNZ at offset: 0xdc <_main+0xdc>: -> cbz w0, 0x104 (2 instructions)
   cmp w0, #0
   b.eq 0x104
@@ -124,7 +128,8 @@ Optimization opportunities by type:
       15  compare-zero branch foldable into CBZ/CBNZ
       12  ADD/SUB/AND/BIC + zero-CMP foldable to S-variant
        2  compare whose flags are overwritten unread
+       1  ADD/SUB recomputed while its registers are unchanged
        1  branch to the next instruction is a no-op
        1  compare-zero signed-branch foldable into TBZ/TBNZ
 
-31 optimization opportunities in 66 instructions
+32 optimization opportunities in 66 instructions
