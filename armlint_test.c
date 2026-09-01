@@ -15129,11 +15129,11 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
     // the NZCV side: it over-reports (5.x puts x16 in PACIA1716's
     // writes, 6 puts x1 in CAS's), and a missed kill is a false
     // negative rather than a wrong finding.
-    // Three documented over-reports, the register-side analogue of the
-    // CBZ/TBZ noise above. In each the instruction's DESTINATION shows
-    // up in Capstone's read set although the architecture says it is
-    // written and not read, so armlint is the correct party and the
-    // oracle is skipped for that one register rather than the
+    // Three documented Capstone 5 over-reports, the register-side
+    // analogue of the CBZ/TBZ noise above. In each the instruction's
+    // DESTINATION shows up in the read set although the architecture
+    // says it is written and not read, so armlint is the correct party
+    // and the oracle is skipped for that one register rather than the
     // classifier being made conservative. The exhaustive sweep found
     // all three; between them they account for every violation left in
     // the 2^32 space once the real defect was fixed.
@@ -15142,12 +15142,19 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
     //     which is right for BFM (BFI/BFXIL merge into Rd) and wrong
     //     for SBFM/UBFM and their shift and extend aliases, which
     //     fully overwrite it. BFM is deliberately NOT skipped -- it is
-    //     a genuine read and keeps its teeth. Capstone 6 splits the
-    //     operands and reports both correctly.
+    //     a genuine read and keeps its teeth.
     //   * PACGA, which computes a fresh code into Rd from Rn and Rm and
-    //     returns it with the low half zeroed. Capstone 5 only.
+    //     returns it with the low half zeroed.
     //   * SYSL, whose Xt receives the system instruction's result.
-    //     Over-reported by BOTH 5 and 6, in 6 as a read with no write.
+    //     5.x flags the operand RW, which lands Xt in the read set.
+    //
+    // All three are 5.x-only, so the exemption compiles away under 6
+    // and the oracle runs there with no register-side indulgences:
+    // 6 splits the bitfield operands and flags PACGA correctly since
+    // Alpha10, and reports SYSL's Xt as the pure write it is since
+    // upstream aa91e738 (through Alpha10 it was a flagged read), which
+    // the CI pin is past. A regression in any of the three now fails
+    // the sweep loudly instead of being silently excused.
     // Scope: the SVE and SME vector spaces are excluded. armlint models
     // neither, and Capstone 5 -- the version it ships against -- cannot
     // decode most of them, so its driver skips those words as data and
@@ -15168,12 +15175,14 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
         return bad ? 1 : 0;
     }
 
+#if CS_API_MAJOR < 6
     unsigned rd = word & 0x1Fu;
     bool over_reports_dest =
         ((word & 0x1F800000u) == 0x13000000u
             && ((word >> 29) & 0x3u) != 1u)         // SBFM/UBFM, not BFM
         || (word & 0xFFE0FC00u) == 0x9AC03000u      // PACGA
         || (word & 0xFFF80000u) == 0xD5280000u;     // SYSL
+#endif
     // Capstone 6 derives one implicit read from insn->alias_id: the RET
     // alias contributes x30. Through 6.0.0-Alpha10 map_set_alias_id
     // returned early WITHOUT clearing alias_id when the instruction is
@@ -15206,9 +15215,11 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
         if (reg < 0) {
             continue;
         }
+#if CS_API_MAJOR < 6
         if (over_reports_dest && reg == (int)rd) {
             continue;
         }
+#endif
         liveness_t rl = classify_reg_liveness(insn, reg);
         if (rl == LIV_READ || rl == LIV_TERM_UNSAFE) {
             continue;

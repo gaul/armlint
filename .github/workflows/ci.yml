@@ -80,16 +80,19 @@ jobs:
     # revisit when v6 reaches beta/stable.
     runs-on: ubuntu-26.04-arm
     env:
-      # A commit, not the 6.0.0-Alpha10 tag: that tag predates upstream
-      # cd4bb2a3, which stopped map_set_alias_id from leaving
-      # insn->alias_id at the PREVIOUS instruction's value when this one
-      # is not an alias -- through it, AArch64_reg_access reported a
-      # phantom x30 read on every non-alias decoded after a `ret`, which
-      # is what the sweep below tripped over. Alpha10 is still the newest
-      # tag, so there is nothing to bump to. Bumped deliberately, not
-      # automatically: rendering and decode behavior can shift between
-      # revisions, which is exactly what this job is meant to surface.
-      CAPSTONE6_REV: 862b59717d54769036f89fd9f780f634e030cf56
+      # A commit, not the 6.0.0-Alpha10 tag: the tag predates three
+      # AArch64 fixes the sweeps lean on. cd4bb2a3 stopped
+      # map_set_alias_id from leaving insn->alias_id at the PREVIOUS
+      # instruction's value when this one is not an alias -- through
+      # it, AArch64_reg_access reported a phantom x30 read on every
+      # non-alias decoded after a `ret`. d82c7265 and aa91e738 fixed
+      # the integer-STLUR and SYSL operands, which lets the register
+      # oracle run under 6 with no exemptions at all. Alpha10 is still
+      # the newest tag, so there is nothing to bump to. Bumped
+      # deliberately, not automatically: rendering and decode behavior
+      # can shift between revisions, which is exactly what this job is
+      # meant to surface.
+      CAPSTONE6_REV: aa91e7381569c98bbbf6671b1b25f2da15952b4f
       # Must be passed as make ARGUMENTS, not environment: the Makefile
       # assigns CAPSTONE_CFLAGS/CAPSTONE_LIBS with :=, which beats the
       # environment but yields to the command line.
@@ -173,7 +176,7 @@ jobs:
     runs-on: ubuntu-26.04-arm
     env:
       # Keep in step with build-capstone6, which explains the pin.
-      CAPSTONE6_REV: 862b59717d54769036f89fd9f780f634e030cf56
+      CAPSTONE6_REV: aa91e7381569c98bbbf6671b1b25f2da15952b4f
       CAPSTONE6_CFLAGS: >-
         -I${{ github.workspace }}/capstone6/include
         -DCAPSTONE_AARCH64_COMPAT_HEADER
