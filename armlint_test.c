@@ -8334,6 +8334,35 @@ static void test_mov_zero_to_xzr(void)
     write_le32(&code[8], 0x0D9F0040u);  // st1 {v0.b}[0], [x2], #1
     assert(run_x0_dead(code, 12) == 1);
 
+    // -- Nor the value a store-release stores. --
+    //
+    // Capstone 5 reports the Rt of STLUR/STLURB/STLURH with no access
+    // flags at all and omits it from the register lists, so the stored
+    // value's read is invisible and the appended kill would prove x0
+    // dead across it. insn_reg_access recovers Rt from the encoding.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    write_le32(&code[8], 0xD9008020u);  // stlur x0, [x1, #8]
+    assert(run_x0_dead(code, 12) == 0);
+
+    // The LDAPUR load half of the class is deliberately not
+    // recovered: its Rt is a pure destination, correctly flagged, and
+    // stays a kill.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    write_le32(&code[8], 0xD9408020u);  // ldapur x0, [x1, #8]
+    assert(run_x0_dead(code, 12) == 1);
+
+    // -- Nor PACGA's modifier. --
+    //
+    // PACGA reads Rn and Rm to compute a code into Rd, but Capstone 5
+    // reports Rm with no access flags, so the modifier looked
+    // untouched. Recovered from the encoding the same way.
+    movz_x(&code[0], 0, 0, 0);
+    str_x_uimm(&code[4], 0, 1, 0);
+    write_le32(&code[8], 0x9AC03041u);  // pacga x1, x2, x0
+    assert(run_x0_dead(code, 12) == 0);
+
     // -- A compare is not a kill. --
     //
     // Capstone drops the XZR destination of CMP/CMN/TST and leaves the
@@ -15497,6 +15526,9 @@ static void test_reg_liveness_matches_capstone(void)
         { 0xDAC11E30u, 16, LIV_READ, "autdb x16, x17" },
         // PACGA is the control: 2-source group, Rd genuinely written.
         { 0x9AC23020u, 0, LIV_OVERWRITE, "pacga x0, x1, x2" },
+        // ... but its Rm is flagless under Capstone 5 and genuinely
+        // read; insn_reg_access recovers it from the encoding.
+        { 0x9AC23020u, 2, LIV_READ, "pacga x0, x1, x2 (Rm)" },
         // PACIA1716 transforms x17 using x16; Capstone 5 lists x16 in
         // the implicit WRITES, where it is only ever read.
         { 0xD503211Fu, 16, LIV_READ, "pacia1716 (x16)" },
@@ -15510,6 +15542,12 @@ static void test_reg_liveness_matches_capstone(void)
         // insn_reg_access recovers the registers from the encoding.
         { 0xF8200022u, 0, LIV_READ, "ldadd x0, x2, [x1]" },
         { 0xC8A07C22u, 0, LIV_READ, "cas x0, x2, [x1]" },
+        // FEAT_LRCPC2 store-releases: Capstone 5 leaves the stored Rt
+        // flagless too. The LDAPUR load half carries real flags and
+        // stays a kill.
+        { 0xD9008020u, 0, LIV_READ, "stlur x0, [x1, #8]" },
+        { 0x1900802Au, 10, LIV_READ, "stlurb w10, [x1, #8]" },
+        { 0xD9408020u, 0, LIV_OVERWRITE, "ldapur x0, [x1, #8]" },
         // Genuine read-modify-writes armlint has always known about.
         { 0xF2800028u, 8, LIV_READ, "movk x8, #1" },
         { 0xB37F0528u, 8, LIV_READ, "bfi x8, x9, #1, #2" },

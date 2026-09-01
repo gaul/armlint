@@ -3392,6 +3392,23 @@ static void insn_reg_access(const cs_insn *insn, int reg,
         }
     }
 
+    // FEAT_LRCPC2 unscaled store-releases -- STLUR, STLURB, STLURH.
+    // Capstone 5 reports their Rt with no access flags at all and
+    // omits it from the register lists, so the stored value's read is
+    // invisible to the loops above and a scan walks past it to a
+    // later kill. Recover Rt from the encoding; it is a genuine read,
+    // and the base arrives through the MEM operand in every version.
+    // The LDAPUR loads sharing the class (opc != 00) are deliberately
+    // not matched: their Rt is a pure destination and correctly
+    // flagged, so claiming a read there would only cost kill proofs.
+    // An Rt of 31 stores zero and never matches a watched register.
+    // Capstone 6 reports the store forms correctly since d82c7265
+    // (before that they carried no register operand at all).
+    if ((op & 0x3FE00C00u) == 0x19000000u
+            && (int)(op & 0x1Fu) == reg) {
+        *reads = true;
+    }
+
     // SIMD load/store with a REGISTER post-index: the Rm field is the
     // increment amount, read and never written -- the base Rn is what
     // the writeback updates. Capstone 5 marks Rm CS_AC_WRITE on the
@@ -3418,6 +3435,16 @@ static void insn_reg_access(const cs_insn *insn, int reg,
     // atomics get above: it stops a scan rather than proving a kill.
     if (reg == 16 && (op == 0xD503211Fu || op == 0xD503215Fu
                       || op == 0xD503219Fu || op == 0xD50321DFu)) {
+        *reads = true;
+    }
+
+    // PACGA computes a fresh code into Rd from Rn and Rm, but
+    // Capstone 5 reports Rm with no access flags at all and omits it
+    // from the read set, so the modifier's read is invisible. Recover
+    // it from the encoding; Capstone 6 flags it correctly. An Rm of
+    // 31 names SP here, never a watched register.
+    if ((op & 0xFFE0FC00u) == 0x9AC03000u
+            && (int)((op >> 16) & 0x1Fu) == reg) {
         *reads = true;
     }
 }
