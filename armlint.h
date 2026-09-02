@@ -43,8 +43,9 @@ bool is_bitmask_immediate(uint64_t imm, unsigned reg_width);
 // Capstone's implicit-flag model is incomplete: 5.0.x cs_regs_access
 // records none of the NZCV reads of BC.cond, MRS NZCV, CFINV/XAFLAG/
 // AXFLAG, RMIF, SETF8/SETF16, or the FEAT_MOPS main/epilogue stages
-// (which it decodes but models no flag access for), and 6.0 still
-// misses MRS NZCV -- precisely the readers that must not be dropped.
+// (which it decodes but models no flag access for), and 6.0.0-Alpha10
+// still misses MRS NZCV (fixed on next by d770dd02) -- precisely the
+// readers that must not be dropped.
 // The cross-check therefore treats Capstone as a one-directional partial
 // oracle (see the test for the exact properties).
 //

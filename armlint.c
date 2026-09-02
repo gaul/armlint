@@ -3376,13 +3376,15 @@ static void insn_reg_access(const cs_insn *insn, int reg,
     // registers: Rd (the destination pointer), Rs (the source pointer
     // for CPY, the value for SET) and Rn (the remaining count). Every
     // stage reads them and writes them back advanced. Capstone 5
-    // reports no access at all for these, and 6 lists the pointers in
-    // the implicit WRITES only -- either way a scan can walk past a
+    // reports no access at all for these, so a scan can walk past a
     // read and let a later overwrite prove the register dead. Recover
     // the fields and claim conservative reads, exactly as the atomics
     // below: it stops a scan rather than proving a kill. Same mask the
     // NZCV classifier uses for the family. An Rs of 31 is the SET
     // aliases' XZR value operand and never matches a watched register.
+    // Capstone 6 models every stage correctly (RW operands, with the
+    // pointers and count in the regs_access reads); this is a 5.x
+    // correction.
     if ((op & 0xFB200C00u) == 0x19000400u) {
         unsigned rd = op & 0x1Fu;
         unsigned rs = (op >> 16) & 0x1Fu;
