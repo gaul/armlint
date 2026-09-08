@@ -22,7 +22,7 @@ image armlint can scan:
     words) and its "constant" entries -- are kept in place, so the
     section stays contiguous and armlint's "LDR literal foldable to
     MOV/FMOV" check can read the pooled values. Scan the output with
-    armlint -m v8pool, which steps over the self-describing pools
+    armlint -m v8, which steps over the self-describing pools
     instead of decoding their data as instructions;
   * an STT_FUNC symbol per section carrying the compiler tier and the
     JS function name (TF_foo, ML_foo, BL_foo, RE_<pattern>, ...), so
@@ -95,7 +95,7 @@ def parse_dump(fp):
             if m:
                 # Constant-pool lines ("constant pool begin" marker and
                 # "constant" data words) are kept: the marker's imm19
-                # self-describes the pool, armlint -m v8pool skips it,
+                # self-describes the pool, armlint -m v8 skips it,
                 # and the literal-fold check reads the pooled values.
                 addr = int(m.group(1), 16)
                 word = int(m.group(3), 16)

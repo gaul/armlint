@@ -1,0 +1,16 @@
+MOV + ORR with the V8 cage base foldable to ADD immediate at offset: 0x0 <_main>: -> add x0, x28, #0x11 (2 instructions)
+  movz x16, #0x11
+  orr x0, x28, x16
+
+MOV + ORR with the V8 cage base foldable to ADD immediate at offset: 0x8 <_main+0x8>: -> add x1, x28, #0x5000 (2 instructions)
+  movz x16, #0x5000
+  orr x1, x16, x28
+
+LDR literal foldable to MOV/FMOV immediate at offset: 0x18 <_main+0x18>: -> mov x3, #0x2a (1 instructions)
+  ldr x3, #0x28
+
+Optimization opportunities by type:
+       2  MOV + ORR with the V8 cage base foldable to ADD immediate
+       1  LDR literal foldable to MOV/FMOV immediate
+
+3 optimization opportunities in 9 instructions

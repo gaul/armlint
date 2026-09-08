@@ -7286,11 +7286,14 @@ static void test_mov_cage_orr_add(void)
     uint8_t code[16];
 
     // movz x16, #0x11 ; orr x0, x28, x16 -> add x0, x28, #0x11 (the V8
-    // undefined-root load). Only with -m v8cage; silent without it.
+    // undefined-root load). Only under the V8CAGE bit; silent without
+    // it. The CLI's -m v8 mask (both V8 bits) arms it the same way.
     movz_x(&code[0], 16, 0x11, 0);
     orr_x(&code[4], 0, 28, 16);
     assert(run_v8cage_reg_dead(code, 8, 16) == 1);
     assert(run_reg_dead(code, 8, 16) == 0);
+    movz_x(&code[8], 16, 1, 0);
+    assert(run_features_check(code, 12, ARMLINT_FEATURE_V8) == 1);
 
     // Commuted spelling: orr x0, x16, x28.
     movz_x(&code[0], 16, 0x11, 0);
@@ -11393,6 +11396,8 @@ static void test_v8pool_skip(void)
     write_le32(&code[8], 0xAA0203E2u);    // pool data ("mov x2, x2")
     write_le32(&code[12], 0xAA0303E3u);   // real code: mov x3, x3
     assert(run_driver_check(code, 16, ARMLINT_FEATURE_V8POOL) == 1);
+    // The CLI's -m v8 mask (both V8 bits) skips it the same way.
+    assert(run_driver_check(code, 16, ARMLINT_FEATURE_V8) == 1);
 
     // Without the feature the same bytes decode as three self-MOVs:
     // the marker is knowledge about V8's stream, not general AArch64.

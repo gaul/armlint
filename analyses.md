@@ -2590,7 +2590,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ST-form suggestions for unused results, and bitmask-immediate
   logic operands (the complemented constant is not always one MOV).
 
-## MOV + cage-base ORR foldable to ADD immediate (feature-gated: `-m v8cage`)
+## MOV + cage-base ORR foldable to ADD immediate (feature-gated: `-m v8`)
 
 ```asm
 movz x16, #0x11
@@ -2625,7 +2625,7 @@ the sound MOV + ORR fold already owns them. The deleted MOV goes
 through the same deferred register-liveness proof as the other MOV
 folds.
 
-Unlike the `-m` ISA gates, `v8cage` asserts a *runtime invariant* of
+Unlike the `-m` ISA gates, `v8` asserts a *runtime invariant* of
 the scanned code rather than a hardware capability: nothing in the
 instruction stream proves x28's alignment, so for arbitrary code the
 rewrite is unsound (a set low bit in x28 makes `orr` and `add`
@@ -2635,6 +2635,20 @@ bug: `MacroAssembler::DecompressTagged(Register, Tagged_t)` guarded
 on `IsImmAddSub(immediate)` -- the ADD encodability test -- and then
 emitted `Orr`, which needs a (rarely matching) logical immediate and
 so quietly materialized through a scratch register instead.
+
+`-m v8` names the input rather than this check alone -- a V8 JIT dump,
+`tools/v8dump2elf.py` output from a pointer-compressed build -- and so
+also arms the constant-pool skip described under the
+[LDR literal check](#ldr-literal-foldable-to-movfmov-immediate) below.
+The two facts describe the same stream and neither is useful alone on
+it: without the pool skip the pool words decode as instructions,
+polluting both the findings and the liveness proofs this fold relies
+on, and without this fold the dump's dominant pair goes unreported.
+The library keeps them as separate bits (`ARMLINT_FEATURE_V8CAGE` and
+`ARMLINT_FEATURE_V8POOL`, with `ARMLINT_FEATURE_V8` as their union)
+for a V8 built without pointer compression, Node's default: its dumps
+still carry the pools, but x28 is an ordinary allocatable register
+there, so they would want the pool bit alone.
 
 ## LDR literal foldable to MOV/FMOV immediate
 
@@ -2668,14 +2682,15 @@ so quietly materialized through a scratch register instead.
   pool slot when nothing else references it.
 * V8 JIT dumps: `tools/v8dump2elf.py` keeps each code object's inline
   constant pool in the section, so this check can read the pooled
-  values; scan that output with `-m v8pool`, which recognizes V8's
+  values; scan that output with `-m v8`, which recognizes V8's
   self-describing pool marker (`LDR XZR, (literal)` whose imm19
   counts the data words that follow) and steps over the pools rather
-  than decoding embedded constants as instructions. Like `v8cage`
-  the bit asserts knowledge about the scanned stream, not an ISA
-  capability: in arbitrary code a literal load to XZR is a legal
-  discarded load followed by real instructions, so the skip stays
-  off by default.
+  than decoding embedded constants as instructions. Like the cage
+  fold above, the skip asserts knowledge about the scanned stream,
+  not an ISA capability: in arbitrary code a literal load to XZR is
+  a legal discarded load followed by real instructions, so it stays
+  off by default and arms together with the cage fold under the one
+  flag.
 
 ## ADR + single use of its target foldable to the direct form
 

@@ -173,6 +173,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
 | [`ldxr`/`stxr` exchange retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `swp` (`-m lse`) |
 | [`ldxr` + `cmp` + `b.ne` + `stxr` CAS retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `mov` + `cas` + `cmp` (`-m lse`) |
+| [`mov #C` + `orr Xd, x28, Xc` (V8 cage base)](analyses.md#mov--cage-base-orr-foldable-to-add-immediate-feature-gated--m-v8) | `add Xd, x28, #C` (`-m v8`) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
@@ -328,6 +329,7 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint /path/to/aarch64/binary
 ./armlint /bin/ls
 ./armlint -m cssc /bin/ls   # also suggest CSSC instructions
+./armlint -m v8 jit.elf     # a V8 JIT dump from tools/v8dump2elf.py
 ```
 
 Linker-synthesized import glue is excluded from both the scan and
@@ -354,6 +356,15 @@ arms automatically on arm64e slices, whose ABI mandates FEAT_PAuth
 `sha3` and `fp16` name extensions that are never mandatory at any
 architecture version, so those three assert a specific target rather
 than a version floor.
+
+`-m v8` is V8 the JavaScript engine, not an architecture version. It
+names an input rather than a target: a V8 JIT dump, the output of
+`tools/v8dump2elf.py` for a pointer-compressed build, and asserts the
+two facts about that stream that its checks need -- x28 is the
+4GB-aligned pointer-compression cage base, and every
+`ldr xzr, (literal)` word opens a constant pool the scans step over.
+Both are knowledge about the scanned code rather than the hardware
+and unsound for arbitrary binaries, so the mode stays opt-in.
 
 `-a <audit>` enables opt-in informational checks that flag missing
 hardening rather than missed folds; `pac` audits the binary against

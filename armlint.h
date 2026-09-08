@@ -142,6 +142,16 @@ void armlint_state_reset(armlint_state *state);
 // XZR is a legal (if pointless) discarded load followed by real
 // instructions; enable it only for V8 JIT dumps (v8dump2elf output).
 #define ARMLINT_FEATURE_V8POOL (1u << 5)
+// The two V8 bits describe one input -- a JIT dump from a
+// pointer-compressed V8 -- and neither is useful alone on it: without
+// V8POOL the pool words decode as instructions, polluting both the
+// findings and the liveness proofs the V8CAGE fold relies on, and
+// without V8CAGE the dump's dominant pair goes unreported. This mask
+// is what the CLI's -m v8 sets. The bits stay separate for a V8 built
+// without pointer compression (Node's default), whose dumps still
+// carry the pools but allocate x28 like any other register and so
+// want V8POOL alone.
+#define ARMLINT_FEATURE_V8 (ARMLINT_FEATURE_V8CAGE | ARMLINT_FEATURE_V8POOL)
 
 // Audit bits, kept in the high half of the same features word. They
 // are different in kind from the ISA bits above: -m asserts what the
@@ -1060,7 +1070,7 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
-// V8-cage fold (feature-gated: ARMLINT_FEATURE_V8CAGE / -m v8cage).
+// V8-cage fold (feature-gated: ARMLINT_FEATURE_V8CAGE / -m v8).
 // A MOV chain materialising a 32-bit constant C that is then merged
 // into the pointer-compression cage base with a direct 64-bit
 // ORR Rd, X28, X<C> folds to a single ADD Rd, X28, #C when C encodes
