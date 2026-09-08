@@ -1663,8 +1663,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   excluded with the shared non-flag-setting decoder.
 * The corpus is JIT code, not the Mach-O sweep: the shape came out of
   adjacent-pair mining of SpiderMonkey's JetStream 3 dump (54.7M JIT
-  instructions), and the realized count there is **126,224** --
-  120,822 in the Baseline tier, nearly all one emitter, the
+  instructions, converted by `tools/smdump2elf.py`), and the realized
+  count there is **126,224** -- 120,822 in the Baseline tier, nearly
+  all one emitter, the
   frame-pointer helper `mov x19, x29 ; sub x19, x19, #0x48` that runs
   before every VM call, plus 5,342 in Ion (the pseudo-SP
   re-derivation `mov x20, sp ; add x20, x20, #imm` and relatives).
