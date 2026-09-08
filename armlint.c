@@ -673,6 +673,23 @@ struct armlint_state {
     char bfx_clear_disasm[ARMLINT_FINDING_LINE_LEN];
     char bfx_isolate_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // Two-instruction bitfield insert whose field reaches the top of
+    // the register, so the shifted ORR needs no isolate -- the shift
+    // truncates the merged source:
+    //   AND Rd, Rd, #((1<<k)-1)      ; ORR Rd, Rd, Rm, LSL #k
+    //     -> BFI   Rd, Rm, #k, #(W-k)
+    //   AND Rd, Rd, #~((1<<(W-k))-1) ; ORR Rd, Rd, Rm, LSR #k
+    //     -> BFXIL Rd, Rm, #k, #(W-k)
+    // The pending in-place AND-immediate is recorded with its concrete
+    // mask; the closing ORR's shift decides which mask it had to be.
+    // Strict adjacency: any non-matching instruction expires the state.
+    bool aos_pending;
+    bool aos_is_64bit;
+    unsigned aos_rd;
+    uint64_t aos_mask;
+    size_t aos_offset;
+    char aos_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Pending MUL Rt, Ra, Rb awaiting an adjacent ADD/SUB consumer
     // whose Rd overwrites Rt and whose accumulator operand is not Rt
     // -- the pair folds to MADD/MSUB. Strict adjacency: any
@@ -8531,6 +8548,115 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
         // Unrecognized instruction expires the window.
         state->bfx_clear_seen = false;
         state->bfx_isolate_seen = false;
+    }
+
+    return produced;
+}
+
+// Decode ORR (shifted register) with N = 0 and an LSL or LSR shift by
+// a non-zero amount: the merge half of the two-instruction insert
+// below. ASR and ROR bring in bits no bitfield insert expresses, and
+// an amount of 0 is the plain combine that closes the
+// three-instruction synthesis above; both are rejected here.
+static bool decode_orr_reg_shifted(uint32_t op, unsigned *out_sf,
+                                   unsigned *out_rd, unsigned *out_rn,
+                                   unsigned *out_rm, bool *out_is_lsr,
+                                   unsigned *out_amount)
+{
+    // opc == 01 (ORR), bit 23 clear (shift is LSL or LSR), N == 0.
+    if ((op & 0x7FA00000u) != 0x2A000000u) {
+        return false;
+    }
+    unsigned sf = (op >> 31) & 1u;
+    unsigned amount = (op >> 10) & 0x3Fu;
+    if (amount == 0 || (sf == 0 && amount > 31u)) {
+        return false;
+    }
+    *out_sf = sf;
+    *out_rd = op & 0x1Fu;
+    *out_rn = (op >> 5) & 0x1Fu;
+    *out_rm = (op >> 16) & 0x1Fu;
+    *out_is_lsr = ((op >> 22) & 1u) != 0;
+    *out_amount = amount;
+    return true;
+}
+
+bool check_and_orr_shift_bfi(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->aos_pending = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: ORR Rd, Rd, Rm, LSL/LSR #k merging into the pending
+    //     AND's register in place. Rm must be neither that register
+    //     (the ORR would read the masked value, which BFI does not)
+    //     nor ZR (nothing is merged; the pair is just the AND).
+    if (state->aos_pending) {
+        unsigned o_sf, o_rd, o_rn, o_rm, k;
+        bool is_lsr;
+        if (decode_orr_reg_shifted(op, &o_sf, &o_rd, &o_rn, &o_rm,
+                                   &is_lsr, &k)
+                && (o_sf != 0) == state->aos_is_64bit
+                && o_rd == state->aos_rd
+                && o_rn == state->aos_rd
+                && o_rm != state->aos_rd
+                && o_rm != 31) {
+            unsigned datasize = state->aos_is_64bit ? 64u : 32u;
+            unsigned width = datasize - k;
+            uint64_t full = state->aos_is_64bit ? ~(uint64_t)0
+                                                : 0xFFFFFFFFu;
+            // LSL #k overwrites bits [W-1, k], so the AND must have
+            // cleared exactly those and nothing else: a narrower mask
+            // clears a bit the insert would keep, a wider one keeps a
+            // bit the ORR merges into. LSR #k overwrites [W-1-k, 0]
+            // instead, so the mask is the top k bits.
+            uint64_t need = is_lsr
+                ? (full << width) & full
+                : ((uint64_t)1 << k) - 1u;
+            if (state->aos_mask == need) {
+                char w_or_x = state->aos_is_64bit ? 'x' : 'w';
+                out->name = is_lsr ? "BFXIL synthesis via AND-ORR"
+                                   : "BFI synthesis via AND-ORR";
+                out->start_offset = state->aos_offset;
+                out->insn_count = 2;
+                clear_finding_strings(out);
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %c%u, #%u, #%u",
+                    is_lsr ? "bfxil" : "bfi", w_or_x, o_rd, w_or_x, o_rm,
+                    k, width);
+                snprintf(out->lines[0], sizeof(out->lines[0]),
+                    "%s", state->aos_disasm);
+                snprintf(out->lines[1], sizeof(out->lines[1]),
+                    "%s %s", insn->mnemonic, insn->op_str);
+                // The ORR overwrites the masked value on the spot, so
+                // no register is dropped and nothing defers. A branch
+                // onto the ORR is the driver's side-entry gate.
+                produced = true;
+            }
+        }
+        // Strict adjacency: any non-matching instruction expires.
+        state->aos_pending = false;
+    }
+
+    // (2) Open: an in-place AND-immediate (Rd == Rn, not SP). ANDS is
+    //     excluded by decode_and_imm; its flags would be lost.
+    unsigned a_sf, a_rd, a_rn;
+    uint64_t a_mask;
+    if (decode_and_imm(op, &a_sf, &a_mask, &a_rd, &a_rn)
+            && a_rd == a_rn && a_rd != 31) {
+        state->aos_pending = true;
+        state->aos_is_64bit = (a_sf != 0);
+        state->aos_rd = a_rd;
+        state->aos_mask = a_mask;
+        state->aos_offset = offset;
+        snprintf(state->aos_disasm, sizeof(state->aos_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
     }
 
     return produced;
@@ -16542,6 +16668,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_csel_self,
     check_fcsel_self,
     check_bfxil_synth,
+    check_and_orr_shift_bfi,
     check_ldp_stp_coalesce,
     check_simd_cmp_zero,
     check_stp_wzr_to_str_xzr,

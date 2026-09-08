@@ -132,6 +132,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`stp wzr, wzr` (W-form)](analyses.md#stp-wzr-wzr-foldable-into-str-xzr) | `str`/`stur xzr` |
 | [`movi #0` + vector `cmeq`/`cmge`/`cmgt` (or FP `fcm*`)](analyses.md#zeroing-movi-then-vector-compare-foldable-to-compare-with-zero) | `cmeq`/`cmge`/`cmgt`/`cmle`/`cmlt Vd, X, #0` (drop the `movi`) |
 | [`and` + `and`/`ubfiz` + `orr` (clear/isolate/merge)](analyses.md#bfxil-and-bfi-bitfield-insert-synthesis) | `bfxil`/`bfi` |
+| [`and #lowmask` + `orr Rm, lsl #k` (or high mask + `lsr`; field reaches the top)](analyses.md#bfi-and-bfxil-synthesis-from-and--shifted-orr) | `bfi`/`bfxil` |
 | [`csel Rd, Rn, Rn, cond`](analyses.md#csel-same-operand-identity-csel-rd-rn-rn-cond) | `mov Rd, Rn` |
 | [`fcsel Vd, Vn, Vn, cond`](analyses.md#fcsel-same-operand-identity-fcsel-vd-vn-vn-cond) | `fmov Vd, Vn` |
 | [`add`/`sub Rd, Rn, #0`](analyses.md#addsub-0-is-redundant) | `mov Rd, Rn`, or remove |

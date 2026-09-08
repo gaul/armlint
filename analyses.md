@@ -914,6 +914,60 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ...` would re-read it).
 * Useful for hand-written assembly and legacy object code.
 
+## BFI and BFXIL synthesis from AND + shifted ORR
+
+* The two-instruction insert whose field reaches the top of the
+  register. Merging a source through a shifted ORR truncates it, so
+  no isolate is needed and the whole idiom is the in-place clear
+  plus the merge:
+  * `AND Rd, Rd, #((1<<k)-1) ; ORR Rd, Rd, Rm, LSL #k`
+    -> `BFI Rd, Rm, #k, #(W-k)`
+  * `AND Rd, Rd, #~((1<<(W-k))-1) ; ORR Rd, Rd, Rm, LSR #k`
+    -> `BFXIL Rd, Rm, #k, #(W-k)`
+  Both W- and X-form, strict adjacency. Reported as "BFI synthesis
+  via AND-ORR" and "BFXIL synthesis via AND-ORR".
+* The canonical instance is UTF-8 decoding, `(acc << 6) | (byte &
+  0x3f)`: `and w8, w8, #0x3f ; orr w8, w8, w10, lsl #6` ->
+  `bfi w8, w10, #6, #26`. LLVM emits the `bfi` for that expression
+  in isolation but not inside the decoder loops -- libxul carries a
+  3-bit `bfi` on the very next line of one of them -- and both
+  Rust's `core::str::next_code_point` and Gecko's decoder ship the
+  pair. **2026-09 sweep:** the check reports **620** in
+  librustc_driver (rustc 1.97.1), **758** in Firefox 155's
+  linux-aarch64 `libxul.so` and **352** in uutils coreutils, a shift
+  of 6 being nearly all of it and the BFXIL twin a handful (2 and 1),
+  with no other check's count moving. The pairscan prediction made
+  before the check was written -- 430 + 4 X-form, 662 + 16 + 1 BFXIL,
+  307 + 2 BFXIL -- was exact for every site whose registers pairscan
+  spells as a plain `w`/`x`, and the surplus (186, 79, 43) is
+  entirely sites on x16/x17/x19/x20/x29/x30, which its normalization
+  names `ip0`/`ip1`/`tr`/`mr`/`fp`/`lr` and the substring that made
+  the prediction did not cover. A prediction is exact only for the
+  population it was actually counting.
+* Soundness: `ORR ... LSL #k` writes bits `[W-1, k]` with
+  `Rm[W-1-k, 0]` and leaves `[k-1, 0]` alone; BFI writes exactly the
+  same bits from the same source and preserves the rest. The AND
+  must therefore clear *exactly* `[W-1, k]`: a narrower mask (`#0x1f`
+  under `LSL #6`) clears a bit the insert would keep, and a wider
+  one (`#0x7f`) keeps a bit the ORR merges into, so only the mask
+  equal to the complement of the overwritten range folds. The LSR
+  twin is the mirror image. Both instructions must write `Rd` in
+  place -- an AND into a separate register would need `Rd` to hold
+  its source first, and an ORR into a separate register leaves the
+  masked value live in `Rd` -- and `Rm` must be neither `Rd` (the
+  ORR would read the masked value, which BFI does not) nor `ZR`
+  (nothing is merged). ASR and ROR shifts bring in bits no insert
+  expresses; `LSL #0` is the plain combine of the three-instruction
+  check above. ANDS is excluded, since the rewrite would lose its
+  flags. The ORR overwrites the masked value on the spot, so no
+  register is dropped and nothing defers; a branch onto the ORR is
+  refused by the side-entry gate. The rewrite was checked against
+  the two-instruction form on 2M random inputs before the check was
+  written.
+* Why it helps: one fewer instruction and one fewer uop. The AND
+  feeding the ORR was already a two-cycle chain, so the insert's
+  latency is never worse.
+
 ## Zeroing MOVI then vector compare foldable to compare-with-zero
 
 * The AArch64 SIMD compares have a register form (`CMEQ`/`CMGE`/`CMGT Vd,

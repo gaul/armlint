@@ -6133,6 +6133,107 @@ static void test_bfxil_synth(void)
     assert(run_helper_check(code, 12) == 0);
 }
 
+static void test_and_orr_shift_bfi(void)
+{
+    uint8_t code[16];
+
+    // -- Positive: the UTF-8 continuation-byte shape. and w8, w8, #0x3f ;
+    //    orr w8, w8, w10, lsl #6 -> bfi w8, w10, #6, #26. The ORR
+    //    overwrites the masked value, so nothing defers. --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    orr_w_sh(&code[4], 8, 8, 10, 0, 6);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: X-form. -> bfi x8, x10, #6, #58 --
+    and_x_lowmask(&code[0], 8, 8, 6);
+    orr_x_sh(&code[4], 8, 8, 10, 0, 6);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: a single-bit field at the top, the largest W-form
+    //    shift. and w8, w8, #0x7fffffff ; orr w8, w8, w10, lsl #31
+    //    -> bfi w8, w10, #31, #1 --
+    and_w_lowmask(&code[0], 8, 8, 31);
+    orr_w_sh(&code[4], 8, 8, 10, 0, 31);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Positive: the LSR mirror. and w8, w8, #0xffffffc0 ;
+    //    orr w8, w8, w10, lsr #26 -> bfxil w8, w10, #26, #6 --
+    and_w_highmask(&code[0], 8, 8, 6);
+    orr_w_sh(&code[4], 8, 8, 10, 1, 26);
+    assert(run_helper_check(code, 8) == 1);
+
+    // -- Negative: the AND is not in place (and w8, w9, #0x3f); the
+    //    insert would first need w8 to hold w9. --
+    and_w_lowmask(&code[0], 8, 9, 6);
+    orr_w_sh(&code[4], 8, 8, 10, 0, 6);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: the ORR is not in place (orr w11, w8, w10, lsl #6);
+    //    w8 keeps the masked value. --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    orr_w_sh(&code[4], 11, 8, 10, 0, 6);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: mask narrower than the shift (#0x1f under lsl #6):
+    //    bit 5 is cleared here but BFI would keep it. --
+    and_w_lowmask(&code[0], 8, 8, 5);
+    orr_w_sh(&code[4], 8, 8, 10, 0, 6);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: mask wider than the shift (#0x7f under lsl #6): bit 6
+    //    is merged here but BFI would overwrite it. --
+    and_w_lowmask(&code[0], 8, 8, 7);
+    orr_w_sh(&code[4], 8, 8, 10, 0, 6);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: Rm is the masked register (orr w8, w8, w8, lsl #6);
+    //    the ORR reads the masked value, which BFI would not. Named, in
+    //    case another check has an opinion about the self-referencing
+    //    ORR. --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    orr_w_sh(&code[4], 8, 8, 8, 0, 6);
+    assert(run_named_check(code, 8, "BFI synthesis via AND-ORR") == 0);
+
+    // -- Negative: Rm is ZR; nothing is merged (the ZR-operand check
+    //    owns that spelling). --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    orr_w_sh(&code[4], 8, 8, 31, 0, 6);
+    assert(run_named_check(code, 8, "BFI synthesis via AND-ORR") == 0);
+
+    // -- Negative: ASR brings in sign bits no insert expresses. --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    orr_w_sh(&code[4], 8, 8, 10, 2, 6);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: width mismatch (W-form AND, X-form ORR). --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    orr_x_sh(&code[4], 8, 8, 10, 0, 6);
+    assert(run_helper_check(code, 8) == 0);
+
+    // -- Negative: ANDS -- the rewrite would lose its flags.
+    //    ands w8, w8, #0x3f is 0x72001508. --
+    write_le32(&code[0], 0x72001508u);
+    orr_w_sh(&code[4], 8, 8, 10, 0, 6);
+    assert(run_named_check(code, 8, "BFI synthesis via AND-ORR") == 0);
+
+    // -- Negative: strict adjacency. --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    nop_insn(&code[4]);
+    orr_w_sh(&code[8], 8, 8, 10, 0, 6);
+    assert(run_helper_check(code, 12) == 0);
+
+    // -- Side entry, through the buffer harness that builds the
+    //    branch-target map: a branch onto the ORR skips the AND, so the
+    //    driver's gate refuses; the same branch onto the AND enters the
+    //    window at its top and the fold stands. --
+    and_w_lowmask(&code[0], 8, 8, 6);
+    orr_w_sh(&code[4], 8, 8, 10, 0, 6);
+    cbz_cbnz(&code[8], 1, 0, 9, -1);   // cbz x9, back to the ORR
+    assert(run_buffer_check(code, 12) == 0);
+    cbz_cbnz(&code[8], 1, 0, 9, -2);   // cbz x9, back to the AND
+    assert(run_buffer_check(code, 12) == 1);
+}
+
 static void test_ldp_stp_coalesce(void)
 {
     uint8_t code[24];
@@ -15909,6 +16010,7 @@ int main(void)
     test_csel_self();
     test_fcsel_self();
     test_bfxil_synth();
+    test_and_orr_shift_bfi();
     test_ldp_stp_coalesce();
     test_simd_cmp_zero();
     test_stp_wzr_to_str_xzr();

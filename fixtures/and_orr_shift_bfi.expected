@@ -1,0 +1,21 @@
+BFI synthesis via AND-ORR at offset: 0x0 <_main>: -> bfi w8, w10, #6, #26 (2 instructions)
+  and w8, w8, #0x3f
+  orr w8, w8, w10, lsl #6
+
+BFI synthesis via AND-ORR at offset: 0x8 <_main+0x8>: -> bfi x1, x2, #6, #58 (2 instructions)
+  and x1, x1, #0x3f
+  orr x1, x1, x2, lsl #6
+
+BFI synthesis via AND-ORR at offset: 0x10 <_main+0x10>: -> bfi w3, w4, #31, #1 (2 instructions)
+  and w3, w3, #0x7fffffff
+  orr w3, w3, w4, lsl #31
+
+BFXIL synthesis via AND-ORR at offset: 0x18 <_main+0x18>: -> bfxil w5, w6, #26, #6 (2 instructions)
+  and w5, w5, #0xffffffc0
+  orr w5, w5, w6, lsr #26
+
+Optimization opportunities by type:
+       3  BFI synthesis via AND-ORR
+       1  BFXIL synthesis via AND-ORR
+
+4 optimization opportunities in 26 instructions

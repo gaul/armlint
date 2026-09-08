@@ -924,6 +924,24 @@ bool check_fcsel_self(armlint_state *state, const cs_insn *insn,
 bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
                        size_t offset, armlint_finding *out);
 
+// Detect the 2-instruction bitfield insert whose field reaches the top
+// of the register, so the merged source needs no isolate -- the ORR's
+// shift truncates it:
+//   AND Rd, Rd, #((1<<k)-1)      ; ORR Rd, Rd, Rm, LSL #k
+//     -> BFI   Rd, Rm, #k, #(W-k)
+//   AND Rd, Rd, #~((1<<(W-k))-1) ; ORR Rd, Rd, Rm, LSR #k
+//     -> BFXIL Rd, Rm, #k, #(W-k)
+// Both instructions must write Rd in place, Rm must be neither Rd (the
+// ORR would read the masked value) nor ZR (nothing is merged), and the
+// AND's mask must be exactly the complement of the bits the shifted
+// ORR overwrites -- a narrower mask clears a bit the insert would
+// keep, a wider one keeps a bit the ORR merges into. The ORR
+// overwrites the masked value on the spot, so no register is dropped
+// and the finding reports immediately. Reported as "BFI synthesis via
+// AND-ORR" and "BFXIL synthesis via AND-ORR".
+bool check_and_orr_shift_bfi(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 // Detect MUL Rd, Rn, Rm (the MADD Rd, Rn, Rm, ZR alias) where one
 // operand is set by an immediately preceding MOV chain (MOVZ/MOVN +
 // optional MOVKs) to a constant C. The MUL is foldable to a single
