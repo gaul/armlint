@@ -2525,6 +2525,59 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   binary whose job is authenticated dispatch. libcapstone and gh
   (plain arm64) contain none of these encodings at all.
 
+## immediate-misfit audit (`-a imm`)
+
+* The MOV-chain folds report a materialized constant that its consumer
+  could have taken as an immediate. `-a imm` reports the complement:
+  `movz x16, #0x1000000 ; cmp x0, x16`, where the value sits outside
+  the consumer's immediate encoding -- not `0..0xfff` or a 4 KiB
+  multiple up to `0xfff000` for `ADD/SUB/ADDS/SUBS/CMP/CMN` (nor
+  sign-crossed), not a bitmask immediate for `AND/ORR/EOR/ANDS/TST`
+  (the complemented constant for `BIC/ORN/EON/BICS`), outside `imm5`
+  for `CCMP/CCMN`, outside the scaled `imm12` / `simm9` range for a
+  register-offset `LDR/STR` indexed by the constant.
+* Nothing in the code can be rewritten -- the chain is already the
+  cheapest spelling of that value -- so like `-a pac` the audit is
+  informational, and its review item is the constant itself. When the
+  value is one the code's author chose (an object-size limit, a
+  sentinel's address, the bit assignment of a flags field), choosing
+  it one step differently turns every site into the immediate form.
+  The detail names what would have encoded: the two nearest 4 KiB
+  multiples; the bitmask immediates fewest bit flips away, plus the
+  mask widened with every bit above it set when that encodes (`0xdf`,
+  the byte with its ASCII case bit clear, is not a bitmask immediate
+  but `0xffffffdf` is, and the two agree on any operand without bits
+  above the mask); the `imm5` and offset ranges. The summary adds an
+  "Immediate misfits by value" table, most frequent first, so the
+  constants worth renumbering sort to the top.
+* Operand rules are the sibling folds' -- the constant in an
+  immediate-capable slot, the other operand neither ZR nor the
+  constant register, strict adjacency -- except that the chain and
+  consumer widths may differ: a W consumer reads the low half of an X
+  chain exactly, and a W chain zero-extends into an X consumer. Zero
+  and all-ones constants are skipped (the `MOV #0` fold and the
+  self-op identities own them). Emitted immediately, with no liveness
+  proof: a live constant register amortizes the materialization
+  across its consumers, but each of them still pays for the register
+  operand the immediate form would not need.
+* On V8's JetStream 3 JIT output (14.0M instructions, `-m v8 -a imm`)
+  the table opens with the constants a renumbering would reach: the
+  write barrier's read-only-space bound, a 16 MiB reservation size
+  one step past `0xfff000` (92,109 sites; fixed in V8 by comparing
+  against the largest encodable bound); the hole sentinel `0x2fffd`
+  (12,035; pinned to a 64 KiB boundary by its unmapped payload, so
+  only a split `sub`/`cmp` reaches it); `kIsNotStringMask |
+  kIsNotInternalizedMask` = `0xffffffa0` (4,753; contiguous if two
+  string-type bits swapped places); the Map bit-field pairs `0x12`
+  and `0x9` (3,840 and 1,176; contiguous if the bits were adjacent);
+  and a read-only map at `0x1c81` (3,449; its hot siblings sit under
+  the 4 KiB line). The residue is the expected kind: `String::
+  kMaxLength`, Unicode code points a regular expression compares
+  against, and -- the whole `ldr/str offset` class, 27,680 sites --
+  frame slots below `fp - 256` and compressed fields more than 255
+  bytes into an object, whose tagged offsets (a multiple of 4 minus
+  the heap-object tag) can never take the scaled form.
+
 ## exclusive-monitor retry loop foldable into an LSE atomic (feature-gated: `-m lse`)
 
 * The Armv8.0 atomic read-modify-write is a retry loop around the

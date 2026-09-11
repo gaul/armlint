@@ -14109,6 +14109,98 @@ static void test_pac_jump_table(void)
 // substitutes. The diversified BRAA/BLRAA/BLRAB forms carry a live
 // modifier register and stay clean, as do RETAA/RETAB (SP-diversified
 // by construction).
+// The -a imm audit (check_imm_misfit_audit): a materialized constant
+// that its consumer's immediate form cannot encode. Each class is
+// checked by name so the sibling folds' own findings never count.
+static const char *const kMisfitAddSub =
+    "MOV + ADD/SUB/CMP: constant has no add/sub immediate form (imm audit)";
+static const char *const kMisfitLogical =
+    "MOV + AND/ORR/EOR/TST: constant is not a bitmask immediate (imm audit)";
+static const char *const kMisfitCcmp =
+    "MOV + CCMP/CCMN: constant is outside imm5 (imm audit)";
+static const char *const kMisfitLdst =
+    "MOV + register-offset LDR/STR: constant has no immediate-offset form "
+    "(imm audit)";
+
+static int run_imm_audit(const uint8_t *code, size_t code_size,
+                         const char *name)
+{
+    return run_named_features_check(code, code_size, ARMLINT_AUDIT_IMM, name);
+}
+
+static void test_imm_audit(void)
+{
+    uint8_t code[16];
+
+    // 16 MiB is one step past the largest add/sub immediate
+    // (0xfff << 12): movz x16, #0x100, lsl #16 ; cmp x0, x16.
+    movz_x(&code[0], 16, 0x100, 1);
+    cmp_x_reg(&code[4], 0, 16);
+    assert(run_imm_audit(code, 8, kMisfitAddSub) == 1);
+    // Silent without the audit bit.
+    assert(run_named_features_check(code, 8, 0, kMisfitAddSub) == 0);
+    // 0xfff000 encodes (the fold's territory): no audit finding.
+    movz_x(&code[0], 16, 0xf000, 0);
+    movk_x(&code[4], 16, 0xff, 1);
+    cmp_x_reg(&code[8], 0, 16);
+    assert(run_imm_audit(code, 12, kMisfitAddSub) == 0);
+    // A two-instruction chain (V8's hole sentinel, 0x2fffd):
+    // movz w16, #0xfffd ; movk w16, #0x2, lsl #16 ; cmp w2, w16.
+    movz_w(&code[0], 16, 0xfffd);
+    movk_w(&code[4], 16, 0x2, 1);
+    cmp_w_reg(&code[8], 2, 16);
+    assert(run_imm_audit(code, 12, kMisfitAddSub) == 1);
+    // A negative constant whose magnitude encodes folds sign-crossed
+    // (cmn w2, #0x100), so it is not a misfit: movn w16, #0xff.
+    movn_w(&code[0], 16, 0xff);
+    cmp_w_reg(&code[4], 2, 16);
+    assert(run_imm_audit(code, 8, kMisfitAddSub) == 0);
+    // Adjacency: an intervening instruction closes the chain.
+    movz_x(&code[0], 16, 0x100, 1);
+    write_le32(&code[4], 0xD503201Fu);      // nop
+    cmp_x_reg(&code[8], 0, 16);
+    assert(run_imm_audit(code, 12, kMisfitAddSub) == 0);
+    // The constant register as the other operand is excluded.
+    movz_x(&code[0], 16, 0x100, 1);
+    cmp_x_reg(&code[4], 16, 16);
+    assert(run_imm_audit(code, 8, kMisfitAddSub) == 0);
+
+    // Bitmask: 0xffffffa0 has a hole at bit 6.
+    // movn w17, #0x5f ; tst w16, w17.
+    movn_w(&code[0], 17, 0x5f);
+    tst_w_reg(&code[4], 16, 17);
+    assert(run_imm_audit(code, 8, kMisfitLogical) == 1);
+    // Chain and consumer widths may differ: movz x11, #0x12 ; tst w9, w11.
+    movz_x(&code[0], 11, 0x12, 0);
+    tst_w_reg(&code[4], 9, 11);
+    assert(run_imm_audit(code, 8, kMisfitLogical) == 1);
+    // 0x7 is a bitmask immediate: no audit finding.
+    movz_w(&code[0], 17, 0x7);
+    tst_w_reg(&code[4], 16, 17);
+    assert(run_imm_audit(code, 8, kMisfitLogical) == 0);
+    // Zero is the MOV #0 fold's: movz w8, #0 ; and w9, w9, w8.
+    movz_w(&code[0], 8, 0);
+    encode_sr(&code[4], 0x0A000000u, 9, 9, 8);
+    assert(run_imm_audit(code, 8, kMisfitLogical) == 0);
+
+    // CCMP: imm5 stops at 31. movz w16, #0x2d ; ccmp w7, w16, #4, ne.
+    movz_w(&code[0], 16, 0x2d);
+    ccmp_reg(&code[4], 0, 1, 7, 16, 4, 1);
+    assert(run_imm_audit(code, 8, kMisfitCcmp) == 1);
+    movz_w(&code[0], 16, 0x11);
+    ccmp_reg(&code[4], 0, 1, 7, 16, 4, 1);
+    assert(run_imm_audit(code, 8, kMisfitCcmp) == 0);
+
+    // Register-offset load: an index beyond the scaled imm12 range.
+    // movz x1, #0x1, lsl #16 ; ldr x0, [x2, x1].
+    movz_x(&code[0], 1, 0x1, 1);
+    ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 0);
+    assert(run_imm_audit(code, 8, kMisfitLdst) == 1);
+    movz_x(&code[0], 1, 0x100, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 0);
+    assert(run_imm_audit(code, 8, kMisfitLdst) == 0);
+}
+
 static void test_pac_zero_disc(void)
 {
     uint8_t code[16];
@@ -16065,6 +16157,7 @@ int main(void)
     test_pac_audit();
     test_pac_jump_table();
     test_pac_zero_disc();
+    test_imm_audit();
     test_br_x30();
     test_branch_to_next();
     test_lse_rmw();

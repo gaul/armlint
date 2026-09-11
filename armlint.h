@@ -160,6 +160,14 @@ void armlint_state_reset(armlint_state *state);
 // missed fold. Audit findings are review items -- a benign residue
 // (jump tables under the PAC audit) is expected in the output.
 #define ARMLINT_AUDIT_PAC (1u << 16)
+// Immediate-misfit audit (-a imm): a MOVZ/MOVN/MOVK-materialized
+// constant feeding a consumer that has an immediate form the value
+// cannot use -- an add/sub, logical, conditional-compare or
+// load/store-offset operand one step outside its encoding. Nothing in
+// the code can be rewritten; the finding points at the constant's
+// definition (a limit, a sentinel address, a bit assignment) as the
+// place to renumber. See check_imm_misfit_audit.
+#define ARMLINT_AUDIT_IMM (1u << 17)
 
 // Enable ISA-extension-gated checks (a bitmask of ARMLINT_FEATURE_*).
 void armlint_state_set_features(armlint_state *state, unsigned features);
@@ -191,12 +199,29 @@ void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
 #define ARMLINT_FINDING_LINE_LEN   96
 #define ARMLINT_FINDING_DETAIL_LEN 128
 
+// Consumer classes of the immediate-misfit audit, carried on its
+// findings so the driver's summary can tally misfits by constant.
+enum {
+    ARMLINT_MISFIT_NONE = 0,
+    ARMLINT_MISFIT_ADDSUB,   // ADD/SUB/ADDS/SUBS/CMP/CMN: imm12, LSL #12
+    ARMLINT_MISFIT_LOGICAL,  // AND/ORR/EOR/ANDS/TST (BIC/ORN/EON): bitmask
+    ARMLINT_MISFIT_CCMP,     // CCMP/CCMN: imm5
+    ARMLINT_MISFIT_LDST,     // register-offset LDR/STR: imm12 scaled, simm9
+};
+
 typedef struct {
     const char *name;
     size_t start_offset;
     unsigned insn_count;
     char detail[ARMLINT_FINDING_DETAIL_LEN];
     char lines[ARMLINT_FINDING_LINES][ARMLINT_FINDING_LINE_LEN];
+    // Set only by the immediate-misfit audit (zero for every other
+    // check; clear_finding_strings resets them with the text): the
+    // consumer class, its operation width (32 or 64) and the constant
+    // the immediate form would have needed.
+    unsigned char misfit_kind;
+    unsigned char misfit_width;
+    uint64_t misfit_value;
 } armlint_finding;
 
 // Shared signature for per-instruction checks and pre-instruction
@@ -661,6 +686,34 @@ bool check_pac_raw_indirect(armlint_state *state, const cs_insn *insn,
 // Reported as "zero-discriminator authenticated BR/BLR (PAC audit)".
 bool check_pac_zero_disc_indirect(armlint_state *state, const cs_insn *insn,
                                   size_t offset, armlint_finding *out);
+
+// Immediate-misfit audit (opt-in, ARMLINT_AUDIT_IMM / -a imm): a
+// MOVZ/MOVN/MOVK chain immediately followed by a consumer that has an
+// immediate form -- ADD/SUB/ADDS/SUBS (and CMP/CMN), the logical ops
+// (and TST), CCMP/CCMN, or a register-offset LDR/STR indexed by the
+// constant -- whose encoding the value misses: not 0..0xfff or a
+// 4 KiB multiple up to 0xfff000 (nor sign-crossed), not a bitmask
+// immediate, outside imm5, outside the scaled imm12 / simm9 offset
+// range. The operand rules are the sibling folds' (the constant in an
+// immediate-capable slot, the other operand neither ZR nor the
+// constant register), but the chain and consumer widths may differ: a
+// W consumer reads the low half of an X chain exactly, and a W chain
+// zero-extends into an X consumer. Zero and all-ones constants are
+// skipped (the MOV #0 fold and the self-op identities own them).
+//
+// Unlike a fold nothing here can be rewritten in place -- the
+// materialization is the cheapest spelling of that value -- so the
+// finding is informational: the constant itself is the review item,
+// and a renumbering that lands it inside the encoding turns every
+// site into the immediate form. The detail names the nearest encodable
+// neighbours, and the driver's summary tallies the audit's findings by
+// value so the constants worth renumbering sort to the top. Emitted
+// immediately (no liveness proof: a live constant register amortizes
+// the materialization, but each consumer still pays for the register
+// operand). Reported per consumer class as "MOV + ...: ... (imm
+// audit)".
+bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
 
 // Detect a producer that provably zeros bits 63..P of its destination,
 // immediately followed by an in-place zero-extension consumer that

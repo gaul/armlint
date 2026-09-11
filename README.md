@@ -171,6 +171,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`bic` + `eor` (16B vectors)](analyses.md#three-operand-sha3-logic-synthesis-feature-gated--m-sha3) | `bcax Vd, Vn, Vm, Va` (`-m sha3`) |
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`; auto-armed on arm64e) |
 | [unsigned LR spill; raw `br`/`blr`; zero-discriminator `braaz`/`blraaz`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
+| [`mov` chain + `cmp`/`tst`/`ccmp`/`ldr` whose immediate form the value misses](analyses.md#immediate-misfit-audit--a-imm) | audit-only review items, tallied by value (`-a imm`) |
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
 | [`ldxr`/`stxr` exchange retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `swp` (`-m lse`) |
 | [`ldxr` + `cmp` + `b.ne` + `stxr` CAS retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `mov` + `cas` + `cmp` (`-m lse`) |
@@ -382,7 +383,13 @@ diversified `braa`/`blraa`. The PAC audit arms automatically on
 arm64e slices (whose ABI already assumes full signing), so macOS
 system binaries surface their worklist with no flag; a plain arm64
 slice never opted in, so it stays silent unless you pass `-a pac`
-explicitly.
+explicitly. `imm` audits every materialized constant against its
+consumer's immediate encoding and tallies the misses by value: a
+constant the code's author chose -- a size limit, a sentinel address,
+a bit assignment -- that lands one step outside `cmp`'s 12-bit
+immediate, the bitmask-immediate shapes, `ccmp`'s 5-bit immediate or
+a load's offset range costs an extra instruction at every use, and
+renumbering it is the fix.
 
 By default armlint prints only a summary: the opportunities grouped by
 type and sorted by prevalence, so it is clear which to look at first,

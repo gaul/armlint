@@ -1011,21 +1011,23 @@ int main(int argc, char **argv)
             i++;
             if (strcmp(argv[i], "pac") == 0) {
                 g_features |= ARMLINT_AUDIT_PAC;
+            } else if (strcmp(argv[i], "imm") == 0) {
+                g_features |= ARMLINT_AUDIT_IMM;
             } else {
                 fprintf(stderr, "%s: unknown -a audit '%s' "
-                    "(known: pac)\n", argv[0], argv[i]);
+                    "(known: pac, imm)\n", argv[0], argv[i]);
                 return 1;
             }
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] <FILE>\n",
             argv[0]);
         return 1;
     }

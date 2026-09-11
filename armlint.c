@@ -1301,6 +1301,9 @@ static void clear_finding_strings(armlint_finding *out)
     for (unsigned i = 0; i < ARMLINT_FINDING_LINES; i++) {
         out->lines[i][0] = '\0';
     }
+    out->misfit_kind = ARMLINT_MISFIT_NONE;
+    out->misfit_width = 0;
+    out->misfit_value = 0;
 }
 
 // Assemble the little-endian 4-byte A64 instruction word. Every check
@@ -14944,6 +14947,394 @@ bool check_mov_reg_offset_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+// === Immediate-misfit audit (-a imm) ===
+//
+// The MOV-chain folds above report a materialized constant that its
+// consumer could have taken as an immediate. This audit reports the
+// complement: the constant that could NOT be taken, because the value
+// sits outside the consumer's immediate encoding. Nothing in the
+// instruction stream can be rewritten -- the chain is already the
+// cheapest spelling of that value -- but when the value is one the
+// code's author chose (an object-size limit, a sentinel's address, the
+// bit assignment of a flags field), choosing it one step differently
+// turns every consumer into the immediate form. So the finding names
+// the value and its nearest encodable neighbours, and the summary
+// tallies the audit by value, which sorts the constants worth
+// renumbering to the top.
+
+// Consumer-class labels for the by-value summary, indexed by
+// ARMLINT_MISFIT_*.
+static const char *const misfit_kind_names[] = {
+    "", "add/sub imm12", "bitmask imm", "ccmp imm5", "ldr/str offset",
+};
+
+static unsigned misfit_popcount64(uint64_t v)
+{
+    unsigned n = 0;
+    while (v != 0) {
+        v &= v - 1u;
+        n++;
+    }
+    return n;
+}
+
+static int misfit_cmp_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+// Every bitmask immediate of one width, sorted ascending: the
+// DecodeBitMasks reconstruction run over all (N, immr, imms) triples
+// and de-duplicated (the decode ignores immr bits above the element
+// size, so the raw sweep repeats each value). 1302 distinct 32-bit
+// values, 5334 64-bit. Built on first use.
+static const uint64_t *misfit_bitmask_table(unsigned width, size_t *out_n)
+{
+    static uint64_t table[2][8192];
+    static size_t counts[2];
+    static bool built[2];
+    unsigned slot = width == 64u ? 1u : 0u;
+    if (!built[slot]) {
+        size_t n = 0;
+        unsigned n_max = width == 64u ? 1u : 0u;
+        for (unsigned nb = 0; nb <= n_max; nb++) {
+            for (unsigned immr = 0; immr < 64u; immr++) {
+                for (unsigned imms = 0; imms < 64u; imms++) {
+                    uint64_t v;
+                    if (decode_bitmask_imm_value(nb, immr, imms, width, &v)
+                            && n < 8192u) {
+                        table[slot][n++] = v;
+                    }
+                }
+            }
+        }
+        qsort(table[slot], n, sizeof(uint64_t), misfit_cmp_u64);
+        size_t u = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (u == 0 || table[slot][u - 1] != table[slot][i]) {
+                table[slot][u++] = table[slot][i];
+            }
+        }
+        counts[slot] = u;
+        built[slot] = true;
+    }
+    *out_n = counts[slot];
+    return table[slot];
+}
+
+// The bitmask immediates nearest to imm by Hamming distance, up to two
+// (ties resolve toward the lower values). Returns the distance.
+static unsigned misfit_nearest_bitmask(uint64_t imm, unsigned width,
+                                       uint64_t out[2], unsigned *out_found)
+{
+    size_t n;
+    const uint64_t *table = misfit_bitmask_table(width, &n);
+    uint64_t mask = width_mask(width);
+    unsigned best = 65u;
+    unsigned found = 0;
+    out[0] = 0;
+    out[1] = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned d = misfit_popcount64((table[i] ^ imm) & mask);
+        if (d < best) {
+            best = d;
+            out[0] = table[i];
+            found = 1;
+        } else if (d == best && found == 1) {
+            out[1] = table[i];
+            found = 2;
+        }
+    }
+    *out_found = found;
+    return best;
+}
+
+static bool misfit_addsub_fits(uint64_t v)
+{
+    return v <= 0xFFFu || ((v & 0xFFFu) == 0 && (v >> 12) <= 0xFFFu);
+}
+
+// What would encode, for the finding detail and the by-value summary.
+// value is the immediate the consumer's encoding would need (for
+// BIC/ORN/EON the complemented constant).
+static void misfit_hint(unsigned kind, unsigned width, uint64_t value,
+                        char *buf, size_t cap)
+{
+    switch (kind) {
+    case ARMLINT_MISFIT_ADDSUB:
+        if (value > 0xFFF000u) {
+            snprintf(buf, cap, "largest add/sub immediate is 0xfff000");
+        } else {
+            uint64_t lo = value & ~(uint64_t)0xFFFu;
+            uint64_t hi = lo + 0x1000u;
+            if (hi > 0xFFF000u) {
+                snprintf(buf, cap, "nearest add/sub immediate 0x%" PRIx64,
+                    lo);
+            } else {
+                snprintf(buf, cap,
+                    "nearest add/sub immediates 0x%" PRIx64 " and 0x%" PRIx64,
+                    lo, hi);
+            }
+        }
+        break;
+    case ARMLINT_MISFIT_LOGICAL: {
+        uint64_t near[2];
+        unsigned found;
+        unsigned d = misfit_nearest_bitmask(value, width, near, &found);
+        int n;
+        if (found == 2) {
+            n = snprintf(buf, cap,
+                "nearest bitmask immediates 0x%" PRIx64 " and 0x%" PRIx64
+                " (%u bit%s away)", near[0], near[1], d, d == 1 ? "" : "s");
+        } else {
+            n = snprintf(buf, cap,
+                "nearest bitmask immediate 0x%" PRIx64 " (%u bit%s away)",
+                near[0], d, d == 1 ? "" : "s");
+        }
+        // A short mask often encodes once every bit above it is set:
+        // 0xdf (clear the ASCII case bit of a byte) is not a bitmask
+        // immediate, 0xffffffdf is, and they agree wherever the operand
+        // has no bits above the mask -- a byte or halfword character,
+        // say. Offer the widened form with that condition.
+        unsigned top = 0;
+        while (top < width && (value >> top) != 0) {
+            top++;
+        }
+        if (top < width && n >= 0 && (size_t)n < cap) {
+            uint64_t mask = width_mask(width);
+            uint64_t widened = (value | (mask << top)) & mask;
+            if (widened != value && is_bitmask_immediate(widened, width)) {
+                snprintf(buf + n, cap - (size_t)n,
+                    "; 0x%" PRIx64 " if bits %u+ are known clear",
+                    widened, top);
+            }
+        }
+        break;
+    }
+    case ARMLINT_MISFIT_CCMP:
+        snprintf(buf, cap,
+            "ccmp/ccmn immediates cover 0..31 (ccmn: -1..-32)");
+        break;
+    default:
+        snprintf(buf, cap,
+            "immediate offsets cover -256..255 unscaled, 0..4095 x size scaled");
+        break;
+    }
+}
+
+bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4 || !(state->features & ARMLINT_AUDIT_IMM)) {
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    unsigned mov_rd = state->mov_rd;
+
+    unsigned kind = ARMLINT_MISFIT_NONE;
+    unsigned width = 64u;
+    bool inverted = false;
+    unsigned ld_size = 0, ld_s = 0;
+
+    unsigned sf, rd, rn, rm, other;
+    bool is_sub, is_s, is_ccmp;
+    unsigned opc, n_bit, nzcv, cond, option, rt;
+    if (decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s, &rd, &rn, &rm)) {
+        // check_mov_add_sub_imm_fold's operand rules: a non-S write to
+        // ZR is dead code; SUB takes the constant only in Rm.
+        if (rd == 31 && !is_s) {
+            return false;
+        }
+        if (is_sub) {
+            if (rm != mov_rd) {
+                return false;
+            }
+            other = rn;
+        } else if (rm == mov_rd) {
+            other = rn;
+        } else if (rn == mov_rd) {
+            other = rm;
+        } else {
+            return false;
+        }
+        if (other == 31 || other == mov_rd) {
+            return false;
+        }
+        kind = ARMLINT_MISFIT_ADDSUB;
+        width = sf ? 64u : 32u;
+    } else if (decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn,
+                                         &rm)) {
+        // check_mov_logic_imm_fold's rules: BIC/ORN/EON/BICS invert Rm
+        // only; a non-ANDS write to ZR is dead code.
+        inverted = (n_bit != 0);
+        if (rd == 31 && opc != 3) {
+            return false;
+        }
+        if (inverted) {
+            if (rm != mov_rd) {
+                return false;
+            }
+            other = rn;
+        } else if (rm == mov_rd) {
+            other = rn;
+        } else if (rn == mov_rd) {
+            other = rm;
+        } else {
+            return false;
+        }
+        if (other == 31 || other == mov_rd) {
+            return false;
+        }
+        kind = ARMLINT_MISFIT_LOGICAL;
+        width = sf ? 64u : 32u;
+    } else if (decode_ccmp_ccmn_reg(op, &sf, &is_ccmp, &rn, &rm, &nzcv,
+                                    &cond)) {
+        // Only Rm has an immediate slot.
+        if (rm != mov_rd || rn == mov_rd || rn == 31) {
+            return false;
+        }
+        kind = ARMLINT_MISFIT_CCMP;
+        width = sf ? 64u : 32u;
+    } else if (decode_ldr_reg_offset(op, &ld_size, &opc, &rm, &option, &ld_s,
+                                     &rn, &rt)) {
+        // check_mov_reg_offset_fold's rules: the LSL/UXTX index only,
+        // and neither the base nor a store's data register may be the
+        // constant.
+        if (option != 3u || rm != mov_rd) {
+            return false;
+        }
+        const char *mnem;
+        char rt_wx;
+        bool is_store;
+        if (classify_int_store(ld_size, opc, &mnem, &rt_wx)) {
+            is_store = true;
+        } else if (classify_int_load(ld_size, opc, &mnem, &rt_wx)) {
+            is_store = false;
+        } else {
+            return false;
+        }
+        if (rn == mov_rd || (is_store && rt == mov_rd)) {
+            return false;
+        }
+        kind = ARMLINT_MISFIT_LDST;
+    } else {
+        return false;
+    }
+
+    // The constant as the consumer reads it: a W chain is stored
+    // zero-extended, which is exactly what an X consumer sees, and an
+    // X chain feeding a W consumer is read through its low half. The
+    // encodability tests mirror the sibling folds', including the
+    // sign-crossed forms (a negative add/sub or ccmp constant whose
+    // magnitude encodes folds into the opposite operation).
+    uint64_t mask = width_mask(width);
+    uint64_t v = state->mov_value & mask;
+    uint64_t sign_bit = (uint64_t)1 << (width - 1u);
+    uint64_t neg = (~v + 1u) & mask;
+    uint64_t needed = v;
+    bool encodable;
+    switch (kind) {
+    case ARMLINT_MISFIT_ADDSUB:
+        if (v == 0) {
+            return false;       // the MOV #0 fold's territory
+        }
+        encodable = misfit_addsub_fits(v)
+            || ((v & sign_bit) != 0 && misfit_addsub_fits(neg));
+        break;
+    case ARMLINT_MISFIT_LOGICAL:
+        if (v == 0 || v == mask) {
+            return false;       // MOV #0 fold / self-op identities
+        }
+        needed = inverted ? (~v & mask) : v;
+        encodable = is_bitmask_immediate(needed, width);
+        break;
+    case ARMLINT_MISFIT_CCMP:
+        encodable = v <= 31u || ((v & sign_bit) != 0 && neg <= 31u);
+        break;
+    default: {
+        int64_t sv = (int64_t)v;
+        encodable = false;
+        if (sv >= -256 && sv <= 32760) {
+            unsigned shift = ld_s ? ld_size : 0u;
+            int64_t byte_off = sv * (int64_t)(1u << shift);
+            int64_t asize = (int64_t)(1u << ld_size);
+            bool fits_scaled = byte_off >= 0 && (byte_off % asize) == 0
+                && (byte_off / asize) <= 4095;
+            bool fits_unscaled = byte_off >= -256 && byte_off <= 255;
+            encodable = fits_scaled || fits_unscaled;
+        }
+        break;
+    }
+    }
+    if (encodable) {
+        return false;
+    }
+
+    static const char *const names[] = {
+        "",
+        "MOV + ADD/SUB/CMP: constant has no add/sub immediate form "
+        "(imm audit)",
+        "MOV + AND/ORR/EOR/TST: constant is not a bitmask immediate "
+        "(imm audit)",
+        "MOV + CCMP/CCMN: constant is outside imm5 (imm audit)",
+        "MOV + register-offset LDR/STR: constant has no immediate-offset "
+        "form (imm audit)",
+    };
+    out->name = names[kind];
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+    out->misfit_kind = (unsigned char)kind;
+    out->misfit_width = (unsigned char)width;
+    out->misfit_value = needed;
+
+    char hint[112];
+    misfit_hint(kind, width, needed, hint, sizeof(hint));
+    if (kind == ARMLINT_MISFIT_LOGICAL && inverted) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> ~#0x%" PRIx64 " = 0x%" PRIx64 "; %s", v, needed, hint);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> #0x%" PRIx64 "; %s", needed, hint);
+    }
+
+    char w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x", mov_mnem, w_or_x, mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, mov_rd, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // Informational: emitted at once, with no liveness proof. A live
+    // constant register amortizes the materialization across its
+    // consumers, but each of them still pays for the register operand
+    // the immediate form would not need.
+    return true;
+}
+
 bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
                          size_t offset, armlint_finding *out)
 {
@@ -16428,6 +16819,10 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
 // 128 is comfortably above the few dozen that exist.
 #define ARMLINT_SUMMARY_MAX 128
 
+// Distinct constants the immediate-misfit tally can hold before it
+// starts dropping (dropped findings are counted and reported).
+#define ARMLINT_MISFIT_SLOTS 4096
+
 struct armlint_summary {
     struct {
         const char *name;
@@ -16435,6 +16830,17 @@ struct armlint_summary {
     } entries[ARMLINT_SUMMARY_MAX];
     size_t count;
     size_t instructions;   // total decoded instructions across all runs
+    // Immediate-misfit audit findings by (consumer class, width,
+    // constant): open-addressed on the constant, a slot is free while
+    // its count is zero.
+    struct {
+        uint64_t value;
+        unsigned count;
+        unsigned char kind;
+        unsigned char width;
+    } misfits[ARMLINT_MISFIT_SLOTS];
+    size_t misfit_count;
+    size_t misfit_dropped;
 };
 
 armlint_summary *armlint_summary_create(void)
@@ -16452,13 +16858,46 @@ size_t armlint_summary_instructions(const armlint_summary *summary)
     return summary == NULL ? 0 : summary->instructions;
 }
 
-// Tally one finding by its name (a stable string literal owned by the
-// check). Linear scan -- the table is tiny. Silently ignores overflow
-// (cannot happen with the current check set) and a NULL summary.
-static void summary_add(armlint_summary *summary, const char *name)
+// Tally an immediate-misfit audit finding by its constant.
+static void summary_add_misfit(armlint_summary *summary,
+                               const armlint_finding *f)
 {
-    if (summary == NULL || name == NULL) {
+    uint64_t h = f->misfit_value * 0x9E3779B97F4A7C15ull;
+    h ^= ((uint64_t)f->misfit_kind << 8) | f->misfit_width;
+    h ^= h >> 29;
+    size_t start = (size_t)(h % ARMLINT_MISFIT_SLOTS);
+    for (size_t probe = 0; probe < ARMLINT_MISFIT_SLOTS; probe++) {
+        size_t j = (start + probe) % ARMLINT_MISFIT_SLOTS;
+        if (summary->misfits[j].count == 0) {
+            summary->misfits[j].value = f->misfit_value;
+            summary->misfits[j].kind = f->misfit_kind;
+            summary->misfits[j].width = f->misfit_width;
+            summary->misfits[j].count = 1;
+            summary->misfit_count++;
+            return;
+        }
+        if (summary->misfits[j].value == f->misfit_value
+                && summary->misfits[j].kind == f->misfit_kind
+                && summary->misfits[j].width == f->misfit_width) {
+            summary->misfits[j].count++;
+            return;
+        }
+    }
+    summary->misfit_dropped++;
+}
+
+// Tally one finding by its name (a stable string literal owned by the
+// check), and an immediate-misfit audit finding by its constant as
+// well. Linear scan -- the table is tiny. Silently ignores overflow
+// (cannot happen with the current check set) and a NULL summary.
+static void summary_add(armlint_summary *summary, const armlint_finding *f)
+{
+    if (summary == NULL || f == NULL || f->name == NULL) {
         return;
+    }
+    const char *name = f->name;
+    if (f->misfit_kind != ARMLINT_MISFIT_NONE) {
+        summary_add_misfit(summary, f);
     }
     for (size_t i = 0; i < summary->count; i++) {
         if (strcmp(summary->entries[i].name, name) == 0) {
@@ -16506,6 +16945,55 @@ void armlint_summary_print(const armlint_summary *summary)
         const char *name = summary->entries[order[i]].name;
         unsigned count = summary->entries[order[i]].count;
         printf("  %6u  %s\n", count, name);
+    }
+    printf("\n");
+
+    // The immediate-misfit audit's by-value table: the constants that
+    // missed their consumers' immediate encodings, most frequent
+    // first (ties by value), with what would have encoded. Only the
+    // top entries print; the rest are counted.
+    if (summary->misfit_count == 0) {
+        return;
+    }
+    static const size_t kMisfitTop = 40;
+    size_t idx[ARMLINT_MISFIT_SLOTS];
+    size_t n = 0;
+    for (size_t i = 0; i < ARMLINT_MISFIT_SLOTS; i++) {
+        if (summary->misfits[i].count != 0) {
+            idx[n++] = i;
+        }
+    }
+    printf("Immediate misfits by value (-a imm):\n");
+    for (size_t i = 0; i < n && i < kMisfitTop; i++) {
+        size_t best = i;
+        for (size_t j = i + 1; j < n; j++) {
+            unsigned cj = summary->misfits[idx[j]].count;
+            unsigned cb = summary->misfits[idx[best]].count;
+            if (cj > cb
+                || (cj == cb
+                    && summary->misfits[idx[j]].value
+                        < summary->misfits[idx[best]].value)) {
+                best = j;
+            }
+        }
+        size_t tmp = idx[i];
+        idx[i] = idx[best];
+        idx[best] = tmp;
+        unsigned kind = summary->misfits[idx[i]].kind;
+        unsigned width = summary->misfits[idx[i]].width;
+        uint64_t value = summary->misfits[idx[i]].value;
+        char hint[112];
+        misfit_hint(kind, width, value, hint, sizeof(hint));
+        printf("  %6u  %-14s %c  #0x%-10" PRIx64 " %s\n",
+            summary->misfits[idx[i]].count, misfit_kind_names[kind],
+            width == 64u ? 'x' : 'w', value, hint);
+    }
+    if (n > kMisfitTop) {
+        printf("  (%zu more distinct values)\n", n - kMisfitTop);
+    }
+    if (summary->misfit_dropped != 0) {
+        printf("  (%zu findings beyond the %u-value table not tallied)\n",
+            summary->misfit_dropped, (unsigned)ARMLINT_MISFIT_SLOTS);
     }
     printf("\n");
 }
@@ -16634,6 +17122,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_extend_cvtf_fold,
     check_mov_zero_to_xzr,
     check_mov_reg_offset_fold,
+    check_imm_misfit_audit,
     check_movz_movk_bitmask,
     check_lsl_fold,
     check_funnel_to_extr,
@@ -16737,7 +17226,7 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                     && !armlint_finding_has_side_entry(state, &finding)) {
                 report_finding(&finding, verbose, symbols,
                     nsymbols, base_addr);
-                summary_add(summary, finding.name);
+                summary_add(summary, &finding);
                 errors++;
             }
             code += pool;
@@ -16759,7 +17248,7 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                                                            &finding)) {
                     report_finding(&finding, verbose, symbols,
                         nsymbols, base_addr);
-                    summary_add(summary, finding.name);
+                    summary_add(summary, &finding);
                     errors++;
                 }
             }
@@ -16772,7 +17261,7 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                     && !armlint_finding_has_side_entry(state, &finding)) {
                 report_finding(&finding, verbose, symbols,
                     nsymbols, base_addr);
-                summary_add(summary, finding.name);
+                summary_add(summary, &finding);
                 errors++;
             }
             code += 4;
@@ -16786,7 +17275,7 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             && !armlint_finding_has_side_entry(state, &finding)) {
         report_finding(&finding, verbose, symbols,
             nsymbols, base_addr);
-        summary_add(summary, finding.name);
+        summary_add(summary, &finding);
         errors++;
     }
 
