@@ -17180,6 +17180,15 @@ const char *armlint_symbol_annotation(char *buf, size_t cap,
     }
     const armlint_symbol *sym = &symbols[lo - 1];
     uint64_t delta = vaddr - sym->vaddr;
+    // A sized anchor reaches only to its end. Past it the code belongs
+    // to some function the table does not record -- Firefox's stripped
+    // libxul.so keeps 110 exports for 28M instructions, and its
+    // 108-byte uprofiler_get would otherwise annotate 40 MB of code as
+    // "<uprofiler_get+0x2b3a1c>" -- so print nothing rather than a
+    // misleading owner.
+    if (sym->size != 0 && delta >= sym->size) {
+        return buf;
+    }
     // The %.120s precision cap keeps a pathological mangled name from
     // overrunning the buffer mid-token: with cap >=
     // ARMLINT_SYMBOL_ANNOTATION_LEN the delta and closing '>' always

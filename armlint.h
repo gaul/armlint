@@ -2846,16 +2846,24 @@ size_t armlint_summary_instructions(const armlint_summary *summary);
 typedef struct {
     uint64_t vaddr;
     const char *name;
+    // Extent in bytes when the container records one (ELF st_size);
+    // 0 when it does not (Mach-O nlist, bare function starts), in
+    // which case the anchor reaches to the next one.
+    uint64_t size;
 } armlint_symbol;
 
 // Format the annotation naming the function containing vaddr:
 // "<_foo+0x18>", "<_foo>" when vaddr is the anchor itself, or
 // "<0x100003f80+0x18>" for a nameless function start. symbols must be
 // sorted by ascending vaddr with no duplicates; the greatest anchor
-// at or below vaddr wins. Writes "" when the table is empty or vaddr
+// at or below vaddr wins, unless it carries a size and vaddr lies at
+// or past its end. Writes "" when the table is empty, when vaddr
 // precedes every anchor (code before the first symbol of a section,
-// e.g. Mach-O stub islands). Very long names (mangled C++/Rust) are
-// truncated; the annotation stays well formed. Returns buf.
+// e.g. Mach-O stub islands), or when it falls past the end of a sized
+// anchor (a stripped ELF keeps only its exports, and the last export
+// before a multi-megabyte run of unnamed code must not claim all of
+// it). Very long names (mangled C++/Rust) are truncated; the
+// annotation stays well formed. Returns buf.
 #define ARMLINT_SYMBOL_ANNOTATION_LEN 160
 const char *armlint_symbol_annotation(char *buf, size_t cap,
                                       const armlint_symbol *symbols,

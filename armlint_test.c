@@ -16102,6 +16102,25 @@ static void test_symbol_annotation(void)
     assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), NULL, 0,
         0x1000), "") == 0);
 
+    // A sized anchor (ELF st_size) reaches only to its end: inside it
+    // the annotation is as usual, at or past the end nothing prints
+    // rather than a huge offset from an unrelated export. An unsized
+    // anchor after it takes over as before.
+    const armlint_symbol sized[] = {
+        { 0x3000, "_export", 0x10 },
+        { 0x3100, "_after", 0 },
+    };
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), sized, 2,
+        0x3008), "<_export+0x8>") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), sized, 2,
+        0x300c), "<_export+0xc>") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), sized, 2,
+        0x3010), "") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), sized, 2,
+        0x30f0), "") == 0);
+    assert(strcmp(armlint_symbol_annotation(buf, sizeof(buf), sized, 2,
+        0x3200), "<_after+0x100>") == 0);
+
     // A pathological mangled name is truncated but the annotation
     // stays well formed: the delta and '>' survive.
     char longname[200];

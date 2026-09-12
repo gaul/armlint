@@ -245,6 +245,7 @@ typedef struct {
     uint64_t vaddr;
     const char *name;   // NULL for a bare function start
     bool external;
+    uint64_t size;      // ELF st_size; 0 when the format records none
 } anchor;
 
 static int anchor_cmp(const void *a, const void *b)
@@ -277,10 +278,16 @@ static size_t anchors_finish(anchor *tmp, size_t n, armlint_symbol *out)
     size_t m = 0;
     for (size_t i = 0; i < n; i++) {
         if (m > 0 && out[m - 1].vaddr == tmp[i].vaddr) {
+            // A duplicate that knows the extent lends it to the
+            // survivor (an unsized alias of a sized function).
+            if (tmp[i].size > out[m - 1].size) {
+                out[m - 1].size = tmp[i].size;
+            }
             continue;
         }
         out[m].vaddr = tmp[i].vaddr;
         out[m].name = tmp[i].name;
+        out[m].size = tmp[i].size;
         m++;
     }
     return m;
@@ -528,6 +535,9 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
                         + (ehdr.e_type == ET_REL ? shdr->sh_addr : 0);
                     tmp[n].name = name;
                     tmp[n].external = bind != STB_LOCAL;
+                    // st_size bounds the annotation's reach; 0 (an
+                    // assembler label without .size) means unknown.
+                    tmp[n].size = sym->st_size;
                     n++;
                 }
                 ntable = anchors_finish(tmp, n, table);
@@ -854,6 +864,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                     tmp[n].vaddr = sym->n_value;
                     tmp[n].name = name;
                     tmp[n].external = (sym->n_type & N_EXT) != 0;
+                    tmp[n].size = 0;   // nlist records no extent
                     n++;
                 }
                 for (size_t s = 0; s < nfstarts; ++s) {
@@ -862,6 +873,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                         tmp[n].vaddr = fstarts[s];
                         tmp[n].name = NULL;
                         tmp[n].external = false;
+                        tmp[n].size = 0;
                         n++;
                     }
                 }

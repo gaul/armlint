@@ -427,7 +427,10 @@ fallback), or
 the function's start address as above when a stripped binary's
 `LC_FUNCTION_STARTS` still records its boundaries. A binary carrying
 neither -- Go's linker, for one, emits its runtime symtab instead of
-either structure -- prints the historic unannotated form.
+either structure -- prints the historic unannotated form, as does a
+finding past the end of an ELF symbol whose recorded size stops short
+of it: a stripped `libxul.so` keeps only its exports, and the last one
+before 40 MB of unnamed code must not claim all of it.
 
 The process exits non-zero when any opportunity is found, so armlint
 can gate a compiler test suite.
