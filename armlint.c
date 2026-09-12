@@ -15429,9 +15429,13 @@ bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
 // immediate: CMP cannot take it, EOR can, and (x ^ C) == 0 is exactly
 // what CBZ tests. The chain, the CMP and the branch become an EOR and
 // a CBZ/CBNZ, the EOR writing the register the chain occupied. The
-// dominant shape in Rust code is x == INT64_MIN -- the niche test for
-// Option<Vec<T>> and Option<String>, whose None is a capacity of
-// isize::MAX + 1 -- which neither LLVM 22 nor rustc 1.97 rewrites.
+// dominant constant is INT64_MIN: in Rust the discriminant of the
+// first dataless variant of an enum whose payload holds a Vec or
+// String and which has two or more such variants (rustc puts those
+// niches at isize::MAX + 1 upward; a lone None takes usize::MAX,
+// which cmn #1 encodes), one site per monomorphization; in Gecko the
+// TimeDuration +-Forever sentinel tested by every inlined ToSeconds.
+// Neither LLVM 24 nor rustc 1.97 rewrites the shape.
 
 bool check_mov_cmp_branch_eor_cbz(armlint_state *state, const cs_insn *insn,
                                   size_t offset, armlint_finding *out)

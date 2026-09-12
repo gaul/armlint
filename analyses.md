@@ -1666,16 +1666,23 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   undecided instructions expire the scan, and as with the sibling
   folds the taken path is not scanned.
 * Why it helps: one instruction and the flag dependency go, and the
-  branch reads the register directly. LLVM 22 and rustc 1.97 emit the
-  three-instruction form: in Rust, `x == INT64_MIN` is the niche test
-  for `Option<Vec<T>>` and `Option<String>` (their `None` is a capacity
-  of `isize::MAX + 1`), one site per monomorphization, and it is the
-  audit's most frequent constant by far. On Firefox 155's libxul.so
-  13,019 compares have the shape (11,262 of them `INT64_MIN`), and the
-  two proofs land before any control transfer in 1,651 of them; on
-  librustc_driver 1.97 the fold reports 642, on uutils 16. The refused
-  remainder is mostly a branch or call arriving before the constant
-  register dies, which the fall-through-only scan cannot see past.
+  branch reads the register directly. LLVM (clang 23, and trunk as of
+  September 2026) and rustc 1.97 emit the three-instruction form, and
+  when the constant is reused across a call LLVM parks it in a
+  callee-saved register, so the fold also removes that register's
+  spill. The constant is overwhelmingly `INT64_MIN`. In Rust it is the
+  discriminant of the first dataless variant of an enum whose payload
+  holds a `Vec` or `String` and which has two or more such variants:
+  rustc places those niches at `isize::MAX + 1` upward (a lone `None`
+  takes `usize::MAX`, which `cmn #1` encodes), one site per
+  monomorphization. In Gecko it is `TimeDuration`'s `INT64_MIN`
+  sentinel (negative Forever), tested by every inlined `ToSeconds` and
+  `ToMilliseconds`. On Firefox 155's libxul.so 13,019 compares have
+  the shape (11,262 of them `INT64_MIN`), and the two proofs land
+  before any control transfer in 1,651 of them; on librustc_driver
+  1.97 the fold reports 642, on uutils 16. The refused remainder is
+  mostly a branch or call arriving before the constant register dies,
+  which the fall-through-only scan cannot see past.
 
 ## MOV + ADD/SUB foldable to the original source
 
@@ -2648,10 +2655,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   would encode), and the byte loads at `0x10d9`..`0x10dd` (362:
   `Document` bit-field bytes just past the 4 KiB byte-load range).
   The beyond-reach table is led by `INT64_MIN` under `cmp` (11,978:
-  Rust's `Option<Vec>`/`Option<String>` niche, one site per
-  monomorphization), the JS::Value shifted tags, and the four 32-bit
-  words of the cycle-collection IIDs that every `QueryInterface`
-  compares -- none of which a renumbering reaches.
+  the niche rustc gives the dataless variants of a `Vec`- or
+  `String`-carrying enum that has two or more of them, one site per
+  monomorphization, plus Gecko's `TimeDuration` Forever sentinel),
+  the JS::Value shifted tags, and the four 32-bit words of the
+  cycle-collection IIDs that every `QueryInterface` compares -- none
+  of which a renumbering reaches.
 
 ## exclusive-monitor retry loop foldable into an LSE atomic (feature-gated: `-m lse`)
 
