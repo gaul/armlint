@@ -150,6 +150,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #2^N` + `udiv` + `msub` (remainder)](analyses.md#remainder-by-power-of-two-foldable-to-and) | `and Rd, Rn, #(2^N-1)` |
 | [`mov #C` + `add`/`sub`](analyses.md#mov--addsub-foldable-to-immediate-form) | `add`/`sub Rd, Rn, #C` (sign-crossed `add`↔`sub`, `cmp`↔`cmn` for `#-C`) |
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
+| [`mov #C` (a bitmask but no add/sub immediate) + `cmp` + `b.eq`/`b.ne`](analyses.md#mov--cmp--beqne-foldable-to-eor-bitmask--cbzcbnz) | `eor Xc, Xn, #C` + `cbz`/`cbnz Xc` |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` (sign-crossed for `#-C`) |
 | [`mov #1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinc Rd, Rn, wzr, cc` (`cset` when the other operand is ZR) |
 | [`mov #-1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinv Rd, Rn, wzr, cc` (`csetm` when the other operand is ZR) |

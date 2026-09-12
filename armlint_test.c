@@ -7429,6 +7429,235 @@ static void test_mov_cage_orr_add(void)
     assert(run_v8cage_reg_dead(code, 12, 16) == 0);
 }
 
+// check_mov_cmp_branch_eor_cbz: a bitmask-immediate constant that no
+// add/sub immediate encodes, compared for equality and branched on.
+// Counted by name -- a two-instruction chain reaching a bitmask
+// immediate is also a "suboptimal MOVZ/MOVK sequence", and the
+// negatives hand their shapes to the sibling folds.
+static const char *const kEorCbz =
+    "MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ";
+
+static void test_mov_cmp_branch_eor_cbz(void)
+{
+    uint8_t code[32];
+
+    // -- Positives: INT64_MIN (movz x0, #0x8000, lsl #48) --
+
+    // movz ; cmp x2, x0 ; b.eq ; movz x0, #1 (x0 dead) ; adds w3, w4,
+    // w5 (NZCV dead) ; ret -> eor x0, x2, #0x8000000000000000 ; cbz.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 1);
+
+    // The proofs land in either order; b.ne -> cbnz.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 1, 8);
+    adds_w(&code[12], 3, 4, 5);
+    movz_x(&code[16], 0, 1, 0);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 1);
+
+    // One instruction settles both: adds x0, x1, x2 overwrites the
+    // constant register and NZCV at once.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    encode_sr(&code[12], 0xAB000000u, 0, 1, 2);
+    ret_(&code[16]);
+    assert(run_named_check(code, 20, kEorCbz) == 1);
+
+    // Once the register is dead, RET proves NZCV dead (terminator).
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    ret_(&code[16]);
+    assert(run_named_check(code, 20, kEorCbz) == 1);
+
+    // The constant in the Rn slot: equality is symmetric.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 0, 2);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 1);
+
+    // W form with a 16-bit run: movz w0, #0xffff ; cmp w2, w0 ; b.ne.
+    movz_w(&code[0], 0, 0xffff);
+    cmp_w_reg(&code[4], 2, 0);
+    b_cond(&code[8], 1, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 1);
+
+    // A two-instruction chain: movz w0, #0xffff ; movk w0, #0x3fff,
+    // lsl #16 (0x3fffffff) ; cmp w2, w0 ; b.eq.
+    movz_w(&code[0], 0, 0xffff);
+    movk_w(&code[4], 0, 0x3fff, 1);
+    cmp_w_reg(&code[8], 2, 0);
+    b_cond(&code[12], 0, 8);
+    movz_x(&code[16], 0, 1, 0);
+    adds_w(&code[20], 3, 4, 5);
+    ret_(&code[24]);
+    assert(run_named_check(code, 28, kEorCbz) == 1);
+
+    // Fifteen undecided instructions fit the sixteen-instruction
+    // window; sixteen expire it.
+    for (int fill = 15; fill <= 16; fill++) {
+        uint8_t big[12 + 16 * 4 + 12];
+        movz_x(&big[0], 0, 0x8000, 3);
+        cmp_x_reg(&big[4], 2, 0);
+        b_cond(&big[8], 0, 8);
+        for (int i = 0; i < fill; i++) {
+            movz_w(&big[12 + i * 4], 5, (uint16_t)(i + 1));
+        }
+        size_t at = 12 + (size_t)fill * 4;
+        movz_x(&big[at], 0, 1, 0);
+        adds_w(&big[at + 4], 3, 4, 5);
+        ret_(&big[at + 8]);
+        assert(run_named_check(big, at + 12, kEorCbz)
+               == (fill == 15 ? 1 : 0));
+    }
+
+    // -- Negatives --
+
+    // An add/sub-encodable constant is the CMP-immediate fold's.
+    movz_x(&code[0], 0, 100, 0);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // So is a sign-crossed one: movn x0, #4 is -5, cmn x2, #5.
+    movn_x(&code[0], 0, 4, 0);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // Not a bitmask immediate: 0x1234.
+    movz_x(&code[0], 0, 0x1234, 0);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // All-ones (movn x0, #0) is cmn #1's; zero is the MOV #0 fold's.
+    movn_x(&code[0], 0, 0, 0);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+    movz_x(&code[0], 0, 0, 0);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // An ordered condition (b.lo) needs the subtraction.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 3, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // Width mismatch: a W chain feeding an X compare.
+    movz_w_hw(&code[0], 0, 0x8000, 1);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // The other operand ZR, or the constant register itself.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 31, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+    cmp_x_reg(&code[4], 0, 0);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // Not adjacent: a NOP between the CMP and the branch.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    nop_insn(&code[8]);
+    b_cond(&code[12], 0, 8);
+    movz_x(&code[16], 0, 1, 0);
+    adds_w(&code[20], 3, 4, 5);
+    ret_(&code[24]);
+    assert(run_named_check(code, 28, kEorCbz) == 0);
+
+    // NZCV read after the branch (b.lt), even with the register dead.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    b_cond(&code[16], 11, 8);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // The instruction that kills the register reads NZCV: csel w0,
+    // w1, w2, lo. The break wins over the settled proof.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    csel_w(&code[12], 0, 1, 2, 3);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // The constant register read after the branch: add x3, x2, x0.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    add_x(&code[12], 3, 2, 0);
+    adds_w(&code[16], 3, 4, 5);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // A call before the register dies discards: NZCV is dead across
+    // it, but the register scan makes no PCS assumption.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    bl_(&code[12], 0x100);
+    movz_x(&code[16], 0, 1, 0);
+    ret_(&code[20]);
+    assert(run_named_check(code, 24, kEorCbz) == 0);
+
+    // Side entry: a branch into the CMP refuses the finding; one to
+    // the chain's first instruction is fine (run_buffer_check builds
+    // the branch-target map).
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 8);
+    movz_x(&code[12], 0, 1, 0);
+    adds_w(&code[16], 3, 4, 5);
+    cbz_cbnz(&code[20], 1, 0, 9, -4);
+    ret_(&code[24]);
+    assert(run_buffer_check(code, 28) == 0);
+    cbz_cbnz(&code[20], 1, 0, 9, -5);
+    assert(run_buffer_check(code, 28) == 1);
+}
+
 static void test_mov_add_sub_imm_fold(void)
 {
     uint8_t code[16];
@@ -16184,6 +16413,7 @@ int main(void)
     test_mneg_strength_reduce();
     test_udiv_strength_reduce();
     test_mov_add_sub_imm_fold();
+    test_mov_cmp_branch_eor_cbz();
     test_mov_logic_imm_fold();
     test_mov_cage_orr_add();
     test_cheap_const_copy();

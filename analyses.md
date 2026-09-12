@@ -1629,6 +1629,54 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `check_add_sub_zero`); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
 
+## MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ
+
+* `mov x8, #0x8000000000000000 ; cmp x0, x8 ; b.eq target` instead
+  of `eor x8, x0, #0x8000000000000000 ; cbz x8, target` (and `b.ne`
+  -> `cbnz`): an equality test against a constant that is a bitmask
+  immediate but no add/sub immediate. `CMP` cannot take it, `EOR`
+  can, and `x == C` is `(x ^ C) == 0`, which `CBZ` tests directly.
+  Three instructions become two, and the `EOR` writes the register
+  the MOV chain occupied, so no fresh scratch is needed. The constant
+  may sit in either `CMP` slot (equality is symmetric); the other
+  operand must be neither ZR nor the constant register, and the chain
+  and `CMP` widths must match.
+* Excluded: constants the [CMP-immediate
+  fold](#mov--addsub-foldable-to-immediate-form) already takes
+  (`0..0xfff`, 4 KiB multiples up to `0xfff000`, and their
+  sign-crossed negatives), where `cmp Rn, #C` keeps the branch and
+  saves the same instruction; zero (the `MOV #0` and `CBZ` folds) and
+  all-ones (`cmn Rn, #1`). Only `b.eq`/`b.ne` qualify: the ordered
+  conditions need the subtraction. For the sign bit alone `cmp xzr,
+  x0 ; b.vs` is an equivalent two-instruction form that needs no
+  scratch at all (negating `INT64_MIN` is the one signed overflow),
+  but the `EOR` spelling covers every bitmask constant, so it is the
+  one reported.
+* Soundness: two proofs on the fall-through path, deferred together.
+  The `CBZ` sets no flags, so NZCV must be dead after the branch --
+  the same scan as the [`CMP #0` -> `CBZ`
+  fold](#compare-zero-branch-foldable-into-cbzcbnz): an overwrite by
+  `ADDS`/`SUBS`/`ANDS`/..., or a `RET`/`BL`/`BLR`, before any reader
+  or unsafe terminator. The `EOR` overwrites the constant register,
+  so it must be dead too -- the same forward scan as the other
+  MOV-chain folds, which refuses every control transfer including
+  calls (no PCS assumption). One instruction may settle both (`adds
+  x8, ...` into the constant register) or settle one while breaking
+  the other (`cset x8, lo` reads the flags): the break wins. Sixteen
+  undecided instructions expire the scan, and as with the sibling
+  folds the taken path is not scanned.
+* Why it helps: one instruction and the flag dependency go, and the
+  branch reads the register directly. LLVM 22 and rustc 1.97 emit the
+  three-instruction form: in Rust, `x == INT64_MIN` is the niche test
+  for `Option<Vec<T>>` and `Option<String>` (their `None` is a capacity
+  of `isize::MAX + 1`), one site per monomorphization, and it is the
+  audit's most frequent constant by far. On Firefox 155's libxul.so
+  13,019 compares have the shape (11,262 of them `INT64_MIN`), and the
+  two proofs land before any control transfer in 1,651 of them; on
+  librustc_driver 1.97 the fold reports 642, on uutils 16. The refused
+  remainder is mostly a branch or call arriving before the constant
+  register dies, which the fall-through-only scan cannot see past.
+
 ## MOV + ADD/SUB foldable to the original source
 
 * An in-place ADD/SUB immediate on a register the previous

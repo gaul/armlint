@@ -1142,6 +1142,28 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// Detect a MOV chain materializing a constant that is a bitmask
+// immediate but no add/sub immediate, compared for equality and
+// branched on:
+//   MOV Xc, #C ; CMP Xn, Xc ; B.EQ/B.NE target
+//     -> EOR Xc, Xn, #C ; CBZ/CBNZ Xc, target
+// x == C is (x ^ C) == 0, which CBZ tests directly, and EOR takes the
+// immediate CMP cannot. The constant may sit in either CMP slot; the
+// other operand is neither ZR nor the constant register, and the
+// chain and CMP widths match. Excluded: constants the CMP-immediate
+// fold already takes (imm12, LSL #12, and their sign-crossed
+// negatives -- one instruction, branch kept), zero (the MOV #0 and
+// CBZ folds) and all-ones (CMN #1). Only B.EQ/B.NE qualify; the
+// ordered conditions need the subtraction. Emission is deferred on
+// two fall-through proofs at once -- NZCV dead after the branch (the
+// CBZ sets no flags) and the constant register dead (the EOR
+// overwrites it) -- run by armlint_advance_pending_ecb. Reported as
+// "MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ". Runs
+// before check_movz_movk_bitmask so the chain state is still active
+// at the CMP.
+bool check_mov_cmp_branch_eor_cbz(armlint_state *state, const cs_insn *insn,
+                                  size_t offset, armlint_finding *out);
+
 // V8-cage fold (feature-gated: ARMLINT_FEATURE_V8CAGE / -m v8).
 // A MOV chain materialising a 32-bit constant C that is then merged
 // into the pointer-compression cage base with a direct 64-bit
@@ -2795,6 +2817,18 @@ bool armlint_advance_pending_zs(armlint_state *state, const cs_insn *insn,
 // armlint_check_fn signature; it is unused.
 bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
+
+// Advance the deferred EOR + CBZ/CBNZ finding
+// (check_mov_cmp_branch_eor_cbz) by one instruction: the NZCV scan of
+// armlint_advance_pending and the register scan of
+// armlint_advance_pending_mz run side by side, and the finding emits
+// once both have proven their value dead (an overwrite; for NZCV also
+// a RET/BL/BLR). Either scan's read or unsafe terminator discards it.
+// One instruction may settle both (ADDS into the constant register)
+// or settle one while breaking the other (CSET into it reads the
+// flags); the break wins. Sixteen undecided instructions expire it.
+bool armlint_advance_pending_ecb(armlint_state *state, const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
 
 // Advance the deferred single-bit-test TBZ/TBNZ finding's two-edge
 // register-liveness scan by one instruction (see check_single_bit_cbz).

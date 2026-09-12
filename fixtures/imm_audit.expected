@@ -2,6 +2,11 @@ MOV + ADD/SUB/CMP: constant has no add/sub immediate form (imm audit) at offset:
   movz x16, #0x100, lsl #16
   cmp x0, x16
 
+MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ at offset: 0x0 <_main>: -> eor x16, x0, #0x1000000 ; cbnz x16, 0x6c (3 instructions)
+  movz x16, #0x100, lsl #16
+  cmp x0, x16
+  b.ne 0x6c
+
 MOV + ADD/SUB/CMP: constant has no add/sub immediate form (imm audit) at offset: 0xc <_main+0xc>: -> #0x2fffd; nearest add/sub immediates 0x2f000 and 0x30000 (3 instructions)
   movz w16, #0xfffd
   movk w16, #0x2, lsl #16
@@ -31,6 +36,7 @@ Optimization opportunities by type:
        3  MOV + AND/ORR/EOR/TST: constant is not a bitmask immediate (imm audit)
        2  MOV + ADD/SUB/CMP: constant has no add/sub immediate form (imm audit)
        1  MOV + CCMP/CCMN: constant is outside imm5 (imm audit)
+       1  MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ
        1  MOV + register-offset LDR/STR: constant has no immediate-offset form (imm audit)
 
 Immediate misfits by value (-a imm), within one step of an immediate form:
@@ -44,4 +50,4 @@ Immediate misfits by value (-a imm), within one step of an immediate form:
 Immediate misfits by value (-a imm), beyond one step (informational):
        1  ldr/str offset x  #0x10000      immediate offsets cover -256..255 unscaled, 0..4095 x size scaled
 
-7 optimization opportunities in 28 instructions
+8 optimization opportunities in 28 instructions

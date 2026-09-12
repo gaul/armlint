@@ -1,0 +1,25 @@
+MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ at offset: 0x0 <_main>: -> eor x8, x0, #0x8000000000000000 ; cbz x8, 0x14 (3 instructions)
+  movz x8, #0x8000, lsl #48
+  cmp x0, x8
+  b.eq 0x14
+
+MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ at offset: 0x14 <_main+0x14>: -> eor w8, w1, #0x80000000 ; cbnz w8, 0x24 (3 instructions)
+  movz w8, #0x8000, lsl #16
+  cmp w8, w1
+  b.ne 0x24
+
+suboptimal MOVZ/MOVK sequence at offset: 0x24 <_main+0x24>: w8 = 0x3fffffff (2 instructions)
+  movz w8, #0xffff
+  movk w8, #0x3fff, lsl #16
+
+MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ at offset: 0x24 <_main+0x24>: -> eor w8, w1, #0x3fffffff ; cbz w8, 0x3c (4 instructions)
+  movz w8, #0xffff
+  movk w8, #0x3fff, lsl #16
+  cmp w1, w8
+  b.eq 0x3c
+
+Optimization opportunities by type:
+       3  MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ
+       1  suboptimal MOVZ/MOVK sequence
+
+4 optimization opportunities in 52 instructions
