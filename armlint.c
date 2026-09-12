@@ -16819,9 +16819,20 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
 // 128 is comfortably above the few dozen that exist.
 #define ARMLINT_SUMMARY_MAX 128
 
-// Distinct constants the immediate-misfit tally can hold before it
-// starts dropping (dropped findings are counted and reported).
-#define ARMLINT_MISFIT_SLOTS 4096
+// Initial capacity of the immediate-misfit tally. The table doubles
+// whenever it is half full, so a corpus with tens of thousands of
+// distinct constants (Firefox's libxul.so: 15,292; librustc_driver:
+// more) is tallied in full rather than truncated at a fixed size.
+#define ARMLINT_MISFIT_INITIAL_SLOTS 1024
+
+// One tallied (consumer class, width, constant) triple of the
+// immediate-misfit audit; a slot is free while its count is zero.
+typedef struct {
+    uint64_t value;
+    unsigned count;
+    unsigned char kind;
+    unsigned char width;
+} misfit_entry;
 
 struct armlint_summary {
     struct {
@@ -16831,14 +16842,12 @@ struct armlint_summary {
     size_t count;
     size_t instructions;   // total decoded instructions across all runs
     // Immediate-misfit audit findings by (consumer class, width,
-    // constant): open-addressed on the constant, a slot is free while
-    // its count is zero.
-    struct {
-        uint64_t value;
-        unsigned count;
-        unsigned char kind;
-        unsigned char width;
-    } misfits[ARMLINT_MISFIT_SLOTS];
+    // constant): open-addressed on the constant, allocated on first
+    // use and grown by doubling. misfit_dropped counts findings that
+    // could not be tallied because a growth allocation failed (they
+    // still count in entries).
+    misfit_entry *misfits;
+    size_t misfit_cap;     // a power of two; 0 until the first misfit
     size_t misfit_count;
     size_t misfit_dropped;
 };
@@ -16850,6 +16859,9 @@ armlint_summary *armlint_summary_create(void)
 
 void armlint_summary_destroy(armlint_summary *summary)
 {
+    if (summary != NULL) {
+        free(summary->misfits);
+    }
     free(summary);
 }
 
@@ -16858,32 +16870,80 @@ size_t armlint_summary_instructions(const armlint_summary *summary)
     return summary == NULL ? 0 : summary->instructions;
 }
 
+static size_t misfit_hash(uint64_t value, unsigned kind, unsigned width)
+{
+    uint64_t h = value * 0x9E3779B97F4A7C15ull;
+    h ^= ((uint64_t)kind << 8) | width;
+    h ^= h >> 29;
+    return (size_t)h;
+}
+
+// The slot for a triple in a table of cap (a power of two) entries:
+// its own if already tallied, else the first free one along its probe
+// sequence. The caller guarantees a free slot exists.
+static misfit_entry *misfit_slot(misfit_entry *table, size_t cap,
+                                 uint64_t value, unsigned kind,
+                                 unsigned width)
+{
+    size_t j = misfit_hash(value, kind, width) & (cap - 1);
+    for (;;) {
+        misfit_entry *e = &table[j];
+        if (e->count == 0
+                || (e->value == value && e->kind == kind
+                    && e->width == width)) {
+            return e;
+        }
+        j = (j + 1) & (cap - 1);
+    }
+}
+
+// Allocate the tally on first use, or double it, rehashing every live
+// entry. Returns false and leaves the table untouched when the
+// allocation fails.
+static bool misfit_grow(armlint_summary *summary)
+{
+    size_t cap = summary->misfit_cap == 0
+        ? ARMLINT_MISFIT_INITIAL_SLOTS : summary->misfit_cap * 2;
+    misfit_entry *table = calloc(cap, sizeof(*table));
+    if (table == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < summary->misfit_cap; i++) {
+        const misfit_entry *e = &summary->misfits[i];
+        if (e->count != 0) {
+            *misfit_slot(table, cap, e->value, e->kind, e->width) = *e;
+        }
+    }
+    free(summary->misfits);
+    summary->misfits = table;
+    summary->misfit_cap = cap;
+    return true;
+}
+
 // Tally an immediate-misfit audit finding by its constant.
 static void summary_add_misfit(armlint_summary *summary,
                                const armlint_finding *f)
 {
-    uint64_t h = f->misfit_value * 0x9E3779B97F4A7C15ull;
-    h ^= ((uint64_t)f->misfit_kind << 8) | f->misfit_width;
-    h ^= h >> 29;
-    size_t start = (size_t)(h % ARMLINT_MISFIT_SLOTS);
-    for (size_t probe = 0; probe < ARMLINT_MISFIT_SLOTS; probe++) {
-        size_t j = (start + probe) % ARMLINT_MISFIT_SLOTS;
-        if (summary->misfits[j].count == 0) {
-            summary->misfits[j].value = f->misfit_value;
-            summary->misfits[j].kind = f->misfit_kind;
-            summary->misfits[j].width = f->misfit_width;
-            summary->misfits[j].count = 1;
-            summary->misfit_count++;
-            return;
-        }
-        if (summary->misfits[j].value == f->misfit_value
-                && summary->misfits[j].kind == f->misfit_kind
-                && summary->misfits[j].width == f->misfit_width) {
-            summary->misfits[j].count++;
-            return;
-        }
+    // Grow at half load so probe sequences stay short and a free slot
+    // always exists. A failed growth keeps tallying into the old table
+    // while it has room, and drops (counted) once it is full.
+    if (summary->misfit_count * 2 >= summary->misfit_cap
+            && !misfit_grow(summary)
+            && summary->misfit_count >= summary->misfit_cap) {
+        summary->misfit_dropped++;
+        return;
     }
-    summary->misfit_dropped++;
+    misfit_entry *e = misfit_slot(summary->misfits, summary->misfit_cap,
+        f->misfit_value, f->misfit_kind, f->misfit_width);
+    if (e->count == 0) {
+        e->value = f->misfit_value;
+        e->kind = f->misfit_kind;
+        e->width = f->misfit_width;
+        e->count = 1;
+        summary->misfit_count++;
+    } else {
+        e->count++;
+    }
 }
 
 // Tally one finding by its name (a stable string literal owned by the
@@ -16956,9 +17016,14 @@ void armlint_summary_print(const armlint_summary *summary)
         return;
     }
     static const size_t kMisfitTop = 40;
-    size_t idx[ARMLINT_MISFIT_SLOTS];
+    size_t *idx = malloc(summary->misfit_count * sizeof(*idx));
+    if (idx == NULL) {
+        printf("Immediate misfits by value (-a imm): %zu distinct values "
+            "(table not printed: out of memory)\n\n", summary->misfit_count);
+        return;
+    }
     size_t n = 0;
-    for (size_t i = 0; i < ARMLINT_MISFIT_SLOTS; i++) {
+    for (size_t i = 0; i < summary->misfit_cap; i++) {
         if (summary->misfits[i].count != 0) {
             idx[n++] = i;
         }
@@ -16992,10 +17057,11 @@ void armlint_summary_print(const armlint_summary *summary)
         printf("  (%zu more distinct values)\n", n - kMisfitTop);
     }
     if (summary->misfit_dropped != 0) {
-        printf("  (%zu findings beyond the %u-value table not tallied)\n",
-            summary->misfit_dropped, (unsigned)ARMLINT_MISFIT_SLOTS);
+        printf("  (%zu findings not tallied: the table could not grow)\n",
+            summary->misfit_dropped);
     }
     printf("\n");
+    free(idx);
 }
 
 const char *armlint_symbol_annotation(char *buf, size_t cap,
