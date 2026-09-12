@@ -2547,9 +2547,20 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   mask widened with every bit above it set when that encodes (`0xdf`,
   the byte with its ASCII case bit clear, is not a bitmask immediate
   but `0xffffffdf` is, and the two agree on any operand without bits
-  above the mask); the `imm5` and offset ranges. The summary adds an
-  "Immediate misfits by value" table, most frequent first, so the
-  constants worth renumbering sort to the top.
+  above the mask); the `imm5` and offset ranges (a load/store misfit
+  is reported as its byte offset, with the access size). The summary
+  tallies the audit by value into two "Immediate misfits by value"
+  tables, each most frequent first. The first holds the constants
+  within one step of an immediate form -- an add/sub magnitude up to
+  `0x1000000`, so a 4 KiB multiple lies within 4 KiB of it; a bitmask
+  at most two bit flips away; a `ccmp` magnitude up to 63; a
+  load/store byte offset within twice the scaled range of its access
+  size (or the 256 bytes below the unscaled range) -- which is the
+  renumbering worklist. The second holds everything beyond reach:
+  NaN-box tags, `INT64_MIN` as an enum niche, hashes, whose whole
+  magnitude is the point. A real corpus is dominated by the second
+  kind (on Firefox's libxul.so they fill the top 30 rows of a merged
+  table), which is why the two are kept apart.
 * Operand rules are the sibling folds' -- the constant in an
   immediate-capable slot, the other operand neither ZR nor the
   constant register, strict adjacency -- except that the chain and
@@ -2577,6 +2588,22 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   frame slots below `fp - 256` and compressed fields more than 255
   bytes into an object, whose tagged offsets (a multiple of 4 minus
   the heap-object tag) can never take the scaled form.
+* On Firefox 155's libxul.so (28.6M instructions, 98,262 audit
+  findings over 15,291 distinct constants) the within-reach table
+  opens with `0x50` under `tst` (2,707 sites: `JS::shadow::Zone::
+  GCState` has Sweep = 4 and Compact = 6, so the inline
+  `isGCSweepingOrCompacting` test is a two-bit mask one flip from
+  contiguous), `0x270f` under `cmp` (2,501: `nsAtom`'s
+  `kAtomGCThreshold = 10000`, tested as `++count >= 10000` and so
+  compared against 9999 -- 8193 would encode), `0x15f90` (1,000:
+  glean's `PAYLOAD_ACCESS_WATERMARK = 90000 - 1`; `0x16000 - 1`
+  would encode), and the byte loads at `0x10d9`..`0x10dd` (362:
+  `Document` bit-field bytes just past the 4 KiB byte-load range).
+  The beyond-reach table is led by `INT64_MIN` under `cmp` (11,978:
+  Rust's `Option<Vec>`/`Option<String>` niche, one site per
+  monomorphization), the JS::Value shifted tags, and the four 32-bit
+  words of the cycle-collection IIDs that every `QueryInterface`
+  compares -- none of which a renumbering reaches.
 
 ## exclusive-monitor retry loop foldable into an LSE atomic (feature-gated: `-m lse`)
 

@@ -14128,6 +14128,44 @@ static int run_imm_audit(const uint8_t *code, size_t code_size,
     return run_named_features_check(code, code_size, ARMLINT_AUDIT_IMM, name);
 }
 
+// Copy the first finding named `name` that the registry produces over
+// code under `features` into *out; false when there is none. For
+// asserting a finding's fields (the audit's tallied constant and
+// width), which the counting runners discard.
+static bool first_named_finding(const uint8_t *code, size_t code_size,
+                                unsigned features, const char *name,
+                                armlint_finding *out)
+{
+    cs_insn *insns = NULL;
+    size_t count = cs_disasm(g_handle, code, code_size, 0, 0, &insns);
+    if (count != code_size / 4) {
+        if (insns != NULL) {
+            cs_free(insns, count);
+        }
+        return false;
+    }
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+    armlint_state_set_features(state, features);
+    bool found = false;
+    for (size_t i = 0; i < count && !found; i++) {
+        size_t offset = (size_t)insns[i].address;
+        for (size_t k = 0; k < armlint_check_registry_count; k++) {
+            armlint_finding f;
+            if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && strcmp(f.name, name) == 0) {
+                *out = f;
+                found = true;
+                break;
+            }
+        }
+    }
+    armlint_state_destroy(state);
+    cs_free(insns, count);
+    return found;
+}
+
 static void test_imm_audit(void)
 {
     uint8_t code[16];
@@ -14199,6 +14237,22 @@ static void test_imm_audit(void)
     movz_x(&code[0], 1, 0x100, 0);
     ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 0);
     assert(run_imm_audit(code, 8, kMisfitLdst) == 0);
+
+    // The load/store class tallies the byte offset and the access
+    // size, not the index register's value: an element index under
+    // LSL #3 is eight times as many bytes, and a byte load is judged
+    // against its own range. movz x1, #0x2000 ; ldr x0, [x2, x1,
+    // lsl #3] -> #0x10000 (64-bit access); movz x1, #0x10d9 ; ldrb
+    // w0, [x2, x1] -> #0x10d9 (8-bit access).
+    armlint_finding f;
+    movz_x(&code[0], 1, 0x2000, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 1);
+    assert(first_named_finding(code, 8, ARMLINT_AUDIT_IMM, kMisfitLdst, &f));
+    assert(f.misfit_value == 0x10000u && f.misfit_width == 64);
+    movz_x(&code[0], 1, 0x10d9, 0);
+    ldst_regoff(&code[4], 0, 1, 0, 2, 1, 3, 0);
+    assert(first_named_finding(code, 8, ARMLINT_AUDIT_IMM, kMisfitLdst, &f));
+    assert(f.misfit_value == 0x10d9u && f.misfit_width == 8);
 }
 
 static void test_pac_zero_disc(void)

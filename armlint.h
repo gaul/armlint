@@ -217,8 +217,9 @@ typedef struct {
     char lines[ARMLINT_FINDING_LINES][ARMLINT_FINDING_LINE_LEN];
     // Set only by the immediate-misfit audit (zero for every other
     // check; clear_finding_strings resets them with the text): the
-    // consumer class, its operation width (32 or 64) and the constant
-    // the immediate form would have needed.
+    // consumer class, its operation width (32 or 64; for a load/store
+    // the access size in bits) and the constant the immediate form
+    // would have needed (for a load/store the byte offset).
     unsigned char misfit_kind;
     unsigned char misfit_width;
     uint64_t misfit_value;

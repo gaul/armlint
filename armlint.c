@@ -15124,6 +15124,60 @@ static void misfit_hint(unsigned kind, unsigned width, uint64_t value,
     }
 }
 
+// The magnitude a renumbering would be judged by: a negative add/sub
+// or ccmp constant's, since the sign-crossed form would take it.
+static uint64_t misfit_magnitude(unsigned width, uint64_t value)
+{
+    uint64_t mask = width_mask(width);
+    uint64_t sign_bit = (uint64_t)1 << (width - 1u);
+    return (value & sign_bit) != 0 ? (~value + 1u) & mask : value;
+}
+
+// Whether an encodable neighbour lies within one step of the constant,
+// so that renumbering it is a plausible fix rather than a redesign.
+// add/sub: magnitude at most 0x1000000, so a 4 KiB multiple sits
+// within 4 KiB of it (0xfff000 is the largest immediate). Bitmask: an
+// immediate at most two bit flips away. ccmp: magnitude at most 63,
+// twice the imm5 range. ldr/str: a byte offset within twice the
+// scaled range of its access size, or within the 256 bytes below the
+// unscaled range. Everything else -- a NaN-box tag, INT64_MIN as a
+// niche, a hash -- misses by its whole magnitude: no renumbering
+// short of a redesign reaches an immediate.
+static bool misfit_reachable(unsigned kind, unsigned width, uint64_t value)
+{
+    switch (kind) {
+    case ARMLINT_MISFIT_ADDSUB:
+        return misfit_magnitude(width, value) <= 0x1000000u;
+    case ARMLINT_MISFIT_LOGICAL: {
+        uint64_t near[2];
+        unsigned found;
+        return misfit_nearest_bitmask(value, width, near, &found) <= 2u;
+    }
+    case ARMLINT_MISFIT_CCMP:
+        return misfit_magnitude(width, value) <= 63u;
+    default: {
+        int64_t off = (int64_t)value;
+        int64_t size = (int64_t)(width / 8u);
+        return (off < 0 && off >= -512) || (off >= 0 && off <= 2 * 4095 * size);
+    }
+    }
+}
+
+// The width column of the by-value table: the consumer's register
+// width, or for a load/store its access size.
+static char misfit_width_letter(unsigned kind, unsigned width)
+{
+    if (kind == ARMLINT_MISFIT_LDST) {
+        switch (width) {
+        case 8:  return 'b';
+        case 16: return 'h';
+        case 32: return 'w';
+        default: return 'x';
+        }
+    }
+    return width == 64u ? 'x' : 'w';
+}
+
 bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -15259,10 +15313,17 @@ bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
         encodable = v <= 31u || ((v & sign_bit) != 0 && neg <= 31u);
         break;
     default: {
+        // The register holds a byte index (LSL #0) or an element
+        // index (LSL #size); the immediate forms are addressed in
+        // bytes, so the finding carries the byte offset and, as its
+        // width, the access size in bits -- what a renumbering (a
+        // field moved below the scaled range) must be judged against.
+        unsigned shift = ld_s ? ld_size : 0u;
         int64_t sv = (int64_t)v;
+        needed = (uint64_t)sv << shift;
+        width = 8u << ld_size;
         encodable = false;
         if (sv >= -256 && sv <= 32760) {
-            unsigned shift = ld_s ? ld_size : 0u;
             int64_t byte_off = sv * (int64_t)(1u << shift);
             int64_t asize = (int64_t)(1u << ld_size);
             bool fits_scaled = byte_off >= 0 && (byte_off % asize) == 0
@@ -16972,6 +17033,47 @@ static void summary_add(armlint_summary *summary, const armlint_finding *f)
     }
 }
 
+// Print one by-value table of the immediate-misfit audit: the n
+// entries idx names, most frequent first (ties by value), capped at
+// the top 40 with the remainder counted. Silent when n is 0.
+static void summary_print_misfits(const armlint_summary *summary,
+                                  const char *title, size_t *idx, size_t n)
+{
+    static const size_t kMisfitTop = 40;
+    if (n == 0) {
+        return;
+    }
+    printf("Immediate misfits by value (-a imm), %s:\n", title);
+    for (size_t i = 0; i < n && i < kMisfitTop; i++) {
+        size_t best = i;
+        for (size_t j = i + 1; j < n; j++) {
+            unsigned cj = summary->misfits[idx[j]].count;
+            unsigned cb = summary->misfits[idx[best]].count;
+            if (cj > cb
+                || (cj == cb
+                    && summary->misfits[idx[j]].value
+                        < summary->misfits[idx[best]].value)) {
+                best = j;
+            }
+        }
+        size_t tmp = idx[i];
+        idx[i] = idx[best];
+        idx[best] = tmp;
+        unsigned kind = summary->misfits[idx[i]].kind;
+        unsigned width = summary->misfits[idx[i]].width;
+        uint64_t value = summary->misfits[idx[i]].value;
+        char hint[112];
+        misfit_hint(kind, width, value, hint, sizeof(hint));
+        printf("  %6u  %-14s %c  #0x%-10" PRIx64 " %s\n",
+            summary->misfits[idx[i]].count, misfit_kind_names[kind],
+            misfit_width_letter(kind, width), value, hint);
+    }
+    if (n > kMisfitTop) {
+        printf("  (%zu more distinct values)\n", n - kMisfitTop);
+    }
+    printf("\n");
+}
+
 void armlint_summary_print(const armlint_summary *summary)
 {
     if (summary == NULL || summary->count == 0) {
@@ -17008,14 +17110,18 @@ void armlint_summary_print(const armlint_summary *summary)
     }
     printf("\n");
 
-    // The immediate-misfit audit's by-value table: the constants that
+    // The immediate-misfit audit's by-value tables: the constants that
     // missed their consumers' immediate encodings, most frequent
-    // first (ties by value), with what would have encoded. Only the
-    // top entries print; the rest are counted.
+    // first (ties by value), with what would have encoded. Two
+    // tables, because a real corpus is dominated by constants no
+    // renumbering reaches -- NaN-box tags, INT64_MIN as an enum niche,
+    // hashes -- which would otherwise bury the worklist: first the
+    // constants within one step of an encodable neighbour
+    // (misfit_reachable), then the rest. Only the top entries of each
+    // print; the rest are counted.
     if (summary->misfit_count == 0) {
         return;
     }
-    static const size_t kMisfitTop = 40;
     size_t *idx = malloc(summary->misfit_count * sizeof(*idx));
     if (idx == NULL) {
         printf("Immediate misfits by value (-a imm): %zu distinct values "
@@ -17028,39 +17134,25 @@ void armlint_summary_print(const armlint_summary *summary)
             idx[n++] = i;
         }
     }
-    printf("Immediate misfits by value (-a imm):\n");
-    for (size_t i = 0; i < n && i < kMisfitTop; i++) {
-        size_t best = i;
-        for (size_t j = i + 1; j < n; j++) {
-            unsigned cj = summary->misfits[idx[j]].count;
-            unsigned cb = summary->misfits[idx[best]].count;
-            if (cj > cb
-                || (cj == cb
-                    && summary->misfits[idx[j]].value
-                        < summary->misfits[idx[best]].value)) {
-                best = j;
-            }
+    // Partition: reachable constants first.
+    size_t n_near = 0;
+    for (size_t i = 0; i < n; i++) {
+        const misfit_entry *e = &summary->misfits[idx[i]];
+        if (misfit_reachable(e->kind, e->width, e->value)) {
+            size_t tmp = idx[i];
+            idx[i] = idx[n_near];
+            idx[n_near] = tmp;
+            n_near++;
         }
-        size_t tmp = idx[i];
-        idx[i] = idx[best];
-        idx[best] = tmp;
-        unsigned kind = summary->misfits[idx[i]].kind;
-        unsigned width = summary->misfits[idx[i]].width;
-        uint64_t value = summary->misfits[idx[i]].value;
-        char hint[112];
-        misfit_hint(kind, width, value, hint, sizeof(hint));
-        printf("  %6u  %-14s %c  #0x%-10" PRIx64 " %s\n",
-            summary->misfits[idx[i]].count, misfit_kind_names[kind],
-            width == 64u ? 'x' : 'w', value, hint);
     }
-    if (n > kMisfitTop) {
-        printf("  (%zu more distinct values)\n", n - kMisfitTop);
-    }
+    summary_print_misfits(summary,
+        "within one step of an immediate form", idx, n_near);
+    summary_print_misfits(summary,
+        "beyond one step (informational)", idx + n_near, n - n_near);
     if (summary->misfit_dropped != 0) {
-        printf("  (%zu findings not tallied: the table could not grow)\n",
+        printf("  (%zu findings not tallied: the table could not grow)\n\n",
             summary->misfit_dropped);
     }
-    printf("\n");
     free(idx);
 }
 
