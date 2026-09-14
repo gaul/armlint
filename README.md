@@ -369,8 +369,8 @@ two facts about that stream that its checks need -- x28 is the
 Both are knowledge about the scanned code rather than the hardware
 and unsound for arbitrary binaries, so the mode stays opt-in.
 
-`-a <audit>` enables opt-in informational checks that flag missing
-hardening rather than missed folds; `pac` audits the binary against
+`-a <audit>` enables opt-in informational checks whose findings are
+review items rather than missed folds; `pac` audits the binary against
 the arm64e-style full pointer-authentication contract (return
 addresses spilled unsigned, unauthenticated `br`/`blr`, and
 zero-discriminator `braaz`/`blraaz` -- authenticated, but against a
@@ -385,14 +385,9 @@ arm64e slices (whose ABI already assumes full signing), so macOS
 system binaries surface their worklist with no flag; a plain arm64
 slice never opted in, so it stays silent unless you pass `-a pac`
 explicitly. `imm` audits every materialized constant against its
-consumer's immediate encoding and tallies the misses by value: a
-constant the code's author chose -- a size limit, a sentinel address,
-a bit assignment -- that lands one step outside `cmp`'s 12-bit
-immediate, the bitmask-immediate shapes, `ccmp`'s 5-bit immediate or
-a load's offset range costs an extra instruction at every use, and
-renumbering it is the fix. Those within one step of an encodable
-value print in their own table ahead of the constants no renumbering
-reaches (tags, niches, hashes).
+consumer's immediate encoding and tallies the misses by value, so the
+constants worth renumbering surface; see [Immediate-misfit audit
+(`-a imm`)](#immediate-misfit-audit--a-imm) below.
 
 By default armlint prints only a summary: the opportunities grouped by
 type and sorted by prevalence, so it is clear which to look at first,
@@ -499,6 +494,118 @@ remainder leaves -- the `-a pac` audit separately confirms zero
 signature of never opting in looks entirely different: Homebrew's
 plain-arm64 libcapstone reads `0 of 1441`. The line is omitted when no
 boundary information exists (Go binaries carry neither structure).
+
+## Immediate-misfit audit (`-a imm`)
+
+`armlint -a imm` adds an audit to the lint scan that is the complement
+of the `mov` folds. Those report a `movz`/`movn`/`movk` chain whose
+consumer could have taken the value as an immediate; the audit reports
+the chain whose consumer has an immediate form the value *misses*:
+`movz x16, #0x100, lsl #16 ; cmp x0, x16`, where `0x1000000` is one
+step past the largest `cmp` immediate. Four consumer classes are
+checked, each against its own encoding: `add`/`sub`/`adds`/`subs` and
+`cmp`/`cmn` (a 12-bit immediate, optionally shifted by 12, in either
+sign -- `cmp x0, #-5` is `cmn x0, #5`), the logical ops
+`and`/`orr`/`eor`/`ands`/`tst` (a bitmask immediate; the complement for
+`bic`/`orn`/`eon`/`bics`), `ccmp`/`ccmn` (a 5-bit immediate, `ccmn`
+covering `-1..-32`), and a register-offset `ldr`/`str` indexed by the
+constant (the scaled 12-bit or the unscaled signed 9-bit offset). The
+consumer must follow the chain directly, the operand rules are the
+folds' own (the constant in an immediate-capable slot, the other
+operand neither the zero register nor the constant's), zero and
+all-ones are skipped, and the chain and the consumer may differ in
+width where the value survives the change (a W consumer reads the low
+half of an X chain, a W chain zero-extends into an X consumer).
+
+Nothing at the site can be rewritten -- the chain is already the
+cheapest spelling of that value -- so the finding is informational,
+like the PAC audit's, and the review item is the constant itself. A
+value the code's author chose (an object-size limit, a sentinel, the
+bit assignment of a flags field) that lands one step outside the
+encoding costs a materialization and a register operand at every use,
+and choosing it one step differently turns every site into the
+immediate form. The audit therefore needs no liveness proof -- a
+constant hoisted into a live register amortizes its materialization,
+but each use still pays for the register operand the immediate form
+would not need -- and each finding names what would have encoded. The
+summary tallies the audit by value, most frequent first, so the
+constants worth renumbering sort to the top:
+
+```console
+$ ./armlint -a imm libxul.so
+Optimization opportunities by type:
+   80391  MOV + ADD/SUB/CMP: constant has no add/sub immediate form (imm audit)
+   ...
+   10279  MOV + AND/ORR/EOR/TST: constant is not a bitmask immediate (imm audit)
+   ...
+    6364  MOV + CCMP/CCMN: constant is outside imm5 (imm audit)
+   ...
+    1228  MOV + register-offset LDR/STR: constant has no immediate-offset form (imm audit)
+   ...
+
+Immediate misfits by value (-a imm), within one step of an immediate form:
+    2707  bitmask imm    w  #0x50         nearest bitmask immediates 0x10 and 0x40 (1 bit away)
+    2501  add/sub imm12  w  #0x270f       nearest add/sub immediates 0x2000 and 0x3000
+    1489  bitmask imm    x  #0xfffb000000000000 nearest bitmask immediate 0xffff000000000000 (1 bit away)
+    1000  add/sub imm12  x  #0x15f90      nearest add/sub immediates 0x15000 and 0x16000
+    ...
+     159  ldr/str offset b  #0x10d9       immediate offsets cover -256..255 unscaled, 0..4095 x size scaled
+    ...
+  (7309 more distinct values)
+
+Immediate misfits by value (-a imm), beyond one step (informational):
+   11978  add/sub imm12  x  #0x8000000000000000 largest add/sub immediate is 0xfff000
+    5738  add/sub imm12  x  #0x7ffffffffffffffd largest add/sub immediate is 0xfff000
+    ...
+  (7906 more distinct values)
+
+135936 optimization opportunities in 28583984 instructions
+```
+
+Each row is a count of sites, the consumer class, a width letter (the
+consumer's register width, `w` or `x`; for a load or store its access
+size, `b`/`h`/`w`/`x`), the constant (a load/store misfit is tallied
+as its byte offset), and a hint naming what would have encoded: the two
+nearest 4 KiB multiples, the bitmask immediates fewest bit flips away,
+the `imm5` or offset range. A bitmask hint sometimes adds a widened
+mask -- `0xdf`, the byte with its ASCII case bit clear, is not a
+bitmask immediate but `0xffffffdf` is, and the two agree on any operand
+whose bits above the mask are known clear -- which is a compiler's fix
+(known bits) rather than a renumbering. Each table prints its top 40
+rows and counts the rest.
+
+Two tables, because a real corpus is dominated by constants no
+renumbering reaches. The first holds the constants within one step of
+an encodable neighbour: an add/sub magnitude up to `0x1000000`, so a
+4 KiB multiple lies within 4 KiB of it; a bitmask at most two bit
+flips away; a `ccmp` magnitude up to 63; a load/store byte offset
+within twice the scaled range of its access size, or the 256 bytes
+below the unscaled range. That table is the renumbering worklist, and
+its rows have owners: in the Firefox libxul.so above, `0x50` under
+`tst` is `JS::shadow::Zone::GCState` with Sweep = 4 and Compact = 6,
+a two-bit mask one flip from contiguous; `0x270f` is `nsAtom`'s
+`kAtomGCThreshold = 10000`, tested as `++count >= 10000` and so
+compared against 9999, where 8193 would encode; the byte loads at
+`0x10d9` are `Document` bit-field bytes just past the 4 KiB byte-load
+range. The second table holds everything beyond reach, whose whole
+magnitude is the point: `INT64_MIN` under `cmp` (the niche rustc
+gives the dataless variants of a `Vec`- or `String`-carrying enum,
+plus Gecko's `TimeDuration` sentinel), the JS::Value tags, the words
+of the interface IDs every `QueryInterface` compares.
+
+To find the sites of one value, `-v` prints each finding as
+`MOV + ADD/SUB/CMP: ... at offset: 0x... <function+0x...>: -> #0x270f;
+nearest ...`, so a grep for the constant lists them with their
+containing functions, which point at the definition to change. The
+findings count toward the total and the non-zero exit status like any
+other, so a test suite that gates on a clean run should not pass
+`-a imm`; the worklist is for reading.
+[analyses.md](analyses.md#immediate-misfit-audit--a-imm) walks the
+rules and two corpora in full: this libxul.so run and V8's JetStream 3
+JIT output (`-m v8 -a imm` on a `tools/v8dump2elf.py` dump), where
+the table opened with a 16 MiB reservation bound one step past
+`0xfff000` at 92,109 sites, since fixed in V8 by comparing against the
+largest encodable bound.
 
 ## Mining tools
 
