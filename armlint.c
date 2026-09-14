@@ -644,30 +644,30 @@ struct armlint_state {
     int pending_mz_reg;
     armlint_finding pending_mz_finding;
 
-    // EOR + CBZ/CBNZ fold (check_mov_cmp_branch_eor_cbz): a CMP of a
-    // MOV-chain constant that is a bitmask immediate but no add/sub
-    // immediate, awaiting its B.EQ/B.NE. The chain and CMP lines are
-    // rendered into ecb_finding at the CMP, while the chain state is
-    // still live; the branch completes it.
-    bool ecb_active;
-    bool ecb_is_64bit;
-    unsigned ecb_rn;           // the tested register
-    unsigned ecb_rc;           // the constant register (the chain's Rd)
-    unsigned ecb_chain_lines;  // chain lines rendered into ecb_finding
-    unsigned ecb_insn_count;   // chain length plus the CMP
-    uint64_t ecb_value;
-    armlint_finding ecb_finding;
+    // B.VS/B.VC fold (check_mov_cmp_branch_bvs): a CMP of a MOV-chain
+    // INT_MIN or INT_MAX, awaiting its B.EQ/B.NE. The chain and CMP
+    // lines are rendered into bvs_finding at the CMP, while the chain
+    // state is still live; the branch completes it.
+    bool bvs_active;
+    bool bvs_is_64bit;
+    bool bvs_is_max;           // INT_MAX (cmn #1), else INT_MIN (cmp xzr)
+    unsigned bvs_rn;           // the tested register
+    unsigned bvs_rc;           // the constant register (the chain's Rd)
+    unsigned bvs_chain_lines;  // chain lines rendered into bvs_finding
+    unsigned bvs_insn_count;   // chain length plus the CMP
+    armlint_finding bvs_finding;
 
-    // Deferred EOR + CBZ/CBNZ finding awaiting two fall-through proofs
-    // at once: NZCV dead after the branch (the CBZ sets no flags) and
-    // the constant register dead (the EOR overwrites it). Advanced by
-    // armlint_advance_pending_ecb; each proof is recorded as it lands.
-    bool pending_ecb_active;
-    bool pending_ecb_flags_dead;
-    bool pending_ecb_reg_dead;
-    unsigned pending_ecb_window;
-    int pending_ecb_reg;
-    armlint_finding pending_ecb_finding;
+    // Deferred B.VS/B.VC finding awaiting two fall-through proofs at
+    // once: NZCV dead after the branch (the new compare sets N, Z and
+    // C from a different subtraction) and the constant register dead
+    // (the chain is deleted). Advanced by armlint_advance_pending_bvs;
+    // each proof is recorded as it lands.
+    bool pending_bvs_active;
+    bool pending_bvs_flags_dead;
+    bool pending_bvs_reg_dead;
+    unsigned pending_bvs_window;
+    int pending_bvs_reg;
+    armlint_finding pending_bvs_finding;
 
     // Most-recent instruction was ADR / ADRP with the recorded Rd.
     // Used by check_add_sub_zero to skip the canonical
@@ -1519,8 +1519,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->aul_active = false;
     state->cmp_active = false;
     state->tst_active = false;
-    state->ecb_active = false;
-    state->pending_ecb_active = false;
+    state->bvs_active = false;
+    state->pending_bvs_active = false;
     state->tbf_active = false;
     state->pending_tb_active = false;
     state->cset_active = false;
@@ -15423,67 +15423,89 @@ bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
-// === MOV + CMP + B.EQ/NE -> EOR bitmask + CBZ/CBNZ ===
+// === MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX -> B.VS/B.VC ===
 //
-// x == C for a constant that is a bitmask immediate but no add/sub
-// immediate: CMP cannot take it, EOR can, and (x ^ C) == 0 is exactly
-// what CBZ tests. The chain, the CMP and the branch become an EOR and
-// a CBZ/CBNZ, the EOR writing the register the chain occupied. The
-// dominant constant is INT64_MIN: in Rust the discriminant of the
-// first dataless variant of an enum whose payload holds a Vec or
-// String and which has two or more such variants (rustc puts those
-// niches at isize::MAX + 1 upward; a lone None takes usize::MAX,
-// which cmn #1 encodes), one site per monomorphization; in Gecko the
-// TimeDuration +-Forever sentinel tested by every inlined ToSeconds.
-// Neither LLVM 24 nor rustc 1.97 rewrites the shape.
+// x == INT_MIN or x == INT_MAX, the signed extremes, which no CMP
+// immediate encodes. Signed overflow singles each out: 0 - x overflows
+// only for x == INT_MIN and x + 1 only for x == INT_MAX, so
+//   mov xc, #INT_MIN ; cmp xn, xc ; b.eq L  ->  cmp xzr, xn ; b.vs L
+//   mov xc, #INT_MAX ; cmp xn, xc ; b.eq L  ->  cmn xn, #1  ; b.vs L
+// and b.ne -> b.vc. Three instructions become two, the constant is
+// never materialized, and the pair is still a flag-setting compare
+// and a conditional branch, so the cores that fuse cmp/b.cond fuse it
+// as before. The dominant constant is INT64_MIN: in Rust the
+// discriminant of the first dataless variant of an enum whose payload
+// holds a Vec or String and which has two or more such variants
+// (rustc puts those niches at isize::MAX + 1 upward; a lone None
+// takes usize::MAX, which cmn #1 encodes), one site per
+// monomorphization; in Gecko the TimeDuration -Forever sentinel
+// tested by every inlined ToSeconds, with +Forever (INT64_MAX) beside
+// it. rustc 1.97 and LLVM (clang 23, trunk as of September 2026) emit
+// the three-instruction form; the INT_MIN half is proposed for LLVM
+// as llvm/llvm-project#223123.
+//
+// Every other bitmask constant (0xffffff, 0x3fffffff, 0xffff) has a
+// two-instruction spelling too, eor xc, xn, #C ; cbz xc, and this
+// check reported it for all of them at first. That is a size win that
+// costs an issue slot -- two issued instructions against a fused
+// cmp/b.cond plus a mov some cores retire at rename -- which is why
+// LLVM's review declined the general form; it is a TODO.md candidate
+// for an opt-in class.
 
-bool check_mov_cmp_branch_eor_cbz(armlint_state *state, const cs_insn *insn,
-                                  size_t offset, armlint_finding *out)
+bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
+                              size_t offset, armlint_finding *out)
 {
     (void)offset;
-    (void)out;   // emission goes through armlint_advance_pending_ecb
+    (void)out;   // emission goes through armlint_advance_pending_bvs
     if (insn->size != 4) {
-        state->ecb_active = false;
+        state->bvs_active = false;
         return false;
     }
     uint32_t op = insn_word(insn);
 
     // (1) Close: the B.EQ/B.NE adjacent to the recorded CMP. Any other
     //     instruction expires it (strict adjacency).
-    if (state->ecb_active) {
-        state->ecb_active = false;
+    if (state->bvs_active) {
+        state->bvs_active = false;
         bool is_eq;
         int32_t imm19;
         if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
             uint64_t target = insn->address
                 + (uint64_t)((int64_t)imm19 * 4);
-            char w_or_x = state->ecb_is_64bit ? 'x' : 'w';
-            armlint_finding *p = &state->pending_ecb_finding;
-            *p = state->ecb_finding;
-            p->insn_count = state->ecb_insn_count + 1u;
-            snprintf(p->detail, sizeof(p->detail),
-                "-> eor %c%u, %c%u, #0x%" PRIx64 " ; %s %c%u, 0x%" PRIx64,
-                w_or_x, state->ecb_rc, w_or_x, state->ecb_rn,
-                state->ecb_value, is_eq ? "cbz" : "cbnz", w_or_x,
-                state->ecb_rc, target);
-            unsigned line = state->ecb_chain_lines + 1u;
+            char w_or_x = state->bvs_is_64bit ? 'x' : 'w';
+            armlint_finding *p = &state->pending_bvs_finding;
+            *p = state->bvs_finding;
+            p->insn_count = state->bvs_insn_count + 1u;
+            // V is the equality either way: x + 1 overflows only at
+            // INT_MAX, 0 - x only at INT_MIN. b.eq -> b.vs, b.ne -> b.vc.
+            const char *b_mnem = is_eq ? "b.vs" : "b.vc";
+            if (state->bvs_is_max) {
+                snprintf(p->detail, sizeof(p->detail),
+                    "-> cmn %c%u, #1 ; %s 0x%" PRIx64,
+                    w_or_x, state->bvs_rn, b_mnem, target);
+            } else {
+                snprintf(p->detail, sizeof(p->detail),
+                    "-> cmp %czr, %c%u ; %s 0x%" PRIx64,
+                    w_or_x, w_or_x, state->bvs_rn, b_mnem, target);
+            }
+            unsigned line = state->bvs_chain_lines + 1u;
             if (line < ARMLINT_FINDING_LINES) {
                 snprintf(p->lines[line], sizeof(p->lines[line]),
                     "%s 0x%" PRIx64, is_eq ? "b.eq" : "b.ne", target);
             }
-            // Deferred on two proofs (armlint_advance_pending_ecb):
+            // Deferred on two proofs (armlint_advance_pending_bvs):
             // NZCV dead after the branch, the constant register dead.
-            state->pending_ecb_active = true;
-            state->pending_ecb_flags_dead = false;
-            state->pending_ecb_reg_dead = false;
-            state->pending_ecb_window = LIVENESS_WINDOW;
-            state->pending_ecb_reg = (int)state->ecb_rc;
+            state->pending_bvs_active = true;
+            state->pending_bvs_flags_dead = false;
+            state->pending_bvs_reg_dead = false;
+            state->pending_bvs_window = LIVENESS_WINDOW;
+            state->pending_bvs_reg = (int)state->bvs_rc;
         }
     }
 
     // (2) Open: CMP Rn, Rm (SUBS to ZR, LSL #0) with the chain's
-    //     register in either slot -- equality is symmetric -- and a
-    //     constant that is a bitmask immediate but no add/sub one.
+    //     register in either slot -- equality is symmetric -- and the
+    //     chain's value INT_MIN or INT_MAX at the compare's width.
     if (!state->mov_active) {
         return false;
     }
@@ -15513,28 +15535,27 @@ bool check_mov_cmp_branch_eor_cbz(armlint_state *state, const cs_insn *insn,
     unsigned width = is_64bit ? 64u : 32u;
     uint64_t mask = width_mask(width);
     uint64_t c = state->mov_value & mask;
-    // Zero is the MOV #0 and CBZ folds' territory, all-ones is
-    // cmn Rn, #1's, and anything imm12 encodes -- directly or
-    // sign-crossed -- is the CMP-immediate fold's: one instruction,
-    // branch kept.
-    if (c == 0 || c == mask) {
-        return false;
-    }
     uint64_t sign_bit = (uint64_t)1 << (width - 1u);
-    if (misfit_addsub_fits(c)
-            || ((c & sign_bit) != 0
-                && misfit_addsub_fits((~c + 1u) & mask))) {
-        return false;
-    }
-    if (!is_bitmask_immediate(c, width)) {
+    // INT_MIN is the sign bit alone, INT_MAX everything below it, at
+    // the compare's width (a W chain's 0x80000000 is not the X sign
+    // bit, and the width rule above already refused it). Neither is
+    // an add/sub immediate at either sign, so nothing here overlaps
+    // the CMP-immediate fold; every other constant is refused.
+    bool is_max;
+    if (c == sign_bit) {
+        is_max = false;
+    } else if (c == (mask >> 1)) {
+        is_max = true;
+    } else {
         return false;
     }
 
     // Render the chain and the CMP now: the chain state closes at the
     // end of this instruction, before the branch arrives. The last
     // line stays free for the branch.
-    armlint_finding *f = &state->ecb_finding;
-    f->name = "MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ";
+    armlint_finding *f = &state->bvs_finding;
+    f->name = "MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to "
+              "B.VS/B.VC";
     f->start_offset = state->mov_start_offset;
     f->insn_count = state->mov_insn_count + 1u;
     clear_finding_strings(f);
@@ -15562,25 +15583,25 @@ bool check_mov_cmp_branch_eor_cbz(armlint_state *state, const cs_insn *insn,
     snprintf(f->lines[chain_n], sizeof(f->lines[chain_n]),
         "%s %s", insn->mnemonic, insn->op_str);
 
-    state->ecb_active = true;
-    state->ecb_is_64bit = is_64bit;
-    state->ecb_rn = other;
-    state->ecb_rc = state->mov_rd;
-    state->ecb_value = c;
-    state->ecb_chain_lines = chain_n;
-    state->ecb_insn_count = state->mov_insn_count + 1u;
+    state->bvs_active = true;
+    state->bvs_is_64bit = is_64bit;
+    state->bvs_is_max = is_max;
+    state->bvs_rn = other;
+    state->bvs_rc = state->mov_rd;
+    state->bvs_chain_lines = chain_n;
+    state->bvs_insn_count = state->mov_insn_count + 1u;
     return false;
 }
 
-bool armlint_advance_pending_ecb(armlint_state *state, const cs_insn *insn,
+bool armlint_advance_pending_bvs(armlint_state *state, const cs_insn *insn,
                                  size_t offset, armlint_finding *out)
 {
     (void)offset;
-    if (!state->pending_ecb_active) {
+    if (!state->pending_bvs_active) {
         return false;
     }
     if (insn->size != 4) {
-        state->pending_ecb_active = false;
+        state->pending_bvs_active = false;
         return false;
     }
     uint32_t op = insn_word(insn);
@@ -15588,33 +15609,33 @@ bool armlint_advance_pending_ecb(armlint_state *state, const cs_insn *insn,
     // one and break the other (CSET into the constant register reads
     // NZCV while overwriting it), and the break must win. A settled
     // proof stops watching -- later readers see the new value.
-    liveness_t fl = state->pending_ecb_flags_dead
+    liveness_t fl = state->pending_bvs_flags_dead
         ? LIV_UNKNOWN : classify_liveness(op);
-    liveness_t rl = state->pending_ecb_reg_dead
-        ? LIV_UNKNOWN : classify_reg_liveness(insn, state->pending_ecb_reg);
+    liveness_t rl = state->pending_bvs_reg_dead
+        ? LIV_UNKNOWN : classify_reg_liveness(insn, state->pending_bvs_reg);
     if (fl == LIV_READ || fl == LIV_TERM_UNSAFE
             || rl == LIV_READ || rl == LIV_TERM_UNSAFE) {
-        state->pending_ecb_active = false;
+        state->pending_bvs_active = false;
         return false;
     }
     bool settled = false;
     if (fl == LIV_OVERWRITE || fl == LIV_TERM_SAFE) {
-        state->pending_ecb_flags_dead = true;
+        state->pending_bvs_flags_dead = true;
         settled = true;
     }
     if (rl == LIV_OVERWRITE) {
-        state->pending_ecb_reg_dead = true;
+        state->pending_bvs_reg_dead = true;
         settled = true;
     }
-    if (state->pending_ecb_flags_dead && state->pending_ecb_reg_dead) {
-        *out = state->pending_ecb_finding;
-        state->pending_ecb_active = false;
+    if (state->pending_bvs_flags_dead && state->pending_bvs_reg_dead) {
+        *out = state->pending_bvs_finding;
+        state->pending_bvs_active = false;
         return true;
     }
     if (!settled
-            && (state->pending_ecb_window == 0
-                || --state->pending_ecb_window == 0)) {
-        state->pending_ecb_active = false;
+            && (state->pending_bvs_window == 0
+                || --state->pending_bvs_window == 0)) {
+        state->pending_bvs_active = false;
     }
     return false;
 }
@@ -17478,7 +17499,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_cbr,
     armlint_advance_pending_fp,
     armlint_advance_pending_mz,
-    armlint_advance_pending_ecb,
+    armlint_advance_pending_bvs,
     armlint_advance_pending_tb,
     armlint_advance_pending_crc,
     armlint_advance_pending_lse,
@@ -17487,7 +17508,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_udiv_strength_reduce,
     check_mov_add_sub_imm_fold,
     check_mov_logic_imm_fold,
-    check_mov_cmp_branch_eor_cbz,
+    check_mov_cmp_branch_bvs,
     check_mov_cage_orr_add,
     check_cheap_const_copy,
     check_reg_copy_chain,

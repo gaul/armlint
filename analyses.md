@@ -1629,60 +1629,80 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `check_add_sub_zero`); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
 
-## MOV + CMP + B.EQ/NE foldable to EOR bitmask + CBZ/CBNZ
+## MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
 
 * `mov x8, #0x8000000000000000 ; cmp x0, x8 ; b.eq target` instead
-  of `eor x8, x0, #0x8000000000000000 ; cbz x8, target` (and `b.ne`
-  -> `cbnz`): an equality test against a constant that is a bitmask
-  immediate but no add/sub immediate. `CMP` cannot take it, `EOR`
-  can, and `x == C` is `(x ^ C) == 0`, which `CBZ` tests directly.
-  Three instructions become two, and the `EOR` writes the register
-  the MOV chain occupied, so no fresh scratch is needed. The constant
-  may sit in either `CMP` slot (equality is symmetric); the other
-  operand must be neither ZR nor the constant register, and the chain
-  and `CMP` widths must match.
-* Excluded: constants the [CMP-immediate
-  fold](#mov--addsub-foldable-to-immediate-form) already takes
-  (`0..0xfff`, 4 KiB multiples up to `0xfff000`, and their
-  sign-crossed negatives), where `cmp Rn, #C` keeps the branch and
-  saves the same instruction; zero (the `MOV #0` and `CBZ` folds) and
-  all-ones (`cmn Rn, #1`). Only `b.eq`/`b.ne` qualify: the ordered
-  conditions need the subtraction. For the sign bit alone `cmp xzr,
-  x0 ; b.vs` is an equivalent two-instruction form that needs no
-  scratch at all (negating `INT64_MIN` is the one signed overflow),
-  but the `EOR` spelling covers every bitmask constant, so it is the
-  one reported.
+  of `cmp xzr, x0 ; b.vs target`, and `mov x8, #0x7fffffffffffffff ;
+  cmp x0, x8 ; b.eq target` instead of `cmn x0, #1 ; b.vs target`
+  (`b.ne` -> `b.vc`): an equality test against the most negative or
+  the most positive signed value, which no `CMP` immediate encodes.
+  Signed overflow singles each out: `0 - x` overflows only for
+  `x == INT_MIN` and `x + 1` only for `x == INT_MAX`, so the overflow
+  flag of a compare against zero or against one is the equality test.
+  Three instructions become two, the constant is never materialized,
+  and the pair is still a flag-setting compare and a conditional
+  branch, which the cores that fuse `cmp`/`b.cond` fuse as before. The
+  constant may sit in either `CMP` slot (equality is symmetric); the
+  other operand must be neither ZR nor the constant register, and the
+  chain and `CMP` widths must match (`0x80000000` in a W chain is
+  `INT32_MIN`; in an X compare it is neither extreme).
+* Excluded: every other constant. The four values here are the only
+  ones a signed-overflow test selects, and none is an add/sub
+  immediate at either sign, so nothing overlaps the [CMP-immediate
+  fold](#mov--addsub-foldable-to-immediate-form). Only `b.eq`/`b.ne`
+  qualify: the ordered conditions need the subtraction. Any other
+  bitmask immediate (`0xffffff`, `0x3fffffff`, `0xffff`) has a
+  two-instruction spelling of its own, `eor x8, x0, #C ; cbz x8`,
+  and this check reported it for every such constant when it first
+  shipped. That spelling trades a fused compare-and-branch, plus a
+  `mov` some cores retire at rename, for two issued instructions --
+  the objection raised in review of the matching LLVM change
+  ([llvm/llvm-project#223123](https://github.com/llvm/llvm-project/pull/223123)),
+  which was narrowed to the sign bit in response -- so it is a size
+  win that can cost an issue slot, and it moved to
+  [TODO.md](TODO.md#microarchinformational-candidates-for-the--a-audit-class)
+  as an opt-in candidate.
 * Soundness: two proofs on the fall-through path, deferred together.
-  The `CBZ` sets no flags, so NZCV must be dead after the branch --
+  The rewritten compare sets N, Z and C from a different subtraction
+  (the branch reads only V), so NZCV must be dead after the branch --
   the same scan as the [`CMP #0` -> `CBZ`
   fold](#compare-zero-branch-foldable-into-cbzcbnz): an overwrite by
   `ADDS`/`SUBS`/`ANDS`/..., or a `RET`/`BL`/`BLR`, before any reader
-  or unsafe terminator. The `EOR` overwrites the constant register,
-  so it must be dead too -- the same forward scan as the other
-  MOV-chain folds, which refuses every control transfer including
-  calls (no PCS assumption). One instruction may settle both (`adds
-  x8, ...` into the constant register) or settle one while breaking
-  the other (`cset x8, lo` reads the flags): the break wins. Sixteen
+  or unsafe terminator. The MOV chain is deleted, so its register must
+  be dead too -- the same forward scan as the other MOV-chain folds,
+  which refuses every control transfer including calls (no PCS
+  assumption); a constant still read later keeps its chain, and the
+  site then saves nothing. One instruction may settle both (`adds x8,
+  ...` into the constant register) or settle one while breaking the
+  other (`cset x8, lo` reads the flags): the break wins. Sixteen
   undecided instructions expire the scan, and as with the sibling
   folds the taken path is not scanned.
-* Why it helps: one instruction and the flag dependency go, and the
-  branch reads the register directly. LLVM (clang 23, and trunk as of
-  September 2026) and rustc 1.97 emit the three-instruction form, and
-  when the constant is reused across a call LLVM parks it in a
-  callee-saved register, so the fold also removes that register's
-  spill. The constant is overwhelmingly `INT64_MIN`. In Rust it is the
+* Why it helps: one instruction and one register go, and what remains
+  is the fusable pair. LLVM (clang 23, and trunk as of September 2026)
+  and rustc 1.97 emit the three-instruction form, and when the
+  constant is reused across a call LLVM parks it in a callee-saved
+  register, so the fold also removes that register's spill. The
+  constant is overwhelmingly `INT64_MIN`. In Rust it is the
   discriminant of the first dataless variant of an enum whose payload
   holds a `Vec` or `String` and which has two or more such variants:
   rustc places those niches at `isize::MAX + 1` upward (a lone `None`
   takes `usize::MAX`, which `cmn #1` encodes), one site per
   monomorphization. In Gecko it is `TimeDuration`'s `INT64_MIN`
   sentinel (negative Forever), tested by every inlined `ToSeconds` and
-  `ToMilliseconds`. On Firefox 155's libxul.so 13,019 compares have
-  the shape (11,262 of them `INT64_MIN`), and the two proofs land
-  before any control transfer in 1,651 of them; on librustc_driver
-  1.97 the fold reports 642, on uutils 16. The refused remainder is
-  mostly a branch or call arriving before the constant register dies,
-  which the fall-through-only scan cannot see past.
+  `ToMilliseconds`, with positive Forever (`INT64_MAX`) beside it in
+  the vsync and refresh-driver code, and `INT32_MAX` is the HTML5
+  tokenizer's sentinel. On Firefox 155's libxul.so 13,019 branch
+  compares test a bitmask constant that no `CMP` immediate takes,
+  11,262 of them `INT64_MIN` and 653 `INT64_MAX` or `INT32_MAX`, and
+  the two proofs land before any control transfer at 1,424 of the
+  extreme-valued sites (1,140 sign bit, 284 `INT_MAX`); on
+  librustc_driver 1.97 the fold reports 179, on uutils 5. The refused
+  remainder is mostly a branch or call arriving before the constant
+  register dies, which the fall-through-only scan cannot see past. The
+  general `eor` form would add 227, 463 and 11 findings respectively;
+  librustc_driver's are mostly 352 tests of a `u16` against `0xffff`,
+  the marker `rustc_span` keeps in an inline `Span` for the interned
+  format, inlined into every `Span::data` caller.
 
 ## MOV + ADD/SUB foldable to the original source
 

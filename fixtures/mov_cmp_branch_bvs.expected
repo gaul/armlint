@@ -1,0 +1,24 @@
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x0 <_main>: -> cmp xzr, x0 ; b.vs 0x14 (3 instructions)
+  movz x8, #0x8000, lsl #48
+  cmp x0, x8
+  b.eq 0x14
+
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x14 <_main+0x14>: -> cmp wzr, w1 ; b.vc 0x24 (3 instructions)
+  movz w8, #0x8000, lsl #16
+  cmp w8, w1
+  b.ne 0x24
+
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x24 <_main+0x24>: -> cmn x0, #1 ; b.vs 0x38 (3 instructions)
+  movn x8, #0x8000, lsl #48
+  cmp x0, x8
+  b.eq 0x38
+
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x38 <_main+0x38>: -> cmn w1, #1 ; b.vc 0x4c (3 instructions)
+  movn w8, #0x8000, lsl #16
+  cmp w1, w8
+  b.ne 0x4c
+
+Optimization opportunities by type:
+       4  MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
+
+4 optimization opportunities in 61 instructions
