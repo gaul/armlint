@@ -4121,6 +4121,8 @@ static void test_lsl_lsr_to_ubfx(void)
 
 static void test_lsr_and_to_ubfx(void)
 {
+    const char *lsr_name = "LSR+AND foldable into UBFX";
+    const char *asr_name = "ASR+AND foldable into UBFX";
     uint8_t code[12];
 
     // -- Positive: LSR + AND with contiguous-low-bit mask -> UBFX. --
@@ -4157,11 +4159,63 @@ static void test_lsr_and_to_ubfx(void)
     and_w_non_contig_lo(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 0);
 
-    // -- Negative: Rd mismatch on consumer. --
+    // -- Out of place: the AND writes another register. --
 
-    // lsr w0, w1, #4 ; and w5, w0, #0xff -- consumer Rd != lra_rd.
+    // lsr w0, w1, #4 ; and w5, w0, #0xff -> ubfx w5, w1, #4, #8, which
+    // deletes the LSR: w0 must die. With nothing after the pair the
+    // deferral lapses unproven...
     lsr_w(&code[0], 0, 1, 4);
     and_w_lowmask(&code[4], 5, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+    // ...with w0 overwritten next it reports...
+    assert(run_named_reg_dead(code, 8, 0, lsr_name) == 1);
+    // ...and with w0 read first it does not.
+    add_w(&code[8], 6, 0, 0);
+    assert(run_named_check(code, 12, lsr_name) == 0);
+
+    // -- ASR: within the field the two shifts agree. --
+
+    // asr w0, w1, #8 ; and w0, w0, #0xff -> ubfx w0, w1, #8, #8, and
+    // nothing else fires (the ASR bounds nothing for the zext check).
+    asr_w(&code[0], 0, 1, 8);
+    and_w_lowmask(&code[4], 0, 0, 8);
+    assert(run_named_check(code, 8, asr_name) == 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // asr w0, w1, #24 ; and w0, w0, #0xff -- the field reaches the top
+    // (24 + 8 = 32): lsr w0, w1, #24.
+    asr_w(&code[0], 0, 1, 24);
+    and_w_lowmask(&code[4], 0, 0, 8);
+    assert(run_named_check(code, 8, asr_name) == 1);
+
+    // asr x4, x4, #63 ; and x4, x4, #1 -> lsr x4, x4, #63: gc's
+    // Slicemask(x) & 1.
+    asr_x(&code[0], 4, 4, 63);
+    and_x_lowmask(&code[4], 4, 4, 1);
+    assert(run_named_check(code, 8, asr_name) == 1);
+
+    // asr w0, w1, #24 ; and w0, w0, #0xffff -- bits 8..15 are copies
+    // of the sign, which no UBFX produces. NOT flagged (where the LSR
+    // arm caps the width).
+    asr_w(&code[0], 0, 1, 24);
+    and_w_lowmask(&code[4], 0, 0, 16);
+    assert(run_helper_check(code, 8) == 0);
+
+    // asr w9, w4, #16 ; and w1, w9, #0xff -> ubfx w1, w4, #16, #8 once
+    // w9 dies.
+    asr_w(&code[0], 9, 4, 16);
+    and_w_lowmask(&code[4], 1, 9, 8);
+    assert(run_named_reg_dead(code, 8, 9, asr_name) == 1);
+
+    // asr w0, w1, #4 ; and x0, x0, #0xff -- widths differ.
+    asr_w(&code[0], 0, 1, 4);
+    and_x_lowmask(&code[4], 0, 0, 8);
+    assert(run_helper_check(code, 8) == 0);
+
+    // asr w0, w1, #8 ; ands w0, w0, #0xff -- the flag-setting AND
+    // owes its flags. NOT flagged.
+    asr_w(&code[0], 0, 1, 8);
+    write_le32(&code[4], 0x72001C00u);      // ands w0, w0, #0xff
     assert(run_helper_check(code, 8) == 0);
 
     // -- Negative: Rn mismatch on consumer. --
@@ -4849,9 +4903,12 @@ static void test_redundant_sext(void)
     assert(run_helper_check(code, 8) == 0);
 
     // asr w0, w1, #4 ; and w0, w0, #0xff -- AND low-mask C=8. NOT dead.
+    // It is the ASR+AND fold, though (ubfx w0, w1, #4, #8): asserted
+    // by name.
     asr_w(&code[0], 0, 1, 4);
     and_w_ff(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8, kDeadSext) == 0);
+    assert(run_named_check(code, 8, "ASR+AND foldable into UBFX") == 1);
 
     // asr x0, x1, #8 ; uxtw x0, w0 -- X-form ASR S=56, UXTW C=32 <= 56.
     // NOT dead. (The W-form zext check also does not fire: an X-form

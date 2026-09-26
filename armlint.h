@@ -801,10 +801,18 @@ bool check_and_ext_chain(armlint_state *state, const cs_insn *insn,
 bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
-// Detect LSR Rd, Rs, #n immediately followed by AND Rd, Rd, #((1<<w)-1)
-// (any width 1..datasize-1). The pair extracts bits Rs[n+w-1 .. n] and
-// zero-extends; equivalent to a single UBFX Rd, Rs, #n, #w (capping
-// width at datasize-n if the mask is wider than the LSR-fillable bits).
+// Detect LSR or ASR Rd, Rs, #n immediately followed by AND Rd2, Rd,
+// #((1<<w)-1) (any width 1..datasize-1). The pair extracts bits
+// Rs[n+w-1 .. n] and zero-extends; equivalent to a single UBFX Rd2, Rs,
+// #n, #w. For LSR the width is capped at datasize-n if the mask is
+// wider than the LSR-fillable bits. For ASR the two shifts agree only
+// below the sign-fill bits, so the pair folds only when n + w <=
+// datasize, and a field reaching the top renders as UBFX's LSR alias
+// (asr x4, x4, #63 ; and x4, x4, #1 -> lsr x4, x4, #63); reported as
+// "ASR+AND foldable into UBFX". Rd2 = Rd kills the shift's result on
+// the spot; any other Rd2 (not SP) defers through the forward
+// register-liveness scan (defer_dead_mov), since the rewrite deletes
+// the shift.
 bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 

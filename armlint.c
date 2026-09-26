@@ -88,11 +88,14 @@ struct armlint_state {
     unsigned bsx_shift;
     size_t bsx_offset;
 
-    // LSR pending an AND-mask consumer for the "shift-right then mask"
-    // UBFX idiom. Separate from bsx_* because that check is keyed on
-    // an LSL producer; here we want an LSR producer.
+    // LSR or ASR pending an AND-mask consumer for the "shift-right then
+    // mask" UBFX idiom. Separate from bsx_* because that check is keyed
+    // on an LSL producer; here we want a right shift. lra_is_asr marks
+    // the arithmetic shift, which folds only when the mask keeps none
+    // of its sign-fill bits.
     bool lra_active;
     bool lra_is_64bit;
+    bool lra_is_asr;
     unsigned lra_rd;
     unsigned lra_rn;
     unsigned lra_shift;
@@ -2368,36 +2371,54 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
 
     uint32_t op = insn_word(insn);
 
-    // (1) Close: AND Rd, Rd, #(1<<w)-1 consuming the pending LSR?
+    // (1) Close: AND Rd2, Rd, #(1<<w)-1 consuming the pending shift?
+    //     Rd2 = 31 is SP for AND, which UBFX cannot write.
     if (state->lra_active) {
         unsigned width, c_rd, c_rn;
         unsigned consumer_sf = (op >> 31) & 1u;
+        unsigned datasize = state->lra_is_64bit ? 64u : 32u;
         if (decode_and_imm_lowmask(op, &width, &c_rd, &c_rn)
                 && consumer_sf == (state->lra_is_64bit ? 1u : 0u)
-                && c_rd == state->lra_rd
-                && c_rn == state->lra_rd) {
-            unsigned datasize = state->lra_is_64bit ? 64u : 32u;
+                && c_rn == state->lra_rd && c_rd != 31u
+                && !(state->lra_is_asr
+                     && width + state->lra_shift > datasize)) {
             // Cap the UBFX width at the number of valid bits in the
             // LSR output: bits >= datasize-shift are zero from the
-            // LSR, so a wider mask doesn't extract more.
+            // LSR, so a wider mask doesn't extract more. An ASR fills
+            // them with copies of the sign bit instead, which the
+            // mask would keep and no UBFX produces -- refused above.
+            // Short of them the two shifts agree bit for bit.
             unsigned ubfx_width = width;
             if (ubfx_width + state->lra_shift > datasize) {
                 ubfx_width = datasize - state->lra_shift;
             }
             char w_or_x = state->lra_is_64bit ? 'x' : 'w';
+            const char *shift_mnem = state->lra_is_asr ? "asr" : "lsr";
 
-            out->name = "LSR+AND foldable into UBFX";
+            out->name = state->lra_is_asr ? "ASR+AND foldable into UBFX"
+                                          : "LSR+AND foldable into UBFX";
             out->start_offset = state->lra_offset;
             out->insn_count = 2;
             clear_finding_strings(out);
 
-            snprintf(out->detail, sizeof(out->detail),
-                "-> ubfx %c%u, %c%u, #%u, #%u",
-                w_or_x, c_rd, w_or_x, state->lra_rn,
-                state->lra_shift, ubfx_width);
+            if (state->lra_is_asr
+                    && state->lra_shift + ubfx_width == datasize) {
+                // A field reaching the top is UBFX's LSR alias, the
+                // spelling an assembler prints: gc's `asr x4, x4, #63 ;
+                // and x4, x4, #1` is `lsr x4, x4, #63`.
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> lsr %c%u, %c%u, #%u",
+                    w_or_x, c_rd, w_or_x, state->lra_rn,
+                    state->lra_shift);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> ubfx %c%u, %c%u, #%u, #%u",
+                    w_or_x, c_rd, w_or_x, state->lra_rn,
+                    state->lra_shift, ubfx_width);
+            }
 
             snprintf(out->lines[0], sizeof(out->lines[0]),
-                "lsr %c%u, %c%u, #%u",
+                "%s %c%u, %c%u, #%u", shift_mnem,
                 w_or_x, state->lra_rd, w_or_x, state->lra_rn,
                 state->lra_shift);
 
@@ -2412,17 +2433,31 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
                     "and %c%u, %c%u, #0x%x",
                     w_or_x, c_rd, w_or_x, c_rn, (unsigned)mask);
             }
-            produced = true;
+            // The rewrite deletes the shift. An AND writing the
+            // shift's own destination kills its result structurally;
+            // one writing elsewhere leaves it to the forward
+            // register-liveness scan. The UBFX reads the shift's
+            // source where the AND stood, which the adjacent shift
+            // left unchanged unless it shifted in place -- and then
+            // the deleted shift leaves the source as it was.
+            if (c_rd == state->lra_rd) {
+                produced = true;
+            } else {
+                defer_dead_mov(state, out, state->lra_rd);
+            }
         }
         // Strict adjacency.
         state->lra_active = false;
     }
 
-    // (2) Open: is this LSR Rd, Rs, #n (Rd != XZR)?
+    // (2) Open: is this LSR/ASR Rd, Rs, #n (Rd != XZR)?
     unsigned sf, rd, rn, shift;
-    if (decode_lsr_imm(op, &sf, &rd, &rn, &shift) && rd != 31) {
+    bool is_lsr = decode_lsr_imm(op, &sf, &rd, &rn, &shift);
+    bool is_asr = !is_lsr && decode_asr_imm(op, &sf, &rd, &rn, &shift);
+    if ((is_lsr || is_asr) && rd != 31) {
         state->lra_active = true;
         state->lra_is_64bit = (sf != 0);
+        state->lra_is_asr = is_asr;
         state->lra_rd = rd;
         state->lra_rn = rn;
         state->lra_shift = shift;

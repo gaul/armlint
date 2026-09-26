@@ -31,4 +31,29 @@ _main:
     add     x20, x20, #1
     and     x11, x11, #0xFF
 
+    // Positive: ASR, the field below the sign fill. JavaScript's
+    // arithmetic `(x >> 8) & 0xff` as SpiderMonkey and JavaScriptCore
+    // emit it.
+    asr     w13, w14, #8
+    and     w13, w13, #0xff         // -> ubfx w13, w14, #8, #8
+
+    // Positive: an ASR field reaching the top is LSR -- gc's
+    // Slicemask(x) & 1.
+    asr     x15, x15, #63
+    and     x15, x15, #0x1          // -> lsr x15, x15, #63
+
+    // Negative: the mask keeps ASR's sign-fill bits (24 + 16 > 32).
+    asr     w16, w17, #24
+    and     w16, w16, #0xffff
+
+    // Positive, out of place: the shift's result dies at the MOVZ.
+    lsr     w9, w4, #24
+    and     w10, w9, #0xff          // -> ubfx w10, w4, #24, #8
+    movz    w9, #1
+
+    // Negative, out of place: the shift's result is read again.
+    asr     w19, w21, #16
+    and     w22, w19, #0xff
+    add     w23, w19, w19
+
     ret

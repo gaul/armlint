@@ -14,8 +14,21 @@ LSR+AND foldable into UBFX at offset: 0x10 <_main+0x10>: -> ubfx w4, w5, #4, #4 
   lsr w4, w5, #4
   and w4, w4, #0xf
 
+ASR+AND foldable into UBFX at offset: 0x34 <_main+0x34>: -> ubfx w13, w14, #8, #8 (2 instructions)
+  asr w13, w14, #8
+  and w13, w13, #0xff
+
+ASR+AND foldable into UBFX at offset: 0x3c <_main+0x3c>: -> lsr x15, x15, #63 (2 instructions)
+  asr x15, x15, #63
+  and x15, x15, #0x1
+
+LSR+AND foldable into UBFX at offset: 0x4c <_main+0x4c>: -> ubfx w10, w4, #24, #8 (2 instructions)
+  lsr w9, w4, #24
+  and w10, w9, #0xff
+
 Optimization opportunities by type:
-       3  LSR+AND foldable into UBFX
+       4  LSR+AND foldable into UBFX
+       2  ASR+AND foldable into UBFX
        1  redundant zero-extension after zeroing op
 
-4 optimization opportunities in 14 instructions
+7 optimization opportunities in 26 instructions

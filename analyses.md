@@ -451,6 +451,45 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `#0x6` are correctly skipped.
 * Fuse win (see the shift fold): shift + mask become one `UBFX` --
   one fewer instruction, the mask off the critical path.
+* `ASR` folds the same way while the field stays below the sign
+  fill: within bits `[n+w-1 .. n]` an arithmetic and a logical shift
+  agree bit for bit, so `asr wd, ws, #n ; and wd, wd, #((1<<w)-1)` is
+  `ubfx wd, ws, #n, #w` when `n + w <= datasize`. Past that the mask
+  keeps copies of the sign bit, which no `UBFX` produces, so there is
+  no width cap to fall back on and the pair is refused. A field that
+  reaches the top renders as `UBFX`'s `LSR` alias. Reported as
+  "ASR+AND foldable into UBFX". The producers are JavaScript's
+  arithmetic `(x >> 8) & 0xff` -- SpiderMonkey's Ion and
+  JavaScriptCore emit `asr w1, w2, #8 ; and w1, w1, #0xff` -- V8's
+  small-integer untagging (`asr w4, w4, #1`) ahead of a mask, and
+  gc's `Slicemask(x) & 1`, `neg x4, x3 ; asr x4, x4, #63 ; and x4,
+  x4, #1`, which is `lsr x4, x4, #63`: gc's ARM64 rules fold
+  `(ANDconst (SRLconst x))` into `UBFX` but have no `SRAconst` twin.
+* The `AND` may write a register other than the shift's. The rewrite
+  still deletes the shift -- `lsr w9, w4, #24 ; and w10, w9, #0xff`
+  is `ubfx w10, w4, #24, #8` -- so the shift's destination must be
+  dead after the `AND`, which the forward register-liveness scan
+  proves (`defer_dead_mov`). The `UBFX` reads the shift's source at
+  the `AND`'s position, unchanged by the adjacent shift unless it
+  shifted in place, and then the deleted shift leaves it as it was.
+  That covers V8's `lsr w9, w4, #24 ; and w10, w9, #0xff`, whose
+  temp is overwritten two instructions later.
+* Corpus (166.6M instructions, JIT dumps included): 734 `ASR+AND`
+  findings and 36 more `LSR+AND` ones, and no other check moved.
+  `ASR`: go 351 (341 of them `Slicemask(x) & 1`), V8 165,
+  JavaScriptCore 124, SpiderMonkey 94; the out-of-place `LSR`: V8 31,
+  clang 3, rustc 2. The .NET 11 census had counted 661 in-place
+  `ASR` pairs and 73 out-of-place `LSR` ones as ceilings; the deadness
+  proof keeps half the latter.
+* Verified by execution with the harness described under the
+  redundant zero-extension check: 300,000 random programs with
+  planted shift + mask pairs, each of the 816,010 folds armlint
+  reported (192,451 of them out of place) run natively against the
+  original on six random states, gave identical `x0..x7` and NZCV
+  every time. Folding the 511,868 pairs armlint refused anyway
+  changed the result 264,721 times, and builds that let an `ASR`
+  fold past the sign fill or report an out-of-place `AND` without
+  the deadness proof fail within 3,000 programs.
 
 ## mask-and-shift bitfield extraction foldable into UBFX
 
