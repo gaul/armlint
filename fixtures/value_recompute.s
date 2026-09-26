@@ -70,9 +70,12 @@ _main:
     ret
 
     // 9) ADRP of the page x8 holds, reported apart as a relink fix.
-    adrp    x8, _main@PAGE
+    //    Emit ADRP via .long to avoid Mach-O/ELF relocation-syntax
+    //    differences (`@PAGE` is Mach-O-only); both words are
+    //    `adrp x8` of this instruction's own page.
+    .long   0x90000008              // adrp x8, page0
     ldr     x9, [x8]
-    adrp    x8, _main@PAGE
+    .long   0x90000008              // adrp x8, page0
     ret
 
     // Negatives:
