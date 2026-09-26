@@ -1781,6 +1781,37 @@ bool armlint_advance_pending_cbr(armlint_state *state,
                                  const cs_insn *insn,
                                  size_t offset, armlint_finding *out);
 
+// Detect a CMP/CMN Rn, #imm12 (unshifted) followed by one or more
+// CCMP/CCMN Rn, #imm5 on the same register at the same width -- up to
+// ARMLINT_FINDING_LINES - 1 compares -- and then, directly, a B.cond or
+// a CSEL/CSINC/CSINV/CSNEG, where one CMP/CMN Rn, #imm12 under some
+// condition decides exactly what the chain decides under the reader's:
+//     cmp w9, #0xfe ; ccmp w9, #0x15, #0x0, ne ; b.eq L
+//         -> cmp w9, #0x15 ; b.eq L       (x != 254 && x == 21)
+// The equivalence is decided exactly: each compare's flags change only
+// at a few boundaries of the compared value, so evaluating the chain
+// and a candidate at all of them, and their neighbours, compares the
+// two predicates over the whole range. The candidate constant, its
+// CMP/CMN spelling and the reader's condition may all change; a
+// compare with zero under EQ/NE ahead of a branch renders as
+// CBZ/CBNZ. A chain whose predicate is constant is left alone.
+//
+// Only the reader's condition survives the rewrite, so NZCV must die
+// unread after the reader: on the fall-through by the deferred scan
+// (armlint_advance_pending_ccc), and for a branch at its target too,
+// by the scan nzcv_dead_at_target also runs for check_cmpbr_fold,
+// before the deferral opens -- so, like that check, it is silent
+// without a scanned buffer. The finding spans the chain and the
+// reader. Reported as "CMP + CCMP chain decidable by one compare".
+bool check_ccmp_chain(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out);
+
+// NZCV-death advancer for the deferred chain finding, parallel to
+// armlint_advance_pending_cbr.
+bool armlint_advance_pending_ccc(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
+
 // Three-operand SHA3 logic synthesis (gated on ARMLINT_FEATURE_SHA3;
 // silent otherwise). FEAT_SHA3 -- optional from Armv8.2, never
 // mandatory -- carries four instructions that are general bit-mixing

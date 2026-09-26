@@ -153,6 +153,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
 | [`mov #INT_MIN` or `#INT_MAX` + `cmp` + `b.eq`/`b.ne`](analyses.md#mov--cmp--beqne-against-int_minint_max-foldable-to-bvsbvc) | `cmp xzr, Xn` or `cmn Xn, #1` + `b.vs`/`b.vc` |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` (sign-crossed for `#-C`) |
+| [`cmp`/`cmn` + `ccmp`/`ccmn` on one register + `b.cond`/`csel`, one compare deciding it](analyses.md#cmp--ccmp-chain-decidable-by-one-compare) | that `cmp`/`cmn` (or `cbz`/`cbnz`) with the reader's condition adjusted |
 | [`mov #1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinc Rd, Rn, wzr, cc` (`cset` when the other operand is ZR) |
 | [`mov #-1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinv Rd, Rn, wzr, cc` (`csetm` when the other operand is ZR) |
 | [`mov #C` + `lsl`/`lsr`/`asr`/`ror` (register amount)](analyses.md#mov--variable-shift-foldable-to-immediate-shift) | immediate-form shift, amount `C mod 32`/`64` |

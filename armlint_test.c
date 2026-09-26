@@ -162,6 +162,50 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
     return findings;
 }
 
+// run_buffer_check restricted to one finding name, copying the first
+// matching finding's detail into `detail` when it is not NULL: for
+// the checks whose proofs read the scanned buffer (a branch target's
+// NZCV) and whose rendering is the point of the test.
+static int run_named_buffer_check(const uint8_t *code, size_t code_size,
+                                  const char *name, char *detail,
+                                  size_t detail_size)
+{
+    cs_insn *insn = cs_malloc(g_handle);
+    assert(insn != NULL);
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+    armlint_state_set_buffer(state, code, code_size);
+
+    int findings = 0;
+    const uint8_t *p = code;
+    size_t size = code_size;
+    uint64_t address = 0;
+    while (size >= 4) {
+        uint64_t insn_addr = address;
+        if (!cs_disasm_iter(g_handle, &p, &size, &address, insn)) {
+            p += 4;
+            size -= 4;
+            address += 4;
+            continue;
+        }
+        for (size_t k = 0; k < armlint_check_registry_count; k++) {
+            armlint_finding f;
+            if (armlint_check_registry[k](state, insn, (size_t)insn_addr,
+                                          &f)
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && strcmp(f.name, name) == 0) {
+                if (findings == 0 && detail != NULL) {
+                    snprintf(detail, detail_size, "%s", f.detail);
+                }
+                findings++;
+            }
+        }
+    }
+    armlint_state_destroy(state);
+    cs_free(insn, 1);
+    return findings;
+}
+
 // Like run_check, but with the given ISA-extension features enabled.
 static int run_features_check(const uint8_t *code, size_t code_size,
                               unsigned features)
@@ -12844,6 +12888,155 @@ static void test_cmpbr_fold(void)
     assert(run_features_check(code, 16, ARMLINT_FEATURE_CMPBR) == 0);
 }
 
+// Words are written little-endian into a buffer; the chain check's
+// proofs read it (the branch target's NZCV), so every case runs with
+// one.
+static const char *const kCcc = "CMP + CCMP chain decidable by one compare";
+
+static int run_ccc_words(const uint32_t *words, size_t n, char *detail)
+{
+    uint8_t code[64];
+    assert(n * 4u <= sizeof(code));
+    for (size_t i = 0; i < n; i++) {
+        write_le32(&code[4u * i], words[i]);
+    }
+    detail[0] = '\0';
+    return run_named_buffer_check(code, n * 4u, kCcc, detail,
+                                  ARMLINT_FINDING_DETAIL_LEN);
+}
+
+static void test_ccmp_chain(void)
+{
+    char d[ARMLINT_FINDING_DETAIL_LEN];
+
+    // -- Positives. Each fall-through and each branch target overwrites
+    //    NZCV before reading it. --
+
+    // rustc_ast's attribute test: x != 254 && x == 21 is x == 21.
+    const uint32_t rustc[] = {
+        0x7103F93Fu,    // cmp  w9, #254
+        0x7A551920u,    // ccmp w9, #21, #0, ne
+        0x54000060u,    // b.eq #12            -> 0x14
+        0x7100041Fu,    // cmp  w0, #1         (fall-through overwrite)
+        0xD65F03C0u,    // ret
+        0x7100083Fu,    // cmp  w1, #2         (target overwrite)
+        0xD65F03C0u,    // ret
+    };
+    assert(run_ccc_words(rustc, 7, d) == 1);
+    assert(strcmp(d, "-> cmp w9, #0x15 ; b.eq 0x14") == 0);
+
+    // uutils' one compare twice: cmp x9, #2 ; ccmp x9, #2, #0, hs.
+    const uint32_t twice[] = {
+        0xF100093Fu, 0xFA422920u, 0x54000060u, 0x7100041Fu, 0xD65F03C0u,
+        0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(twice, 7, d) == 1);
+    assert(strcmp(d, "-> cmp x9, #0x2 ; b.eq 0x14") == 0);
+
+    // Three links, a new constant: x not in {13, 22} and x >= 29 is
+    // x >= 29.
+    const uint32_t three[] = {
+        0x7100351Fu,    // cmp  w8, #13
+        0x7A561904u,    // ccmp w8, #22, #4, ne
+        0x7A5D1900u,    // ccmp w8, #29, #0, ne
+        0x54000062u,    // b.hs #12            -> 0x18
+        0x7100041Fu, 0xD65F03C0u, 0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(three, 8, d) == 1);
+    assert(strcmp(d, "-> cmp w8, #0x1d ; b.hs 0x18") == 0);
+
+    // A new spelling: cmn w8, #1 ; ccmp w8, #1, #0, ne is x == 1.
+    const uint32_t spell[] = {
+        0x3100051Fu, 0x7A411900u, 0x54000060u, 0x7100041Fu, 0xD65F03C0u,
+        0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(spell, 7, d) == 1);
+    assert(strcmp(d, "-> cmp w8, #0x1 ; b.eq 0x14") == 0);
+
+    // A compare with zero under EQ ahead of a branch is CBZ:
+    // x != 5 && x == 0.
+    const uint32_t zero[] = {
+        0x7100141Fu,    // cmp  w0, #5
+        0x7A401800u,    // ccmp w0, #0, #0, ne
+        0x54000060u, 0x7100083Fu, 0xD65F03C0u, 0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(zero, 7, d) == 1);
+    assert(strcmp(d, "-> cbz w0, 0x14") == 0);
+
+    // CSEL-family readers keep their operands. CSET prints its
+    // condition inverted, which the rendering follows.
+    const uint32_t cset[] = {
+        0xF1000D1Fu,    // cmp  x8, #3
+        0xFA441900u,    // ccmp x8, #4, #0, ne
+        0x1A9F17E0u,    // cset w0, eq
+        0xEB02003Fu,    // cmp  x1, x2
+        0xD65F03C0u,
+    };
+    assert(run_ccc_words(cset, 5, d) == 1);
+    assert(strcmp(d, "-> cmp x8, #0x4 ; cset w0, eq") == 0);
+    const uint32_t csel[] = {
+        0xF1000D1Fu, 0xFA441900u,
+        0x9A820020u,    // csel x0, x1, x2, eq
+        0xEB02003Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(csel, 5, d) == 1);
+    assert(strcmp(d, "-> cmp x8, #0x4 ; csel x0, x1, x2, eq") == 0);
+
+    // -- Negatives. --
+
+    // x == 3 || x == 4 is two values, which no one compare tests.
+    const uint32_t two[] = {
+        0xF1000D1Fu,
+        0xFA441904u,    // ccmp x8, #4, #4, ne
+        0x1A9F17E0u, 0xEB02003Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(two, 5, d) == 0);
+
+    // A predicate that is constant (x >= 0 unsigned, twice) decides
+    // nothing: another fold, not this one.
+    const uint32_t constant[] = {
+        0x7100001Fu,    // cmp  w0, #0
+        0x7A402802u,    // ccmp w0, #0, #2, hs
+        0x54000062u,    // b.hs #12
+        0x7100041Fu, 0xD65F03C0u, 0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(constant, 7, d) == 0);
+
+    // The fall-through reads the chain's flags again.
+    const uint32_t ft_read[] = {
+        0x7103F93Fu, 0x7A551920u, 0x54000060u,
+        0x54000043u,    // b.lo #8
+        0xD65F03C0u, 0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(ft_read, 7, d) == 0);
+
+    // The branch target reads them.
+    const uint32_t tgt_read[] = {
+        0x7103F93Fu, 0x7A551920u, 0x54000060u, 0x7100041Fu, 0xD65F03C0u,
+        0x54000048u,    // b.hi #8 (the target)
+        0xD65F03C0u, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(tgt_read, 8, d) == 0);
+
+    // A branch lands on the CCMP, which it reaches without the CMP.
+    const uint32_t side[] = {
+        0x7103F93Fu, 0x7A551920u,
+        0x54000080u,    // b.eq #16            -> 0x18
+        0x7100041Fu,
+        0xB5FFFFA3u,    // cbnz x3, #-12       -> the CCMP
+        0xD65F03C0u, 0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(side, 8, d) == 0);
+
+    // The CCMP compares another register.
+    const uint32_t other[] = {
+        0x7103F93Fu,
+        0x7A551940u,    // ccmp w10, #21, #0, ne
+        0x54000060u, 0x7100041Fu, 0xD65F03C0u, 0x7100083Fu, 0xD65F03C0u,
+    };
+    assert(run_ccc_words(other, 7, d) == 0);
+}
+
 // EOR / BIC (vector, three-same). q selects the 8B (0) or 16B (1)
 // form; BIC computes Vd = Vn AND NOT Vm.
 static void vec_eor(uint8_t out[4], unsigned q, unsigned rd,
@@ -16981,6 +17174,7 @@ int main(void)
     test_cssc_ctz();
     test_cssc_popcount();
     test_cmpbr_fold();
+    test_ccmp_chain();
     test_sha3_fold();
     test_add_sub_imm_chain();
     test_extend_add_sub_fold();

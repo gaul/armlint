@@ -1,0 +1,20 @@
+CMP + CCMP chain decidable by one compare at offset: 0x0 <_main>: -> cmp w9, #0x15 ; b.eq 0x70 (3 instructions)
+  cmp w9, #0xfe
+  ccmp w9, #0x15, #0, ne
+  b.eq #0x70
+
+CMP + CCMP chain decidable by one compare at offset: 0x10 <_main+0x10>: -> cmp w8, #0x1d ; b.hs 0x70 (4 instructions)
+  cmp w8, #0xd
+  ccmp w8, #0x16, #4, ne
+  ccmp w8, #0x1d, #0, ne
+  b.hs #0x70
+
+CMP + CCMP chain decidable by one compare at offset: 0x24 <_main+0x24>: -> cmp x8, #0x4 ; cset w0, eq (3 instructions)
+  cmp x8, #3
+  ccmp x8, #4, #0, ne
+  cset w0, eq
+
+Optimization opportunities by type:
+       3  CMP + CCMP chain decidable by one compare
+
+3 optimization opportunities in 30 instructions

@@ -38,6 +38,9 @@ typedef struct {
 // One finding line goes to the ADD itself, leaving the others for its
 // consumers.
 #define MF_MAX_LINES (ARMLINT_FINDING_LINES - 1)
+// Longest CMP + CCMP chain check_ccmp_chain tracks: one finding line
+// per compare, and one for the flag reader.
+#define CCC_MAX_LINKS (ARMLINT_FINDING_LINES - 1)
 
 struct armlint_state {
     // MOV chain (MOVZ/MOVN followed by zero or more MOVKs).
@@ -535,6 +538,27 @@ struct armlint_state {
     bool pending_cbr_active;
     unsigned pending_cbr_window;
     armlint_finding pending_cbr_finding;
+
+    // CMP/CMN Rn, #imm12 extended by CCMP/CCMN Rn, #imm5 links on the
+    // same register at the same width, pending the flag reader right
+    // after the chain (check_ccmp_chain). ccc_ops holds each link's
+    // word for the equivalence search, ccc_disasm its rendering.
+    bool ccc_active;
+    bool ccc_is_64bit;
+    unsigned ccc_rn;
+    unsigned ccc_links;
+    uint32_t ccc_ops[CCC_MAX_LINKS];
+    size_t ccc_offset;
+    char ccc_disasm[CCC_MAX_LINKS][ARMLINT_FINDING_LINE_LEN];
+
+    // Deferred chain finding awaiting proof that NZCV dies unread on
+    // the fall-through: the one compare leaves the reader's condition
+    // as the chain did and every other flag free to differ. A branch
+    // reader's taken edge is proven before the deferral opens
+    // (nzcv_dead_at_target), as for the CMPBR fold.
+    bool pending_ccc_active;
+    unsigned pending_ccc_window;
+    armlint_finding pending_ccc_finding;
 
     // Deferred sign-shift finding awaiting proof that NZCV is dead:
     // the LSR/ASR rewrite deletes the compare and sets no flags, the
@@ -1598,6 +1622,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->pending_sgn_active = false;
     state->cbr_active = false;
     state->pending_cbr_active = false;
+    state->ccc_active = false;
+    state->pending_ccc_active = false;
     state->aut_active = false;
     state->pac_sign_recent = 0;
     state->jt_stage = 0;
@@ -3805,6 +3831,23 @@ bool armlint_advance_pending_cbr(armlint_state *state,
     return advance_one_pending(op, &state->pending_cbr_active,
                                &state->pending_cbr_window,
                                &state->pending_cbr_finding, out);
+}
+
+bool armlint_advance_pending_ccc(armlint_state *state,
+                                 const cs_insn *insn,
+                                 size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (!state->pending_ccc_active) {
+        return false;
+    }
+    if (insn->size != 4) {
+        state->pending_ccc_active = false;
+        return false;
+    }
+    return advance_one_pending(insn_word(insn), &state->pending_ccc_active,
+                               &state->pending_ccc_window,
+                               &state->pending_ccc_finding, out);
 }
 
 // The compare-and-branch twin of defer_dead_nzcv_cssc: CB<cc> folds
@@ -6079,6 +6122,361 @@ bool check_cmpbr_fold(armlint_state *state, const cs_insn *insn,
         }
     }
 
+    return false;
+}
+
+// NZCV (N = 8, Z = 4, C = 2, V = 1) after CMP (SUBS) or CMN (ADDS) of x
+// with the immediate k at the given width.
+static unsigned ccc_compare(uint64_t x, uint64_t k, unsigned width,
+                            bool is_cmn)
+{
+    uint64_t mask = width_mask(width);
+    uint64_t top = (uint64_t)1 << (width - 1u);
+    x &= mask;
+    k &= mask;
+    uint64_t r;
+    bool c, v;
+    if (is_cmn) {
+        r = (x + k) & mask;
+        c = width == 64u ? r < x : (x + k) > mask;
+        v = ((x ^ r) & (k ^ r) & top) != 0;
+    } else {
+        r = (x - k) & mask;
+        c = x >= k;
+        v = ((x ^ k) & (x ^ r) & top) != 0;
+    }
+    return ((r & top) != 0 ? 8u : 0u) | (r == 0 ? 4u : 0u)
+        | (c ? 2u : 0u) | (v ? 1u : 0u);
+}
+
+// The architectural ConditionHolds for a 4-bit NZCV value.
+static bool ccc_cond_holds(unsigned cond, unsigned nzcv)
+{
+    bool n = (nzcv & 8u) != 0, z = (nzcv & 4u) != 0;
+    bool c = (nzcv & 2u) != 0, v = (nzcv & 1u) != 0;
+    bool r;
+    switch (cond >> 1) {
+    case 0: r = z; break;
+    case 1: r = c; break;
+    case 2: r = n; break;
+    case 3: r = v; break;
+    case 4: r = c && !z; break;
+    case 5: r = n == v; break;
+    case 6: r = n == v && !z; break;
+    default: return true;          // AL, NV
+    }
+    return (cond & 1u) != 0 ? !r : r;
+}
+
+// A chain link: the compare's immediate and spelling and, for a
+// CCMP/CCMN, the condition it tests and the NZCV it sets otherwise.
+typedef struct {
+    uint64_t imm;
+    bool is_cmn;
+    unsigned cond;
+    unsigned nzcv;
+} ccc_link;
+
+static unsigned ccc_chain_nzcv(const ccc_link *l, unsigned n, uint64_t x,
+                               unsigned width)
+{
+    unsigned f = ccc_compare(x, l[0].imm, width, l[0].is_cmn);
+    for (unsigned i = 1; i < n; i++) {
+        f = ccc_cond_holds(l[i].cond, f)
+            ? ccc_compare(x, l[i].imm, width, l[i].is_cmn) : l[i].nzcv;
+    }
+    return f;
+}
+
+#define CCC_MAX_CANDS (CCC_MAX_LINKS * 5u + 1u)
+#define CCC_MAX_POINTS (6u + 6u * (CCC_MAX_LINKS + CCC_MAX_CANDS))
+
+// Is there one CMP/CMN Rn, #imm (imm12, unshifted) and one condition
+// that decide exactly what the chain decides under `cond`, for every
+// value of Rn? Decided exactly rather than by sampling at random.
+//
+// Compare each link with the VALUE it tests: v = k for CMP #k, v = -k
+// for CMN #k. As x runs over the register's range, the NZCV of either
+// changes only at v, v + 1 (Z), v + 2^(w-1) (the wrap of the signed
+// difference) and 2^(w-1) (the sign of x itself), so any predicate
+// built from those flags -- the chain's included -- is constant
+// between consecutive such boundaries. Evaluating the chain and a
+// candidate at every boundary either can have, and their neighbours,
+// therefore compares them everywhere.
+//
+// A candidate can only match if its own boundaries land on the
+// chain's, and the ones an imm12 can reach are within one of a chain
+// value; the search tries every value within two of one (the last
+// link's first -- the usual answer, since the first test is the one
+// implied), then 0, each as CMP and as CMN where the immediate fits,
+// under the reader's own condition first and then the others. A
+// predicate that is constant over the whole range is refused: that
+// chain decides nothing, which is another fold.
+static bool ccc_single_compare(const ccc_link *l, unsigned n,
+                               unsigned width, unsigned cond,
+                               uint64_t *out_imm, bool *out_is_cmn,
+                               unsigned *out_cond)
+{
+    uint64_t mask = width_mask(width);
+    uint64_t half = (uint64_t)1 << (width - 1u);
+    uint64_t vals[CCC_MAX_LINKS];
+    for (unsigned i = 0; i < n; i++) {
+        vals[i] = l[i].is_cmn ? (0 - l[i].imm) & mask : l[i].imm;
+    }
+
+    uint64_t cand[CCC_MAX_CANDS];
+    unsigned nc = 0;
+    for (unsigned d = 0; d <= 2u; d++) {
+        for (unsigned j = 0; j < 2u * n; j++) {
+            if (d == 0 && j >= n) {
+                break;
+            }
+            uint64_t v = vals[n - 1u - (j % n)];
+            uint64_t c = (j < n ? v + d : v - d) & mask;
+            bool seen = false;
+            for (unsigned q = 0; q < nc; q++) {
+                seen = seen || cand[q] == c;
+            }
+            if (!seen) {
+                cand[nc++] = c;
+            }
+        }
+    }
+    bool have_zero = false;
+    for (unsigned q = 0; q < nc; q++) {
+        have_zero = have_zero || cand[q] == 0;
+    }
+    if (!have_zero) {
+        cand[nc++] = 0;
+    }
+
+    uint64_t pts[CCC_MAX_POINTS];
+    unsigned np = 0;
+    pts[np++] = 0;
+    pts[np++] = 1;
+    pts[np++] = half - 1u;
+    pts[np++] = half;
+    pts[np++] = half + 1u;
+    pts[np++] = mask;
+    for (unsigned i = 0; i < n + nc; i++) {
+        uint64_t t = i < n ? vals[i] : cand[i - n];
+        for (unsigned d = 0; d < 3u; d++) {
+            pts[np++] = (t + d - 1u) & mask;
+            pts[np++] = (t + half + d - 1u) & mask;
+        }
+    }
+
+    bool want[CCC_MAX_POINTS];
+    bool any_true = false, any_false = false;
+    for (unsigned p = 0; p < np; p++) {
+        want[p] = ccc_cond_holds(cond, ccc_chain_nzcv(l, n, pts[p], width));
+        any_true = any_true || want[p];
+        any_false = any_false || !want[p];
+    }
+    if (!any_true || !any_false) {
+        return false;
+    }
+
+    unsigned flags[CCC_MAX_POINTS];
+    for (unsigned ci = 0; ci < nc; ci++) {
+        for (unsigned sp = 0; sp < 2u; sp++) {
+            bool is_cmn = sp == 1u;
+            uint64_t imm = is_cmn ? (0 - cand[ci]) & mask : cand[ci];
+            if (imm > 0xFFFu) {
+                continue;
+            }
+            for (unsigned p = 0; p < np; p++) {
+                flags[p] = ccc_compare(pts[p], imm, width, is_cmn);
+            }
+            for (unsigned k = 0; k < 15u; k++) {
+                // The reader's own condition first, then the rest.
+                unsigned c2 = k == 0 ? cond : k - 1u;
+                if (k != 0 && c2 == cond) {
+                    continue;
+                }
+                bool same = true;
+                for (unsigned p = 0; p < np && same; p++) {
+                    same = ccc_cond_holds(c2, flags[p]) == want[p];
+                }
+                if (same) {
+                    *out_imm = imm;
+                    *out_is_cmn = is_cmn;
+                    *out_cond = c2;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// The condition code a lowercase A64 name spells, or -1. Capstone
+// prints HS/LO; CS/CC are accepted as their synonyms.
+static int a64_cond_from_name(const char *s)
+{
+    for (int i = 0; i < 16; i++) {
+        if (strcmp(s, a64_cond_names[i]) == 0) {
+            return i;
+        }
+    }
+    if (strcmp(s, "cs") == 0) {
+        return 2;
+    }
+    if (strcmp(s, "cc") == 0) {
+        return 3;
+    }
+    return -1;
+}
+
+// A CMP/CMN compared with an immediate, then one or more CCMP/CCMN of
+// the same register against immediates, then the flag reader:
+//     cmp  w9, #0xfe              ; x != 254 ...
+//     ccmp w9, #0x15, #0x0, ne    ; ... and then x == 21
+//     b.eq L
+// That chain tests x == 21 alone -- the second compare implies the
+// first -- so `cmp w9, #0x15 ; b.eq L` does it in one link less. rustc
+// emits exactly this 552 times, one attribute test in rustc_ast
+// inlined everywhere; LLVM builds the chain from two branches without
+// asking whether one implies the other. The search that decides it
+// (ccc_single_compare) is exact, and may change the constant, the
+// spelling and the reader's condition: three links testing x not in
+// {13, 22} and x >= 29 become `cmp w8, #29 ; b.hs`. A single compare
+// against zero under EQ/NE in front of a branch renders as CBZ/CBNZ.
+//
+// The reader is a B.cond or a CSEL/CSINC/CSINV/CSNEG right after the
+// chain; its condition is what must survive. The rest of NZCV does
+// not, so the flags must die unread after the reader: on its
+// fall-through by the deferred scan (armlint_advance_pending_ccc),
+// and for a branch at its target too, proven before the deferral
+// opens by the same scan from the target the CMPBR fold uses -- the
+// chain's flags are exactly what a compiler might test again on the
+// other side. The finding spans the chain and the reader, so a branch
+// into any of them rejects it at the central side-entry gate. Chains
+// longer than a finding can show (CCC_MAX_LINKS compares) are left
+// alone, as are the register forms of CCMP and shifted immediates.
+bool check_ccmp_chain(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out)
+{
+    (void)out;   // emission goes through armlint_advance_pending_ccc
+    if (insn->size != 4) {
+        state->ccc_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+
+    // (1) Extend: CCMP/CCMN Rn, #imm5 on the chain's register and
+    //     width.
+    if (state->ccc_active && (op & 0x3FE00C10u) == 0x3A400800u
+            && ((op >> 5) & 0x1Fu) == state->ccc_rn
+            && ((op >> 31) != 0) == state->ccc_is_64bit) {
+        if (state->ccc_links < CCC_MAX_LINKS) {
+            state->ccc_ops[state->ccc_links] = op;
+            snprintf(state->ccc_disasm[state->ccc_links],
+                sizeof(state->ccc_disasm[0]), "%s %s",
+                insn->mnemonic, insn->op_str);
+            state->ccc_links++;
+        } else {
+            state->ccc_active = false;
+        }
+        return false;
+    }
+
+    // (2) Close: the flag reader right after a chain holding at least
+    //     one CCMP. BC.cond (bit 4) is left out.
+    if (state->ccc_active && state->ccc_links >= 2u) {
+        bool is_branch = (op & 0xFF000010u) == 0x54000000u;
+        bool is_csel = (op & 0x3FE00800u) == 0x1A800000u;
+        unsigned cond = is_branch ? (op & 0xFu) : ((op >> 12) & 0xFu);
+        unsigned width = state->ccc_is_64bit ? 64u : 32u;
+        ccc_link links[CCC_MAX_LINKS];
+        for (unsigned i = 0; i < state->ccc_links; i++) {
+            uint32_t w = state->ccc_ops[i];
+            links[i].is_cmn = ((w >> 30) & 1u) == 0;
+            if (i == 0) {
+                links[i].imm = (w >> 10) & 0xFFFu;
+                links[i].cond = 14;
+                links[i].nzcv = 0;
+            } else {
+                links[i].imm = (w >> 16) & 0x1Fu;
+                links[i].cond = (w >> 12) & 0xFu;
+                links[i].nzcv = w & 0xFu;
+            }
+        }
+        uint64_t imm = 0;
+        bool is_cmn = false;
+        unsigned new_cond = 0;
+        int64_t target = 0;
+        if (is_branch) {
+            int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+            imm19 = (imm19 ^ 0x40000) - 0x40000;
+            target = (int64_t)offset + (int64_t)imm19 * 4;
+        }
+        // For the CSEL family, the condition as printed: the aliases
+        // that hide an operand (CSET, CINC, CNEG, ...) print it
+        // inverted.
+        const char *comma = is_csel ? strrchr(insn->op_str, ',') : NULL;
+        int shown = comma != NULL ? a64_cond_from_name(comma + 2) : -1;
+        bool inverted = shown >= 0 && (unsigned)shown == (cond ^ 1u);
+        if ((is_branch || (is_csel && shown >= 0
+                           && ((unsigned)shown == cond || inverted)))
+                && cond < 14u
+                && ccc_single_compare(links, state->ccc_links, width, cond,
+                                      &imm, &is_cmn, &new_cond)
+                && (!is_branch || nzcv_dead_at_target(state, target))) {
+            char w_or_x = state->ccc_is_64bit ? 'x' : 'w';
+            armlint_finding *p = &state->pending_ccc_finding;
+            p->name = "CMP + CCMP chain decidable by one compare";
+            p->start_offset = state->ccc_offset;
+            p->insn_count = state->ccc_links + 1u;
+            clear_finding_strings(p);
+            uint64_t value = is_cmn ? (0 - imm) & width_mask(width) : imm;
+            if (is_branch) {
+                uint64_t taddr = insn->address
+                    + (uint64_t)(target - (int64_t)offset);
+                if (value == 0 && new_cond <= 1u) {
+                    snprintf(p->detail, sizeof(p->detail),
+                        "-> %s %c%u, 0x%" PRIx64,
+                        new_cond == 0 ? "cbz" : "cbnz", w_or_x,
+                        state->ccc_rn, taddr);
+                } else {
+                    snprintf(p->detail, sizeof(p->detail),
+                        "-> %s %c%u, #0x%" PRIx64 " ; b.%s 0x%" PRIx64,
+                        is_cmn ? "cmn" : "cmp", w_or_x, state->ccc_rn,
+                        imm, a64_cond_names[new_cond], taddr);
+                }
+            } else {
+                snprintf(p->detail, sizeof(p->detail),
+                    "-> %s %c%u, #0x%" PRIx64 " ; %s %.*s, %s",
+                    is_cmn ? "cmn" : "cmp", w_or_x, state->ccc_rn, imm,
+                    insn->mnemonic, (int)(comma - insn->op_str),
+                    insn->op_str,
+                    a64_cond_names[inverted ? new_cond ^ 1u : new_cond]);
+            }
+            for (unsigned i = 0; i < state->ccc_links; i++) {
+                snprintf(p->lines[i], sizeof(p->lines[i]), "%s",
+                    state->ccc_disasm[i]);
+            }
+            snprintf(p->lines[state->ccc_links],
+                sizeof(p->lines[0]), "%s %s", insn->mnemonic,
+                insn->op_str);
+            state->pending_ccc_active = true;
+            state->pending_ccc_window = LIVENESS_WINDOW;
+        }
+    }
+    state->ccc_active = false;
+
+    // (3) Open: CMP/CMN Rn, #imm12, unshifted. Rn = 31 is SP in the
+    //     immediate form, which no chain here compares.
+    if ((op & 0x3FC0001Fu) == 0x3100001Fu && ((op >> 5) & 0x1Fu) != 31u) {
+        state->ccc_active = true;
+        state->ccc_is_64bit = (op >> 31) != 0;
+        state->ccc_rn = (op >> 5) & 0x1Fu;
+        state->ccc_links = 1;
+        state->ccc_ops[0] = op;
+        state->ccc_offset = offset;
+        snprintf(state->ccc_disasm[0], sizeof(state->ccc_disasm[0]),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
     return false;
 }
 
@@ -18030,6 +18428,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_cssc,
     armlint_advance_pending_sgn,
     armlint_advance_pending_cbr,
+    armlint_advance_pending_ccc,
     armlint_advance_pending_fp,
     armlint_advance_pending_mz,
     armlint_advance_pending_bvs,
@@ -18079,6 +18478,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cset_fold,
     check_cmp_cset_sign,
     check_cmpbr_fold,
+    check_ccmp_chain,
     check_aut_ret,
     check_br_x30,
     check_branch_to_next,

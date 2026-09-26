@@ -2109,6 +2109,68 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   compare of `#C` perform the identical 65-bit sum, and when it
   fails both set the carried-over `#nzcv` literal.
 
+## CMP + CCMP chain decidable by one compare
+
+* `cmp w9, #0xfe ; ccmp w9, #0x15, #0x0, ne ; b.eq L` tests
+  x != 254 and then x == 21 -- which is x == 21, the first test
+  implied by the second -- so `cmp w9, #0x15 ; b.eq L` does it with
+  one compare fewer. librustc_driver carries this exact chain
+  496 times: one attribute test in `rustc_ast`
+  (`Attribute::may_have_doc_links`, `doc_str_and_fragment_kind` and
+  the visitors they are inlined into), which LLVM builds from two
+  branches without asking whether one implies the other.
+* The shape: a `CMP`/`CMN Rn, #imm12` (unshifted), one or more
+  `CCMP`/`CCMN Rn, #imm5` of the same register at the same width, and
+  directly after them a `B.cond` or a `CSEL`/`CSINC`/`CSINV`/`CSNEG`
+  (aliases included) -- up to four compares, one finding line each.
+* The equivalence is decided exactly, not sampled. Compare each link
+  with the value it tests: `k` for `CMP #k`, `-k` for `CMN #k`. Over
+  the register's range a compare's NZCV changes only at `v`, `v + 1`,
+  `v + 2^(w-1)` and `2^(w-1)`, so any condition of the chain's flags
+  is constant between consecutive boundaries, and evaluating the
+  chain and a candidate at every boundary either can have, and their
+  neighbours, compares them everywhere. The candidates are the values
+  within two of a chain value, and zero -- an imm12 compare can only
+  match with boundaries within one of the chain's -- each spelled
+  `CMP` or `CMN` where the immediate fits, under the reader's own
+  condition first and then the others. So the rewrite may change the
+  constant, its spelling and the reader's condition: `cmp w8, #13 ;
+  ccmp w8, #22, #4, ne ; ccmp w8, #29, #0, ne ; b.hs` tests x not in
+  {13, 22} and x >= 29, which is `cmp w8, #29 ; b.hs`; `cmn w8, #1 ;
+  ccmp w8, #1, #0, ne` is `cmp w8, #1`; a compare with zero under
+  EQ/NE ahead of a branch renders as `CBZ`/`CBNZ`. A chain whose
+  predicate is constant decides nothing and is left alone.
+* Only the reader's condition survives, so NZCV must die unread
+  after it: on the fall-through by the deferred scan, and for a branch
+  at its target too, proven before the deferral opens by the scan the
+  [CMPBR fold](#compare-and-branch-synthesis-feature-gated--m-cmpbr)
+  uses -- the chain's flags are what a compiler might test again on
+  the other side. That scan stops at a conditional branch rather than
+  chase it, which costs librustc_driver 57 findings (682 with the
+  fall-through proof alone, the convention the `CBZ` and `B.VS` folds
+  follow). The finding spans the chain and the reader, so a branch
+  into any of them rejects it at the side-entry gate.
+* Corpus (166.6M instructions, JIT dumps included): 652 findings
+  and no other check moved -- librustc_driver 625, clang 23, uutils
+  2, go 2, and none in the JIT dumps (SpiderMonkey emits no CCMP,
+  and none of V8's or JavaScriptCore's chains reduces). The .NET 11
+  census had counted 831 foldable chains in librustc_driver as a
+  ceiling; of the rest, 40 put an instruction between the chain and
+  its reader, which strict adjacency leaves out, and the others fail
+  the NZCV proof on one edge or the other.
+* Verified by execution with the harness described under the
+  redundant zero-extension check: 300,000 random programs with
+  planted chains of two to four compares -- small constants, and
+  small register values often enough to land on the boundaries -- and
+  `B.cond` or CSEL-family readers. Each of the 135,281 rewrites
+  armlint reported (37,749 with a branch reader), applied as its
+  rendering says, ran natively against the original on six random
+  states with identical `x0..x7` and NZCV every time. Rewriting the
+  824,766 chains armlint refused to their last compare changed the
+  result 340,474 times, and builds without either NZCV proof, with
+  a sparser equivalence sample, or rendering an inverted alias's
+  condition uninverted fail within 3,000 programs.
+
 ## MOV #1 + CSEL foldable to CSINC/CSET
 
 * `mov w8, #1 ; csel wd, w8, wn, cc` instead of
