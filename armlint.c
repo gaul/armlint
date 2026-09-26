@@ -388,6 +388,22 @@ struct armlint_state {
     armlint_finding dw_ready[DW_READY_MAX];
     unsigned dw_ready_n;
 
+    // check_cmp_cmn_w: a one-instruction MOV of 2^32 - k awaiting the
+    // adjacent CMP Xn, Xc (cwc_*), then the fold's deferred proofs
+    // (pending_cwc_*): no reader of N or V, and Xc dead, on every path
+    // out of the compare.
+    bool cwc_active;
+    unsigned cwc_rd;
+    uint64_t cwc_value;
+    size_t cwc_offset;
+    char cwc_disasm[ARMLINT_FINDING_LINE_LEN];
+    bool pending_cwc_active;
+    bool pending_cwc_flags_done;
+    bool pending_cwc_reg_done;
+    unsigned pending_cwc_reg;
+    unsigned pending_cwc_window;
+    armlint_finding pending_cwc_finding;
+
     // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
     // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
     bool sgn_active;
@@ -1648,6 +1664,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lvn_valid = false;
     state->lvn_cur_valid = false;
     state->dw_mask = 0;
+    state->cwc_active = false;
+    state->pending_cwc_active = false;
     state->alr_active = false;
     state->aul_active = false;
     state->cmp_active = false;
@@ -11976,6 +11994,354 @@ bool check_dead_write(armlint_state *state, const cs_insn *insn,
     return dw_emit(state, out);
 }
 
+// === CMP of a 32-bit value against 2^32 - k (check_cmp_cmn_w) ===
+
+// The target of a direct branch at `offset`, and whether it is
+// conditional (B.cond, BC.cond, CBZ/CBNZ, TBZ/TBNZ -- the fall-through
+// continues too) or not (B). BL is a call, not a branch here.
+static bool direct_branch_target(uint32_t op, size_t offset,
+                                 int64_t *target, bool *conditional)
+{
+    int64_t disp;
+    if ((op & 0xFF000000u) == 0x54000000u
+            || (op & 0x7E000000u) == 0x34000000u) {
+        int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+        disp = (int64_t)((imm19 ^ 0x40000) - 0x40000) * 4;
+        *conditional = true;
+    } else if ((op & 0x7E000000u) == 0x36000000u) {
+        int32_t imm14 = (int32_t)((op >> 5) & 0x3FFFu);
+        disp = (int64_t)((imm14 ^ 0x2000) - 0x2000) * 4;
+        *conditional = true;
+    } else if ((op & 0xFC000000u) == 0x14000000u) {
+        int32_t imm26 = (int32_t)(op & 0x3FFFFFFu);
+        disp = (int64_t)((imm26 ^ 0x2000000) - 0x2000000) * 4;
+        *conditional = false;
+    } else {
+        return false;
+    }
+    *target = (int64_t)offset + disp;
+    return true;
+}
+
+// How an integer or FP load or store in the common forms -- unsigned
+// offset, unscaled, pre/post-index, register offset, and the pairs --
+// affects GPR `reg`, from the encoding alone: -1 when it reads it (a
+// base, an index, a stored register), 1 when it overwrites it (a GPR
+// load's destination, with nothing read), 0 when it does neither.
+// Anything else in the load/store space answers -1: unknown ends a
+// scan unproven.
+static int word_ldst_reg_liveness(uint32_t op, unsigned reg)
+{
+    unsigned rt = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    bool vreg = ((op >> 26) & 1u) != 0;
+    unsigned rt2 = 32u;
+    unsigned rm = 32u;
+    bool load;
+    if ((op & 0x3B000000u) == 0x39000000u
+            || (op & 0x3B200000u) == 0x38000000u
+            || (op & 0x3B200C00u) == 0x38200800u) {
+        unsigned opc = (op >> 22) & 3u;
+        unsigned size = op >> 30;
+        load = opc != 0u;
+        if (!vreg && opc == 2u && size == 3u) {
+            load = false;       // PRFM: reads only the address
+            rt = 32u;
+        }
+        if ((op & 0x3B200C00u) == 0x38200800u) {
+            rm = (op >> 16) & 0x1Fu;
+        }
+    } else if ((op & 0x3A000000u) == 0x28000000u) {
+        load = ((op >> 22) & 1u) != 0;
+        rt2 = (op >> 10) & 0x1Fu;
+    } else {
+        return -1;
+    }
+    if (rn == reg || rm == reg) {
+        return -1;
+    }
+    if (vreg) {
+        return 0;
+    }
+    if (!load) {
+        return rt == reg || rt2 == reg ? -1 : 0;
+    }
+    return rt == reg || rt2 == reg ? 1 : 0;
+}
+
+// Classify a word's effect on GPR `reg` without decoding it; see
+// armlint.h.
+liveness_t classify_word_reg_liveness(uint32_t op, unsigned reg)
+{
+    lvn_op p;
+    if (decode_lvn_op(op, &p)) {
+        for (unsigned j = 0; j < p.nin; j++) {
+            if (p.in[j] == reg) {
+                return LIV_READ;
+            }
+        }
+        return p.out == reg ? LIV_OVERWRITE : LIV_UNKNOWN;
+    }
+    if ((op & 0x0A000000u) == 0x08000000u) {
+        int r = word_ldst_reg_liveness(op, reg);
+        return r < 0 ? LIV_READ : r > 0 ? LIV_OVERWRITE : LIV_UNKNOWN;
+    }
+    // Branches, system, SIMD&FP: unproven.
+    return op == 0xD503201Fu ? LIV_UNKNOWN : LIV_READ;
+}
+
+// Whether GPR `reg` is dead at a branch target in the scanned buffer:
+// overwritten before any read, within the window, without leaving
+// straight-line code -- the register-side twin of nzcv_dead_at_target.
+static bool reg_dead_at_target(const armlint_state *state, int64_t target,
+                               unsigned reg)
+{
+    if (state->buf == NULL || target < 0) {
+        return false;
+    }
+    size_t off = (size_t)target;
+    for (unsigned i = 0; i < LIVENESS_WINDOW; i++) {
+        if (off > state->buf_len || state->buf_len - off < 4u) {
+            return false;
+        }
+        switch (classify_word_reg_liveness(buf_word_at(state->buf, off),
+                                           reg)) {
+        case LIV_OVERWRITE:
+            return true;
+        case LIV_UNKNOWN:
+            break;
+        default:
+            return false;
+        }
+        off += 4u;
+    }
+    return false;
+}
+
+// The constant a one-instruction MOVZ/MOVN or ORR-from-ZR writes, when
+// it is 2^32 - k with k an ADD/SUB immediate (imm12, optionally LSL
+// #12): the comparand check_cmp_cmn_w folds.
+static bool cwc_constant(uint32_t op, unsigned *out_rd, uint64_t *out_value)
+{
+    bool sf = (op >> 31) != 0;
+    uint64_t v;
+    if ((op & 0x1F800000u) == 0x12800000u) {
+        unsigned opc = (op >> 29) & 3u;
+        unsigned hw = (op >> 21) & 3u;
+        if ((opc != 0u && opc != 2u) || (!sf && hw >= 2u)) {
+            return false;
+        }
+        uint64_t imm = (uint64_t)((op >> 5) & 0xFFFFu) << (16u * hw);
+        v = opc == 2u ? imm : ~imm;
+    } else if ((op & 0x7F8003E0u) == 0x320003E0u) {
+        if (!sf && ((op >> 22) & 1u) != 0) {
+            return false;
+        }
+        if (!decode_bitmask_imm_value((op >> 22) & 1u, (op >> 16) & 0x3Fu,
+                                      (op >> 10) & 0x3Fu, sf ? 64u : 32u,
+                                      &v)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    if (!sf) {
+        v &= 0xFFFFFFFFu;
+    }
+    uint64_t top = (uint64_t)1 << 32;
+    if ((op & 0x1Fu) == 31u || v >= top || v < top - 0xFFF000u) {
+        return false;
+    }
+    uint64_t k = top - v;
+    if (k > 0xFFFu && ((k & 0xFFFu) != 0 || k > 0xFFF000u)) {
+        return false;
+    }
+    *out_rd = op & 0x1Fu;
+    *out_value = v;
+    return true;
+}
+
+// Detect MOV Xc, #(2^32 - k) ; CMP Xn, Xc with Xn's top half known
+// zero; see armlint.h. The finding waits for its proofs in
+// armlint_advance_pending_cwc.
+bool check_cmp_cmn_w(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out)
+{
+    (void)out;
+    if (insn->size != 4) {
+        state->cwc_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    if (state->cwc_active && offset == state->cwc_offset + 4u
+            && (op & 0xFFE0FC1Fu) == 0xEB00001Fu
+            && ((op >> 16) & 0x1Fu) == state->cwc_rd) {
+        unsigned n = (op >> 5) & 0x1Fu;
+        // Both operands below 2^32: Xn by the zero-extension facts,
+        // Xc by construction.
+        if (n != 31u && n != state->cwc_rd
+                && ((state->wzx_valid >> n) & 1u) != 0
+                && state->wzx_zero_from[n] <= 32u) {
+            uint64_t k = ((uint64_t)1 << 32) - state->cwc_value;
+            armlint_finding *f = &state->pending_cwc_finding;
+            f->name = "MOV + CMP of a 32-bit value against 2^32-k "
+                      "foldable to W-form CMN";
+            f->start_offset = state->cwc_offset;
+            f->insn_count = 2;
+            clear_finding_strings(f);
+            if (k <= 0xFFFu) {
+                snprintf(f->detail, sizeof(f->detail),
+                    "-> cmn w%u, #0x%" PRIx64 " (drop %s)", n, k,
+                    state->cwc_disasm);
+            } else {
+                snprintf(f->detail, sizeof(f->detail),
+                    "-> cmn w%u, #0x%" PRIx64 ", lsl #12 (drop %s)", n,
+                    k >> 12, state->cwc_disasm);
+            }
+            snprintf(f->lines[0], sizeof(f->lines[0]), "%s",
+                state->cwc_disasm);
+            snprintf(f->lines[1], sizeof(f->lines[1]), "%s %s",
+                insn->mnemonic, insn->op_str);
+            state->pending_cwc_active = true;
+            state->pending_cwc_flags_done = false;
+            state->pending_cwc_reg_done = false;
+            state->pending_cwc_reg = state->cwc_rd;
+            state->pending_cwc_window = LIVENESS_WINDOW;
+        }
+    }
+    unsigned rd;
+    uint64_t value;
+    state->cwc_active = cwc_constant(op, &rd, &value);
+    if (state->cwc_active) {
+        state->cwc_rd = rd;
+        state->cwc_value = value;
+        state->cwc_offset = offset;
+        snprintf(state->cwc_disasm, sizeof(state->cwc_disasm), "%s %s",
+            insn->mnemonic, insn->op_str);
+    }
+    return false;
+}
+
+// The flags half of check_cmp_cmn_w's proof, for one instruction: 1 when
+// the N and V the fold changes are dead from here, 0 when the scan goes
+// on, -1 when they may be read. Z and C are unchanged, so a reader whose
+// condition tests only them passes; a branch's taken edge must meet
+// dead flags at its target.
+static int cwc_flags_step(const armlint_state *state, uint32_t op,
+                          bool branch, int64_t target, bool conditional)
+{
+    unsigned cond = 16u;
+    bool rewrites = false;
+    if ((op & 0xFF000000u) == 0x54000000u) {
+        cond = op & 0xFu;                   // B.cond, BC.cond
+    } else if ((op & 0x3FE00800u) == 0x1A800000u
+            || (op & 0xFF200C00u) == 0x1E200C00u) {
+        cond = (op >> 12) & 0xFu;           // CSEL family, FCSEL
+    } else if ((op & 0x3FE00410u) == 0x3A400000u
+            || (op & 0xFF200C00u) == 0x1E200400u) {
+        cond = (op >> 12) & 0xFu;           // CCMP/CCMN, FCCMP/FCCMPE
+        rewrites = true;
+    }
+    if (cond < 16u) {
+        if ((cond_nzcv_reads(cond) & (NZCV_N | NZCV_V)) != 0) {
+            return -1;
+        }
+        if (rewrites) {
+            return 1;
+        }
+        if (branch && !nzcv_dead_at_target(state, target)) {
+            return -1;
+        }
+        return 0;
+    }
+    switch (classify_liveness(op)) {
+    case LIV_OVERWRITE:
+    case LIV_TERM_SAFE:
+        return 1;
+    case LIV_READ:
+        return -1;
+    case LIV_TERM_UNSAFE:
+        // CBZ/TBZ leave for a target but keep the flags; B leaves for
+        // good. BR and the rest go somewhere unknown.
+        if (!branch || !nzcv_dead_at_target(state, target)) {
+            return -1;
+        }
+        return conditional ? 0 : 1;
+    case LIV_UNKNOWN:
+        break;
+    }
+    return 0;
+}
+
+// The register half: the constant register must be dead on every path.
+static int cwc_reg_step(const armlint_state *state, const cs_insn *insn,
+                        uint32_t op, bool branch, int64_t target,
+                        bool conditional, unsigned reg)
+{
+    if (branch) {
+        // CBZ/CBNZ and TBZ/TBNZ read their Rt first.
+        if (((op & 0x7E000000u) == 0x34000000u
+                    || (op & 0x7E000000u) == 0x36000000u)
+                && (op & 0x1Fu) == reg) {
+            return -1;
+        }
+        if (!reg_dead_at_target(state, target, reg)) {
+            return -1;
+        }
+        return conditional ? 0 : 1;
+    }
+    switch (classify_reg_liveness(insn, (int)reg)) {
+    case LIV_OVERWRITE:
+        return 1;
+    case LIV_UNKNOWN:
+        return 0;
+    default:
+        return -1;      // a read, or a call, return or unknown transfer
+    }
+}
+
+bool armlint_advance_pending_cwc(armlint_state *state, const cs_insn *insn,
+                                 size_t offset, armlint_finding *out)
+{
+    if (!state->pending_cwc_active) {
+        return false;
+    }
+    if (insn->size != 4) {
+        state->pending_cwc_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    int64_t target = -1;
+    bool conditional = false;
+    bool branch = direct_branch_target(op, offset, &target, &conditional);
+    if (!state->pending_cwc_flags_done) {
+        int r = cwc_flags_step(state, op, branch, target, conditional);
+        if (r < 0) {
+            state->pending_cwc_active = false;
+            return false;
+        }
+        state->pending_cwc_flags_done = r > 0;
+    }
+    if (!state->pending_cwc_reg_done) {
+        int r = cwc_reg_step(state, insn, op, branch, target, conditional,
+                             state->pending_cwc_reg);
+        if (r < 0) {
+            state->pending_cwc_active = false;
+            return false;
+        }
+        state->pending_cwc_reg_done = r > 0;
+    }
+    if (state->pending_cwc_flags_done && state->pending_cwc_reg_done) {
+        state->pending_cwc_active = false;
+        *out = state->pending_cwc_finding;
+        return true;
+    }
+    if (--state->pending_cwc_window == 0) {
+        state->pending_cwc_active = false;
+    }
+    return false;
+}
+
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
 //   sf op 1 11010010 Rm cond 0 0 Rn 0 nzcv
 // Mask 0x3FE00C10 fixes S (bit 29), the class bits 28..21, the
@@ -19337,6 +19703,7 @@ const armlint_check_fn armlint_check_registry[] = {
     armlint_advance_pending_sgn,
     armlint_advance_pending_cbr,
     armlint_advance_pending_ccc,
+    armlint_advance_pending_cwc,
     armlint_advance_pending_fp,
     armlint_advance_pending_mz,
     armlint_advance_pending_bvs,
@@ -19388,6 +19755,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cmp_cset_sign,
     check_cmpbr_fold,
     check_ccmp_chain,
+    check_cmp_cmn_w,
     check_aut_ret,
     check_br_x30,
     check_branch_to_next,

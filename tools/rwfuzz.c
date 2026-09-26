@@ -36,6 +36,8 @@
 //          destination (and NZCV) already holds.
 //   dead   check_dead_write: delete the write whose value is overwritten
 //          before anything reads it.
+//   cmn    check_cmp_cmn_w: delete the MOV of 2^32 - k and turn the 64-bit
+//          CMP into the W-form CMN the finding renders.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -159,6 +161,7 @@ static uint32_t madd_w(unsigned d, unsigned n, unsigned m, unsigned a) { return 
 static uint32_t cmp_imm(bool x, bool cmn, unsigned n, unsigned i) { return (x ? 0x80000000u : 0) | (cmn ? 0x3100001Fu : 0x7100001Fu) | (i & 0xFFFu) << 10 | n << 5; }
 static uint32_t ccmp_imm(bool x, bool ccmn, unsigned n, unsigned i, unsigned nzcv, unsigned c) { return (x ? 0x80000000u : 0) | (ccmn ? 0x3A400800u : 0x7A400800u) | (i & 31u) << 16 | c << 12 | n << 5 | nzcv; }
 static uint32_t cmp_x(unsigned n, unsigned m) { return 0xEB00001Fu | m << 16 | n << 5; }
+static uint32_t cmn_w_imm(unsigned n, unsigned i, bool lsl12) { return 0x3100001Fu | (lsl12 ? 1u << 22 : 0) | (i & 0xFFFu) << 10 | n << 5; }
 static uint32_t tst_w_low(unsigned n, unsigned w) { return 0x7200001Fu | (w - 1u) << 10 | n << 5; }
 static uint32_t ldrb_w(unsigned t, unsigned i) { return 0x39400000u | (i & 0xFFFu) << 10 | REG_BUF << 5 | t; }
 static uint32_t ldrh_w(unsigned t, unsigned i) { return 0x79400000u | (i & 0xFFFu) << 10 | REG_BUF << 5 | t; }
@@ -493,6 +496,43 @@ static void plant_dead_write(void)
     case 2: push(add_x(r, c, d)); break;       // may read r
     case 3: push(eor_w(r, c, d)); break;       // may read r
     default: push(ldadd_x(c, r)); break;       // reads c, loads r
+    }
+}
+
+// cmn: a producer of r (zero-extending, now and then not), a MOV of
+// 2^32 - k into c, CMP Xr, Xc, a reader of any condition, then c and the
+// flags overwritten or not.
+static void plant_cmp_cmn(void)
+{
+    unsigned r = body_reg(), c = body_reg(), a = body_reg();
+    if (c == r) {
+        c = (r + 1u) % 8u;
+    }
+    switch (rr(6)) {
+    case 0: push(mov_w(r, a)); break;
+    case 1: push(ubfm_x(r, a, 32, 63)); break;           // lsr x, #32
+    case 2: push(and_x_low(r, a, 32)); break;
+    case 3: push(ldr_w(r, rr(64))); break;
+    case 4: push(add_w(r, a, body_reg())); break;
+    default: push(add_x(r, a, body_reg())); break;       // top unknown
+    }
+    switch (rr(4)) {
+    case 0: push(movz_w(c, 0xFFFFu, 1)); break;          // k = 0x10000
+    case 1: push(movn_w(c, 4096u)); break;               // k = 4097: no
+    default: push(movn_w(c, rr(40))); break;             // k = 1..40
+    }
+    push(cmp_x(r, c));
+    if (rr(2) == 0) {
+        push_transfer(SLOT_READER);
+    } else {
+        push(rr(2) == 0 ? cset_w(body_reg(), rr(14))
+                        : csel_x(body_reg(), body_reg(), body_reg(), rr(14)));
+    }
+    if (rr(3) != 0) {
+        push(movz_x(c, rr(0x10000), 0));
+    }
+    if (rr(3) != 0) {
+        push(cmp_x(body_reg(), body_reg()));
     }
 }
 
@@ -1049,6 +1089,63 @@ static bool dead_control(int i, uint32_t *alt)
     return false;
 }
 
+// cmn: "-> cmn wN, #0xK[, lsl #12] (drop ...)": NOP the MOV, CMN the CMP.
+static bool cmn_apply(const hit_t *h, uint32_t *code)
+{
+    if (h->count != 2u || !in_body(h->start, h->start + 1u)) {
+        return false;
+    }
+    unsigned n;
+    unsigned long long k;
+    if (sscanf(h->detail, "-> cmn w%u, #0x%llx", &n, &k) != 2 || k > 0xFFFu
+            || n != ((code[h->start + 1u] >> 5) & 31u)) {
+        return false;
+    }
+    code[h->start] = NOP;
+    code[h->start + 1u] = cmn_w_imm(n, (unsigned)k,
+                                    strstr(h->detail, "lsl #12") != NULL);
+    return true;
+}
+
+static size_t cmn_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+static bool cmn_special(const hit_t *h)
+{
+    return (prog[h->start + 2u] & 0xFF000010u) == 0x54000000u;
+}
+
+// Control: fold an unflagged MOV of 2^32 - k (k encodable) + CMP Xr, Xc.
+static bool cmn_control(int i, uint32_t *alt)
+{
+    if (i + 1 >= epi_start) {
+        return false;
+    }
+    uint32_t mov = prog[i], cmp = prog[i + 1];
+    unsigned c = mov & 31u;
+    uint64_t v;
+    if ((mov & 0xFFE00000u) == 0x12800000u) {            // movn w, #imm
+        v = ~((uint64_t)((mov >> 5) & 0xFFFFu)) & 0xFFFFFFFFu;
+    } else if (mov == movz_w(c, 0xFFFFu, 1)) {
+        v = 0xFFFF0000u;
+    } else {
+        return false;
+    }
+    uint64_t k = (1ull << 32) - v;
+    bool lsl12 = k > 0xFFFu;
+    if ((lsl12 && ((k & 0xFFFu) != 0 || k > 0xFFF000u))
+            || (cmp & 0xFFE0FC1Fu) != 0xEB00001Fu
+            || ((cmp >> 16) & 31u) != c) {
+        return false;
+    }
+    unsigned n = (cmp >> 5) & 31u;
+    alt[i] = NOP;
+    alt[i + 1] = cmn_w_imm(n, (unsigned)(lsl12 ? k >> 12 : k), lsl12);
+    return true;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -1077,6 +1174,10 @@ static const mode_t_ modes[] = {
     { "dead", { "register write overwritten unread", NULL },
       "across a gap", plant_dead_write, dead_apply, dead_slot, dead_special,
       dead_control },
+    { "cmn", { "MOV + CMP of a 32-bit value against 2^32-k foldable to "
+               "W-form CMN", NULL },
+      "with a branch reader", plant_cmp_cmn, cmn_apply, cmn_slot,
+      cmn_special, cmn_control },
 };
 
 static bool wanted(const char *name)
@@ -1092,7 +1193,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn\n");
 }
 
 int main(int argc, char **argv)

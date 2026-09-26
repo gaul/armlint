@@ -9035,6 +9035,74 @@ static void test_dead_write(void)
     }
 }
 
+static void test_cmp_cmn_w(void)
+{
+    const char *name = "MOV + CMP of a 32-bit value against 2^32-k "
+                       "foldable to W-form CMN";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // lsr x1, x0, #32 ; mov w8, #-1 ; cmp x1, x8 ; b.ne L ;
+        // mov x8, #0 ; cmp x2, #3 ; L: mov x8, #1 ; cmn x2, #3 -- the
+        // constant and the flags die on both edges.
+        { { 0xD360FC01u, 0x12800008u, 0xEB08003Fu, 0x54000061u, 0xD2800008u,
+            0xF1000C5Fu, 0xD2800028u, 0xB1000C5Fu }, 8, 1,
+          "-> cmn w1, #0x1 (drop mov w8, #-1)" },
+        // A reader of N or V (b.lt) sees what the fold changes.
+        { { 0xD360FC01u, 0x12800008u, 0xEB08003Fu, 0x5400006Bu, 0xD2800008u,
+            0xF1000C5Fu, 0xD2800028u, 0xB1000C5Fu }, 8, 0, NULL },
+        // The constant read on the fall-through, or at the target.
+        { { 0xD360FC01u, 0x12800008u, 0xEB08003Fu, 0x54000061u, 0x91000509u,
+            0xF1000C5Fu, 0xD2800028u, 0xB1000C5Fu }, 8, 0, NULL },
+        { { 0xD360FC01u, 0x12800008u, 0xEB08003Fu, 0x54000061u, 0xD2800008u,
+            0xF1000C5Fu, 0x91000503u, 0xB1000C5Fu }, 8, 0, NULL },
+        // The taken edge reaches a b.lt before the flags die.
+        { { 0xD360FC01u, 0x12800008u, 0xEB08003Fu, 0x54000061u, 0xD2800008u,
+            0xF1000C5Fu, 0xD2800028u, 0x5400004Bu }, 8, 0, NULL },
+        // x1's top half unknown.
+        { { 0x12800008u, 0xEB08003Fu, 0x54000061u, 0xD2800008u, 0xF1000C5Fu,
+            0xD2800028u, 0xB1000C5Fu }, 7, 0, NULL },
+        // k = 4097 does not encode; k = 0x10000 does, shifted.
+        { { 0xD360FC01u, 0x12820008u, 0xEB08003Fu, 0x54000061u, 0xD2800008u,
+            0xF1000C5Fu, 0xD2800028u, 0xB1000C5Fu }, 8, 0, NULL },
+        { { 0xD360FC01u, 0x52BFFFE8u, 0xEB08003Fu, 0x54000061u, 0xD2800008u,
+            0xF1000C5Fu, 0xD2800028u, 0xB1000C5Fu }, 8, 1, NULL },
+        // A W copy zero-extends; HS reads C, which the fold keeps:
+        // mov w1, w0 ; mov w9, #-2 ; cmp x1, x9 ; cset w0, hs ; ...
+        { { 0x2A0003E1u, 0x12800029u, 0xEB09003Fu, 0x1A9F37E0u, 0xD2800009u,
+            0xF1000C5Fu }, 6, 1, "-> cmn w1, #0x2 (drop mov w9, #-2)" },
+        // A call before the constant dies may read it.
+        { { 0xD360FC01u, 0x12800008u, 0xEB08003Fu, 0x54000061u, 0x94000000u,
+            0xF1000C5Fu, 0xD2800028u, 0xB1000C5Fu }, 8, 0, NULL },
+        // Not adjacent.
+        { { 0xD360FC01u, 0x12800008u, 0xD503201Fu, 0xEB08003Fu, 0x54000061u,
+            0xD2800008u, 0xF1000C5Fu, 0xD2800028u }, 8, 0, NULL },
+        // An X-form ORR constant, an EQ select, a load killing the
+        // constant and a CCMP on NE rewriting the flags.
+        { { 0xD360FC01u, 0xB2407FE8u, 0xEB08003Fu, 0x9A830040u, 0xF94000A8u,
+            0xFA431840u }, 6, 1, NULL },
+        // CBZ leaves for a target where both die too.
+        { { 0xD360FC01u, 0x12800008u, 0xEB08003Fu, 0xB4000062u, 0xD2800008u,
+            0xF1000C5Fu, 0xF9400088u, 0xF100105Fu }, 8, 1, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, name, detail,
+                                sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "cmp_cmn_w case %zu: %d findings, detail "
+                    "\"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
 static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
@@ -16592,13 +16660,13 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
     // the NZCV side: it over-reports (5.x puts x16 in PACIA1716's
     // writes, 6 puts x1 in CAS's), and a missed kill is a false
     // negative rather than a wrong finding.
-    // Three documented Capstone 5 over-reports, the register-side
+    // Four documented Capstone 5 over-reports, the register-side
     // analogue of the CBZ/TBZ noise above. In each the instruction's
     // DESTINATION shows up in the read set although the architecture
     // says it is written and not read, so armlint is the correct party
     // and the oracle is skipped for that one register rather than the
     // classifier being made conservative. The exhaustive sweep found
-    // all three; between them they account for every violation left in
+    // all four; between them they account for every violation left in
     // the 2^32 space once the real defect was fixed.
     //
     //   * The bitfield class. Capstone 5 marks the whole class R+W,
@@ -16610,15 +16678,20 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
     //     returns it with the low half zeroed.
     //   * SYSL, whose Xt receives the system instruction's result.
     //     5.x flags the operand RW, which lands Xt in the read set.
+    //   * The 32-bit ADDS (immediate), `adds w1, w0, #1`: 5.x flags Wd
+    //     read-only and leaves it out of the write set too (the X form
+    //     and SUBS are right). classify_reg_liveness, built on those
+    //     flags, inherits a missed kill; the word classifier decodes
+    //     the overwrite, which is what the sweep found.
     //
-    // All three are 5.x-only, so the exemption compiles away under 6
+    // All four are 5.x-only, so the exemption compiles away under 6
     // and the oracle runs there with no register-side indulgences:
     // 6 splits the bitfield operands and flags PACGA correctly since
     // Alpha10, and reports SYSL's Xt as the pure write it is since
     // upstream aa91e738 (through Alpha10 it was a flagged read), which
-    // 6.0.0-Alpha11, the CI pin, includes. A regression in any of the
-    // three now fails the sweep loudly instead of being silently
-    // excused.
+    // 6.0.0-Alpha11, the CI pin, includes; Alpha11 flags ADDS right as
+    // well. A regression in any of the four now fails the sweep loudly
+    // instead of being silently excused.
     // Scope: the SVE and SME vector spaces are excluded. armlint models
     // neither, and Capstone 5 -- the version it ships against -- cannot
     // decode most of them, so its driver skips those words as data and
@@ -16645,7 +16718,8 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
         ((word & 0x1F800000u) == 0x13000000u
             && ((word >> 29) & 0x3u) != 1u)         // SBFM/UBFM, not BFM
         || (word & 0xFFE0FC00u) == 0x9AC03000u      // PACGA
-        || (word & 0xFFF80000u) == 0xD5280000u;     // SYSL
+        || (word & 0xFFF80000u) == 0xD5280000u      // SYSL
+        || (word & 0xFF800000u) == 0x31000000u;     // ADDS Wd, #imm
 #endif
     // Capstone 6 derives one implicit read from insn->alias_id: the RET
     // alias contributes x30. Through 6.0.0-Alpha10 map_set_alias_id
@@ -16685,13 +16759,51 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
         }
 #endif
         liveness_t rl = classify_reg_liveness(insn, reg);
-        if (rl == LIV_READ || rl == LIV_TERM_UNSAFE) {
+        if (rl != LIV_READ && rl != LIV_TERM_UNSAFE) {
+            fprintf(stderr, "reg liveness cross-check failed: %08x  %s %s  "
+                    "capstone reads x%d, classify_reg_liveness=%d\n",
+                    word, insn->mnemonic, insn->op_str, reg, (int)rl);
+            bad = true;
+        }
+        liveness_t wl = classify_word_reg_liveness(word, (unsigned)reg);
+        if (wl != LIV_READ) {
+            fprintf(stderr, "word reg liveness cross-check failed: %08x  "
+                    "%s %s  capstone reads x%d, "
+                    "classify_word_reg_liveness=%d\n",
+                    word, insn->mnemonic, insn->op_str, reg, (int)wl);
+            bad = true;
+        }
+    }
+    // W) The word-level classifier's kills, held to Capstone's write
+    //    set: unlike classify_reg_liveness, which takes Capstone's own
+    //    operands, it has no other check that a register it calls
+    //    overwritten is written at all. Only the Rd/Rt and Rt2 fields
+    //    can carry one of its kills.
+    unsigned fields[2] = { word & 0x1Fu, (word >> 10) & 0x1Fu };
+    for (unsigned f = 0; f < 2; f++) {
+        unsigned reg = fields[f];
+        if (reg == 31u || (f == 1u && reg == fields[0])
+                || classify_word_reg_liveness(word, reg) != LIV_OVERWRITE) {
             continue;
         }
-        fprintf(stderr, "reg liveness cross-check failed: %08x  %s %s  "
-                "capstone reads x%d, classify_reg_liveness=%d\n",
-                word, insn->mnemonic, insn->op_str, reg, (int)rl);
-        bad = true;
+#if CS_API_MAJOR < 6
+        if (over_reports_dest && reg == rd) {
+            continue;
+        }
+#endif
+        bool written = false;
+        for (uint8_t i = 0; i < nwrite; i++) {
+            if (arm64_gpr_num(regs_write[i]) == (int)reg) {
+                written = true;
+            }
+        }
+        if (!written) {
+            fprintf(stderr, "word reg liveness cross-check failed: %08x  "
+                    "%s %s  classify_word_reg_liveness kills x%u, "
+                    "capstone writes no such register\n",
+                    word, insn->mnemonic, insn->op_str, reg);
+            bad = true;
+        }
     }
     return bad ? 1 : 0;
 }
@@ -17020,6 +17132,63 @@ static void test_reg_liveness_matches_capstone(void)
         if (got != cases[i].want) {
             fprintf(stderr, "classify_reg_liveness(%08x [%s], x%d) = %d, "
                     "want %d\n", cases[i].word, cases[i].name,
+                    cases[i].reg, (int)got, (int)cases[i].want);
+            assert(0);
+        }
+        assert(liveness_check_word(g_handle, insn, cases[i].word) == 0);
+    }
+
+    cs_free(insn, 1);
+}
+
+// classify_word_reg_liveness, the undecoded twin the branch-target
+// scans use. Each case is asserted directly and through
+// liveness_check_word, which holds the word classifier to Capstone's
+// read and write sets; the exhaustive sweep generalizes the second.
+static void test_word_reg_liveness_matches_capstone(void)
+{
+    static const struct {
+        uint32_t word; unsigned reg; liveness_t want; const char *name;
+    } cases[] = {
+        // Loads kill their destinations, pairs both, and read their
+        // bases and indices, written-back bases included.
+        { 0xF9400788u, 8, LIV_OVERWRITE, "ldr x8, [x28, #8]" },
+        { 0xF9400788u, 28, LIV_READ, "ldr x8, [x28, #8] (base)" },
+        { 0xF9400108u, 8, LIV_READ, "ldr x8, [x8]" },
+        { 0xA9402428u, 9, LIV_OVERWRITE, "ldp x8, x9, [x1] (Rt2)" },
+        { 0xF8408428u, 1, LIV_READ, "ldr x8, [x1], #8 (base)" },
+        { 0xB8687820u, 8, LIV_READ, "ldr w0, [x1, x8, lsl #2] (index)" },
+        { 0xB9800028u, 8, LIV_OVERWRITE, "ldrsw x8, [x1]" },
+        { 0x385FF028u, 8, LIV_OVERWRITE, "ldurb w8, [x1, #-1]" },
+        // Stores read what they store.
+        { 0xF9000028u, 8, LIV_READ, "str x8, [x1]" },
+        { 0xA9BF27E8u, 9, LIV_READ, "stp x8, x9, [sp, #-16]! (Rt2)" },
+        // The Rt field of a prefetch or a SIMD&FP transfer names no GPR.
+        { 0xF9800020u, 0, LIV_UNKNOWN, "prfm pldl1keep, [x1]" },
+        { 0x3DC00020u, 0, LIV_UNKNOWN, "ldr q0, [x1]" },
+        { 0x3DC00020u, 1, LIV_READ, "ldr q0, [x1] (base)" },
+        { 0x6D400440u, 1, LIV_UNKNOWN, "ldp d0, d1, [x2]" },
+        // Data processing, as value numbering decodes it.
+        { 0xF2800028u, 8, LIV_READ, "movk x8, #1" },
+        { 0x91000528u, 8, LIV_OVERWRITE, "add x8, x9, #1" },
+        { 0x9B0A2D28u, 11, LIV_READ, "madd x8, x9, x10, x11 (Ra)" },
+        { 0xD503201Fu, 8, LIV_UNKNOWN, "nop" },
+        // Unmodelled ends the scan, a write among them.
+        { 0x14000000u, 8, LIV_READ, "b ." },
+        { 0xC8DFFC28u, 8, LIV_READ, "ldar x8, [x1]" },
+        { 0x58000008u, 8, LIV_READ, "ldr x8, #0" },
+        { 0xF8200028u, 8, LIV_READ, "ldadd x0, x8, [x1]" },
+    };
+
+    cs_insn *insn = cs_malloc(g_handle);
+    assert(insn != NULL);
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        liveness_t got = classify_word_reg_liveness(cases[i].word,
+                                                    cases[i].reg);
+        if (got != cases[i].want) {
+            fprintf(stderr, "classify_word_reg_liveness(%08x [%s], x%u) = "
+                    "%d, want %d\n", cases[i].word, cases[i].name,
                     cases[i].reg, (int)got, (int)cases[i].want);
             assert(0);
         }
@@ -17377,6 +17546,7 @@ int main(void)
     test_sp_mov_overwritten();
     test_value_recompute();
     test_dead_write();
+    test_cmp_cmn_w();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();
@@ -17428,6 +17598,7 @@ int main(void)
     test_central_side_entry_gate();
     test_liveness_matches_capstone();
     test_reg_liveness_matches_capstone();
+    test_word_reg_liveness_matches_capstone();
     test_mops_flag_liveness();
     test_census();
     test_census_coverage();

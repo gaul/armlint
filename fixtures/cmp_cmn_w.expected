@@ -1,0 +1,34 @@
+MOV + CMP of a 32-bit value against 2^32-k foldable to W-form CMN at offset: 0x4 <_main+0x4>: -> cmn w1, #0x1 (drop mov w8, #-1) (2 instructions)
+  mov w8, #-1
+  cmp x1, x8
+
+register write overwritten unread at offset: 0x10 <_main+0x10>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #0
+  ... 1 instruction ...
+  mov x8, #1
+
+compare whose flags are overwritten unread at offset: 0x14 <_main+0x14>: -> delete; NZCV overwritten unread by cmn x2, #3 (1 instructions)
+  cmp x2, #3
+
+MOV + CMP of a 32-bit value against 2^32-k foldable to W-form CMN at offset: 0x28 <_main+0x28>: -> cmn w1, #0x2 (drop mov w9, #-2) (2 instructions)
+  mov w9, #-2
+  cmp x1, x9
+
+MOV + CMP of a 32-bit value against 2^32-k foldable to W-form CMN at offset: 0x44 <_main+0x44>: -> cmn w1, #0x10, lsl #12 (drop mov w8, #-0x10000) (2 instructions)
+  mov w8, #-0x10000
+  cmp x1, x8
+
+low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x5c <_main+0x5c>: -> mov w1, w0 (1 instructions)
+  and x1, x0, #0xffffffff
+
+MOV + CMP of a 32-bit value against 2^32-k foldable to W-form CMN at offset: 0x60 <_main+0x60>: -> cmn w1, #0x1 (drop mov x8, #0xffffffff) (2 instructions)
+  mov x8, #0xffffffff
+  cmp x1, x8
+
+Optimization opportunities by type:
+       4  MOV + CMP of a 32-bit value against 2^32-k foldable to W-form CMN
+       1  compare whose flags are overwritten unread
+       1  low-32 zero-extension foldable to MOV Wd, Wn
+       1  register write overwritten unread
+
+7 optimization opportunities in 58 instructions

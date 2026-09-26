@@ -99,6 +99,19 @@ liveness_t classify_liveness(uint32_t op);
 // `reg` is a 0..30 GPR encoding number, as returned by arm64_gpr_num.
 liveness_t classify_reg_liveness(const cs_insn *insn, int reg);
 
+// The same question from the encoding alone, for a word no one has
+// decoded: the instructions at a branch target, which a scan in the
+// straight-line stream reaches only as buffer words. Exact for the
+// data-processing classes value numbering decodes and for the common
+// loads and stores (unsigned offset, unscaled, pre/post-index, register
+// offset, the pairs): LIV_READ for a read, LIV_OVERWRITE for a write
+// with nothing read, LIV_UNKNOWN for neither. Everything else, NOP
+// aside, answers LIV_READ -- unmodelled ends the scan unproven. The
+// exhaustive sweep holds both directions to Capstone: a register it
+// reads must classify LIV_READ, and one classified LIV_OVERWRITE must
+// be in its write set.
+liveness_t classify_word_reg_liveness(uint32_t op, unsigned reg);
+
 // Map a Capstone AArch64 register id to its 0..30 GPR encoding number,
 // or -1 for the zero register, SP, and every non-GPR. Exposed so the
 // cross-check can walk Capstone's register lists in armlint's own
@@ -1913,6 +1926,47 @@ bool check_ccmp_chain(armlint_state *state, const cs_insn *insn,
 // armlint_advance_pending_cbr.
 bool armlint_advance_pending_ccc(armlint_state *state,
                                  const cs_insn *insn,
+                                 size_t offset, armlint_finding *out);
+
+// Detect a 64-bit compare of a value whose top half is known zero
+// against a constant just below 2^32, materialized by the instruction
+// before it -- `(uint64_t)x == UINT32_MAX` and its neighbours:
+//     lsr  x1, x0, #32
+//     mov  w8, #-1           ; x8 = 0xffffffff
+//     cmp  x1, x8            -> cmn w1, #1 (drop the MOV)
+// With both operands below 2^32, Xn - C at 64 bits and Wn + k at 32
+// (k = 2^32 - C) agree on Z (Xn == C) and on C (no borrow iff Xn >= C),
+// so the W-form CMN replaces the compare and the MOV deletes; N and V
+// differ. The producer is a lone MOVZ/MOVN or ORR-from-ZR of C (W or X
+// form) and the CMP must follow it directly; k must encode as an
+// ADD/SUB immediate (imm12, or imm12 LSL #12). Xn's top half comes from
+// check_redundant_zext's per-register facts -- a W-form write, a
+// narrow or W load, an LSR/UBFX by at least 32, a low mask, across any
+// gap those facts survive.
+//
+// The rewrite changes N and V, and it deletes the MOV, so two proofs
+// defer the finding (armlint_advance_pending_cwc), both on every path
+// out of the compare. The flags: every reader must test only Z and C
+// (EQ/NE, HS/LO, HI/LS); a conditional compare with such a condition,
+// a full flag write or a PCS boundary (BL/BLR/RET) ends the proof, and
+// a branch's taken edge must meet flags that die at its target
+// (nzcv_dead_at_target). The constant register: dead after the CMP on
+// the fall-through (the register-liveness scan) and at every branch
+// target, by reg_dead_at_target -- the register-side twin of the NZCV
+// target scan, which walks the undecoded target through
+// classify_word_reg_liveness. A call is a read here (x8, the usual
+// constant register, is the indirect-result register).
+//
+// Constants reused by a second compare are not folded (the MOV stays
+// live); the finding spans MOV and CMP, so the central gate refuses a
+// branch onto the compare. Reported as "MOV + CMP of a 32-bit value
+// against 2^32-k foldable to W-form CMN".
+bool check_cmp_cmn_w(armlint_state *state, const cs_insn *insn,
+                     size_t offset, armlint_finding *out);
+
+// Advance check_cmp_cmn_w's deferred proofs by one instruction;
+// registered with the other advancers, ahead of the checks.
+bool armlint_advance_pending_cwc(armlint_state *state, const cs_insn *insn,
                                  size_t offset, armlint_finding *out);
 
 // Three-operand SHA3 logic synthesis (gated on ARMLINT_FEATURE_SHA3;

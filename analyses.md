@@ -2355,6 +2355,95 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   a sparser equivalence sample, or rendering an inverted alias's
   condition uninverted fail within 3,000 programs.
 
+## MOV + CMP of a 32-bit value against 2^32-k foldable to W-form CMN
+
+* `lsr x1, x0, #32 ; mov w8, #-1 ; cmp x1, x8 ; b.ne L` compares a
+  value below 2^32 with 0xffffffff at 64 bits, where 2^32 - 1 is no
+  ADD/SUB immediate, so the constant takes a register and an
+  instruction. At 32 bits it is -1, and `lsr x1, x0, #32 ; cmn w1,
+  #1 ; b.ne L` does the same. It is .NET's CastEquality pattern
+  (`(ulong)(uint)value == uint.MaxValue`), and LLVM leaves it too:
+  librustc_driver carries 1,002, nearly all the high half of a 64-bit
+  pair -- a `rustc_data_structures::sharded` query-cache lookup's
+  result, or one just assembled with `orr x0, x9, x8, lsl #32` --
+  tested against 0xffffffff. clang has five, one inlined
+  `std::optional<unsigned>` unpacking (`mov w10, w8 ; ... ; mov w8,
+  #-1 ; cmp x10, x8 ; csel x8, xzr, x9, eq`) in `llvm::Attribute`'s
+  `getAllocSizeArgs` and its callers.
+* **The equivalence.** With both operands below 2^32, `Xn - C` is zero
+  exactly when `Wn + k` wraps to zero, and borrows exactly when `Wn +
+  k` does not carry out of bit 31: the X-form compare and the W-form
+  one agree on Z and C. They do not agree on N and V -- the 64-bit
+  difference is negative whenever `Xn < C` and never overflows, while
+  the 32-bit sum's follow its bit 31 -- so every reader must test only
+  Z and C: EQ, NE, HS, LO, HI, LS.
+* **The shape.** A one-instruction MOVZ/MOVN or ORR-from-ZR, either
+  width, writing `C = 2^32 - k` with `k` an ADD/SUB immediate (imm12,
+  or imm12 LSL #12: `C >= 2^32 - 0xfff000`), and directly after it
+  `CMP Xn, Xc` with the constant as the subtrahend. `Xn`'s top half
+  must be known zero -- the per-register facts the [redundant
+  zero-extension check](#redundant-zero-extension-after-a-producer-that-already-zeroed-those-bits)
+  carries across gaps (a W write, `lsr #32`, a zero-extending load).
+* **The proofs,** deferred to the instructions after the compare, and
+  needed on every path out of it. The flags: a condition reader
+  testing only Z and C passes, a CCMP/FCCMP under such a condition
+  rewrites all four and ends the proof, a call, a return or an
+  overwrite ends it too, and a B.cond, CBZ/TBZ or B must meet dead
+  flags at its target, by the target scan the
+  [CMPBR fold](#compare-and-branch-synthesis-feature-gated--m-cmpbr)
+  uses. The constant register, which the fold deletes the MOV of: the
+  register-liveness scan on the fall-through, and at each direct
+  branch's target a word-level scan, `classify_word_reg_liveness`,
+  exact for the data-processing classes value numbering decodes and
+  for the common loads and stores (unsigned offset, unscaled,
+  pre/post-index, register offset, the pairs), which ends unproven at
+  anything else. An indirect branch, a call or a return with that
+  proof open leaves it unproven. The finding spans the MOV and the
+  CMP, so a branch into the CMP -- a path where `Xc` holds something
+  else -- rejects it at the side-entry gate.
+* **The word-level scan is swept.** It classifies buffer words no
+  instruction decode has seen, so the exhaustive 2^32 register sweep
+  now holds it to Capstone in both directions: a register Capstone
+  reads must classify as a read, and one the scan calls overwritten
+  must be in Capstone's write set. What that found was an oracle bug:
+  Capstone 5 flags the 32-bit ADDS (immediate) as reading `Wd` and
+  not writing it, 7.9M words (the X form, SUBS and Capstone 6 are
+  right), now the sweep's fourth documented 5.x over-report. Both
+  versions sweep with 0 violations. The Capstone-based classifier the
+  other scans use inherits the 5.x flag as a missed kill, which is
+  conservative.
+* **Corpus, 2026-09-26** (166.6M instructions): **1,007** findings, no
+  other check moved -- librustc_driver 1,002, clang 5; no measurable
+  scan time. Of the 2,760 rustc MOV + CMP pairs, 1,507 compare a
+  register whose top half is not known zero; of the 1,253 left, 135
+  lose the flags proof at a branch target, 73 the constant's (31 of
+  those scans stop at a call, 25 at a return, 17 at another branch),
+  35 read the constant again -- one MOV feeding two compares, which a
+  multi-use fold could take -- 7 meet a call, a return or an indirect
+  branch first, and one outlasts the window. clang: 336 pairs, 45
+  with the fact, of which 31 lose the constant's proof at a target
+  and 7 the flags'; uutils 23, 13 with the fact, none proven (9 and
+  4); go (17), libcrypto (3) and
+  JavaScriptCore (70) never have the fact, and the other JIT dumps
+  have no such pair. The ranking scan had expected 84 of its 1,364
+  candidates to prove, having no register scan at branch targets.
+* **Verified by execution** (`tools/rwfuzz cmn`): 100,000 random
+  programs with planted pairs -- `k` from 1 to 40, 0x10000 (LSL #12)
+  and the unencodable 4097, `Xn` from a zero-extending producer or an
+  X-form ADD, a B.cond, CSET or CSEL reader under any condition, and
+  the constant and the flags overwritten after or not. Each of the
+  25,255 rewrites armlint reported (4,960 with a branch reader),
+  applied as rendered, ran natively against the original on six
+  random states with identical `x0..x7` and NZCV. Applying it to the
+  195,356 pairs armlint refused changed the result 110,664 times, and
+  builds without the top-half fact, the N/V reader test, the flags
+  target scan, the register target scan, or the constant's reads each
+  mismatch within 5,000 programs (61, 488, 5, 281, 67). The load/store
+  half of the word scan cannot run that way -- an address built from
+  a constant near 2^32 faults -- so a build that drops its base and
+  index reads passes the fuzzer and fails the unit table and the
+  sweep instead.
+
 ## MOV #1 + CSEL foldable to CSINC/CSET
 
 * `mov w8, #1 ; csel wd, w8, wn, cc` instead of

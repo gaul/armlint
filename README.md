@@ -156,6 +156,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #INT_MIN` or `#INT_MAX` + `cmp` + `b.eq`/`b.ne`](analyses.md#mov--cmp--beqne-against-int_minint_max-foldable-to-bvsbvc) | `cmp xzr, Xn` or `cmn Xn, #1` + `b.vs`/`b.vc` |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` (sign-crossed for `#-C`) |
 | [`cmp`/`cmn` + `ccmp`/`ccmn` on one register + `b.cond`/`csel`, one compare deciding it](analyses.md#cmp--ccmp-chain-decidable-by-one-compare) | that `cmp`/`cmn` (or `cbz`/`cbnz`) with the reader's condition adjusted |
+| [`mov #(2^32-k)` + `cmp Xn` of a zero-extended value, read only through Z and C](analyses.md#mov--cmp-of-a-32-bit-value-against-232-k-foldable-to-w-form-cmn) | `cmn Wn, #k` |
 | [`mov #1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinc Rd, Rn, wzr, cc` (`cset` when the other operand is ZR) |
 | [`mov #-1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinv Rd, Rn, wzr, cc` (`csetm` when the other operand is ZR) |
 | [`mov #C` + `lsl`/`lsr`/`asr`/`ror` (register amount)](analyses.md#mov--variable-shift-foldable-to-immediate-shift) | immediate-form shift, amount `C mod 32`/`64` |
@@ -651,9 +652,9 @@ backlog -- and one that checks the checks -- built separately with
   difference is a soundness bug. A control arm applies the rewrite
   where armlint refused to, so a harness that stopped seeing
   differences would show it. Modes cover the redundant
-  zero-extension, shift + mask and CMP + CCMP chain checks
-  (`tools/rwfuzz -n 100000 zext`); a new rewrite gets a mode of its
-  own. Needs an AArch64 host, since the programs run natively, and
+  zero-extension, shift + mask, CMP + CCMP chain, value-numbering,
+  dead-write and CMP-to-CMN checks (`tools/rwfuzz -n 100000 zext`);
+  a new rewrite gets a mode of its own. Needs an AArch64 host, since the programs run natively, and
   links `libarmlint.a`.
 
 The workflow that produced several of the current checks: compile a
