@@ -1,0 +1,8 @@
+fat_slices.o: scanning ARM64 slice 0 (arm64), skipping 1 (arm64e); -s all scans every slice
+redundant MOV to self at offset: 0x4 <_main+0x4>: mov x0, x0 is a no-op (1 instructions)
+  mov x0, x0
+
+Optimization opportunities by type:
+       1  redundant MOV to self
+
+1 optimization opportunities in 4 instructions

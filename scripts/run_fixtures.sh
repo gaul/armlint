@@ -118,6 +118,35 @@ for s in "$ROOT"/fixtures/*.s; do
         fi
     fi
 
+    # A sidecar fixtures/<name>.fat lists Mach-O arches ("arm64
+    # arm64e"): the fixture is assembled once per arch and the objects
+    # joined by lipo into one universal object, to exercise the
+    # driver's choice of slice. Darwin only, like .arch.
+    fat_arches=()
+    if [ -f "$ROOT/fixtures/$name.fat" ]; then
+        read -r -a fat_arches < "$ROOT/fixtures/$name.fat"
+        if [ "$(uname -s)" != "Darwin" ]; then
+            printf "  skip    %s  (universal %s: Mach-O slice test, Darwin only)\n" \
+                "$name" "${fat_arches[*]}"
+            SKIP=$((SKIP + 1))
+            continue
+        fi
+        fat_missing=""
+        for fx_arch in "${fat_arches[@]}"; do
+            if ! clang -arch "$fx_arch" -c -o "$PROBE/archprobe.o" \
+                    "$PROBE/probe.s" >/dev/null 2>&1; then
+                fat_missing="$fx_arch"
+                break
+            fi
+        done
+        if [ -n "$fat_missing" ]; then
+            printf "  skip    %s  (clang -arch %s unavailable)\n" \
+                "$name" "$fat_missing"
+            SKIP=$((SKIP + 1))
+            continue
+        fi
+    fi
+
     # The inverse pin: a sidecar fixtures/<name>.format of "elf"
     # marks a fixture whose source uses ELF-only section syntax
     # (.section .plt,"ax",@progbits) that the Mach-O assembler
@@ -143,7 +172,25 @@ for s in "$ROOT"/fixtures/*.s; do
     # here killed the script mid-loop, with no FAIL line and no
     # summary, so a single bad fixture silently hid every fixture
     # sorting after it. Report it as a failure and keep going.
-    if ! asm_err="$(clang "${fixture_cc_flags[@]}" -c -o "$obj" "$s" 2>&1)"; then
+    if [ "${#fat_arches[@]}" -gt 0 ]; then
+        fat_parts=()
+        asm_err=""
+        for fx_arch in "${fat_arches[@]}"; do
+            part="$PROBE/$name.$fx_arch.o"
+            if ! asm_err="$(clang -arch "$fx_arch" -c -o "$part" "$s" 2>&1)"; then
+                break
+            fi
+            fat_parts+=("$part")
+        done
+        if [ "${#fat_parts[@]}" -ne "${#fat_arches[@]}" ] \
+                || ! asm_err="$(lipo -create "${fat_parts[@]}" -output "$obj" 2>&1)"; then
+            printf "  FAIL    %s  (assembly failed)\n" "$name"
+            printf '%s\n' "$asm_err" | sed 's/^/      /'
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES+=("$name")
+            continue
+        fi
+    elif ! asm_err="$(clang "${fixture_cc_flags[@]}" -c -o "$obj" "$s" 2>&1)"; then
         printf "  FAIL    %s  (assembly failed)\n" "$name"
         printf '%s\n' "$asm_err" | sed 's/^/      /'
         FAIL=$((FAIL + 1))
@@ -159,11 +206,19 @@ for s in "$ROOT"/fixtures/*.s; do
     # A fixture may carry extra armlint flags in a sidecar
     # fixtures/<name>.flags file (e.g. "-m cssc" for feature-gated
     # checks); its whitespace-separated contents are passed through.
+    #
+    # Anything armlint writes to stderr leads the snapshot, so a
+    # diagnostic (the universal-binary slice note, say) is tested like
+    # the report. armlint runs from the scratch directory on a
+    # relative object path, which keeps the path those diagnostics
+    # print the same from run to run.
     EXTRA_FLAGS=()
     if [ -f "$ROOT/fixtures/$name.flags" ]; then
         read -r -a EXTRA_FLAGS < "$ROOT/fixtures/$name.flags"
     fi
-    "$ROOT/armlint" -v "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" "$obj" > "$actual" || true
+    (cd "$PROBE" && "$ROOT/armlint" -v "${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}" \
+        "$name.o") > "$actual.out" 2> "$actual.err" || true
+    cat "$actual.err" "$actual.out" > "$actual"
 
     if [ "$MODE" = "regen" ]; then
         cp "$actual" "$expected"

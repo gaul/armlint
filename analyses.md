@@ -474,7 +474,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   shifted in place, and then the deleted shift leaves it as it was.
   That covers V8's `lsr w9, w4, #24 ; and w10, w9, #0xff`, whose
   temp is overwritten two instructions later.
-* Corpus (166.6M instructions, JIT dumps included): 734 `ASR+AND`
+* Corpus (166.2M instructions, JIT dumps included): 734 `ASR+AND`
   findings and 36 more `LSR+AND` ones, and no other check moved.
   `ASR`: go 351 (341 of them `Slicemask(x) & 1`), V8 165,
   JavaScriptCore 124, SpiderMonkey 94; the out-of-place `LSR`: V8 31,
@@ -663,13 +663,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
     `mov w0, #0 ; ldaddalb w0, w0, [x8] ; and w0, w0, #0xff`, and
     go's `internal/runtime/atomic` loads are `ldarb w1, [x0] ;
     ubfx x1, x1, #0, #8`.
-  * Corpus, JIT dumps included (166.6M instructions: the eight
+  * Corpus, JIT dumps included (166.2M instructions: the eight
     compiled binaries, V8 and SpiderMonkey on Octane, SpiderMonkey
-    and JavaScriptCore on JetStream 3): 28,528 more findings and
+    and JavaScriptCore on JetStream 3): 28,526 more findings and
     no other check moved. JavaScriptCore 27,183 (95% WasmBBQ),
     rustc 640, clang 452, go 84 (61 `ldarb` and 21 `ldar` +
     zero-extension -- adjacent, the atomics being new producers),
-    SpiderMonkey 88, uutils 43, V8 34, ssh 4. The earlier
+    SpiderMonkey 88, uutils 43, V8 34, ssh 2. The earlier
     JavaScriptCore zero-extension fix (its `js3-zfix3` dump) took the
     adjacent ones from 3,028 to 55 and left the gapped ones (27,027
     to 26,714): an emitter-side fix wants the same per-register fact.
@@ -825,11 +825,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   rendered, assembled back with llvm-mc, computes the chain's value
   with the chain's destination and source, `ANDS` staying `ANDS` at
   the same width.
-* Corpus (2026-09, 57.2M instructions): **352 findings** -- librustc_driver
+* Corpus (2026-09, 56.8M instructions): **347 findings** -- librustc_driver
   1.97.1 143, a Release clang 24 95, uutils 0.10.0 62, the SpiderMonkey
-  JIT under Octane 32, dyld 8, the V8 JIT under Octane 7, libcrypto
-  3.6.4 3, ssh 2, go and bash 0 -- and no other check's count moved.
-  All use the first two arms: 239 narrowings and 113 merges. The UTF-8
+  JIT under Octane 32, the V8 JIT under Octane 7, dyld 4, libcrypto
+  3.6.4 3, ssh 1, go and bash 0 -- and no other check's count moved.
+  All use the first two arms: 238 narrowings and 109 merges. The UTF-8
   continuation-byte decode `and w8, w8, #0xff ; and w8, w8, #0x3f` is
   69 of rustc's and 45 of uutils', and `and x16, x12, #0x7f ;
   tst x16, #0x40` (or `#0xff`) 26 and 17 more; 44 of clang's are
@@ -2056,9 +2056,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * **ADR/ADRP.** A PC-relative value moves with the image, so it is
   numbered apart from absolute constants and never matches one, and
   its findings are reported under their own name, "ADR/ADRP of an
-  address its register already holds": **6,561**, none of them in JIT
-  code -- rustc 2,464, clang 1,982, go 928, uutils 502, bash 403,
-  libcrypto 126, dyld 90, ssh 66. In LLVM output they are loads from
+  address its register already holds": **6,279**, none of them in JIT
+  code -- rustc 2,464, clang 1,982, go 928, uutils 502, bash 202,
+  libcrypto 126, dyld 42, ssh 33. In LLVM output they are loads from
   different constant-pool entries that landed on one page (18 of 18
   sampled in rustc: `adrp x8, 0x64b8000 ; ldr q1, [x8, #0x620] ; adrp
   x8, 0x64b8000 ; ldr q2, [x8, #0x630]`), symbols the compiler could
@@ -2095,13 +2095,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   alone, not both together. Deduplicating the first would cost the
   MOV #0 fold's own fixture most of its positives, whose fragments each
   rematerialize the zero.
-* **Corpus, 2026-09-26** (166.6M instructions): **256,277** findings,
+* **Corpus, 2026-09-26** (166.2M instructions): **255,803** findings,
   replacing -- and subsuming -- the 9,689 of the register-register
   ADD/SUB recompute check it generalizes; no other check moved.
   * LLVM output: librustc_driver **16,891** (copies 11,237,
     cmp/tst/cmn 2,943, `mov #imm` 1,912), clang **15,785** (copies
     10,716, cmp/tst 3,855, `mov #imm` 866), libcrypto 998, uutils 845,
-    go 463, bash 403, dyld 332, ssh 218. About half the copies (rustc
+    go 463, bash 204, dyld 165, ssh 110. About half the copies (rustc
     4,817, clang 5,726) move an argument back from the callee-saved
     register it was parked in, before a call, on a path that never
     clobbered the argument; the pairs straddle a branch, and
@@ -2203,7 +2203,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   sites, all go assembler templates -- right for compiled code, where
   dead-code elimination runs after register allocation. The population
   is in JIT code.
-* **Corpus, 2026-09-26** (166.6M instructions): **14,195** findings, no
+* **Corpus, 2026-09-26** (166.2M instructions): **14,195** findings, no
   other check moved. JavaScriptCore 7,923 -- DFG 3,958 (a register
   zeroed, then reloaded by an LDP), DFG and FTL OSR exits 2,095 (the
   tag register rebuilt with `orr x28, x27, #2` and then restored from
@@ -2334,7 +2334,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   fall-through proof alone, the convention the `CBZ` and `B.VS` folds
   follow). The finding spans the chain and the reader, so a branch
   into any of them rejects it at the side-entry gate.
-* Corpus (166.6M instructions, JIT dumps included): 652 findings
+* Corpus (166.2M instructions, JIT dumps included): 652 findings
   and no other check moved -- librustc_driver 625, clang 23, uutils
   2, go 2, and none in the JIT dumps (SpiderMonkey emits no CCMP,
   and none of V8's or JavaScriptCore's chains reduces). The .NET 11
@@ -2412,7 +2412,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   versions sweep with 0 violations. The Capstone-based classifier the
   other scans use inherits the 5.x flag as a missed kill, which is
   conservative.
-* **Corpus, 2026-09-26** (166.6M instructions): **1,007** findings, no
+* **Corpus, 2026-09-26** (166.2M instructions): **1,007** findings, no
   other check moved -- librustc_driver 1,002, clang 5; no measurable
   scan time. Of the 2,760 rustc MOV + CMP pairs, 1,507 compare a
   register whose top half is not known zero; of the 1,253 left, 135

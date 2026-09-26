@@ -97,9 +97,15 @@ typedef struct {
 #define FAT_MAGIC_64       0xcafebabfu       // fat header with 64-bit offsets
 #define CPU_TYPE_ARM64     0x0100000cu       // includes arm64 and arm64e
 // The cpusubtype's low 24 bits name the variant; the high byte holds
-// capability/feature bits (CPU_SUBTYPE_PTRAUTH_ABI etc.). arm64e is 2.
-#define CPU_SUBTYPE_MASK   0x00ffffffu
-#define CPU_SUBTYPE_ARM64E 0x00000002u
+// capability/feature bits (CPU_SUBTYPE_PTRAUTH_ABI etc.). arm64e is 2;
+// arm64e.x1 (12) is the same pointer-authentication ABI for cores
+// with FEAT_PAuth_LR, whose code signs and authenticates the return
+// address with pacibsppc/autibsppc/retabsppc.
+#define CPU_SUBTYPE_MASK      0x00ffffffu
+#define CPU_SUBTYPE_ARM64_ALL 0x00000000u
+#define CPU_SUBTYPE_ARM64_V8  0x00000001u
+#define CPU_SUBTYPE_ARM64E    0x00000002u
+#define CPU_SUBTYPE_ARM64E_X1 0x0000000cu
 #define LC_SYMTAB          0x2u
 #define LC_SEGMENT_64      0x19u
 #define LC_FUNCTION_STARTS 0x26u
@@ -302,6 +308,11 @@ static size_t anchors_finish(anchor *tmp, size_t n, armlint_symbol *out)
 static bool g_verbose = false;
 static unsigned g_features = 0;
 static armlint_summary *g_summary = NULL;
+// -s: which ARM64-family slice of a fat binary to scan. NULL keeps
+// the default (the lowest variant; see scan_fat), "all" scans every
+// one, and anything else names one slice by its fat_arch index or its
+// variant name.
+static const char *g_slice = NULL;
 // Non-NULL in -i census mode: scan_code then tallies instead of
 // linting, and main prints the census in place of the findings report.
 static armlint_census *g_census = NULL;
@@ -610,6 +621,13 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
     // features is implied: arm64e is a statement about pointer auth,
     // not about CSSC/LRCPC2/LSE. Explicit flags still force any of
     // these on any slice.
+    //
+    // arm64e.x1 has opted into the same ABI but is deliberately not
+    // armed. Its functions sign and authenticate with FEAT_PAuth_LR
+    // (pacibsppc, autibsppc, retabsppc), which Capstone 5 does not
+    // decode and neither check models, so the audit would report
+    // every function's LR spill as unsigned: 1,325 of 1,325 in the
+    // x1 slice of macOS 27's /bin/bash.
     unsigned features = g_features;
     if (((uint32_t)mh.cpusubtype & CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E) {
         features |= ARMLINT_AUDIT_PAC | ARMLINT_FEATURE_PAUTH;
@@ -903,8 +921,58 @@ fail:
     return -1;
 }
 
-// Walk a fat binary and scan every ARM64-family slice. arm64 and
-// arm64e share CPU_TYPE_ARM64; both are scanned.
+// The variant name lipo prints for an ARM64 cpusubtype, or NULL for
+// a variant this table does not know.
+static const char *arm64_variant_name(uint32_t cpusubtype)
+{
+    switch (cpusubtype & CPU_SUBTYPE_MASK) {
+    case CPU_SUBTYPE_ARM64_ALL:
+        return "arm64";
+    case CPU_SUBTYPE_ARM64_V8:
+        return "arm64v8";
+    case CPU_SUBTYPE_ARM64E:
+        return "arm64e";
+    case CPU_SUBTYPE_ARM64E_X1:
+        return "arm64e.x1";
+    default:
+        return NULL;
+    }
+}
+
+// One ARM64-family entry of a fat header: its index among all the
+// fat_arch entries (as `otool -f` numbers them), its cpusubtype, and
+// where it lies in the file.
+typedef struct {
+    uint32_t index;
+    uint32_t cpusubtype;
+    uint64_t offset;
+    uint64_t size;
+} arm64_slice;
+
+// Print a slice as "2 (arm64e.x1)", falling back to the raw variant
+// number for a cpusubtype arm64_variant_name does not know.
+static void print_slice(FILE *out, const arm64_slice *s)
+{
+    const char *name = arm64_variant_name(s->cpusubtype);
+    if (name != NULL) {
+        fprintf(out, "%" PRIu32 " (%s)", s->index, name);
+    } else {
+        fprintf(out, "%" PRIu32 " (arm64 variant %" PRIu32 ")", s->index,
+            s->cpusubtype & CPU_SUBTYPE_MASK);
+    }
+}
+
+// Walk a fat binary and scan its ARM64-family slices. arm64, arm64e
+// and arm64e.x1 all share CPU_TYPE_ARM64, and one file may hold
+// several: macOS 27's /bin/bash, /usr/bin/ssh and /usr/lib/dyld each
+// carry an arm64e and an arm64e.x1 slice, two compilations of one
+// program, so scanning both reports each program about twice. By
+// default one slice is scanned, the lowest variant -- the most widely
+// runnable (arm64 before arm64e before arm64e.x1), and for those two
+// system slices also the one Capstone 5 can read, since the x1 code's
+// FEAT_PAuth_LR prologues and epilogues are undecodable to it (3,140
+// words in /bin/bash). A note on stderr names what was skipped.
+// -s all scans every ARM64 slice; -s INDEX or -s NAME picks one.
 static int scan_fat(FILE *f, const char *path, bool is_fat_64,
                     uint64_t file_size, csh handle)
 {
@@ -922,10 +990,11 @@ static int scan_fat(FILE *f, const char *path, bool is_fat_64,
     size_t arch_size = is_fat_64 ? sizeof(fat_arch_64) : sizeof(fat_arch_32);
     long arches_off = (long)sizeof(fh);
 
-    int errors = 0;
-    bool found_arm64 = false;
+    // nfat is at most 256, so every ARM64 entry fits.
+    arm64_slice slices[256];
+    size_t nslices = 0;
     for (uint32_t i = 0; i < nfat; ++i) {
-        uint32_t cputype;
+        uint32_t cputype, cpusubtype;
         uint64_t off, size;
         long entry = arches_off + (long)i * (long)arch_size;
         if (is_fat_64) {
@@ -935,6 +1004,7 @@ static int scan_fat(FILE *f, const char *path, bool is_fat_64,
                 return -1;
             }
             cputype = be32(a.cputype);
+            cpusubtype = be32(a.cpusubtype);
             off = be64(a.offset);
             size = be64(a.size);
         } else {
@@ -944,27 +1014,91 @@ static int scan_fat(FILE *f, const char *path, bool is_fat_64,
                 return -1;
             }
             cputype = be32(a.cputype);
+            cpusubtype = be32(a.cpusubtype);
             off = (uint64_t)be32(a.offset);
             size = (uint64_t)be32(a.size);
         }
         if (cputype != CPU_TYPE_ARM64) {
             continue;
         }
-        found_arm64 = true;
-
         if (off > file_size || size > file_size - off) {
             fprintf(stderr, "%s: fat arch %u out of bounds\n", path, i);
             return -1;
         }
-        int n = scan_macho(f, path, (long)off, size, handle);
+        slices[nslices].index = i;
+        slices[nslices].cpusubtype = cpusubtype;
+        slices[nslices].offset = off;
+        slices[nslices].size = size;
+        nslices++;
+    }
+    if (nslices == 0) {
+        fprintf(stderr, "%s: fat binary contains no ARM64 slice\n", path);
+        return -1;
+    }
+
+    bool all = g_slice != NULL && strcmp(g_slice, "all") == 0;
+    size_t pick = 0;
+    if (all) {
+        // Every slice; pick is unused.
+    } else if (g_slice != NULL) {
+        char *end;
+        unsigned long want = strtoul(g_slice, &end, 10);
+        bool by_index = g_slice[0] >= '0' && g_slice[0] <= '9'
+            && *end == '\0';
+        pick = nslices;
+        for (size_t k = 0; k < nslices; k++) {
+            const char *name = arm64_variant_name(slices[k].cpusubtype);
+            if (by_index ? slices[k].index == want
+                    : name != NULL && strcmp(name, g_slice) == 0) {
+                pick = k;
+                break;
+            }
+        }
+        if (pick == nslices) {
+            fprintf(stderr, "%s: no ARM64 slice '%s'; the slices are",
+                path, g_slice);
+            for (size_t k = 0; k < nslices; k++) {
+                fputs(k == 0 ? " " : ", ", stderr);
+                print_slice(stderr, &slices[k]);
+            }
+            fputc('\n', stderr);
+            return -1;
+        }
+    } else {
+        for (size_t k = 1; k < nslices; k++) {
+            if ((slices[k].cpusubtype & CPU_SUBTYPE_MASK)
+                    < (slices[pick].cpusubtype & CPU_SUBTYPE_MASK)) {
+                pick = k;
+            }
+        }
+    }
+    if (!all && nslices > 1) {
+        fprintf(stderr, "%s: scanning ARM64 slice ", path);
+        print_slice(stderr, &slices[pick]);
+        fputs(", skipping", stderr);
+        bool first = true;
+        for (size_t k = 0; k < nslices; k++) {
+            if (k == pick) {
+                continue;
+            }
+            fputs(first ? " " : ", ", stderr);
+            print_slice(stderr, &slices[k]);
+            first = false;
+        }
+        fputs("; -s all scans every slice\n", stderr);
+    }
+
+    int errors = 0;
+    for (size_t k = 0; k < nslices; k++) {
+        if (!all && k != pick) {
+            continue;
+        }
+        int n = scan_macho(f, path, (long)slices[k].offset, slices[k].size,
+                           handle);
         if (n < 0) {
             return -1;
         }
         errors += n;
-    }
-    if (!found_arm64) {
-        fprintf(stderr, "%s: fat binary contains no ARM64 slice\n", path);
-        return -1;
     }
     return errors;
 }
@@ -1030,16 +1164,22 @@ int main(int argc, char **argv)
                     "(known: pac, imm)\n", argv[0], argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+            // Which ARM64 slice of a universal binary to scan: "all",
+            // a fat_arch index, or a variant name such as arm64e.x1.
+            // Checked against the file's slices in scan_fat, and
+            // ignored for a thin Mach-O or ELF file, which has one.
+            g_slice = argv[++i];
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-i] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 1;
     }

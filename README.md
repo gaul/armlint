@@ -335,7 +335,21 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint /bin/ls
 ./armlint -m cssc /bin/ls   # also suggest CSSC instructions
 ./armlint -m v8 jit.elf     # a V8 JIT dump from tools/v8dump2elf.py
+./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
 ```
+
+A universal binary can carry more than one ARM64 slice. macOS 27's
+`/bin/bash`, `/usr/bin/ssh` and `/usr/lib/dyld` each hold an `arm64e`
+and an `arm64e.x1` slice, two compilations of the same program, so
+armlint scans one slice by default -- the lowest variant, `arm64`
+before `arm64e` before `arm64e.x1` -- and names the slices it skipped
+on stderr. `-s all` scans every ARM64 slice and adds up their
+findings; `-s NAME` (`-s arm64e.x1`) or `-s INDEX` (the slice's
+position in the fat header, as `otool -f` numbers it) picks one.
+`arm64e.x1` code signs and authenticates return addresses with
+FEAT_PAuth_LR (`pacibsppc`, `retabsppc`), which Capstone 5 does not
+decode: a scan of that slice skips those words as data, and the PAC
+audit and `-m pauth` do not arm themselves there.
 
 Linker-synthesized import glue is excluded from both the scan and
 the census: Mach-O `__stubs`, `__stub_helper`, and `__objc_stubs`,
