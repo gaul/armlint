@@ -34,6 +34,10 @@ MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x58 <_main+0x58>: -> sub
   movz x0, #0x8
   msub x3, x2, x0, x4
 
+register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov x0, #8
+  mov x0, #8
+
 MUL by constant foldable to shift/add at offset: 0x60 <_main+0x60>: -> lsl x3, x2, #3 (2 instructions)
   movz x0, #0x8
   mul x3, x2, x0
@@ -42,5 +46,6 @@ Optimization opportunities by type:
        8  MNEG by constant foldable to neg/sub
        1  MOV + MADD/MSUB foldable to shifted ADD/SUB
        1  MUL by constant foldable to shift/add
+       1  register already holds the recomputed value
 
-10 optimization opportunities in 28 instructions
+11 optimization opportunities in 28 instructions

@@ -30,11 +30,16 @@ ADD/SUB immediate chain foldable to one at offset: 0x80 <_main+0x80>: -> add x8,
   add x8, x0, #0x10
   add x8, x8, #0x20
 
+register already holds the recomputed value at offset: 0x90 <_main+0x90>: -> delete; x9 already holds this value (set 0xc bytes back) (1 instructions)
+  mov x9, #7
+  mov x9, #7
+
 ADD/SUB immediate chain foldable to one at offset: 0x8c <_main+0x8c>: -> add x11, x0, #0x30 (3 instructions)
   add x10, x0, #0x10
   add x11, x10, #0x20
 
 Optimization opportunities by type:
        9  ADD/SUB immediate chain foldable to one
+       1  register already holds the recomputed value
 
-9 optimization opportunities in 49 instructions
+10 optimization opportunities in 49 instructions

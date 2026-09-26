@@ -83,8 +83,16 @@ ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0x94 <_main+0x94>: -
   ldr w1, [x2]
   cmp w0, #0
 
+register already holds the recomputed value at offset: 0xb0 <_main+0xb0>: -> delete; w0 already holds this value (set 0xc bytes back) (1 instructions)
+  and w0, w1, w2
+  and w0, w1, w2
+
 ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0xa4 <_main+0xa4>: -> ands w0, w1, w2 (drop cmp w0, #0) (2 instructions)
   and w0, w1, w2
+  cmp w0, #0
+
+register already holds the recomputed value at offset: 0xb4 <_main+0xb4>: -> delete; NZCV already holds these flags (set 0xc bytes back) (1 instructions)
+  cmp w0, #0
   cmp w0, #0
 
 ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0xb0 <_main+0xb0>: -> ands w0, w1, w2 (drop cmp w0, #0) (2 instructions)
@@ -105,7 +113,7 @@ ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0xbc <_main+0xbc>: -
 compare whose flags are overwritten unread at offset: 0xd8 <_main+0xd8>: -> delete; NZCV overwritten unread by cmp w0, #0 (1 instructions)
   cmp w5, #0
 
-ADD/SUB recomputed while its registers are unchanged at offset: 0xe4 <_main+0xe4>: -> delete; w0 still holds w1 + w2 (from 0x10 bytes back) (1 instructions)
+register already holds the recomputed value at offset: 0xe4 <_main+0xe4>: -> delete; w0 already holds this value (set 0x10 bytes back) (1 instructions)
   add w0, w1, w2
   add w0, w1, w2
 
@@ -127,9 +135,9 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0xfc <_main+0xfc>: -> cbz 
 Optimization opportunities by type:
       15  compare-zero branch foldable into CBZ/CBNZ
       12  ADD/SUB/AND/BIC + zero-CMP foldable to S-variant
+       3  register already holds the recomputed value
        2  compare whose flags are overwritten unread
-       1  ADD/SUB recomputed while its registers are unchanged
        1  branch to the next instruction is a no-op
        1  compare-zero signed-branch foldable into TBZ/TBNZ
 
-32 optimization opportunities in 66 instructions
+34 optimization opportunities in 66 instructions

@@ -42,6 +42,33 @@ typedef struct {
 // per compare, and one for the flag reader.
 #define CCC_MAX_LINKS (ARMLINT_FINDING_LINES - 1)
 
+// Local value numbering (check_value_recompute): the numbered slots --
+// X0..X30 by encoding number, then SP and NZCV -- and the computations
+// remembered per region.
+#define LVN_SP 31u
+#define LVN_NZCV 32u
+#define LVN_SLOTS 33u
+#define LVN_NONE 0xFFu
+#define LVN_TABLE 64u
+
+// What a remembered computation's number names.
+enum {
+    LVN_KIND_RESULT = 1,    // an operation's register result
+    LVN_KIND_FLAGS,         // an operation's NZCV result
+    LVN_KIND_CONST,         // an absolute constant
+    LVN_KIND_REL,           // an ADR/ADRP-derived, image-relative value
+};
+
+typedef struct {
+    uint32_t epoch;         // the region the entry belongs to; 0 = empty
+    uint8_t kind;
+    uint8_t nin;
+    uint32_t word;          // the operation, register fields cleared
+    uint32_t in[4];         // the inputs' numbers, NZCV's last if read
+    uint64_t value;         // a constant's value
+    uint32_t vn;            // the number of the result
+} lvn_entry;
+
 struct armlint_state {
     // MOV chain (MOVZ/MOVN followed by zero or more MOVKs).
     bool mov_active;
@@ -291,18 +318,29 @@ struct armlint_state {
     size_t spm_offset;
     char spm_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // A register-register ADD/SUB whose result may still be live: the
-    // bit-identical instruction seen again with Rd, Rn and Rm all
-    // unwritten since -- and no side entry, call, or unconditional
-    // transfer in between -- recomputes a value the register already
-    // holds. One slot, newest producer wins.
-    bool arc_active;
-    uint32_t arc_op;
-    unsigned arc_rd;
-    unsigned arc_rn;
-    unsigned arc_rm;
-    size_t arc_offset;
-    char arc_disasm[ARMLINT_FINDING_LINE_LEN];
+    // Local value numbering for check_value_recompute. Each GPR, SP
+    // and NZCV carries the number of the value it holds -- equal
+    // numbers, equal values -- with the instruction it got it from
+    // (its text kept only when the check decoded it: a number a
+    // finding can match only ever comes from one); lvn_table maps each
+    // computation seen since the region began to the number of its
+    // result, and lvn_const keeps the registers constants determine
+    // (lvn_const_rel: an ADR/ADRP-derived value, which moves with the
+    // image).
+    bool lvn_valid;
+    uint32_t lvn_epoch;
+    uint32_t lvn_next;
+    uint32_t lvn_vn[LVN_SLOTS];
+    size_t lvn_def_offset[LVN_SLOTS];
+    char lvn_def_disasm[LVN_SLOTS][ARMLINT_FINDING_LINE_LEN];
+    uint32_t lvn_const_known;
+    uint32_t lvn_const_rel;
+    uint64_t lvn_const[31];
+    bool lvn_nzcv_read;         // NZCV read since it got its number
+    bool lvn_nzcv_by_cmp;       // ...which a flags-only compare gave it
+    bool lvn_prev_valid;
+    uint32_t lvn_prev_op;       // the instruction before this one
+    lvn_entry lvn_table[LVN_TABLE];
 
     // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
     // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
@@ -1559,6 +1597,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->shf_active = false;
     state->bsx_active = false;
     state->lra_active = false;
+    state->lvn_valid = false;
     state->alr_active = false;
     state->aul_active = false;
     state->cmp_active = false;
@@ -10973,103 +11012,773 @@ bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
     return found;
 }
 
-// A register-register ADD/SUB re-executed while nothing has changed:
-//     add  x16, x0, x2       ; input + pos
-//     ldrb w1, [x16, #1]     ; checks that read but write none of the
-//     cmp  w1, #0x78         ; three registers
-//     b.ne fail
-//     add  x16, x0, x2       ; recomputes a sum x16 still holds
-// The second ADD is deleted outright; nothing is rewritten, so there
-// are no encodability questions. Unlike the adjacent-pair checks this
-// is a value-integrity scan: the tracked registers must still hold
-// the earlier result when the recompute appears, so ANY write to Rd,
-// Rn or Rm invalidates (read-modify-writes included -- the ranking
-// insn_writes_reg exists to provide), as does a call or unconditional
-// transfer (the callee may write anything; past a B/BR/RET the next
-// instruction is reachable only as a branch target), an exception
-// instruction, and any branch target (a side entry reaches the
-// recompute without the first ADD having executed -- the opposite
-// exposure from the SP check above, which deletes the FIRST
-// instruction of its pair and is side-entry-immune; this one deletes
-// the SECOND). Conditional branches do not invalidate: the
-// fall-through path keeps its registers.
+// === Local value numbering (check_value_recompute) ===
 //
-// Matching is by exact instruction word, so width and operand order
-// are handled for free. Producers require Rd, Rn, Rm all real
-// registers with Rd not among the inputs (a self-input ADD changes
-// its own operand each execution and is never redundant), and the
-// S-variants are excluded: re-executing ADDS recomputes the same
-// flags only if nothing wrote NZCV in between, a condition this check
-// does not track. One producer slot, newest wins -- the motivating
-// corpus (irregexp's lookahead loads, an emitter V8 shares) re-forms
-// a single input+pos sum per block. Recorded rather than done:
-// shifted and extended-register forms, a multi-slot cache, and the
-// other pure ALU ops.
-bool check_add_recompute(armlint_state *state, const cs_insn *insn,
-                         size_t offset, armlint_finding *out)
+// Every GPR, SP and NZCV carries a value number: two slots with equal
+// numbers hold equal values. A pure data-processing instruction's
+// result is numbered from what it computes -- its operation word with
+// the register fields cleared plus its inputs' numbers, or the value
+// itself when constants determine it -- so an instruction whose
+// destination already carries the number it would assign changes
+// nothing. The table maps each computation seen since the region
+// began to its number; keys are compared whole, never hashed, so two
+// different computations can never share a number. A computation the
+// table has forgotten simply gets a fresh one.
+
+// "mnemonic op_str" into buf, truncated like snprintf would: the same
+// text the findings' lines carry, without a format parse on a path that
+// runs for nearly every instruction.
+static void insn_text(char *buf, size_t size, const cs_insn *insn)
 {
-    if (insn->size != 4) {
-        state->arc_active = false;
+    size_t n = 0;
+    for (const char *s = insn->mnemonic; *s != '\0' && n + 1 < size; s++) {
+        buf[n++] = *s;
+    }
+    if (insn->op_str[0] != '\0' && n + 1 < size) {
+        buf[n++] = ' ';
+        for (const char *s = insn->op_str; *s != '\0' && n + 1 < size; s++) {
+            buf[n++] = *s;
+        }
+    }
+    buf[n] = '\0';
+}
+
+static unsigned lvn_zr(unsigned r)
+{
+    return r == 31u ? LVN_NONE : r;
+}
+
+// Start a region: fresh numbers everywhere, no computation or constant
+// remembered. Numbers are private to a region, so the counter restarts.
+static void lvn_reset(armlint_state *state)
+{
+    state->lvn_epoch++;
+    if (state->lvn_epoch == 0) {
+        // 2^32 regions later a stale entry could look current again.
+        memset(state->lvn_table, 0, sizeof(state->lvn_table));
+        state->lvn_epoch = 1;
+    }
+    for (unsigned i = 0; i < LVN_SLOTS; i++) {
+        state->lvn_vn[i] = i + 1u;
+        state->lvn_def_offset[i] = SIZE_MAX;
+    }
+    state->lvn_next = LVN_SLOTS;
+    state->lvn_const_known = 0;
+    state->lvn_const_rel = 0;
+    state->lvn_nzcv_read = true;
+    state->lvn_nzcv_by_cmp = false;
+    state->lvn_prev_valid = false;
+    state->lvn_valid = true;
+}
+
+static uint32_t lvn_fresh(armlint_state *state)
+{
+    return ++state->lvn_next;
+}
+
+static bool lvn_key_equal(const lvn_entry *a, const lvn_entry *b)
+{
+    if (a->kind != b->kind || a->word != b->word || a->nin != b->nin
+            || a->value != b->value) {
         return false;
     }
+    for (unsigned i = 0; i < a->nin; i++) {
+        if (a->in[i] != b->in[i]) {
+            return false;
+        }
+    }
+    return true;
+}
 
-    // A side entry reaches this instruction without the cached ADD
-    // having executed. Without a buffer there is no target map and
-    // the gate stays off, like the central side-entry check.
-    if (state->arc_active && offset_is_branch_target(state, offset)) {
-        state->arc_active = false;
+// The number of a computation: the one it got earlier in the region, or
+// a fresh one remembered from now on. A small open-addressed table,
+// probed from a hash of the key; when the probe run is full, the entry
+// at its head is replaced (that computation is forgotten, never merged).
+static uint32_t lvn_number(armlint_state *state, lvn_entry *key)
+{
+    uint64_t h = (uint64_t)key->kind * 0x9E3779B97F4A7C15ull;
+    h ^= key->word;
+    h *= 0xff51afd7ed558ccdull;
+    for (unsigned i = 0; i < key->nin; i++) {
+        h ^= key->in[i] + 0x9E3779B9u * (i + 1u);
+        h *= 0xc4ceb9fe1a85ec53ull;
+    }
+    h ^= key->value;
+    h *= 0xff51afd7ed558ccdull;
+    unsigned home = (unsigned)(h >> 58) % LVN_TABLE;
+    for (unsigned probe = 0; probe < 8u; probe++) {
+        lvn_entry *e = &state->lvn_table[(home + probe) % LVN_TABLE];
+        if (e->epoch == state->lvn_epoch) {
+            if (lvn_key_equal(e, key)) {
+                return e->vn;
+            }
+            continue;
+        }
+        *e = *key;
+        e->epoch = state->lvn_epoch;
+        e->vn = lvn_fresh(state);
+        return e->vn;
+    }
+    lvn_entry *e = &state->lvn_table[home];
+    *e = *key;
+    e->epoch = state->lvn_epoch;
+    e->vn = lvn_fresh(state);
+    return e->vn;
+}
+
+static uint32_t lvn_const_number(armlint_state *state, uint64_t value,
+                                 bool rel)
+{
+    lvn_entry key = { 0 };
+    key.kind = rel ? LVN_KIND_REL : LVN_KIND_CONST;
+    key.value = value;
+    return lvn_number(state, &key);
+}
+
+// A pure GPR data-processing instruction, decoded for value numbering:
+// its GPR result's slot (0..30 or LVN_SP; LVN_NONE for a flags-only
+// compare), whether it also writes or reads NZCV, its inputs in field
+// order (LVN_NONE for ZR), and its word with the register fields
+// cleared. `copy` marks the X-form MOV spellings -- ORR from ZR with no
+// shift, and ADD/SUB #0 -- whose result is their source's value; a W
+// form zero-extends, which is a different value and not a copy.
+typedef struct {
+    unsigned out;
+    bool sets_flags;
+    bool reads_flags;
+    bool sf;
+    bool pcrel;
+    bool copy;
+    unsigned copy_src;
+    bool move_wide;
+    bool movk;
+    unsigned nin;
+    unsigned in[3];
+    uint32_t key_word;
+} lvn_op;
+
+static bool decode_lvn_op(uint32_t op, lvn_op *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->out = LVN_NONE;
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned ra = (op >> 10) & 0x1Fu;
+    bool sf = (op >> 31) != 0;
+    bool s_bit = ((op >> 29) & 1u) != 0;
+    uint32_t clear = 0x1Fu;     // Rd
+    p->sf = sf;
+
+    if ((op & 0x1F000000u) == 0x10000000u) {
+        // ADR/ADRP: a value of the instruction's own address.
+        p->pcrel = true;
+        p->sf = true;
+        p->out = lvn_zr(rd);
+    } else if ((op & 0x1F800000u) == 0x11000000u) {
+        // ADD/SUB (immediate): Rn = 31 is SP, and so is Rd unless S.
+        p->in[p->nin++] = rn;
+        clear |= 0x3E0u;
+        p->out = s_bit ? lvn_zr(rd) : rd;
+        p->sets_flags = s_bit;
+        p->copy = !s_bit && sf && ((op >> 10) & 0xFFFu) == 0;
+        p->copy_src = rn;
+    } else if ((op & 0x1F800000u) == 0x12000000u) {
+        // Logical (immediate): Rd = 31 is SP unless ANDS; Rn = 31 is ZR.
+        if (!sf && ((op >> 22) & 1u) != 0) {
+            return false;
+        }
+        unsigned opc = (op >> 29) & 3u;
+        p->in[p->nin++] = lvn_zr(rn);
+        clear |= 0x3E0u;
+        p->out = opc == 3u ? lvn_zr(rd) : rd;
+        p->sets_flags = opc == 3u;
+    } else if ((op & 0x1F800000u) == 0x12800000u) {
+        // Move wide: MOVK keeps the halfwords it does not write.
+        unsigned opc = (op >> 29) & 3u;
+        unsigned hw = (op >> 21) & 3u;
+        if (opc == 1u || (!sf && hw >= 2u)) {
+            return false;
+        }
+        p->move_wide = true;
+        p->movk = opc == 3u;
+        if (p->movk) {
+            p->in[p->nin++] = lvn_zr(rd);
+        }
+        p->out = lvn_zr(rd);
+    } else if ((op & 0x1F800000u) == 0x13000000u) {
+        // Bitfield: BFM keeps the bits of Rd it does not insert.
+        unsigned opc = (op >> 29) & 3u;
+        if (opc == 3u || ((op >> 22) & 1u) != (unsigned)sf
+                || (!sf && (op & 0x00208000u) != 0)) {
+            return false;
+        }
+        p->in[p->nin++] = lvn_zr(rn);
+        if (opc == 1u) {
+            p->in[p->nin++] = lvn_zr(rd);
+        }
+        clear |= 0x3E0u;
+        p->out = lvn_zr(rd);
+    } else if ((op & 0x1F800000u) == 0x13800000u) {
+        // EXTR.
+        if (((op >> 29) & 3u) != 0 || ((op >> 21) & 1u) != 0
+                || ((op >> 22) & 1u) != (unsigned)sf
+                || (!sf && ((op >> 15) & 1u) != 0)) {
+            return false;
+        }
+        p->in[p->nin++] = lvn_zr(rn);
+        p->in[p->nin++] = lvn_zr(rm);
+        clear |= 0x3E0u | 0x1F0000u;
+        p->out = lvn_zr(rd);
+    } else if ((op & 0x1F000000u) == 0x0A000000u) {
+        // Logical (shifted register); ANDS/BICS set flags. ORR from ZR
+        // with no shift and no inversion is the MOV alias.
+        unsigned opc = (op >> 29) & 3u;
+        if (!sf && ((op >> 15) & 1u) != 0) {
+            return false;
+        }
+        p->in[p->nin++] = lvn_zr(rn);
+        p->in[p->nin++] = lvn_zr(rm);
+        clear |= 0x3E0u | 0x1F0000u;
+        p->out = lvn_zr(rd);
+        p->sets_flags = opc == 3u;
+        p->copy = sf && opc == 1u && ((op >> 21) & 1u) == 0 && rn == 31u
+            && rm != 31u && ((op >> 22) & 3u) == 0
+            && ((op >> 10) & 0x3Fu) == 0;
+        p->copy_src = rm;
+    } else if ((op & 0x1F200000u) == 0x0B000000u) {
+        // ADD/SUB (shifted register): 31 is ZR throughout.
+        if (((op >> 22) & 3u) == 3u || (!sf && ((op >> 15) & 1u) != 0)) {
+            return false;
+        }
+        p->in[p->nin++] = lvn_zr(rn);
+        p->in[p->nin++] = lvn_zr(rm);
+        clear |= 0x3E0u | 0x1F0000u;
+        p->out = lvn_zr(rd);
+        p->sets_flags = s_bit;
+    } else if ((op & 0x1F200000u) == 0x0B200000u) {
+        // ADD/SUB (extended register): Rn = 31 is SP, and so is Rd
+        // unless S.
+        if (((op >> 22) & 3u) != 0 || ((op >> 10) & 7u) > 4u) {
+            return false;
+        }
+        p->in[p->nin++] = rn;
+        p->in[p->nin++] = lvn_zr(rm);
+        clear |= 0x3E0u | 0x1F0000u;
+        p->out = s_bit ? lvn_zr(rd) : rd;
+        p->sets_flags = s_bit;
+    } else if ((op & 0x1FE0FC00u) == 0x1A000000u) {
+        // ADC/SBC read the carry.
+        p->in[p->nin++] = lvn_zr(rn);
+        p->in[p->nin++] = lvn_zr(rm);
+        clear |= 0x3E0u | 0x1F0000u;
+        p->reads_flags = true;
+        p->out = lvn_zr(rd);
+        p->sets_flags = s_bit;
+    } else if ((op & 0x3FE00410u) == 0x3A400000u) {
+        // CCMP/CCMN: a condition read, then a full NZCV write. Only the
+        // register form's Rm field names a register, and there is no
+        // Rd: bits 4..0 are o3 and the nzcv literal.
+        p->in[p->nin++] = lvn_zr(rn);
+        clear = 0x3E0u;
+        if (((op >> 11) & 1u) == 0) {
+            p->in[p->nin++] = lvn_zr(rm);
+            clear |= 0x1F0000u;
+        }
+        p->reads_flags = true;
+        p->sets_flags = true;
+    } else if ((op & 0x3FE00800u) == 0x1A800000u) {
+        // CSEL/CSINC/CSINV/CSNEG.
+        p->in[p->nin++] = lvn_zr(rn);
+        p->in[p->nin++] = lvn_zr(rm);
+        clear |= 0x3E0u | 0x1F0000u;
+        p->reads_flags = true;
+        p->out = lvn_zr(rd);
+    } else if ((op & 0x1F000000u) == 0x1B000000u) {
+        // Data-processing (3 source); SMULH/UMULH take no addend.
+        unsigned op31 = (op >> 21) & 7u;
+        bool high = false;
+        if (((op >> 29) & 3u) != 0) {
+            return false;
+        }
+        if (op31 == 0u) {
+            // MADD/MSUB, either width.
+        } else if (!sf) {
+            return false;
+        } else if (op31 == 1u || op31 == 5u) {
+            // SMADDL/SMSUBL/UMADDL/UMSUBL.
+        } else if ((op31 == 2u || op31 == 6u) && ((op >> 15) & 1u) == 0) {
+            high = true;
+        } else {
+            return false;
+        }
+        p->in[p->nin++] = lvn_zr(rn);
+        p->in[p->nin++] = lvn_zr(rm);
+        if (!high) {
+            p->in[p->nin++] = lvn_zr(ra);
+        }
+        clear |= 0x3E0u | 0x1F0000u | 0x7C00u;
+        p->out = lvn_zr(rd);
+    } else if ((op & 0x5FE00000u) == 0x1AC00000u) {
+        // Data-processing (2 source): UDIV/SDIV, the variable shifts,
+        // CRC32 and the CSSC register min/max. PACGA, the MTE forms and
+        // SUBPS stay out.
+        unsigned opc = (op >> 10) & 0x3Fu;
+        bool known = opc == 2u || opc == 3u || (opc >= 8u && opc <= 11u)
+            || (opc >= 16u && opc <= 23u && ((opc & 3u) == 3u) == sf)
+            || (opc >= 24u && opc <= 27u);
+        if (s_bit || !known) {
+            return false;
+        }
+        p->in[p->nin++] = lvn_zr(rn);
+        p->in[p->nin++] = lvn_zr(rm);
+        clear |= 0x3E0u | 0x1F0000u;
+        p->out = lvn_zr(rd);
+    } else if ((op & 0x5FE00000u) == 0x5AC00000u) {
+        // Data-processing (1 source) without the pointer-authentication
+        // group: RBIT, REV16/REV32/REV, CLZ, CLS, and the CSSC
+        // CTZ/CNT/ABS.
+        unsigned opc = (op >> 10) & 0x3Fu;
+        if (s_bit || ((op >> 16) & 0x1Fu) != 0 || opc > 8u
+                || (!sf && opc == 3u)) {
+            return false;
+        }
+        p->in[p->nin++] = lvn_zr(rn);
+        clear |= 0x3E0u;
+        p->out = lvn_zr(rd);
+    } else {
+        return false;
+    }
+    p->key_word = op & ~clear;
+    return p->out != LVN_NONE || p->sets_flags;
+}
+
+// The value a pure instruction writes when constants the region has seen
+// determine it: MOVZ/MOVN, a MOVK onto a known value, an immediate
+// logical or ADD/SUB of a known value (or of ZR), a MOV of one, and
+// ADR/ADRP. An ADR/ADRP value moves with the image, so it is numbered
+// apart from the absolute constants (*rel), and only the X-form MOV and
+// ADD/SUB carry that through.
+static bool lvn_const_value(const armlint_state *state, uint32_t op,
+                            const lvn_op *p, uint64_t pc,
+                            uint64_t *value, bool *rel)
+{
+    *rel = false;
+    if (p->sets_flags) {
+        return false;
+    }
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    bool sf = p->sf;
+    uint64_t v;
+    if (p->pcrel) {
+        uint64_t imm = ((op >> 5) & 0x7FFFFu) << 2 | ((op >> 29) & 3u);
+        imm = (imm ^ 0x100000u) - 0x100000u;    // sign-extend 21 bits
+        v = (op >> 31) != 0 ? (pc & ~(uint64_t)0xFFFu) + (imm << 12)
+                            : pc + imm;
+        *value = v;
+        *rel = true;
+        return true;
+    }
+    if (p->move_wide) {
+        unsigned opc = (op >> 29) & 3u;
+        unsigned hw = (op >> 21) & 3u;
+        uint64_t imm = (uint64_t)((op >> 5) & 0xFFFFu) << (16u * hw);
+        if (opc == 3u) {
+            if (rd == 31u || ((state->lvn_const_known >> rd) & 1u) == 0
+                    || ((state->lvn_const_rel >> rd) & 1u) != 0) {
+                return false;
+            }
+            v = (state->lvn_const[rd] & ~((uint64_t)0xFFFFu << (16u * hw)))
+                | imm;
+        } else {
+            v = opc == 2u ? imm : ~imm;
+        }
+    } else if ((op & 0x1F800000u) == 0x12000000u) {
+        uint64_t mask;
+        if (!decode_bitmask_imm_value((op >> 22) & 1u, (op >> 16) & 0x3Fu,
+                                      (op >> 10) & 0x3Fu, sf ? 64u : 32u,
+                                      &mask)) {
+            return false;
+        }
+        uint64_t src;
+        if (rn == 31u) {
+            src = 0;
+        } else if (((state->lvn_const_known >> rn) & 1u) != 0
+                && ((state->lvn_const_rel >> rn) & 1u) == 0) {
+            src = state->lvn_const[rn];
+        } else {
+            return false;
+        }
+        unsigned opc = (op >> 29) & 3u;
+        v = opc == 0u ? (src & mask) : opc == 1u ? (src | mask)
+                                                 : (src ^ mask);
+    } else if ((op & 0x1F800000u) == 0x11000000u) {
+        if (rn == 31u || ((state->lvn_const_known >> rn) & 1u) == 0) {
+            return false;
+        }
+        *rel = ((state->lvn_const_rel >> rn) & 1u) != 0;
+        if (*rel && !sf) {
+            return false;
+        }
+        uint64_t imm = (uint64_t)((op >> 10) & 0xFFFu)
+            << (((op >> 22) & 1u) != 0 ? 12u : 0u);
+        v = ((op >> 30) & 1u) != 0 ? state->lvn_const[rn] - imm
+                                   : state->lvn_const[rn] + imm;
+    } else if ((op & 0x7FE0FFE0u) == 0x2A0003E0u) {
+        // MOV (ORR from ZR, no shift).
+        if (rm == 31u) {
+            v = 0;
+        } else if (((state->lvn_const_known >> rm) & 1u) != 0) {
+            *rel = ((state->lvn_const_rel >> rm) & 1u) != 0;
+            if (*rel && !sf) {
+                return false;
+            }
+            v = state->lvn_const[rm];
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    *value = sf ? v : (v & 0xFFFFFFFFu);
+    return true;
+}
+
+// Whether the instruction may write SP: an SP operand flagged written
+// (or flagless), a writeback through SP, or SP in the implicit list. A
+// compare's operands are sources however Capstone flags them.
+static bool lvn_writes_sp(const cs_insn *insn)
+{
+    const cs_detail *detail = insn->detail;
+    if (detail == NULL || insn->size != 4) {
+        return true;
+    }
+    uint32_t op = insn_word(insn);
+    bool no_gpr_write = insn_writes_no_gpr(op);
+    const cs_arm64 *a = &detail->arm64;
+    bool writeback = detail->writeback;
+#if CS_API_MAJOR < 6
+    writeback = writeback || a->writeback;
+#endif
+    for (int i = 0; i < a->op_count; i++) {
+        const cs_arm64_op *o = &a->operands[i];
+        if (o->type == ARM64_OP_REG
+                && (o->reg == ARM64_REG_SP || o->reg == ARM64_REG_WSP)
+                && ((o->access & CS_AC_WRITE) != 0 ? !no_gpr_write
+                                                   : o->access == 0)) {
+            return true;
+        }
+        if (o->type == ARM64_OP_MEM && writeback
+                && o->mem.base == ARM64_REG_SP) {
+            return true;
+        }
+    }
+    for (uint8_t i = 0; i < detail->regs_write_count; i++) {
+        if (detail->regs_write[i] == ARM64_REG_SP
+                || detail->regs_write[i] == ARM64_REG_WSP) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether the instruction may write NZCV, erring toward yes. The flag
+// classifier knows the full writers; its readers split into those that
+// only read (B.cond/BC.cond, the CSEL family, FCSEL, ADC/SBC) and the
+// rest, which also write (CCMP, ADCS, FlagM, MOPS). Whatever it does
+// not classify is asked of Capstone. (MSR NZCV never gets here: the
+// check ends its region at every system instruction.)
+static bool lvn_writes_nzcv(const cs_insn *insn, uint32_t op,
+                            liveness_t liv)
+{
+    if (liv == LIV_OVERWRITE) {
+        return true;
+    }
+    if (liv == LIV_READ) {
+        return !((op & 0xFF000000u) == 0x54000000u
+                 || (op & 0x3FE00800u) == 0x1A800000u
+                 || (op & 0xFF200C00u) == 0x1E200C00u
+                 || (op & 0x3FE0FC00u) == 0x1A000000u);
+    }
+    if ((op & 0xFB200C00u) == 0x19000400u) {
+        return true;    // any FEAT_MOPS stage
+    }
+    const cs_detail *detail = insn->detail;
+    if (detail == NULL) {
+        return true;
+    }
+    if (detail->arm64.update_flags) {
+        return true;
+    }
+    for (uint8_t i = 0; i < detail->regs_write_count; i++) {
+        if (detail->regs_write[i] == ARM64_REG_NZCV) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether the instruction ends a numbering region after it executes:
+// B/BL, the branch-register class (BR/BLR/RET/ERET and their PAC
+// forms), exception generation, UDF, and every system instruction but
+// NOP, BTI, the barriers and MRS -- MSR can rewrite NZCV or the stack
+// pointer selection, SYS/SYSL write registers Capstone 5 does not
+// report, and the hint space holds the PAC instructions that rewrite
+// x30, x16 and x17.
+static bool lvn_ends_region(uint32_t op)
+{
+    if ((op & 0x7C000000u) == 0x14000000u
+            || (op & 0xFE000000u) == 0xD6000000u
+            || (op & 0xFF000000u) == 0xD4000000u
+            || (op & 0xFFFF0000u) == 0) {
+        return true;
+    }
+    if ((op & 0xFFC00000u) != 0xD5000000u) {
+        return false;
+    }
+    return !(op == 0xD503201Fu                      // NOP
+             || (op & 0xFFFFFF3Fu) == 0xD503241Fu   // BTI
+             || (op & 0xFFFFF01Fu) == 0xD503301Fu   // CLREX/DSB/DMB/ISB/SB
+             || (op & 0xFFF00000u) == 0xD5300000u); // MRS
+}
+
+// Register name for a value-number slot, at the instruction's width.
+static void lvn_slot_name(char *buf, size_t size, unsigned slot, bool sf)
+{
+    if (slot == LVN_SP) {
+        snprintf(buf, size, "%s", sf ? "sp" : "wsp");
+    } else {
+        snprintf(buf, size, "%c%u", sf ? 'x' : 'w', slot);
+    }
+}
+
+// Detect an instruction that recomputes a value its destination already
+// holds (local value numbering); see armlint.h.
+bool check_value_recompute(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->lvn_valid = false;
+        return false;
+    }
+    // A side entry reaches this instruction with values the region's
+    // earlier instructions never produced. Without a buffer there is
+    // no target map and the gate stays off, like the central check.
+    if (!state->lvn_valid || offset_is_branch_target(state, offset)
+            || state->lvn_next > 0xFFFFFF00u) {
+        lvn_reset(state);
     }
 
     uint32_t op = insn_word(insn);
-
-    unsigned sf, rd, rn, rm;
-    bool is_sub, is_s;
-    bool is_alu = decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
-                                              &rd, &rn, &rm)
-        && !is_s && rd != 31 && rn != 31 && rm != 31
-        && rd != rn && rd != rm;
+    lvn_op p;
+    bool pure = decode_lvn_op(op, &p);
+    uint32_t vn_result = 0;
+    uint32_t vn_flags = 0;
+    bool numbered = false;
+    bool known = false;
+    bool rel = false;
+    uint64_t value = 0;
+    if (pure) {
+        if (lvn_const_value(state, op, &p, insn->address, &value, &rel)) {
+            known = true;
+            vn_result = lvn_const_number(state, value, rel);
+        } else if (p.copy) {
+            vn_result = state->lvn_vn[p.copy_src];
+        } else {
+            lvn_entry key = { 0 };
+            key.word = p.key_word;
+            for (unsigned i = 0; i < p.nin; i++) {
+                key.in[key.nin++] = p.in[i] == LVN_NONE
+                    ? lvn_const_number(state, 0, false)
+                    : state->lvn_vn[p.in[i]];
+            }
+            if (p.reads_flags) {
+                key.in[key.nin++] = state->lvn_vn[LVN_NZCV];
+            }
+            key.kind = LVN_KIND_RESULT;
+            vn_result = lvn_number(state, &key);
+            if (p.sets_flags) {
+                key.kind = LVN_KIND_FLAGS;
+                vn_flags = lvn_number(state, &key);
+            }
+        }
+        numbered = true;
+    }
 
     bool found = false;
-    if (state->arc_active && is_alu && op == state->arc_op) {
-        char w = (sf != 0) ? 'x' : 'w';
-        out->name = "ADD/SUB recomputed while its registers are unchanged";
-        out->start_offset = offset;
-        out->insn_count = 1;
-        clear_finding_strings(out);
-        snprintf(out->detail, sizeof(out->detail),
-            "-> delete; %c%u still holds %c%u %s %c%u (from 0x%zx bytes back)",
-            w, rd, w, rn, is_sub ? "-" : "+", w, rm,
-            offset - state->arc_offset);
-        snprintf(out->lines[0], sizeof(out->lines[0]),
-            "%s", state->arc_disasm);
-        snprintf(out->lines[1], sizeof(out->lines[1]),
-            "%s %s", insn->mnemonic, insn->op_str);
-        found = true;
-        // The register still holds the sum: a third recompute reports
-        // against this one, so only the offset refreshes.
-        state->arc_offset = offset;
-    } else if (is_alu) {
-        state->arc_active = true;
-        state->arc_op = op;
-        state->arc_rd = rd;
-        state->arc_rn = rn;
-        state->arc_rm = rm;
-        state->arc_offset = offset;
-        snprintf(state->arc_disasm, sizeof(state->arc_disasm),
-            "%s %s", insn->mnemonic, insn->op_str);
-    } else if (state->arc_active) {
-        // B/BL (bit 31 free covers both), the unconditional
-        // branch-register class (BR/BLR/RET and their PAC variants),
-        // and exception generation end the tracked region; otherwise
-        // any write to the three registers kills the value.
-        if ((op & 0x7C000000u) == 0x14000000u
-                || (op & 0xFE000000u) == 0xD6000000u
-                || (op & 0xFF000000u) == 0xD4000000u
-                || insn_writes_reg(insn, (int)state->arc_rd)
-                || insn_writes_reg(insn, (int)state->arc_rn)
-                || insn_writes_reg(insn, (int)state->arc_rm)) {
-            state->arc_active = false;
+    if (numbered
+            && (p.out == LVN_NONE || state->lvn_vn[p.out] == vn_result)
+            && (!p.sets_flags || state->lvn_vn[LVN_NZCV] == vn_flags)) {
+        // Shapes another check owns, or that are not the code's to
+        // change: a move-wide sequence may be a JIT's patch site, whose
+        // placeholder MOVKs change nothing until patched (a MOVK, or
+        // the MOVZ/MOVN the next word continues); a self-MOV, an
+        // in-place ADD/SUB #0, an adjacent copy-back, an adjacent
+        // repeated MOV to SP, a compare right after the flag setter
+        // it repeats, and a repeated compare whose earlier twin nothing
+        // read (check_dead_compare deletes that one).
+        bool skip = p.movk;
+        if (!skip && p.move_wide && state->buf != NULL
+                && offset + 8u <= state->buf_len) {
+            uint32_t next = buf_word_at(state->buf, offset + 4u);
+            skip = (next & 0x7F800000u) == 0x72800000u
+                && (next & 0x1Fu) == (op & 0x1Fu);
         }
+        if (p.copy && p.copy_src == p.out) {
+            skip = true;
+        }
+        unsigned zc, zc_rd, zc_rn;
+        if ((decode_and_imm_lowmask(op, &zc, &zc_rd, &zc_rn)
+                    && zc_rd == zc_rn)
+                || decode_mov_w_self(op, &zc, &zc_rd)) {
+            skip = true;    // check_redundant_zext's consumers
+        }
+        bool adjacent = state->lvn_prev_valid;
+        uint32_t prev = state->lvn_prev_op;
+        if (adjacent && p.copy && (op & 0xFFE0FFE0u) == 0xAA0003E0u
+                && (prev & 0xFFE0FFE0u) == 0xAA0003E0u
+                && (prev & 0x1Fu) == p.copy_src
+                && ((prev >> 16) & 0x1Fu) == p.out) {
+            skip = true;
+        }
+        if (adjacent && p.copy && p.out == LVN_SP && prev == op) {
+            skip = true;
+        }
+        if (p.out == LVN_NONE && p.sets_flags) {
+            if (state->lvn_def_offset[LVN_NZCV] + 4u == offset
+                    || (state->lvn_nzcv_by_cmp && !state->lvn_nzcv_read)) {
+                skip = true;
+            }
+        }
+        if (!skip) {
+            // The line shown is where the destination got its value --
+            // or, for a copy whose destination kept a value from before
+            // the region, the later copy that made the two equal.
+            unsigned slot = p.out != LVN_NONE ? p.out : LVN_NZCV;
+            if (p.copy && state->lvn_def_offset[p.copy_src] != SIZE_MAX
+                    && (state->lvn_def_offset[slot] == SIZE_MAX
+                        || state->lvn_def_offset[p.copy_src]
+                           > state->lvn_def_offset[slot])) {
+                slot = p.copy_src;
+            }
+            char reg[8] = "";
+            if (p.out != LVN_NONE) {
+                lvn_slot_name(reg, sizeof(reg), p.out, p.sf);
+            }
+            out->name = p.pcrel
+                ? "ADR/ADRP of an address its register already holds"
+                : "register already holds the recomputed value";
+            out->start_offset = offset;
+            out->insn_count = 1;
+            clear_finding_strings(out);
+            size_t back = offset - state->lvn_def_offset[slot];
+            if (p.out == LVN_NONE) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> delete; NZCV already holds these flags "
+                    "(set 0x%zx bytes back)", back);
+            } else if (p.sets_flags) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> delete; %s and NZCV already hold these results "
+                    "(set 0x%zx bytes back)", reg, back);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> delete; %s already holds this value "
+                    "(set 0x%zx bytes back)", reg, back);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+                state->lvn_def_disasm[slot]);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            found = true;
+        }
+    }
+
+    // Every slot the instruction may write gets a fresh number; the
+    // decoded result then takes the number computed above. A decoded
+    // instruction's writes are exact -- its result and, for a flag
+    // setter, NZCV -- and anything else is asked of the conservative
+    // model. A slot that keeps its number keeps its definer, so a
+    // recompute's own write does not move the line the finding shows.
+    uint32_t written = 0;
+    bool sp_written = false;
+    bool flags_written = false;
+    bool flags_read;
+    if (pure) {
+        if (p.out < 31u) {
+            written = 1u << p.out;
+        } else if (p.out == LVN_SP) {
+            sp_written = true;
+        }
+        flags_written = p.sets_flags;
+        flags_read = p.reads_flags;
+    } else {
+        liveness_t liv = classify_liveness(op);
+        written = insn_gpr_write_mask(insn);
+        // Past the decoded classes only a load/store writeback moves
+        // SP (the system instructions that could end the region).
+        sp_written = (op & 0x0A000000u) == 0x08000000u && lvn_writes_sp(insn);
+        flags_written = lvn_writes_nzcv(insn, op, liv);
+        flags_read = liv == LIV_READ || liv == LIV_TERM_SAFE
+            || liv == LIV_TERM_UNSAFE;
+    }
+    if (flags_read) {
+        state->lvn_nzcv_read = true;
+    }
+    const char *text = NULL;    // rendered into the first slot defined
+    for (unsigned slot = 0; slot < LVN_SLOTS; slot++) {
+        if (slot < 31u) {
+            if ((written >> slot) == 0) {
+                slot = 30u;     // no GPR left: on to SP and NZCV
+                continue;
+            }
+            if (((written >> slot) & 1u) == 0) {
+                continue;
+            }
+        } else if (slot == LVN_SP ? !sp_written : !flags_written) {
+            continue;
+        }
+        uint32_t vn = lvn_fresh(state);
+        if (numbered && slot == p.out) {
+            vn = vn_result;
+        } else if (numbered && slot == LVN_NZCV && p.sets_flags) {
+            vn = vn_flags;
+        }
+        if (slot < 31u) {
+            bool is_known = numbered && known && slot == p.out;
+            state->lvn_const_known = (state->lvn_const_known & ~(1u << slot))
+                | ((is_known ? 1u : 0u) << slot);
+            state->lvn_const_rel = (state->lvn_const_rel & ~(1u << slot))
+                | ((is_known && rel ? 1u : 0u) << slot);
+            if (is_known) {
+                state->lvn_const[slot] = value;
+            }
+        }
+        if (slot == LVN_NZCV) {
+            state->lvn_nzcv_read = false;
+            state->lvn_nzcv_by_cmp = numbered && p.out == LVN_NONE;
+        }
+        if (vn == state->lvn_vn[slot]) {
+            continue;
+        }
+        state->lvn_vn[slot] = vn;
+        state->lvn_def_offset[slot] = offset;
+        char *line = state->lvn_def_disasm[slot];
+        if (!numbered) {
+            line[0] = '\0';
+        } else if (text == NULL) {
+            insn_text(line, ARMLINT_FINDING_LINE_LEN, insn);
+            text = line;
+        } else {
+            memcpy(line, text, ARMLINT_FINDING_LINE_LEN);
+        }
+    }
+
+    state->lvn_prev_valid = true;
+    state->lvn_prev_op = op;
+    if (lvn_ends_region(op)) {
+        state->lvn_valid = false;
     }
     return found;
 }
@@ -18452,7 +19161,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_reg_copy_chain,
     check_copy_add_sub_fold,
     check_sp_mov_overwritten,
-    check_add_recompute,
+    check_value_recompute,
     check_cset_recompare,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,

@@ -527,14 +527,18 @@ static int run_helper_check(uint8_t *bytes, size_t len)
     return run_check(bytes, len);
 }
 
-// Append a movz Xreg, #1 overwrite so register `reg` is provably dead after the
-// fragment, satisfying the forward register-liveness scan that gates the folds
-// which delete a value-producing instruction: MOV #0 -> ZR, the MOV-constant
-// strength reductions, and the BFXIL/BFI synthesis (whose isolate temp is
-// dropped).
+// Append a movz Xreg, #KILL_IMM overwrite so register `reg` is provably dead
+// after the fragment, satisfying the forward register-liveness scan that gates
+// the folds which delete a value-producing instruction: MOV #0 -> ZR, the
+// MOV-constant strength reductions, and the BFXIL/BFI synthesis (whose isolate
+// temp is dropped). The value is one no fragment materializes: an overwrite
+// with the value the register already holds would be a recompute,
+// check_value_recompute's finding, on top of the fold under test.
+#define KILL_IMM 0xD1EDu
+
 static int run_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
 {
-    movz_x(&bytes[len], reg, 1, 0);
+    movz_x(&bytes[len], reg, KILL_IMM, 0);
     return run_check(bytes, len + 4);
 }
 
@@ -547,7 +551,7 @@ static int run_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
 static int run_named_reg_dead(uint8_t *bytes, size_t len, unsigned reg,
                               const char *name)
 {
-    movz_x(&bytes[len], reg, 1, 0);
+    movz_x(&bytes[len], reg, KILL_IMM, 0);
     return run_named_check(bytes, len + 4, name);
 }
 
@@ -561,7 +565,7 @@ static int run_x0_dead(uint8_t *bytes, size_t len)
 // deleted ADD needs the same overwrite proof for its address temp.
 static int run_lrcpc2_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
 {
-    movz_x(&bytes[len], reg, 1, 0);
+    movz_x(&bytes[len], reg, KILL_IMM, 0);
     return run_lrcpc2_check(bytes, len + 4);
 }
 
@@ -570,7 +574,7 @@ static int run_lrcpc2_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
 // fold's deleted MOV needs the same overwrite proof for its scratch.
 static int run_v8cage_reg_dead(uint8_t *bytes, size_t len, unsigned reg)
 {
-    movz_x(&bytes[len], reg, 1, 0);
+    movz_x(&bytes[len], reg, KILL_IMM, 0);
     return run_features_check(bytes, len + 4, ARMLINT_FEATURE_V8CAGE);
 }
 
@@ -2688,7 +2692,7 @@ static void test_single_bit_cbz(void)
 
     and_w_bit(&code[0], 8, 31, 4);
     cbz_cbnz(&code[4], 0, 0, 8, 2);
-    movz_w(&code[8], 8, 0);
+    movz_w(&code[8], 8, 1);     // not #0: w8 already holds zero
     assert(run_helper_check(code, 12) == 0);
 }
 
@@ -5938,11 +5942,15 @@ static void test_subs_cmp_redundant(void)
     write_le32(&code[4], 0xEB00001Fu | (3u << 16) | (1u << 5));
     assert(run_helper_check(code, 8) == 0);
 
-    // Intervening instruction breaks adjacency.
+    // Intervening instruction breaks adjacency (the gapped pair is
+    // check_value_recompute's: nothing between touched the flags).
     write_le32(&code[0], 0xEB000000u | (2u << 16) | (1u << 5) | 0u);
     movz_x(&code[4], 5, 1, 0);
     write_le32(&code[8], 0xEB00001Fu | (2u << 16) | (1u << 5));
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_named_check(code, 12,
+        "SUBS + CMP of identical operands: redundant compare") == 0);
+    assert(run_named_check(code, 12,
+        "register already holds the recomputed value") == 1);
 }
 
 // check_dead_compare reports through armlint_advance_pending_dc,
@@ -8735,15 +8743,28 @@ static void test_sp_mov_overwritten(void)
     assert(run_buffer_check(code, 12) == 1);
 }
 
-static void test_add_recompute(void)
+// Run check_value_recompute over instruction words with the buffer set
+// (branch targets and the move-wide peek need it), counting findings
+// named `name` and copying the first one's detail.
+static int run_lvn_words(const uint32_t *words, size_t n, const char *name,
+                         char *detail, size_t detail_size)
+{
+    uint8_t code[64];
+    assert(n * 4u <= sizeof(code));
+    memcpy(code, words, n * 4u);
+    return run_named_buffer_check(code, n * 4u, name, detail, detail_size);
+}
+
+static void test_value_recompute(void)
 {
     uint8_t code[16];
-    const char *name =
-        "ADD/SUB recomputed while its registers are unchanged";
+    const char *name = "register already holds the recomputed value";
+    const char *adrp_name =
+        "ADR/ADRP of an address its register already holds";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
 
     // The irregexp lookahead shape: input+pos re-formed while x16, x0
-    // and x2 are all untouched (the compare only reads and writes
-    // flags).
+    // and x2 are all untouched (the compare only writes flags).
     add_x(&code[0], 16, 0, 2);
     cmp_x_imm(&code[4], 1, 0x30);
     add_x(&code[8], 16, 0, 2);
@@ -8758,7 +8779,7 @@ static void test_add_recompute(void)
     add_x(&code[8], 16, 0, 2);
     assert(run_named_check(code, 12, name) == 2);
 
-    // SUB and W spellings match by exact word.
+    // SUB and W spellings.
     sub_x(&code[0], 5, 6, 7);
     sub_x(&code[4], 5, 6, 7);
     assert(run_named_check(code, 8, name) == 1);
@@ -8766,14 +8787,13 @@ static void test_add_recompute(void)
     add_w(&code[4], 16, 0, 2);
     assert(run_named_check(code, 8, name) == 1);
 
-    // A width change is a different word: the second replaces the
-    // slot instead of matching.
+    // A width change computes a different value.
     add_w(&code[0], 16, 0, 2);
     add_x(&code[4], 16, 0, 2);
     assert(run_named_check(code, 8, name) == 0);
 
-    // A write to a source register kills the tracked value; so does a
-    // write to the destination.
+    // A write to a source register, or to the destination, ends the
+    // match.
     add_x(&code[0], 16, 0, 2);
     movz_x(&code[4], 0, 1, 0);
     add_x(&code[8], 16, 0, 2);
@@ -8783,16 +8803,9 @@ static void test_add_recompute(void)
     add_x(&code[8], 16, 0, 2);
     assert(run_named_check(code, 12, name) == 0);
 
-    // A destination that is also an input changes per execution --
-    // never cached.
+    // A destination that is also an input changes per execution.
     add_x(&code[0], 0, 0, 2);
     add_x(&code[4], 0, 0, 2);
-    assert(run_named_check(code, 8, name) == 0);
-
-    // The S-variant's flag write is a second effect this check does
-    // not track.
-    encode_sr(&code[0], 0xAB000000u, 16, 0, 2);   // adds x16, x0, x2
-    encode_sr(&code[4], 0xAB000000u, 16, 0, 2);
     assert(run_named_check(code, 8, name) == 0);
 
     // A call between the two may write anything.
@@ -8801,12 +8814,115 @@ static void test_add_recompute(void)
     add_x(&code[8], 16, 0, 2);
     assert(run_named_check(code, 12, name) == 0);
 
-    // Side entry onto the recompute: the cached ADD never executed on
+    // Side entry onto the recompute: the first ADD never executed on
     // the entering path (buffer-aware harness for the target map).
     add_x(&code[0], 16, 0, 2);
     add_x(&code[4], 16, 0, 2);
     cbz_cbnz(&code[8], 1, 0, 9, -1);   // cbz x9, back to the second add
     assert(run_buffer_check(code, 12) == 0);
+
+    static const struct {
+        uint32_t words[4];
+        unsigned n;
+        bool adrp;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // add x16, x0, x2 ; cmp x1, #0x30 ; add x16, x0, x2
+        { { 0x8B020010u, 0xF100C03Fu, 0x8B020010u }, 3, false, 1,
+          "-> delete; x16 already holds this value (set 0x8 bytes back)" },
+        // Constants: the JIT scratch rematerialized, one value through
+        // two spellings (mov w8, #-1 ; mov x8, #0xffffffff), and a value
+        // an ADD of a known one produced (movz x1, #5 ; add x2, x1, #3 ;
+        // movz x2, #8), a W and an X MOVZ of one value.
+        { { 0xD2919410u, 0x8B100324u, 0xD2919410u }, 3, false, 1, NULL },
+        { { 0x12800008u, 0xB2407FE8u }, 2, false, 1,
+          "-> delete; x8 already holds this value (set 0x4 bytes back)" },
+        { { 0xD28000A1u, 0x91000C22u, 0xD2800102u }, 3, false, 1, NULL },
+        { { 0x528000A8u, 0xD28000A8u }, 2, false, 1, NULL },
+        // A compare repeated past the branch that read it: cmp x26, #5 ;
+        // b.lo ; strb w19, [x8, #4] ; cmp x26, #5.
+        { { 0xF100175Fu, 0x54000063u, 0x39001113u, 0xF100175Fu }, 4, false, 1,
+          "-> delete; NZCV already holds these flags (set 0xc bytes back)" },
+        // ...but not when nothing read the first (check_dead_compare
+        // deletes that one), not adjacent (check_subs_cmp_redundant),
+        // and not after another compare changed the flags.
+        { { 0xF100141Fu, 0x8B030041u, 0xF100141Fu }, 3, false, 0, NULL },
+        { { 0xF100141Fu, 0xF100141Fu }, 2, false, 0, NULL },
+        { { 0xF100141Fu, 0x54000060u, 0xF100083Fu, 0xF100141Fu }, 4, false, 0,
+          NULL },
+        // A copy restored across a branch: mov x19, x0 ; cbz x1 ;
+        // mov x0, x19. The adjacent copy-back is check_reg_copy_chain's.
+        { { 0xAA0003F3u, 0xB4000041u, 0xAA1303E0u }, 3, false, 1,
+          "-> delete; x0 already holds this value (set 0x8 bytes back)" },
+        { { 0xAA0003F3u, 0xAA1303E0u }, 2, false, 0, NULL },
+        // Equality through a copy: mov x2, x1 ; add x3, x2, #8 ;
+        // add x3, x1, #8.
+        { { 0xAA0103E2u, 0x91002043u, 0x91002023u }, 3, false, 1, NULL },
+        // Operand order and immediates are part of the operation.
+        { { 0xCB020020u, 0xCB010040u }, 2, false, 0, NULL },
+        { { 0x91004020u, 0x91008020u }, 2, false, 0, NULL },
+        // SP: mov sp, x20 ; str x5, [x20] ; mov x0, x5 ; mov sp, x20.
+        // An adjacent repeat is check_sp_mov_overwritten's.
+        { { 0x9100029Fu, 0xF9000285u, 0xAA0503E0u, 0x9100029Fu }, 4, false, 1,
+          "-> delete; sp already holds this value (set 0xc bytes back)" },
+        { { 0x9100029Fu, 0x9100029Fu }, 2, false, 0, NULL },
+        // A W copy zero-extends: mov w1, w0 ; mov w0, w1 changes x0
+        // whenever its top half was set.
+        { { 0x2A0003E1u, 0x2A0103E0u }, 2, false, 0, NULL },
+        // ADRP of a page x8 holds, reported apart; an ADRP value never
+        // matches an absolute constant (it moves with the image).
+        { { 0x90000008u, 0xF9400109u, 0x90000008u }, 3, true, 1,
+          "-> delete; x8 already holds this value (set 0x8 bytes back)" },
+        { { 0x90000008u, 0xD2800008u }, 2, false, 0, NULL },
+        { { 0x90000008u, 0xD2800008u }, 2, true, 0, NULL },
+        // Patch sites: a MOVZ the next word continues, and a MOVK, are
+        // never reported, whatever they change.
+        { { 0xD2800010u, 0xF9000010u, 0xD2800010u, 0xF2A00010u }, 4, false, 0,
+          NULL },
+        { { 0xD2824690u, 0xF2AACF10u, 0xF2AACF10u }, 3, false, 0, NULL },
+        // The self-MOV and the in-place ADD #0 belong to their checks.
+        { { 0xAA0003E0u, 0x91000021u }, 2, false, 0, NULL },
+        // UDF and system instructions end the region; NOP does not.
+        { { 0x8B020010u, 0x00000000u, 0x8B020010u }, 3, false, 0, NULL },
+        { { 0x8B020010u, 0xD51B4201u, 0x8B020010u }, 3, false, 0, NULL },
+        { { 0x8B020010u, 0xD503201Fu, 0x8B020010u }, 3, false, 1, NULL },
+        // A flag reader's number includes the flags': csel x0, x1, x2,
+        // eq repeats only while NZCV is unchanged.
+        { { 0x9A820020u, 0xEB04007Fu, 0x9A820020u }, 3, false, 0, NULL },
+        { { 0x9A820020u, 0x8B0700C5u, 0x9A820020u }, 3, false, 1, NULL },
+        // Three sources: madd x0, x1, x2, x3, with and without x3
+        // changing between.
+        { { 0x9B020C20u, 0x9B020C20u }, 2, false, 1, NULL },
+        { { 0x9B020C20u, 0x91000463u, 0x9B020C20u }, 3, false, 0, NULL },
+        // A flag-setting ALU repeats when both results are unchanged:
+        // adds x16, x0, x2 ; b.eq ; adds x16, x0, x2.
+        { { 0xAB020010u, 0x54000040u, 0xAB020010u }, 3, false, 1,
+          "-> delete; x16 and NZCV already hold these results "
+          "(set 0x8 bytes back)" },
+        // SUBS then its compare: adjacent is check_subs_cmp_redundant's,
+        // past a flag read it is this check's.
+        { { 0xEB020020u, 0xEB02003Fu }, 2, false, 0, NULL },
+        { { 0xEB020020u, 0x8B0700C5u, 0x54000041u, 0xEB02003Fu }, 4, false, 1,
+          NULL },
+        // Writes Capstone 5 flags poorly still end the match: an LSE
+        // atomic's loaded register, a post-index base.
+        { { 0x8B020010u, 0xF8230120u, 0x8B020010u }, 3, false, 0, NULL },
+        { { 0x8B020010u, 0xF8408445u, 0x8B020010u }, 3, false, 0, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n,
+                                cases[i].adrp ? adrp_name : name,
+                                detail, sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "value_recompute case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
 }
 
 static void test_mov_logic_imm_fold(void)
@@ -17149,7 +17265,7 @@ int main(void)
     test_reg_copy_chain();
     test_copy_add_sub_fold();
     test_sp_mov_overwritten();
-    test_add_recompute();
+    test_value_recompute();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

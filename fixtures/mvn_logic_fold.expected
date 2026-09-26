@@ -26,6 +26,18 @@ MVN + AND/ORR/EOR foldable to BIC/ORN/EON at offset: 0x30 <_main+0x30>: -> bic w
   mvn w0, w1
   and w5, w3, w0
 
+register already holds the recomputed value at offset: 0x38 <_main+0x38>: -> delete; w0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mvn w0, w1
+  mvn w0, w1
+
+register already holds the recomputed value at offset: 0x48 <_main+0x48>: -> delete; w0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mvn w0, w1
+  mvn w0, w1
+
+register already holds the recomputed value at offset: 0x4c <_main+0x4c>: -> delete; w5 already holds this value (set 0x18 bytes back) (1 instructions)
+  and w5, w3, w0
+  and w5, w3, w0
+
 MVN + CSEL foldable to CSINV at offset: 0x58 <_main+0x58>: -> csinv x3, x2, x1, lt (2 instructions)
   mvn x3, x1
   csel x3, x2, x3, lt
@@ -36,6 +48,7 @@ MVN + CSEL foldable to CSINV at offset: 0x60 <_main+0x60>: -> csinv x3, x2, x1, 
 
 Optimization opportunities by type:
        7  MVN + AND/ORR/EOR foldable to BIC/ORN/EON
+       3  register already holds the recomputed value
        2  MVN + CSEL foldable to CSINV
 
-9 optimization opportunities in 29 instructions
+12 optimization opportunities in 29 instructions

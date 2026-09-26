@@ -191,6 +191,21 @@ populations below are the real beyond-adjacency mass.
 | Same-address reload: second `ldr`/`ldrb`/`ldrh` of an untouched `[Rn, #d]` with no store/call/barrier between | reuse the first value (delete the reload, or copy the first destination) | ~18.2k in librustc_driver (d4-7 dominant), ~830 rustup, ~320 go. Signature shape: chained keyword-compare arms clobber the loaded register to materialize the next `ccmp` constant, then reload both fields. Deletion cannot meet the hard soundness bar -- a plain LDR may be a relaxed atomic, so a concurrent writer is architecturally visible -- so this is opt-in/informational class material |
 | Zero-CMP → S-variant with a 1-2 instruction gap | as the adjacent fold | go `cmp0\|and`: 72 at d2, 10 at d3 vs 42 at d1 -- gc's non-adjacent tail rivals the adjacent population; same flag-liveness scan, wider match |
 
+## Value-numbering leftovers (2026-09)
+
+`check_value_recompute` numbers GPR, SP and NZCV values over
+straight-line code (see
+[analyses.md](analyses.md#value-already-in-its-register-local-value-numbering)).
+What it leaves out, with the scratch census that measured each (166.6M
+instructions, 2026-09-26; no deadness or side-entry proof applied, so
+every count is a ceiling):
+
+| Pattern | Rewrite | Notes |
+| --- | --- | --- |
+| A whole MOVZ/MOVK chain (or ADRP + ADD pair) rebuilding the value its register already holds | delete the rebuild | **66,043**, all but 31 in JIT code: JavaScriptCore 30,794, SpiderMonkey Baseline 21,574 and Ion 11,364, V8 409. A JIT's patch sites are exactly such fixed-length sequences (JSC's `moveWithPatch` placeholders are `mov x16, #0 ; movk x16, #0, lsl #16 ; ...`), and two that match in a snapshot need not once patched, so this needs a way to tell a patch site from a constant before it can be a default check |
+| FP and SIMD registers | delete the recompute | Not numbered. Census: about 250 scalar FP recomputes in the JSC corpus, a handful elsewhere -- small, and FP ops also write FPSR's cumulative bits, which a deletion drops |
+| Values through memory: a store's value reloaded into the same unchanged register, or into another; a load repeated; a store overwritten before any read | delete the reload / `mov` / delete the store | Largest in baseline JIT tiers: store then reload of the same frame slot into the unchanged register, JSC 180,698 (Baseline 170,051), SpiderMonkey Baseline 31,074, rustc 3,180; into another register JSC 165,531; single-register stores overwritten with no read or branch between, JSC 13,697, SpiderMonkey Baseline 7,858, clang 1,059 (720 with no possibly-aliasing load between); a load repeated into its unchanged register, SpiderMonkey Ion 37,417, JSC 33,450, rustc 9,788, clang 8,920. Audit class at most, for the reason the same-address reload row above gives: a concurrent writer (or, for a deleted store, an asynchronous reader such as a sampling profiler walking frames) makes the difference architecturally visible |
+
 ## Investigated and closed (2026-08 sweep)
 
 Candidates measured and rejected, recorded so they are not

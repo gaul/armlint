@@ -53,11 +53,16 @@ dead sign-extension masked by zero-extension at offset: 0x6c <_main+0x6c>: sxth 
   sxth w6, w6
   uxtb w6, w6
 
+register already holds the recomputed value at offset: 0x88 <_main+0x88>: -> delete; x19 already holds this value (set 0x44 bytes back) (1 instructions)
+  and x19, x0, #0x7fffffff
+  and x19, x0, #0x7fffffff
+
 Optimization opportunities by type:
       10  AND/extend chain foldable to one
        1  dead sign-extension masked by zero-extension
        1  low-32 zero-extension foldable to MOV Wd, Wn
        1  redundant sign-extension after sign-extending op
        1  redundant zero-extension after zeroing op
+       1  register already holds the recomputed value
 
-14 optimization opportunities in 40 instructions
+15 optimization opportunities in 40 instructions

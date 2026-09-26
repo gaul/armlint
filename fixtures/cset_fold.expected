@@ -14,13 +14,25 @@ CSET + EOR #1 foldable to inverted CSET at offset: 0x40 <_main+0x40>: -> cset w1
   cset w11, eq
   eor w11, w11, #1
 
+register already holds the recomputed value at offset: 0x48 <_main+0x48>: -> delete; NZCV already holds these flags (set 0xc bytes back) (1 instructions)
+  cmp w0, w1
+  cmp w0, w1
+
 CSET + EOR #1 foldable to inverted CSET at offset: 0x4c <_main+0x4c>: -> cset w13, lo (2 instructions)
   cset w12, hs
   eor w13, w12, #1
 
+register already holds the recomputed value at offset: 0x58 <_main+0x58>: -> delete; NZCV already holds these flags (set 0x1c bytes back) (1 instructions)
+  cmp w0, w1
+  cmp w0, w1
+
 CSET + NEG foldable to CSETM at offset: 0x5c <_main+0x5c>: -> csetm w14, mi (2 instructions)
   cset w14, mi
   neg w14, w14
+
+register already holds the recomputed value at offset: 0x64 <_main+0x64>: -> delete; NZCV already holds these flags (set 0x28 bytes back) (1 instructions)
+  cmp w0, w1
+  cmp w0, w1
 
 CBZ/CBNZ of a live CSET foldable to B.cond at offset: 0x68 <_main+0x68>: -> b.eq 0x74 (CSET stays) (2 instructions)
   cset w15, eq
@@ -32,8 +44,9 @@ CBZ/CBNZ of a live CSET foldable to B.cond at offset: 0x7c <_main+0x7c>: -> b.ne
 
 Optimization opportunities by type:
        3  CSET + CBZ/CBNZ foldable into B.cond
+       3  register already holds the recomputed value
        2  CBZ/CBNZ of a live CSET foldable to B.cond
        2  CSET + EOR #1 foldable to inverted CSET
        1  CSET + NEG foldable to CSETM
 
-8 optimization opportunities in 36 instructions
+11 optimization opportunities in 36 instructions

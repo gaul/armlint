@@ -30,12 +30,21 @@ extend + ADD/SUB foldable to extended-register form at offset: 0x38 <_main+0x38>
   sxtw x0, w1
   add x2, x3, x0
 
+register already holds the recomputed value at offset: 0x40 <_main+0x40>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  sxtw x0, w1
+  sxtw x0, w1
+
+register already holds the recomputed value at offset: 0x5c <_main+0x5c>: -> delete; x2 already holds this value (set 0x20 bytes back) (1 instructions)
+  add x2, x3, x0
+  add x2, x3, x0
+
 ADD/SUB of a live extend foldable to extended-register form at offset: 0x58 <_main+0x58>: -> add x2, x3, w1, sxtw (extend stays) (2 instructions)
   sxtw x0, w1
   add x2, x3, x0
 
 Optimization opportunities by type:
        8  extend + ADD/SUB foldable to extended-register form
+       2  register already holds the recomputed value
        1  ADD/SUB of a live extend foldable to extended-register form
 
-9 optimization opportunities in 27 instructions
+11 optimization opportunities in 27 instructions

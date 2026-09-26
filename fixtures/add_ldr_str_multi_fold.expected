@@ -59,6 +59,10 @@ ADD + STR foldable to immediate-offset STR at offset: 0xb8 <_main+0xb8>: -> str 
   add x8, x1, #0x10
   str q0, [x8]
 
+register already holds the recomputed value at offset: 0x138 <_main+0x138>: -> delete; x0 already holds this value (set 0x18 bytes back) (1 instructions)
+  mov x0, #5
+  mov x0, #5
+
 ADD foldable into every access it feeds at offset: 0x12c <_main+0x12c>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
   add x8, x0, #0x10
   str q0, [x8]  -> [x0, #0x10]
@@ -72,5 +76,6 @@ ADD foldable into every access it feeds at offset: 0x154 <_main+0x154>: -> rebas
 Optimization opportunities by type:
       13  ADD foldable into every access it feeds
        1  ADD + STR foldable to immediate-offset STR
+       1  register already holds the recomputed value
 
-14 optimization opportunities in 94 instructions
+15 optimization opportunities in 94 instructions

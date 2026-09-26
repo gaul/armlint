@@ -23,12 +23,25 @@ MUL by constant foldable to shift/add at offset: 0x28 <_main+0x28>: -> add x3, x
   movk x0, #0x1
   mul x3, x2, x0
 
+register already holds the recomputed value at offset: 0x54 <_main+0x54>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov x0, #8
+  mov x0, #8
+
+register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> delete; x0 already holds this value (set 0x14 bytes back) (1 instructions)
+  mov x0, #8
+  mov x0, #8
+
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x60 <_main+0x60>: -> add x3, x4, x2, lsl #3 (2 instructions)
   movz x0, #0x8
   madd x3, x2, x0, x4
 
+register already holds the recomputed value at offset: 0x68 <_main+0x68>: -> delete; x0 already holds this value (set 0x1c bytes back) (1 instructions)
+  mov x0, #8
+  mov x0, #8
+
 Optimization opportunities by type:
        6  MUL by constant foldable to shift/add
+       3  register already holds the recomputed value
        1  MOV + MADD/MSUB foldable to shifted ADD/SUB
 
-7 optimization opportunities in 29 instructions
+10 optimization opportunities in 29 instructions

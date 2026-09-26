@@ -1327,22 +1327,77 @@ bool check_copy_add_sub_fold(armlint_state *state, const cs_insn *insn,
 bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
-// Detect a register-register ADD/SUB re-executed while its three
-// registers are unchanged -- the recompute produces a value the
-// destination already holds and deletes:
+// Detect an instruction that writes a value its destination already
+// holds -- local value numbering over straight-line code:
 //     add  x16, x0, x2
 //     ...checks that write none of the three...
 //     add  x16, x0, x2       -> delete
-// A value-integrity scan rather than an adjacent pair: any write to
-// Rd/Rn/Rm invalidates (read-modify-writes included), as does a call,
-// an unconditional transfer, an exception instruction, or a branch
-// target (a side entry reaches the recompute without the first ADD
-// having executed -- this check deletes the SECOND instruction, the
-// opposite exposure from the SP check above). Matching is by exact
-// instruction word; self-input producers and the S-variants are
-// excluded. One producer slot, newest wins.
-bool check_add_recompute(armlint_state *state, const cs_insn *insn,
-                         size_t offset, armlint_finding *out);
+//     cmp  x26, #5 ; b.lo L ; strb w19, [x8, #4]
+//     cmp  x26, #5           -> delete (NZCV unchanged)
+//     mov  x19, x0 ; ldr x1, [x1, #0x18] ; cbz x1, L
+//     mov  x0, x19           -> delete (x0 still equals x19)
+//     mov  x16, #0xfc30 ; add x4, x25, x16 ; ldr x2, [x29, x17]
+//     mov  x16, #0xfc30      -> delete
+// Every GPR, SP and NZCV carries a value number, equal numbers meaning
+// equal values. A pure data-processing instruction -- ADD/SUB,
+// logical, move-wide, bitfield, EXTR, CSEL family, ADC/SBC, the
+// compares and CCMP, multiply, divide, variable shift, CRC32, the
+// 1-source group, ADR/ADRP -- numbers its result from its operation
+// word with the register fields cleared plus its inputs' numbers (and
+// NZCV's, if it reads the flags); an X-form MOV or ADD/SUB #0 takes its
+// source's number; a result constants determine (MOVZ/MOVN, MOVK, an
+// immediate logical or ADD/SUB of a known value, ADR/ADRP) is numbered
+// by its value, so any spelling of a constant matches any other. When
+// the destination -- and NZCV, for a flag setter -- already carries the
+// number the instruction would give it, the instruction changes nothing
+// and deletes. ADR/ADRP values move with the image, so they are
+// numbered apart from absolute constants; their findings are reported
+// separately, as "ADR/ADRP of an address its register already holds",
+// because they are the linker's or the assembler's doing rather than
+// the compiler's: two symbols placed on one page (a relink fix, ld64's
+// AdrpAdrp optimization hint), or go's assembler rematerializing a page
+// into REGTMP for every access.
+//
+// A value-integrity scan: anything that may write a slot gives it a
+// fresh number (insn_gpr_write_mask's conservative GPR writes, SP
+// writes and writebacks, any NZCV writer the flag classifier or
+// Capstone admits), and a region ends -- every number fresh -- at a
+// branch target (a side entry arrives with values the region never
+// produced; this check deletes the SECOND instruction, so side entries
+// are the binding constraint), after B/BL/BR/BLR/RET, exceptions, UDF,
+// and every system instruction but NOP, BTI, the barriers and MRS.
+// Conditional branches do not end it: the fall-through keeps its
+// registers. Keys are compared whole, never hashed, so two different
+// computations never share a number; the region remembers 64, and one
+// forgotten when its probe run fills costs only findings.
+//
+// Left to the checks that own them, so no instruction is reported
+// twice: a self-MOV (check_mov_reg_self), an in-place ADD/SUB #0
+// (check_add_sub_zero, which also knows the relink-only ADRP + ADD #0
+// pair), an in-place low-mask AND or MOV Wd, Wd (check_redundant_zext,
+// whose known bits and this check's constants often agree), an
+// adjacent X copy-back (check_reg_copy_chain), an adjacent
+// repeated MOV to SP (check_sp_mov_overwritten), a compare right after
+// the flag setter it repeats (check_subs_cmp_redundant), and a
+// repeated compare whose earlier twin nothing read (check_dead_compare
+// deletes that one). A MOVK that changes nothing, and a MOVZ/MOVN the
+// next word continues with a MOVK, are never reported: a JIT's patch
+// site is a fixed-length move-wide sequence whose placeholder halfwords
+// match until patched (JSC's moveWithPatch). For the same reason a
+// whole MOVZ/MOVK chain rebuilding a constant its register holds is not
+// a finding. FP and SIMD registers are not numbered.
+//
+// Reported as one instruction, with the instruction the destination got
+// its value from as the first line. Co-fires with the folds that delete
+// a MOV of a constant, the MOV #0 fold chief among them: a MOV that
+// rematerializes a value its register holds can draw both this deletion
+// and that fold (5,280 sites in the 166.6M-instruction corpus), and a
+// fold's deadness proof may accept this check's recompute of the same
+// constant as the overwrite that kills an earlier MOV. Each rewrite is
+// sound alone, not both together. Reported as "register already holds
+// the recomputed value".
+bool check_value_recompute(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
 
 // Detect a CSET whose 0/1 result is re-compared against zero for a
 // conditional select while the original comparison is still in the

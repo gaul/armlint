@@ -18,7 +18,20 @@ UDIV by constant foldable to shift at offset: 0x20 <_main+0x20>: -> lsr x3, x2, 
   movz x0, #0x1, lsl #16
   udiv x3, x2, x0
 
+register already holds the recomputed value at offset: 0x50 <_main+0x50>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov x0, #8
+  mov x0, #8
+
+register already holds the recomputed value at offset: 0x5c <_main+0x5c>: -> delete; x0 already holds this value (set 0x14 bytes back) (1 instructions)
+  mov x0, #8
+  mov x0, #8
+
+register already holds the recomputed value at offset: 0x64 <_main+0x64>: -> delete; x0 already holds this value (set 0x1c bytes back) (1 instructions)
+  mov x0, #8
+  mov x0, #8
+
 Optimization opportunities by type:
        5  UDIV by constant foldable to shift
+       3  register already holds the recomputed value
 
-5 optimization opportunities in 28 instructions
+8 optimization opportunities in 28 instructions

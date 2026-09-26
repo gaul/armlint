@@ -41,6 +41,18 @@ MOV + ADD/SUB foldable to immediate form at offset: 0x48 <_main+0x48>: -> add x3
   movz x0, #0x1000
   add x3, x2, x0
 
+register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov x0, #0x64
+  mov x0, #0x64
+
+register already holds the recomputed value at offset: 0x68 <_main+0x68>: -> delete; x0 already holds this value (set 0x10 bytes back) (1 instructions)
+  mov x0, #0x64
+  mov x0, #0x64
+
+register already holds the recomputed value at offset: 0x70 <_main+0x70>: -> delete; x0 already holds this value (set 0x18 bytes back) (1 instructions)
+  mov x0, #0x64
+  mov x0, #0x64
+
 MOV + ADD/SUB foldable to sign-crossed immediate form at offset: 0x78 <_main+0x78>: -> sub x3, x2, #0x5 (2 instructions)
   movn x0, #0x4
   add x3, x2, x0
@@ -60,6 +72,7 @@ MOV + ADD/SUB foldable to sign-crossed immediate form at offset: 0x9c <_main+0x9
 Optimization opportunities by type:
       10  MOV + ADD/SUB foldable to immediate form
        4  MOV + ADD/SUB foldable to sign-crossed immediate form
+       3  register already holds the recomputed value
        1  compare whose flags are overwritten unread
 
-15 optimization opportunities in 46 instructions
+18 optimization opportunities in 46 instructions

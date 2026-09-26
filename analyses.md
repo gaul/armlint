@@ -1994,57 +1994,147 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   in `RemoteNotificationResponder::notifyMonitorOfImageListChanges`,
   an alloca-restore immediately re-derived from the frame pointer.
 
-## ADD/SUB recomputed while its registers are unchanged
+## Value already in its register (local value numbering)
 
-* A register-register ADD/SUB re-executed while its destination and
-  both sources are unwritten recomputes a value the register already
-  holds, and deletes -- nothing is rewritten, so there are no
-  encodability questions:
+* An instruction that writes a value its destination already holds
+  changes nothing and deletes. Nothing is rewritten, so there are no
+  encodability questions -- the whole problem is knowing that the value
+  is already there:
 
   ```
-  add  x16, x0, x2      ; input + pos
+  add  x16, x0, x2      ; irregexp: input + pos
   ldrb w1, [x16, #1]    ; checks that read but write none of
   cmp  w1, #0x78        ; the three registers
   b.ne fail
   add  x16, x0, x2      ->  delete; x16 still holds x0 + x2
+
+  cmp  x26, #5          ; librustc_driver: a compare repeated
+  b.lo L                ; past the branch that read it
+  strb w19, [x8, #4]
+  cmp  x26, #5          ->  delete; NZCV is unchanged
+
+  mov  x19, x0          ; a copy restored across a block edge
+  ldr  x1, [x1, #0x18]
+  cbz  x1, L
+  mov  x0, x19          ->  delete; x0 still equals x19
+
+  mov  x16, #0xfc30     ; JavaScriptCore Baseline: the scratch
+  add  x4, x25, x16     ; constant rematerialized after its use
+  ldr  x2, [x29, x17]
+  mov  x16, #0xfc30     ->  delete
   ```
 
-* **This is a value-integrity scan, not an adjacent pair.** The
-  tracked registers must still hold the earlier result when the
-  recompute appears, so ANY write to Rd, Rn or Rm invalidates --
-  read-modify-writes included, the ranking `insn_writes_reg` exists
-  to provide -- as does a call, an unconditional transfer, an
-  exception instruction, and any branch target: a side entry reaches
-  the recompute without the first ADD having executed. That last rule
-  is the mirror image of the SP check above, which deletes the
-  *first* instruction of its pair and is side-entry-immune; this one
-  deletes the *second*, so side entries are the binding constraint.
-  Conditional branches do not invalidate -- the fall-through path
-  keeps its registers.
-* Matching is by exact instruction word, which settles width, operand
-  order and shift agreement for free. Producers require all three
-  registers real, with the destination not among the inputs (a
-  self-input ADD changes its own operand each execution and is never
-  redundant). The S-variants are excluded: re-executing ADDS
-  recomputes the same flags only if nothing wrote NZCV in between, a
-  condition this check does not track. One producer slot, newest
-  wins. Recorded rather than done: shifted and extended-register
-  forms, a multi-slot cache, the flags-dead ADDS variant, and the
-  other pure ALU ops -- the general direction is local value
-  numbering, and each op class carries its own purity argument.
-* The population is one emitter: irregexp's lookahead character loads
-  re-form `input + pos` for every nonzero character offset, while the
-  checks in between read but never write the triple (the zero-offset
-  loads use the register-offset form and skip the scratch entirely).
-  SpiderMonkey's JetStream 3 RegExp tier: **8,836** findings --
-  exactly the count an independent measurement script produced from
-  the text dumps before the check existed, single-slot cache and
-  full-map bookkeeping agreeing because each block re-forms a single
-  triple. Ion and Baseline: **0** (Ion CSEs addresses at the MIR
-  level and its guard targets kill the windows; Baseline's frame
-  traffic is fp-relative). `/bin/bash`, `/usr/bin/ssh`,
-  `/usr/lib/dyld`: **0**. The same emitter ships in V8's arm64 port,
-  so the check transfers to that corpus as-is.
+* **Numbering.** Every GPR, SP and NZCV carries a value number, equal
+  numbers meaning equal values. A pure data-processing instruction --
+  ADD/SUB, the logical forms, move-wide, bitfield, EXTR, the CSEL
+  family, ADC/SBC, the compares and CCMP, multiply, divide, variable
+  shift, CRC32, the 1-source group, ADR/ADRP -- numbers its result from
+  its operation word with the register fields cleared plus its inputs'
+  numbers in field order (and NZCV's, if it reads the flags). An X-form
+  MOV or ADD/SUB #0 takes its source's number, so values stay equal
+  through copies (`mov x2, x1 ; add x3, x2, #8` makes a later
+  `add x3, x1, #8` a recompute); a result constants determine -- MOVZ,
+  MOVN, a MOVK onto a known value, an immediate logical or ADD/SUB of a
+  known value, a MOV of one -- is numbered by the value itself, so
+  `mov w8, #-1` and `mov x8, #0xffffffff` are one value. An instruction
+  whose destination (and NZCV, for a flag setter) already carries the
+  number it would assign is the finding. Keys are compared whole, never
+  hashed, so two computations can never share a number by accident; the
+  table remembers 64 computations per region, and forgetting one costs
+  only findings (a scanner census found more than 99% of recomputes
+  within 8 instructions of the original).
+* **Integrity.** Anything that may write a slot gives it a fresh
+  number -- `insn_gpr_write_mask`'s conservative GPR writes (writeback
+  bases, the operands Capstone 5 leaves unflagged), SP writes and
+  writebacks, and every flag writer the NZCV classifier or Capstone
+  admits. A region ends, every number fresh, at a branch target (a
+  side entry arrives with values the region never produced: this check
+  deletes the SECOND instruction, so side entries are what binds it),
+  after B/BL/BR/BLR/RET, an exception instruction or UDF, and at every
+  system instruction but NOP, BTI, the barriers and MRS. Conditional
+  branches do not end it: the fall-through keeps its registers.
+* **ADR/ADRP.** A PC-relative value moves with the image, so it is
+  numbered apart from absolute constants and never matches one, and
+  its findings are reported under their own name, "ADR/ADRP of an
+  address its register already holds": **6,561**, none of them in JIT
+  code -- rustc 2,464, clang 1,982, go 928, uutils 502, bash 403,
+  libcrypto 126, dyld 90, ssh 66. In LLVM output they are loads from
+  different constant-pool entries that landed on one page (18 of 18
+  sampled in rustc: `adrp x8, 0x64b8000 ; ldr q1, [x8, #0x620] ; adrp
+  x8, 0x64b8000 ; ldr q2, [x8, #0x630]`), symbols the compiler could
+  not have merged; ld64's AdrpAdrp optimization hint, which turns the
+  second into a NOP, is the relink that fixes them. go's are its
+  assembler rematerializing a global's page into REGTMP (x27) for every
+  access, the same global twice included -- a code-generation choice,
+  but one no compiler flag reaches. Either way they are counted apart.
+* **Left to other checks**, so no instruction is reported twice: a
+  self-MOV, an in-place ADD/SUB #0 (including the ADRP + `add #0`
+  relink pair, 1,432 of them in rustc, which constants would otherwise
+  make a recompute), an in-place low-mask AND or MOV Wd, Wd (the
+  redundant zero-extension check, whose known bits the constants often
+  agree with), an adjacent X copy-back, an adjacent repeated MOV to SP,
+  a compare right after the flag setter it repeats, and a repeated
+  compare whose earlier twin nothing read (the dead-compare check
+  deletes that one instead).
+* **JIT patch sites.** A MOVK that changes nothing, and a MOVZ/MOVN the
+  next word continues with a MOVK, are never reported. JavaScriptCore's
+  `moveWithPatch` emits fixed-length placeholder sequences --
+  `mov x16, #0 ; movk x16, #0, lsl #16 ; movk x16, #0, lsl #32` -- that
+  are later patched in place, and two placeholders equal in the
+  snapshot need not be equal once patched (6,697 such MOVKs in the JSC
+  corpus before the exclusion). For the same reason a whole MOVZ/MOVK
+  chain rebuilding a constant its register holds is not a finding, even
+  where the value matches: a scanner census counts 66,000 of them, all
+  but a few dozen in JIT code (TODO.md).
+* **Co-fire.** The folds that delete a MOV of a constant overlap this
+  check both ways. A MOV rematerializing a zero its register holds, in
+  front of a use that can take ZR, draws this deletion and the MOV #0
+  fold's at once (5,280 sites -- two rewrites of one instruction); and a
+  fold's deadness proof accepts a later recompute of the same constant
+  as the overwrite that kills an earlier MOV. Each rewrite is sound
+  alone, not both together. Deduplicating the first would cost the
+  MOV #0 fold's own fixture most of its positives, whose fragments each
+  rematerialize the zero.
+* **Corpus, 2026-09-26** (166.6M instructions): **256,277** findings,
+  replacing -- and subsuming -- the 9,689 of the register-register
+  ADD/SUB recompute check it generalizes; no other check moved.
+  * LLVM output: librustc_driver **16,891** (copies 11,237,
+    cmp/tst/cmn 2,943, `mov #imm` 1,912), clang **15,785** (copies
+    10,716, cmp/tst 3,855, `mov #imm` 866), libcrypto 998, uutils 845,
+    go 463, bash 403, dyld 332, ssh 218. About half the copies (rustc
+    4,817, clang 5,726) move an argument back from the callee-saved
+    register it was parked in, before a call, on a path that never
+    clobbered the argument; the pairs straddle a branch, and
+    MachineCopyPropagation works a block at a time. The compares are
+    one test repeated after the branch that consumed it.
+  * JavaScriptCore, JetStream 3: **152,866** -- Baseline 96,809,
+    WasmBBQ 34,954, DFG 8,015, DFGOSRExit 4,392, FTL 3,879, WasmOMG
+    2,416, YarrJIT 1,568. By instruction: `mov #imm` 86,390 (the
+    MacroAssembler rematerializing its x16/x17 scratch constants), ADD
+    49,664 (Baseline's `add x4, x25, #k` metadata pointer formed twice
+    around a load, WasmBBQ's `add x17, x22, #off` memory address),
+    cmp 9,325, ORR 2,555 (the tag register rebuilt: `orr x28, x27,
+    #2`).
+  * SpiderMonkey, JetStream 3: Ion **30,763** (17,191 are `mov sp,
+    x20` resynchronizing a stack pointer nothing moved; `mov #imm`
+    10,130; ASR 1,274), Baseline 12,380 (`mov sp` 6,631, `mov #imm`
+    3,868, ASR 1,684), RegExp 14,349 (12,360 ADD -- irregexp's
+    lookahead, the old check's 8,836 among them), Other 510; Octane
+    6,115. V8, Octane: 3,359 (cmp 1,721, `mov #imm` 889, ADD 615).
+* **Verification.** `test_value_recompute` (the old check's cases, the
+  S-variant one now a positive, and 35 word-level cases covering every
+  exclusion), `fixtures/value_recompute.s`, and `tools/rwfuzz lvn`,
+  which plants exact recomputes, second spellings of a constant,
+  copy-backs and values equal through a copy behind random gaps:
+  100,000 programs, 177,326 deletions executed, 0 mismatches. Its
+  control arm, deleting an unflagged instruction whose word ran within
+  six slots, changed the result in 35,324 of 86,395 cases, and builds
+  with one proof removed each -- the write invalidation, the
+  branch-target reset, the flags input to a key, the reset at calls,
+  a W copy taken for a copy -- mismatched within 5,000 programs.
+  ASan/UBSan clean; the unit tests pass against Capstone 6.0.0-Alpha11.
+* Not covered: FP and SIMD registers, values through memory (a store's
+  value reloaded), and the rebuilt MOVZ/MOVK chains above; see TODO.md.
 
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 

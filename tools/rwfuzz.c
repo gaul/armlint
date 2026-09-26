@@ -32,6 +32,8 @@
 //          compare the finding renders, deleting the other links and
 //          changing the reader's condition, or making the branch the
 //          CBZ/CBNZ it renders.
+//   lvn    check_value_recompute: delete the instruction whose result its
+//          destination (and NZCV) already holds.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -121,6 +123,7 @@ static unsigned body_reg(void)
 
 static uint32_t add_w(unsigned d, unsigned n, unsigned m) { return 0x0B000000u | m << 16 | n << 5 | d; }
 static uint32_t add_x(unsigned d, unsigned n, unsigned m) { return 0x8B000000u | m << 16 | n << 5 | d; }
+static uint32_t adds_x(unsigned d, unsigned n, unsigned m) { return 0xAB000000u | m << 16 | n << 5 | d; }
 static uint32_t addi_w(unsigned d, unsigned n, unsigned i) { return 0x11000000u | (i & 0xFFFu) << 10 | n << 5 | d; }
 static uint32_t addi_x(unsigned d, unsigned n, unsigned i) { return 0x91000000u | (i & 0xFFFu) << 10 | n << 5 | d; }
 static uint32_t subi_w(unsigned d, unsigned n, unsigned i) { return 0x51000000u | (i & 0xFFFu) << 10 | n << 5 | d; }
@@ -397,6 +400,72 @@ static void plant_ccmp_chain(void)
     case 0: push(cmp_x(body_reg(), body_reg())); break;
     case 1: push(csel_x(body_reg(), body_reg(), body_reg(), rr(14))); break;
     default: break;
+    }
+}
+
+// lvn: a pure instruction, a gap, and the same value computed again --
+// the same word, another spelling of its constant, a copy back, or a
+// computation equal through a copy.
+static uint32_t pure_op(void)
+{
+    unsigned d = body_reg(), a = body_reg(), b = body_reg();
+    switch (rr(12)) {
+    case 0: return add_x(d, a, b);
+    case 1: return add_w(d, a, b);
+    case 2: return addi_x(d, a, rr(4096));
+    case 3: return eor_x(d, a, b);
+    case 4: return ubfm_x(d, a, rr(64), 63);        // lsr x
+    case 5: return sbfm_w(d, a, rr(32), 31);        // asr w
+    case 6: return csel_x(d, a, b, rr(14));
+    case 7: return madd_w(d, a, b, body_reg());
+    case 8: return cmp_x(a, b);
+    case 9: return cmp_imm(rr(2) == 0, rr(2) == 0, a, small_imm());
+    case 10: return adds_x(d, a, b);
+    default: return neg_x(d, a);
+    }
+}
+
+static void plant_gap(void)
+{
+    for (unsigned gap = rr(4); gap > 0; gap--) {
+        push(filler());
+    }
+}
+
+static void plant_recompute(void)
+{
+    switch (rr(4)) {
+    case 0: {
+        uint32_t w = pure_op();
+        push(w);
+        plant_gap();
+        push(w);
+        break;
+    }
+    case 1: {
+        unsigned r = body_reg();
+        unsigned v = rr(4) == 0 ? rr(0x10000) : rr(48);
+        push(movz_x(r, v, 0));
+        plant_gap();
+        push(rr(2) == 0 ? movz_w(r, v, 0) : movz_x(r, v, 0));
+        break;
+    }
+    case 2: {
+        unsigned a = body_reg(), b = body_reg();
+        push(mov_x(a, b));
+        plant_gap();
+        push(mov_x(b, a));
+        break;
+    }
+    default: {
+        unsigned a = body_reg(), b = body_reg(), c = body_reg();
+        unsigned d = body_reg();
+        push(mov_x(a, b));
+        push(add_x(c, a, d));
+        plant_gap();
+        push(add_x(c, b, d));
+        break;
+    }
     }
 }
 
@@ -869,6 +938,46 @@ static bool ccmp_control(int i, uint32_t *alt)
     return true;
 }
 
+// lvn: the finding's one instruction is deleted.
+static bool lvn_apply(const hit_t *h, uint32_t *code)
+{
+    if (h->count != 1u || !in_body(h->start, h->start)) {
+        return false;
+    }
+    code[h->start] = NOP;
+    return true;
+}
+
+static size_t lvn_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+// The value came from further back than the previous instruction.
+static bool lvn_special(const hit_t *h)
+{
+    const char *s = strstr(h->detail, "(set 0x");
+    unsigned long back = s != NULL ? strtoul(s + 5, NULL, 16) : 0;
+    return back > 4u;
+}
+
+// Control: delete an unflagged instruction whose exact word ran within the
+// last six slots.
+static bool lvn_control(int i, uint32_t *alt)
+{
+    bool repeat = false;
+    for (int j = i - 1; j >= body_start && j >= i - 6; j--) {
+        if (prog[j] == prog[i]) {
+            repeat = true;
+        }
+    }
+    if (!repeat || prog[i] == NOP) {
+        return false;
+    }
+    alt[i] = NOP;
+    return true;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -890,6 +999,10 @@ static const mode_t_ modes[] = {
     { "ccmp", { "CMP + CCMP chain decidable by one compare", NULL },
       "with a branch reader", plant_ccmp_chain, ccmp_apply, ccmp_slot,
       ccmp_special, ccmp_control },
+    { "lvn", { "register already holds the recomputed value",
+               "ADR/ADRP of an address its register already holds" },
+      "not adjacent", plant_recompute, lvn_apply, lvn_slot, lvn_special,
+      lvn_control },
 };
 
 static bool wanted(const char *name)
@@ -904,7 +1017,8 @@ static bool wanted(const char *name)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] zext|ubfx|ccmp\n");
+    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
+            "zext|ubfx|ccmp|lvn\n");
 }
 
 int main(int argc, char **argv)

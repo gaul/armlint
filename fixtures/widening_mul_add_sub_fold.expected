@@ -34,8 +34,17 @@ SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x58 <_main+0x58>: ->
   smull x8, w0, w1
   add x9, x8, x2
 
+register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> delete; x8 already holds this value (set 0x8 bytes back) (1 instructions)
+  smull x8, w0, w1
+  smull x8, w0, w1
+
+register already holds the recomputed value at offset: 0x80 <_main+0x80>: -> delete; x9 already holds this value (set 0x24 bytes back) (1 instructions)
+  add x9, x8, x2
+  add x9, x8, x2
+
 Optimization opportunities by type:
        7  SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
        2  SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL
+       2  register already holds the recomputed value
 
-9 optimization opportunities in 36 instructions
+11 optimization opportunities in 36 instructions

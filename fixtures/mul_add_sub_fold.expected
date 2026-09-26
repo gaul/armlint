@@ -30,8 +30,13 @@ MUL + ADD/SUB foldable to MADD/MSUB at offset: 0x48 <_main+0x48>: -> madd x5, x1
   mul x3, x1, x2
   add x5, x3, x4
 
+register already holds the recomputed value at offset: 0x50 <_main+0x50>: -> delete; x3 already holds this value (set 0x8 bytes back) (1 instructions)
+  mul x3, x1, x2
+  mul x3, x1, x2
+
 Optimization opportunities by type:
        7  MUL + ADD/SUB foldable to MADD/MSUB
        1  MUL + NEG foldable to MNEG
+       1  register already holds the recomputed value
 
-8 optimization opportunities in 32 instructions
+9 optimization opportunities in 32 instructions

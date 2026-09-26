@@ -18,6 +18,14 @@ NEG + ADD/SUB foldable to SUB/ADD at offset: 0x30 <_main+0x30>: -> sub x5, x2, x
   neg x3, x1
   add x5, x2, x3
 
+register already holds the recomputed value at offset: 0x38 <_main+0x38>: -> delete; x3 already holds this value (set 0x8 bytes back) (1 instructions)
+  neg x3, x1
+  neg x3, x1
+
+register already holds the recomputed value at offset: 0x48 <_main+0x48>: -> delete; x3 already holds this value (set 0x8 bytes back) (1 instructions)
+  neg x3, x1
+  neg x3, x1
+
 NEG + CSEL foldable to CSNEG at offset: 0x6c <_main+0x6c>: -> csneg x3, x2, x1, lt (2 instructions)
   neg x3, x1
   csel x3, x2, x3, lt
@@ -40,6 +48,7 @@ CSEL same-operand identity at offset: 0xa0 <_main+0xa0>: csel x5, x3, x3, lt -> 
 Optimization opportunities by type:
        5  NEG + ADD/SUB foldable to SUB/ADD
        4  NEG + CSEL foldable to CSNEG
+       2  register already holds the recomputed value
        1  CSEL same-operand identity
 
-10 optimization opportunities in 43 instructions
+12 optimization opportunities in 43 instructions

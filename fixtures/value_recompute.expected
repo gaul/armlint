@@ -1,0 +1,56 @@
+register already holds the recomputed value at offset: 0x1c <_main+0x1c>: -> delete; x16 already holds this value (set 0x1c bytes back) (1 instructions)
+  add x16, x0, x2
+  add x16, x0, x2
+
+register already holds the recomputed value at offset: 0x34 <_main+0x34>: -> delete; x16 already holds this value (set 0xc bytes back) (1 instructions)
+  mov x16, #0x8ca0
+  mov x16, #0x8ca0
+
+register already holds the recomputed value at offset: 0x44 <_main+0x44>: -> delete; x8 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov w8, #-1
+  mov x8, #0xffffffff
+
+register already holds the recomputed value at offset: 0x58 <_main+0x58>: -> delete; NZCV already holds these flags (set 0xc bytes back) (1 instructions)
+  cmp x26, #5
+  cmp x26, #5
+
+register already holds the recomputed value at offset: 0x70 <_main+0x70>: -> delete; x0 already holds this value (set 0xc bytes back) (1 instructions)
+  mov x19, x0
+  mov x0, x19
+
+register already holds the recomputed value at offset: 0x84 <_main+0x84>: -> delete; x3 already holds this value (set 0x8 bytes back) (1 instructions)
+  add x3, x2, #8
+  add x3, x1, #8
+
+register already holds the recomputed value at offset: 0x98 <_main+0x98>: -> delete; sp already holds this value (set 0xc bytes back) (1 instructions)
+  mov sp, x20
+  mov sp, x20
+
+register already holds the recomputed value at offset: 0xa8 <_main+0xa8>: -> delete; x10 and NZCV already hold these results (set 0x8 bytes back) (1 instructions)
+  adds x10, x11, x12
+  adds x10, x11, x12
+
+ADR/ADRP of an address its register already holds at offset: 0xb8 <_main+0xb8>: -> delete; x8 already holds this value (set 0x8 bytes back) (1 instructions)
+  adrp x8, #0
+  adrp x8, #0
+
+compare whose flags are overwritten unread at offset: 0xf4 <_main+0xf4>: -> delete; NZCV overwritten unread by cmp x0, #5 (1 instructions)
+  cmp x1, #2
+
+MOV #0 + use foldable to ZR at offset: 0x110 <_main+0x110>: -> str xzr, [x0] (2 instructions)
+  movz x16, #0x0
+  str x16, [x0]
+
+suboptimal MOVZ/MOVK sequence at offset: 0x118 <_main+0x118>: -> movz x16, #0x0 (3 instructions)
+  movz x16, #0x0
+  movk x16, #0x0, lsl #16
+  movk x16, #0x0, lsl #32
+
+Optimization opportunities by type:
+       8  register already holds the recomputed value
+       1  ADR/ADRP of an address its register already holds
+       1  MOV #0 + use foldable to ZR
+       1  compare whose flags are overwritten unread
+       1  suboptimal MOVZ/MOVK sequence
+
+12 optimization opportunities in 78 instructions

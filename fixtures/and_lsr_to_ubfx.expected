@@ -18,7 +18,12 @@ AND+LSR foldable into UBFX at offset: 0x20 <_main+0x20>: -> ubfx w0, w1, #11, #1
   and w0, w1, #0xff0
   lsr w0, w0, #11
 
+register already holds the recomputed value at offset: 0x50 <_main+0x50>: -> delete; w0 already holds this value (set 0x8 bytes back) (1 instructions)
+  and w0, w1, #0xff0
+  and w0, w1, #0xff0
+
 Optimization opportunities by type:
        5  AND+LSR foldable into UBFX
+       1  register already holds the recomputed value
 
-5 optimization opportunities in 24 instructions
+6 optimization opportunities in 24 instructions

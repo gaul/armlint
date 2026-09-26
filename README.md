@@ -125,6 +125,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`and #mask`/`uxtb`/`uxth`/`uxtw`/`mov` + `lsl` (or `lsr` + `lsl`)](analyses.md#mask-and-shift-left-foldable-into-ubfiz-or-shift-round-trip-into-a-clearing-and) | `ubfiz` (or clearing `and`) |
 | [zeroing producer + `uxtb`/`uxth`/`uxtw`/`and`/`mov Wd, Wd`, adjacent or not](analyses.md#redundant-zero-extension-after-a-producer-that-already-zeroed-those-bits) | drop the zero-extension |
 | [`mov xd, xd`](analyses.md#mov-xd-xd-is-a-literal-no-op) | remove (architectural no-op) |
+| [instruction recomputing a value its register or NZCV already holds, across a gap](analyses.md#value-already-in-its-register-local-value-numbering) | delete (an ADR/ADRP of a held page is reported apart: a relink fix) |
 | [sign-extending producer + `sxtb`/`sxth`/`sxtw`](analyses.md#redundant-sign-extension-after-a-producer-that-already-replicated-the-sign) | drop the sign-extension |
 | [`and`/`uxt*`/`sxt*`/`mov Wd, Wm` + a narrower `and`/`ands`/`tst`/`uxt*`/`sxt*`](analyses.md#andextend-chain-foldable-to-one) | the second reading the first's source, or one `and` of the intersected masks |
 | [`and`/`orr`/`eor`/`sub`/`bic`/`orn`/`eon` with `Rs, Rs`](analyses.md#self-op-identities-andorreorsubbicorneon-rd-rs-rs) | `mov` / zero / all-ones |

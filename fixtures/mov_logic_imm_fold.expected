@@ -2,25 +2,53 @@ MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x0 <_main>: -> and x
   movz x0, #0xff
   and x3, x2, x0
 
+register already holds the recomputed value at offset: 0x8 <_main+0x8>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov x0, #0xff
+
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x8 <_main+0x8>: -> and x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   and x3, x0, x2
+
+register already holds the recomputed value at offset: 0x10 <_main+0x10>: -> delete; w0 already holds this value (set 0x10 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov w0, #0xff
 
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x10 <_main+0x10>: -> and w3, w2, #0xff (2 instructions)
   movz w0, #0xff
   and w3, w2, w0
 
+register already holds the recomputed value at offset: 0x18 <_main+0x18>: -> delete; x0 already holds this value (set 0x18 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov x0, #0xff
+
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x18 <_main+0x18>: -> orr x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   orr x3, x2, x0
+
+register already holds the recomputed value at offset: 0x20 <_main+0x20>: -> delete; x0 already holds this value (set 0x20 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov x0, #0xff
 
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x20 <_main+0x20>: -> eor x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   eor x3, x2, x0
 
+register already holds the recomputed value at offset: 0x28 <_main+0x28>: -> delete; x0 already holds this value (set 0x28 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov x0, #0xff
+
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x28 <_main+0x28>: -> ands x3, x2, #0xff (2 instructions)
   movz x0, #0xff
   ands x3, x2, x0
+
+register already holds the recomputed value at offset: 0x30 <_main+0x30>: -> delete; x0 already holds this value (set 0x30 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov x0, #0xff
+
+register already holds the recomputed value at offset: 0x34 <_main+0x34>: -> delete; NZCV already holds these flags (set 0x8 bytes back) (1 instructions)
+  ands x3, x2, x0
+  tst x2, x0
 
 MOV + AND/ORR/EOR foldable to bitmask immediate at offset: 0x30 <_main+0x30>: -> tst x2, #0xff (2 instructions)
   movz x0, #0xff
@@ -42,9 +70,17 @@ MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x50 <_main+0x50>: ->
   movz w0, #0x1
   orn w3, w2, w0
 
+register already holds the recomputed value at offset: 0x58 <_main+0x58>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov w0, #1
+  mov x0, #1
+
 MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x58 <_main+0x58>: -> eor x3, x2, #0xfffffffffffffffe (2 instructions)
   movz x0, #0x1
   eon x3, x2, x0
+
+register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> delete; w0 already holds this value (set 0x10 bytes back) (1 instructions)
+  mov w0, #1
+  mov w0, #1
 
 compare whose flags are overwritten unread at offset: 0x34 <_main+0x34>: -> delete; NZCV overwritten unread by bics w3, w2, w0 (1 instructions)
   tst x2, x0
@@ -53,17 +89,34 @@ MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x60 <_main+0x60>: ->
   movz w0, #0x1
   bics w3, w2, w0
 
+register already holds the recomputed value at offset: 0x68 <_main+0x68>: -> delete; w0 already holds this value (set 0x18 bytes back) (1 instructions)
+  mov w0, #1
+  mov w0, #1
+
+register already holds the recomputed value at offset: 0x6c <_main+0x6c>: -> delete; NZCV already holds these flags (set 0x8 bytes back) (1 instructions)
+  bics w3, w2, w0
+  bics wzr, w2, w0
+
 MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x68 <_main+0x68>: -> tst w2, #0xfffffffe (2 instructions)
   movz w0, #0x1
   bics wzr, w2, w0
+
+register already holds the recomputed value at offset: 0x88 <_main+0x88>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov x0, #0xff
+
+register already holds the recomputed value at offset: 0x90 <_main+0x90>: -> delete; x0 already holds this value (set 0x10 bytes back) (1 instructions)
+  mov x0, #0xff
+  mov x0, #0xff
 
 self-op identity at offset: 0x94 <_main+0x94>: and x3, x0, x0 -> mov x3, x0 (1 instructions)
   and x3, x0, x0
 
 Optimization opportunities by type:
+      13  register already holds the recomputed value
        9  MOV + AND/ORR/EOR foldable to bitmask immediate
        5  MOV + BIC/ORN/EON foldable to bitmask immediate
        1  compare whose flags are overwritten unread
        1  self-op identity
 
-16 optimization opportunities in 39 instructions
+29 optimization opportunities in 39 instructions
