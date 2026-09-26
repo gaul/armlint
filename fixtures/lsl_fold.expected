@@ -10,27 +10,74 @@ shift foldable into shifted-register form at offset: 0x10 <_main+0x10>: -> sub w
   lsl w8, w9, #2
   sub w8, w11, w8
 
+register write overwritten unread at offset: 0x18 <_main+0x18>: -> delete; x12 is overwritten before any read (1 instructions)
+  lsl x12, x13, #3
+  add x12, x15, x16
+
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x4, x0
+  ... 11 instructions ...
+  lsl x0, x1, #3
+
 shift foldable into shifted-register form at offset: 0x34 <_main+0x34>: -> add x0, x4, x1, lsl #3 (2 instructions)
   lsl x0, x1, #3
   add x0, x0, x4
+
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; w8 is overwritten before any read (1 instructions)
+  sub w8, w11, w8
+  ... 9 instructions ...
+  lsl w8, w9, #2
+
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x0, x4
+  ... 2 instructions ...
+  lsl w0, w1, #3
+
+register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; w0 is overwritten before any read (1 instructions)
+  add w0, w0, w0
+  lsr x0, x1, #4
 
 shift foldable into shifted-register form at offset: 0x4c <_main+0x4c>: -> add x0, x4, x1, lsr #4 (2 instructions)
   lsr x0, x1, #4
   add x0, x4, x0
 
+register write overwritten unread at offset: 0x40 <_main+0x40>: -> delete; w8 is overwritten before any read (1 instructions)
+  sub w8, w8, w11
+  ... 4 instructions ...
+  asr w8, w9, #3
+
 shift foldable into shifted-register form at offset: 0x54 <_main+0x54>: -> sub w8, w11, w9, asr #3 (2 instructions)
   asr w8, w9, #3
   sub w8, w11, w8
+
+register write overwritten unread at offset: 0x50 <_main+0x50>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x4, x0
+  ... 2 instructions ...
+  ror w0, w1, #5
 
 shift foldable into shifted-register form at offset: 0x5c <_main+0x5c>: -> orr w0, w4, w1, ror #5 (2 instructions)
   ror w0, w1, #5
   orr w0, w4, w0
 
+register write overwritten unread at offset: 0x60 <_main+0x60>: -> delete; w0 is overwritten before any read (1 instructions)
+  orr w0, w4, w0
+  ror w0, w1, #5
+
+register write overwritten unread at offset: 0x68 <_main+0x68>: -> delete; w0 is overwritten before any read (1 instructions)
+  add w0, w4, w0
+  extr w0, w1, w2, #5
+
 shift foldable into shifted-register form at offset: 0x74 <_main+0x74>: -> and x27, x28, x26, lsl #4 (2 instructions)
   lsl x25, x26, #4
   and x27, x28, x25
 
+register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; w8 is overwritten before any read (1 instructions)
+  sub w8, w11, w8
+  ... 9 instructions ...
+  lsr w8, w9, #2
+
 Optimization opportunities by type:
+      10  register write overwritten unread
        8  shift foldable into shifted-register form
 
-8 optimization opportunities in 37 instructions
+18 optimization opportunities in 37 instructions

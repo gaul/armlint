@@ -2,29 +2,57 @@ extend + ADD/SUB foldable to extended-register form at offset: 0x0 <_main>: -> a
   sxtw x0, w1
   add x0, x3, x0
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x3, x0
+  sxtw x0, w1
+
 extend + ADD/SUB foldable to extended-register form at offset: 0x8 <_main+0x8>: -> add x0, x3, w1, sxtw (2 instructions)
   sxtw x0, w1
   add x0, x0, x3
+
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x0, x3
+  sxtw x0, w1
 
 extend + ADD/SUB foldable to extended-register form at offset: 0x10 <_main+0x10>: -> sub x0, x3, w1, sxtw (2 instructions)
   sxtw x0, w1
   sub x0, x3, x0
 
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x0 is overwritten before any read (1 instructions)
+  sub x0, x3, x0
+  sxtb w0, w1
+
 extend + ADD/SUB foldable to extended-register form at offset: 0x18 <_main+0x18>: -> add w0, w3, w1, sxtb (2 instructions)
   sxtb w0, w1
   add w0, w3, w0
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; w0 is overwritten before any read (1 instructions)
+  add w0, w3, w0
+  uxtb w0, w1
 
 extend + ADD/SUB foldable to extended-register form at offset: 0x20 <_main+0x20>: -> add w0, w3, w1, uxtb (2 instructions)
   uxtb w0, w1
   add w0, w3, w0
 
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; w0 is overwritten before any read (1 instructions)
+  add w0, w3, w0
+  sxtb x0, w1
+
 extend + ADD/SUB foldable to extended-register form at offset: 0x28 <_main+0x28>: -> add x0, x3, w1, sxtb (2 instructions)
   sxtb x0, w1
   add x0, x3, x0
 
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x3, x0
+  uxtb w0, w1
+
 extend + ADD/SUB foldable to extended-register form at offset: 0x30 <_main+0x30>: -> add x0, x3, w1, uxtb (2 instructions)
   uxtb w0, w1
   add x0, x3, x0
+
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x3, x0
+  sxtw x0, w1
 
 extend + ADD/SUB foldable to extended-register form at offset: 0x38 <_main+0x38>: -> add x2, x3, w1, sxtw (2 instructions)
   sxtw x0, w1
@@ -32,6 +60,18 @@ extend + ADD/SUB foldable to extended-register form at offset: 0x38 <_main+0x38>
 
 register already holds the recomputed value at offset: 0x40 <_main+0x40>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
   sxtw x0, w1
+  sxtw x0, w1
+
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; x0 is overwritten before any read (1 instructions)
+  sub x0, x0, x3
+  sxtb w0, w1
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x3, x0
+  uxtb w0, w1
+
+register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; w0 is overwritten before any read (1 instructions)
+  add w0, wzr, w0
   sxtw x0, w1
 
 register already holds the recomputed value at offset: 0x5c <_main+0x5c>: -> delete; x2 already holds this value (set 0x20 bytes back) (1 instructions)
@@ -43,8 +83,9 @@ ADD/SUB of a live extend foldable to extended-register form at offset: 0x58 <_ma
   add x2, x3, x0
 
 Optimization opportunities by type:
+      10  register write overwritten unread
        8  extend + ADD/SUB foldable to extended-register form
        2  register already holds the recomputed value
        1  ADD/SUB of a live extend foldable to extended-register form
 
-11 optimization opportunities in 27 instructions
+21 optimization opportunities in 27 instructions

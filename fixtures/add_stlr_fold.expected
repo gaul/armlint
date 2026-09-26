@@ -2,27 +2,64 @@ ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x0 <_main>: -> stlur w1, [x0, 
   add x16, x0, #0x8
   stlr w1, [x16]
 
+register write overwritten unread at offset: 0x8 <_main+0x8>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x2, #0xf8
+
 ADD + STLR foldable to STLUR (LRCPC2) at offset: 0xc <_main+0xc>: -> stlur x3, [x2, #0xf8] (2 instructions)
   add x16, x2, #0xf8
   stlr x3, [x16]
+
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x0, #3
 
 ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x18 <_main+0x18>: -> stlurb w1, [x0, #0x3] (2 instructions)
   add x16, x0, #0x3
   stlrb w1, [x16]
 
+register write overwritten unread at offset: 0x20 <_main+0x20>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x0, #3
+
 ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x24 <_main+0x24>: -> stlurh w1, [x0, #0x3] (2 instructions)
   add x16, x0, #0x3
   stlrh w1, [x16]
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x0, #0xc
 
 ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x30 <_main+0x30>: -> stlur wzr, [x0, #0xc] (2 instructions)
   add x16, x0, #0xc
   stlr wzr, [x16]
 
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, sp, #0x10
+
 ADD + STLR foldable to STLUR (LRCPC2) at offset: 0x3c <_main+0x3c>: -> stlur w1, [sp, #0x10] (2 instructions)
   add x16, sp, #0x10
   stlr w1, [x16]
 
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x0, #0x100
+
+register write overwritten unread at offset: 0x50 <_main+0x50>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x0, #8
+
+register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x0, #8
+
+register write overwritten unread at offset: 0x68 <_main+0x68>: -> delete; x16 is overwritten before any read (1 instructions)
+  mov x16, #0
+  add x16, x0, #8
+
 Optimization opportunities by type:
+       9  register write overwritten unread
        6  ADD + STLR foldable to STLUR (LRCPC2)
 
-6 optimization opportunities in 36 instructions
+15 optimization opportunities in 36 instructions

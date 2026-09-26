@@ -2,27 +2,91 @@ MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x0 <_main>: -> add x0, x
   movz x8, #0x8
   madd x0, x1, x8, x2
 
+register write overwritten unread at offset: 0x8 <_main+0x8>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #8
+
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x0 is overwritten before any read (1 instructions)
+  madd x0, x1, x8, x2
+  ... 2 instructions ...
+  msub x0, x1, x8, x2
+
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0xc <_main+0xc>: -> sub x0, x2, x1, lsl #3 (2 instructions)
   movz x8, #0x8
   msub x0, x1, x8, x2
+
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #0x10
+
+register write overwritten unread at offset: 0x10 <_main+0x10>: -> delete; x0 is overwritten before any read (1 instructions)
+  msub x0, x1, x8, x2
+  ... 2 instructions ...
+  madd x0, x8, x1, x2
 
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x18 <_main+0x18>: -> add x0, x2, x1, lsl #4 (2 instructions)
   movz x8, #0x10
   madd x0, x8, x1, x2
 
+register write overwritten unread at offset: 0x20 <_main+0x20>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #1
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x0 is overwritten before any read (1 instructions)
+  madd x0, x8, x1, x2
+  ... 2 instructions ...
+  madd x0, x1, x8, x2
+
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x24 <_main+0x24>: -> add x0, x2, x1 (2 instructions)
   movz x8, #0x1
   madd x0, x1, x8, x2
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov w8, #4
+
+register write overwritten unread at offset: 0x28 <_main+0x28>: -> delete; x0 is overwritten before any read (1 instructions)
+  madd x0, x1, x8, x2
+  ... 2 instructions ...
+  msub w0, w1, w8, w2
 
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x30 <_main+0x30>: -> sub w0, w2, w1, lsl #2 (2 instructions)
   movz w8, #0x4
   msub w0, w1, w8, w2
 
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #9
+  mov x8, #0x20
+
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x3c <_main+0x3c>: -> add x8, x2, x1, lsl #5 (2 instructions)
   movz x8, #0x20
   madd x8, x1, x8, x2
 
+register write overwritten unread at offset: 0x40 <_main+0x40>: -> delete; x8 is overwritten before any read (1 instructions)
+  madd x8, x1, x8, x2
+  mov x8, #6
+
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; w0 is overwritten before any read (1 instructions)
+  msub w0, w1, w8, w2
+  ... 4 instructions ...
+  madd x0, x1, x8, x2
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #8
+
+register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; x0 is overwritten before any read (1 instructions)
+  madd x0, x1, x8, x2
+  ... 2 instructions ...
+  madd x0, x1, x8, x8
+
+register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x0 is overwritten before any read (1 instructions)
+  madd x0, x1, x8, x8
+  ... 2 instructions ...
+  madd x0, x1, x9, x2
+
 Optimization opportunities by type:
+      14  register write overwritten unread
        6  MOV + MADD/MSUB foldable to shifted ADD/SUB
 
-6 optimization opportunities in 26 instructions
+20 optimization opportunities in 26 instructions

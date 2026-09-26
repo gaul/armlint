@@ -2,6 +2,10 @@ shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x0 <_main>: -> extr x2
   lsr x2, x1, #56
   orr x2, x2, x3, lsl #8
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x2 is overwritten before any read (1 instructions)
+  orr x2, x2, x3, lsl #8
+  lsl x2, x1, #8
+
 shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x8 <_main+0x8>: -> extr x2, x1, x3, #56 (2 instructions)
   lsl x2, x1, #8
   orr x2, x2, x3, lsr #56
@@ -10,13 +14,27 @@ shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x10 <_main+0x10>: -> e
   lsr x0, x1, #40
   eor x0, x0, x5, lsl #24
 
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x0 is overwritten before any read (1 instructions)
+  eor x0, x0, x5, lsl #24
+  lsl x0, x1, #0x18
+
 shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x18 <_main+0x18>: -> extr x0, x1, x5, #40 (2 instructions)
   lsl x0, x1, #24
   add x0, x0, x5, lsr #40
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x2 is overwritten before any read (1 instructions)
+  orr x2, x2, x3, lsr #56
+  ... 4 instructions ...
+  lsr w2, w1, #0x18
+
 shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x20 <_main+0x20>: -> extr w2, w3, w1, #24 (2 instructions)
   lsr w2, w1, #24
   orr w2, w2, w3, lsl #8
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x0, x5, lsr #40
+  ... 2 instructions ...
+  lsr x0, x2, #8
 
 shift + shifted OR/EOR/ADD foldable into ROR at offset: 0x28 <_main+0x28>: -> ror x0, x2, #8 (2 instructions)
   lsr x0, x2, #8
@@ -26,12 +44,38 @@ shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x30 <_main+0x30>: -> e
   lsr x0, x0, #56
   orr x0, x0, x3, lsl #8
 
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; x0 is overwritten before any read (1 instructions)
+  orr x0, x0, x3, lsl #8
+  ... 1 instruction ...
+  orr x0, x1, x2, lsl #8
+
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; x2 is overwritten before any read (1 instructions)
+  orr x2, x2, x3, lsl #8
+  lsl x2, x1, #0x38
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x2 is overwritten before any read (1 instructions)
+  orr x2, x2, x3, lsl #8
+  lsr x2, x1, #0x38
+
+register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x2 is overwritten before any read (1 instructions)
+  orr x2, x2, x3, asr #8
+  lsr x2, x1, #0x38
+
+register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x2 is overwritten before any read (1 instructions)
+  orr x2, x2, x2, lsl #8
+  lsl x2, x1, #8
+
+register write overwritten unread at offset: 0x64 <_main+0x64>: -> delete; x2 is overwritten before any read (1 instructions)
+  sub x2, x2, x3, lsr #56
+  lsl x2, x1, #8
+
 shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x7c <_main+0x7c>: -> extr x7, x8, x5, #56 (2 instructions)
   lsr x6, x5, #56
   orr x7, x6, x8, lsl #8
 
 Optimization opportunities by type:
+      10  register write overwritten unread
        7  shift + shifted OR/EOR/ADD foldable into EXTR
        1  shift + shifted OR/EOR/ADD foldable into ROR
 
-8 optimization opportunities in 35 instructions
+18 optimization opportunities in 35 instructions

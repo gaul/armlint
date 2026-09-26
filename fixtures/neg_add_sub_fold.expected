@@ -2,17 +2,41 @@ NEG + ADD/SUB foldable to SUB/ADD at offset: 0x0 <_main>: -> sub x3, x2, x1 (2 i
   neg x3, x1
   add x3, x2, x3
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x2, x3
+  neg x3, x1
+
 NEG + ADD/SUB foldable to SUB/ADD at offset: 0x8 <_main+0x8>: -> sub x3, x2, x1 (2 instructions)
   neg x3, x1
   add x3, x3, x2
+
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x3, x2
+  neg w3, w1
 
 NEG + ADD/SUB foldable to SUB/ADD at offset: 0x10 <_main+0x10>: -> sub w3, w2, w1 (2 instructions)
   neg w3, w1
   add w3, w2, w3
 
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; w3 is overwritten before any read (1 instructions)
+  add w3, w2, w3
+  neg x3, x1
+
 NEG + ADD/SUB foldable to SUB/ADD at offset: 0x18 <_main+0x18>: -> add x3, x2, x1 (2 instructions)
   neg x3, x1
   sub x3, x2, x3
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x3 is overwritten before any read (1 instructions)
+  sub x3, x2, x3
+  neg x3, x1
+
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; x3 is overwritten before any read (1 instructions)
+  sub x3, x3, x4
+  neg w3, w1
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x2, x3
+  neg x3, x1
 
 NEG + ADD/SUB foldable to SUB/ADD at offset: 0x30 <_main+0x30>: -> sub x5, x2, x1 (2 instructions)
   neg x3, x1
@@ -22,33 +46,90 @@ register already holds the recomputed value at offset: 0x38 <_main+0x38>: -> del
   neg x3, x1
   neg x3, x1
 
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x3, x3
+  neg x3, x1
+
 register already holds the recomputed value at offset: 0x48 <_main+0x48>: -> delete; x3 already holds this value (set 0x8 bytes back) (1 instructions)
   neg x3, x1
+  neg x3, x1
+
+register write overwritten unread at offset: 0x50 <_main+0x50>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x2, x3
+  sub x3, x4, x1
+
+register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x2, x3
+  neg x3, x1
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x5 is overwritten before any read (1 instructions)
+  add x5, x5, x6
+  ... 4 instructions ...
+  add x5, x2, x3
+
+register write overwritten unread at offset: 0x68 <_main+0x68>: -> delete; x3 is overwritten before any read (1 instructions)
+  mov x3, #1
   neg x3, x1
 
 NEG + CSEL foldable to CSNEG at offset: 0x6c <_main+0x6c>: -> csneg x3, x2, x1, lt (2 instructions)
   neg x3, x1
   csel x3, x2, x3, lt
 
+register write overwritten unread at offset: 0x70 <_main+0x70>: -> delete; x3 is overwritten before any read (1 instructions)
+  csel x3, x2, x3, lt
+  neg x3, x1
+
 NEG + CSEL foldable to CSNEG at offset: 0x74 <_main+0x74>: -> csneg x3, x2, x1, ge (2 instructions)
   neg x3, x1
   csel x3, x3, x2, lt
+
+register write overwritten unread at offset: 0x78 <_main+0x78>: -> delete; x3 is overwritten before any read (1 instructions)
+  csel x3, x3, x2, lt
+  neg w3, w1
 
 NEG + CSEL foldable to CSNEG at offset: 0x7c <_main+0x7c>: -> csneg w3, w2, w1, hi (2 instructions)
   neg w3, w1
   csel w3, w2, w3, hi
 
+register write overwritten unread at offset: 0x80 <_main+0x80>: -> delete; w3 is overwritten before any read (1 instructions)
+  csel w3, w2, w3, hi
+  neg x3, x1
+
+register write overwritten unread at offset: 0x60 <_main+0x60>: -> delete; x5 is overwritten before any read (1 instructions)
+  add x5, x2, x3
+  ... 9 instructions ...
+  csel x5, x2, x3, ne
+
 NEG + CSEL foldable to CSNEG at offset: 0x84 <_main+0x84>: -> csneg x5, x2, x1, ne (2 instructions)
   neg x3, x1
   csel x5, x2, x3, ne
+
+register write overwritten unread at offset: 0x8c <_main+0x8c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mov x3, #1
+  neg x3, x1
+
+register write overwritten unread at offset: 0x88 <_main+0x88>: -> delete; x5 is overwritten before any read (1 instructions)
+  csel x5, x2, x3, ne
+  ... 2 instructions ...
+  csel x5, x2, x3, al
+
+register write overwritten unread at offset: 0x98 <_main+0x98>: -> delete; x3 is overwritten before any read (1 instructions)
+  mov x3, #1
+  neg x3, x1
+
+register write overwritten unread at offset: 0x94 <_main+0x94>: -> delete; x5 is overwritten before any read (1 instructions)
+  csel x5, x2, x3, al
+  ... 2 instructions ...
+  csel x5, x3, x3, lt
 
 CSEL same-operand identity at offset: 0xa0 <_main+0xa0>: csel x5, x3, x3, lt -> mov x5, x3 (cond irrelevant: both branches = x3) (1 instructions)
   csel x5, x3, x3, lt
 
 Optimization opportunities by type:
+      19  register write overwritten unread
        5  NEG + ADD/SUB foldable to SUB/ADD
        4  NEG + CSEL foldable to CSNEG
        2  register already holds the recomputed value
        1  CSEL same-operand identity
 
-12 optimization opportunities in 43 instructions
+31 optimization opportunities in 43 instructions

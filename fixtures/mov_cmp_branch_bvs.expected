@@ -3,6 +3,11 @@ MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x0
   cmp x0, x8
   b.eq 0x14
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ... 1 instruction ...
+  mov w8, #-0x80000000
+
 MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x14 <_main+0x14>: -> cmp wzr, w1 ; b.vc 0x24 (3 instructions)
   movz w8, #0x8000, lsl #16
   cmp w8, w1
@@ -18,7 +23,37 @@ MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x3
   cmp w1, w8
   b.ne 0x4c
 
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #1
+  ... 1 instruction ...
+  mov x8, #0x64
+
+register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ... 1 instruction ...
+  mov w8, #0xffffff
+
+register write overwritten unread at offset: 0x6c <_main+0x6c>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #1
+  ... 1 instruction ...
+  mov x8, #0x80000000
+
+register write overwritten unread at offset: 0x80 <_main+0x80>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ... 1 instruction ...
+  mov x8, #-0x8000000000000000
+
+register write overwritten unread at offset: 0x94 <_main+0x94>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ... 1 instruction ...
+  mov x8, #-0x8000000000000000
+
+register write overwritten unread at offset: 0xbc <_main+0xbc>: -> delete; x9 is overwritten before any read (1 instructions)
+  add x9, x0, x8
+  adds w9, w10, w11
+
 Optimization opportunities by type:
+       7  register write overwritten unread
        4  MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
 
-4 optimization opportunities in 61 instructions
+11 optimization opportunities in 61 instructions

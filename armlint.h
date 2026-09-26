@@ -84,11 +84,17 @@ liveness_t classify_liveness(uint32_t op);
 //
 // The register side trusts Capstone more than the NZCV side does: it
 // takes the operand access flags rather than re-deriving them, with
-// two corrections applied in insn_reg_access for the places 5.x gets
-// them wrong. That makes the cross-check MORE valuable here, not less
-// -- the classifier and its oracle share a source, so a disagreement
-// is nearly always a real defect on one side. Both corrections were
-// found that way.
+// corrections applied in insn_reg_access for the places 5.x gets them
+// wrong. That makes the cross-check MORE valuable here, not less --
+// the classifier and its oracle share a source, so a disagreement is
+// nearly always a real defect on one side. Most corrections were found
+// that way. One was not: an operand Capstone 5 gives no access flags
+// at all -- the SVE forms it decodes (`index z16.s, w20, #1`,
+// `mov z18.s, w6`), MTE's IRG, FP16's `fmov h2, w11` -- is taken as a
+// read, since the oracle is silent there too; the dead-write check
+// found those, in hand-written SVE crypto, dyld and rustc. Every
+// branch (BC.cond included) and every exception instruction (a system
+// call reads registers Capstone does not list) ends a scan.
 //
 // `reg` is a 0..30 GPR encoding number, as returned by arm64_gpr_num.
 liveness_t classify_reg_liveness(const cs_insn *insn, int reg);
@@ -1398,6 +1404,48 @@ bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
 // the recomputed value".
 bool check_value_recompute(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
+
+// Detect a pure register write whose value is overwritten before any
+// instruction reads it, on the straight-line path after it:
+//     add  x4, x25, x16      ; JavaScriptCore Baseline
+//     ldur x2, [x29, #-0xa8]
+//     mov  x16, #0x3898
+//     add  x4, x25, x16      -> delete the first ADD
+//     sub  w4, w4, #8        ; SpiderMonkey Ion
+//     ldr  w4, [x10, #4]     -> delete the SUB
+// The producer is any GPR write check_value_recompute decodes -- the
+// ADD/SUB, logical, move-wide, bitfield, EXTR, CSEL, ADC/SBC,
+// multiply, divide, shift, CRC32 and 1-source classes, ADR/ADRP --
+// except a flag setter (its NZCV would need its own proof), an SP
+// write (check_sp_mov_overwritten's, with the signal-frame caveat), a
+// write of x29 or x30 (the frame record: an asynchronous unwinder or
+// profiler reads it between any two instructions, and gc's prologue
+// sets x29 twice on purpose), a MOVK or the MOVZ/MOVN its next word
+// continues (a JIT's patch site), and a recompute of the value the
+// register already holds (check_value_recompute deletes that one).
+// The scan behind it is the forward register-liveness scan the
+// deferred folds use, per register: a read keeps the value live, an
+// overwrite that does not read it proves it dead, and anything that
+// leaves straight-line code -- any branch (BC.cond included), a call,
+// a return, an exception instruction (a system call reads argument
+// registers Capstone does not list), UDF, a system instruction but
+// NOP/BTI/the barriers -- or LIVENESS_WINDOW instructions without an
+// answer leaves it unproven.
+// An overwrite that recomputes the value the register already holds
+// leaves the pair to check_value_recompute, which deletes the second
+// instead: one of the two can go, not both.
+//
+// Deleting the FIRST instruction needs no side-entry gate: a path that
+// enters between the two never executed it, and the path through it
+// reaches the overwrite with no read on the way, so the finding is one
+// instruction wide (as check_sp_mov_overwritten's). A decoded
+// instruction's reads and write are exact, so only the others reach
+// the classifier. The finding is reported at the overwrite; when one
+// instruction kills two pending writes (an LDP), the second follows on
+// the next instruction, or from armlint_flush at the end of a region.
+// Reported as "register write overwritten unread".
+bool check_dead_write(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out);
 
 // Detect a CSET whose 0/1 result is re-compared against zero for a
 // conditional select while the original comparison is still in the

@@ -3,22 +3,73 @@ remainder by power of two foldable to AND at offset: 0x0 <_main>: -> and x9, x1,
   udiv x9, x1, x8
   msub x9, x9, x8, x1
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #5
+  mov x8, #8
+
+register write overwritten unread at offset: 0x8 <_main+0x8>: -> delete; x9 is overwritten before any read (1 instructions)
+  msub x9, x9, x8, x1
+  ... 2 instructions ...
+  udiv x9, x1, x8
+
 remainder by power of two foldable to AND at offset: 0x10 <_main+0x10>: -> and x9, x1, #0x7 (3 instructions)
   movz x8, #0x8
   udiv x9, x1, x8
   msub x9, x8, x9, x1
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #5
+  mov x8, #0x10
+
+register write overwritten unread at offset: 0x18 <_main+0x18>: -> delete; x9 is overwritten before any read (1 instructions)
+  msub x9, x8, x9, x1
+  ... 2 instructions ...
+  udiv x9, x1, x8
 
 remainder by power of two foldable to AND at offset: 0x20 <_main+0x20>: -> and x8, x1, #0xf (3 instructions)
   movz x8, #0x10
   udiv x9, x1, x8
   msub x8, x9, x8, x1
 
+register write overwritten unread at offset: 0x28 <_main+0x28>: -> delete; x8 is overwritten before any read (1 instructions)
+  msub x8, x9, x8, x1
+  ... 1 instruction ...
+  mov w8, #2
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #5
+  ... 1 instruction ...
+  udiv w9, w1, w8
+
 remainder by power of two foldable to AND at offset: 0x30 <_main+0x30>: -> and w9, w1, #0x1 (3 instructions)
   movz w8, #0x2
   udiv w9, w1, w8
   msub w9, w9, w8, w1
 
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #5
+  mov x8, #0x10
+
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; w9 is overwritten before any read (1 instructions)
+  msub w9, w9, w8, w1
+  ... 2 instructions ...
+  udiv x9, x1, x8
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #5
+  mov x8, #0x10
+
+register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; x9 is overwritten before any read (1 instructions)
+  msub x9, x9, x8, x2
+  ... 2 instructions ...
+  udiv x9, x1, x8
+
+register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #5
+  mov x8, #6
+
 Optimization opportunities by type:
+      11  register write overwritten unread
        4  remainder by power of two foldable to AND
 
-4 optimization opportunities in 29 instructions
+15 optimization opportunities in 29 instructions

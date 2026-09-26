@@ -14,7 +14,12 @@ LSL+LSR/ASR foldable into bitfield op at offset: 0x18 <_main+0x18>: -> ubfx w6, 
   lsl w6, w7, #8
   lsr w6, w6, #16
 
+register write overwritten unread at offset: 0x20 <_main+0x20>: -> delete; x8 is overwritten before any read (1 instructions)
+  lsl x8, x9, #4
+  lsr x8, x10, #8
+
 Optimization opportunities by type:
        4  LSL+LSR/ASR foldable into bitfield op
+       1  register write overwritten unread
 
-4 optimization opportunities in 16 instructions
+5 optimization opportunities in 16 instructions

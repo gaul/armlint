@@ -26,6 +26,10 @@ ADD + LDR foldable to register-offset LDR at offset: 0x30 <_main+0x30>: -> ldr x
   add x3, x3, x2
   ldr x3, [x3]
 
+register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x1, x2
+  ldr x3, [x5]
+
 ADD + LDR foldable to register-offset LDR at offset: 0x50 <_main+0x50>: -> ldr x7, [x1, x2] (2 instructions)
   add x3, x1, x2
   ldr x7, [x3]
@@ -46,17 +50,30 @@ ADD + STR foldable to register-offset STR at offset: 0x84 <_main+0x84>: -> str x
   add x3, x1, x2
   str x0, [x3]
 
+register write overwritten unread at offset: 0x8c <_main+0x8c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mov x3, #1
+  add x3, x1, x2, lsl #3
+
 ADD + STR foldable to register-offset STR at offset: 0x90 <_main+0x90>: -> str x0, [x1, x2, lsl #3] (2 instructions)
   add x3, x1, x2, lsl #3
   str x0, [x3]
+
+register write overwritten unread at offset: 0x98 <_main+0x98>: -> delete; x3 is overwritten before any read (1 instructions)
+  mov x3, #2
+  add x3, x1, x2
 
 ADD + STR foldable to register-offset STR at offset: 0x9c <_main+0x9c>: -> str xzr, [x1, x2] (2 instructions)
   add x3, x1, x2
   str xzr, [x3]
 
+register write overwritten unread at offset: 0xa4 <_main+0xa4>: -> delete; x3 is overwritten before any read (1 instructions)
+  mov x3, #3
+  add x3, x1, x2
+
 Optimization opportunities by type:
        9  ADD + LDR foldable to register-offset LDR
+       4  register write overwritten unread
        3  ADD + STR foldable to register-offset STR
        2  register already holds the recomputed value
 
-14 optimization opportunities in 46 instructions
+18 optimization opportunities in 46 instructions

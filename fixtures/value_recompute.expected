@@ -34,6 +34,15 @@ ADR/ADRP of an address its register already holds at offset: 0xb8 <_main+0xb8>: 
   adrp x8, #0
   adrp x8, #0
 
+register write overwritten unread at offset: 0xc0 <_main+0xc0>: -> delete; x17 is overwritten before any read (1 instructions)
+  add x17, x1, x4
+  ... 1 instruction ...
+  add x17, x1, x4
+
+register write overwritten unread at offset: 0xd0 <_main+0xd0>: -> delete; x21 is overwritten before any read (1 instructions)
+  add x21, x22, x23
+  add x21, x22, x23
+
 compare whose flags are overwritten unread at offset: 0xf4 <_main+0xf4>: -> delete; NZCV overwritten unread by cmp x0, #5 (1 instructions)
   cmp x1, #2
 
@@ -48,9 +57,10 @@ suboptimal MOVZ/MOVK sequence at offset: 0x118 <_main+0x118>: -> movz x16, #0x0 
 
 Optimization opportunities by type:
        8  register already holds the recomputed value
+       2  register write overwritten unread
        1  ADR/ADRP of an address its register already holds
        1  MOV #0 + use foldable to ZR
        1  compare whose flags are overwritten unread
        1  suboptimal MOVZ/MOVK sequence
 
-12 optimization opportunities in 78 instructions
+14 optimization opportunities in 78 instructions

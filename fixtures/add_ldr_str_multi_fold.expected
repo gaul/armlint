@@ -13,6 +13,10 @@ ADD foldable into every access it feeds at offset: 0x18 <_main+0x18>: -> rebase 
   str x0, [x8]  -> [x1, #0x10]
   str x2, [x8, #0x18]  -> [x1, #0x28]
 
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  add x8, x0, #0x120
+
 ADD foldable into every access it feeds at offset: 0x28 <_main+0x28>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
   add x8, x0, #0x120
   ldur x1, [x8, #-8]  -> [x0, #0x118]
@@ -35,6 +39,16 @@ ADD foldable into every access it feeds at offset: 0x5c <_main+0x5c>: -> rebase 
   stp xzr, xzr, [x9]  -> [sp, #0x38]
   stp xzr, xzr, [x9, #0x20]  -> [sp, #0x58]
 
+register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #2
+  ... 4 instructions ...
+  add x8, x0, #0x40
+
+register write overwritten unread at offset: 0x68 <_main+0x68>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #3
+  ... 2 instructions ...
+  ldp x8, x9, [x8, #0x20]
+
 ADD foldable into every access it feeds at offset: 0x6c <_main+0x6c>: -> rebase 2 accesses on x0, deleting the add (3 instructions)
   add x8, x0, #0x40
   ldr x1, [x8]  -> [x0, #0x40]
@@ -47,17 +61,58 @@ ADD foldable into every access it feeds at offset: 0x78 <_main+0x78>: -> rebase 
   stp xzr, xzr, [x9, #0x40]  -> [sp, #0x140]
   ... and 2 more
 
+register write overwritten unread at offset: 0x90 <_main+0x90>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #0xc
+  ... 1 instruction ...
+  mov x9, #7
+
 ADD foldable into every access it feeds at offset: 0x94 <_main+0x94>: -> rebase the access on x1, deleting the add (3 instructions)
   add x8, x1, #0x10
   str q0, [x8]  -> [x1, #0x10]
+
+register write overwritten unread at offset: 0xa0 <_main+0xa0>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #4
+  add x8, sp, #0x1d0
 
 ADD foldable into every access it feeds at offset: 0xa4 <_main+0xa4>: -> rebase the access on sp, deleting the add (4 instructions)
   add x8, sp, #0x1d0
   stp x0, x1, [x8, #0x10]  -> [sp, #0x1e0]
 
+register write overwritten unread at offset: 0xb4 <_main+0xb4>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #0xe
+  add x8, x1, #0x10
+
 ADD + STR foldable to immediate-offset STR at offset: 0xb8 <_main+0xb8>: -> str q0, [x1, #0x10] (2 instructions)
   add x8, x1, #0x10
   str q0, [x8]
+
+register write overwritten unread at offset: 0xc0 <_main+0xc0>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #0xf
+  add x8, x1, #0x10
+
+register write overwritten unread at offset: 0xd0 <_main+0xd0>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #0x10
+  add x8, x1, #0x10
+
+register write overwritten unread at offset: 0xe0 <_main+0xe0>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #5
+  add x8, x1, #0x10
+
+register write overwritten unread at offset: 0xf4 <_main+0xf4>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #6
+  add x8, x1, #0x10
+
+register write overwritten unread at offset: 0x104 <_main+0x104>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #7
+  add x8, x1, #0x10
+
+register write overwritten unread at offset: 0x114 <_main+0x114>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #8
+  add x8, x0, #0x10
+
+register write overwritten unread at offset: 0x128 <_main+0x128>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  add x8, x0, #0x10
 
 register already holds the recomputed value at offset: 0x138 <_main+0x138>: -> delete; x0 already holds this value (set 0x18 bytes back) (1 instructions)
   mov x0, #5
@@ -68,14 +123,27 @@ ADD foldable into every access it feeds at offset: 0x12c <_main+0x12c>: -> rebas
   str q0, [x8]  -> [x0, #0x10]
   str q1, [x8, #0x20]  -> [x0, #0x30]
 
+register write overwritten unread at offset: 0x13c <_main+0x13c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #0xd
+  add x8, sp, #0x10
+
+register write overwritten unread at offset: 0x150 <_main+0x150>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #0xa
+  add x8, sp, #0x10
+
 ADD foldable into every access it feeds at offset: 0x154 <_main+0x154>: -> rebase 2 accesses on sp, deleting the add (4 instructions)
   add x8, sp, #0x10
   str q0, [x8]  -> [sp, #0x10]
   str q1, [x8, #0x20]  -> [sp, #0x30]
 
+register write overwritten unread at offset: 0x164 <_main+0x164>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #0xb
+  add x8, x1, #0x10
+
 Optimization opportunities by type:
+      16  register write overwritten unread
       13  ADD foldable into every access it feeds
        1  ADD + STR foldable to immediate-offset STR
        1  register already holds the recomputed value
 
-15 optimization opportunities in 94 instructions
+31 optimization opportunities in 94 instructions

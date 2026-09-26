@@ -31,6 +31,22 @@
 
 static csh g_handle;
 
+// A finding name the counting harnesses (run_check, run_buffer_check,
+// run_features_check) leave out while set. Several negatives hand a check
+// a fragment whose second instruction overwrites the first's register
+// unread -- a dead write in its own right, check_dead_write's finding --
+// and those tests are about the other check.
+static const char *g_uncounted;
+static const char *const kDeadWrite = "register write overwritten unread";
+
+static bool counted(const armlint_finding *f)
+{
+    return g_uncounted == NULL || strcmp(f->name, g_uncounted) != 0;
+}
+
+#define DEAD_WRITES_UNCOUNTED(stmt) \
+    do { g_uncounted = kDeadWrite; stmt; g_uncounted = NULL; } while (0)
+
 static int run_check(const uint8_t *code, size_t code_size)
 {
     cs_insn *insns = NULL;
@@ -51,7 +67,8 @@ static int run_check(const uint8_t *code, size_t code_size)
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
             if (armlint_check_registry[k](state, &insns[i], offset, &f)
-                    && !armlint_finding_has_side_entry(state, &f)) {
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && counted(&f)) {
                 findings++;
             }
         }
@@ -59,7 +76,8 @@ static int run_check(const uint8_t *code, size_t code_size)
 
     armlint_finding f;
     if (armlint_flush(state, &f)
-            && !armlint_finding_has_side_entry(state, &f)) {
+            && !armlint_finding_has_side_entry(state, &f)
+            && counted(&f)) {
         findings++;
     }
 
@@ -136,14 +154,16 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
                 armlint_finding f;
                 if (armlint_check_registry[k](state, insn,
                                               (size_t)insn_addr, &f)
-                        && !armlint_finding_has_side_entry(state, &f)) {
+                        && !armlint_finding_has_side_entry(state, &f)
+                        && counted(&f)) {
                     findings++;
                 }
             }
         } else {
             armlint_finding f;
             if (armlint_flush(state, &f)
-                    && !armlint_finding_has_side_entry(state, &f)) {
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && counted(&f)) {
                 findings++;
             }
             p += 4;
@@ -153,7 +173,8 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
     }
     armlint_finding f;
     if (armlint_flush(state, &f)
-            && !armlint_finding_has_side_entry(state, &f)) {
+            && !armlint_finding_has_side_entry(state, &f)
+            && counted(&f)) {
         findings++;
     }
 
@@ -229,7 +250,8 @@ static int run_features_check(const uint8_t *code, size_t code_size,
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
             if (armlint_check_registry[k](state, &insns[i], offset, &f)
-                    && !armlint_finding_has_side_entry(state, &f)) {
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && counted(&f)) {
                 findings++;
             }
         }
@@ -237,7 +259,8 @@ static int run_features_check(const uint8_t *code, size_t code_size,
 
     armlint_finding f;
     if (armlint_flush(state, &f)
-            && !armlint_finding_has_side_entry(state, &f)) {
+            && !armlint_finding_has_side_entry(state, &f)
+            && counted(&f)) {
         findings++;
     }
 
@@ -1922,7 +1945,9 @@ static void test_cmp_zero_branch(void)
         cmp_w_imm(&big[0], 0, 0);
         b_cond(&big[4], 0, 8);
         for (int i = 0; i < 14; i++) {
-            movz_w(&big[8 + i * 4], 5, (uint16_t)(i + 1));
+            // Distinct registers: a MOVZ overwriting the previous one's
+            // register unread would be a dead write, a finding of its own.
+            movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 1));
         }
         ret_(&big[8 + 14 * 4]);
         assert(run_helper_check(big, sizeof(big)) == 1);
@@ -2023,7 +2048,8 @@ static void test_cmp_zero_branch(void)
         cmp_w_imm(&big[0], 0, 0);
         b_cond(&big[4], 0, 8);
         for (int i = 0; i < 16; i++) {
-            movz_w(&big[8 + i * 4], 5, (uint16_t)(i + 1));
+            // Distinct registers, as above: no dead writes of their own.
+            movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 1));
         }
         ret_(&big[8 + 16 * 4]);
         assert(run_helper_check(big, sizeof(big)) == 0);
@@ -3102,7 +3128,7 @@ static void test_cset_recompare(void)
     cmp_w_imm(&code[8], 8, 0);
     csel_w(&code[12], 0, 1, 2, 0);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 20) == 0););
 
     // -- Negative: a read-modify-write of the temp in the gap (the
     //    boolean-XOR shape Rust's median3 emits) leaves the zero-test
@@ -3809,7 +3835,7 @@ static void test_redundant_zext(void)
 
     add_w(&code[0], 0, 1, 2);
     mov_w_reg(&code[4], 0, 5);
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // -- Sharper producer thresholds: UBFM geometry. --
 
@@ -4134,7 +4160,7 @@ static void test_lsl_lsr_to_ubfx(void)
     // lsl w0, w1, #4 ; lsr w0, w5, #12 -- consumer Rn != bsx_rd.
     lsl_w(&code[0], 0, 1, 4);
     lsr_w(&code[4], 0, 5, 12);
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // -- Negative: width mismatch. --
 
@@ -4271,7 +4297,7 @@ static void test_lsr_and_to_ubfx(void)
     // lsr w0, w1, #4 ; and w0, w5, #0xff -- consumer Rn != lra_rd.
     lsr_w(&code[0], 0, 1, 4);
     and_w_lowmask(&code[4], 0, 5, 8);
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // -- Negative: width mismatch (W LSR + X AND). --
 
@@ -4381,7 +4407,7 @@ static void test_and_lsr_to_ubfx(void)
     // LSR Rn != AND Rd (the LSR reads a different source).
     and_run(&code[0], 0, 0, 1, 4, 8);
     lsr_w(&code[4], 0, 5, 4);
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Intervening instruction expires the pending AND.
     and_run(&code[0], 0, 0, 1, 4, 8);
@@ -4459,7 +4485,7 @@ static void test_and_lsr_lsl_fold(void)
     // LSL Rn != producer dest (reads a different source).
     and_w_lowmask(&code[0], 0, 1, 8);
     lsl_w(&code[4], 0, 5, 4);
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Width mismatch: W-form AND, X-form LSL.
     and_w_lowmask(&code[0], 0, 1, 8);
@@ -4559,7 +4585,7 @@ static void test_and_lsr_lsl_fold(void)
     // LSL Rn reads a different register than the zero-extension wrote.
     uxtb_w(&code[0], 0, 1);
     lsl_w(&code[4], 0, 5, 4);
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Intervening instruction expires the pending zero-extension.
     uxtw(&code[0], 0, 1);
@@ -4989,7 +5015,7 @@ static void test_redundant_sext(void)
 
     sxtb_w(&code[0], 0, 1);
     uxtb_w(&code[4], 0, 5);   // consumer Rn != sxt_rd
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // -- Negative: intervening instruction expires sxt state. --
 
@@ -5647,7 +5673,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 1);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 20) == 1););
 
     // A read-modify-write of Rd in the gap breaks it just the same
     // (EOR is not itself a producer, so nothing reopens the slot):
@@ -6568,7 +6594,7 @@ static void test_bfxil_synth(void)
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 0, 1, 8);   // Rt == clear.Rd
     orr_w(&code[8], 0, 0, 0);
-    assert(run_helper_check(code, 12) == 1);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 12) == 1););
 
     // -- Negative: aliasing -- Rt == Rs (isolate modifies source). --
 
@@ -8819,7 +8845,7 @@ static void test_value_recompute(void)
     add_x(&code[0], 16, 0, 2);
     add_x(&code[4], 16, 0, 2);
     cbz_cbnz(&code[8], 1, 0, 9, -1);   // cbz x9, back to the second add
-    assert(run_buffer_check(code, 12) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_buffer_check(code, 12) == 0););
 
     static const struct {
         uint32_t words[4];
@@ -8922,6 +8948,90 @@ static void test_value_recompute(void)
                     "detail \"%s\"\n", i, got, detail);
             assert(0);
         }
+    }
+}
+
+static void test_dead_write(void)
+{
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[4];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // mov x3, #7 ; ldr x4, [x0] ; ldr x3, [x1]: the load kills the
+        // MOV's value unread.
+        { { 0xD28000E3u, 0xF9400004u, 0xF9400023u }, 3, 1,
+          "-> delete; x3 is overwritten before any read" },
+        // Adjacent, W form: sub w4, w4, #8 ; ldr w4, [x10, #4].
+        { { 0x51002084u, 0xB9400544u }, 2, 1,
+          "-> delete; w4 is overwritten before any read" },
+        // A W write kills the whole register: mov x0, #1 ; mov w0, #2.
+        { { 0xD2800020u, 0x52800040u }, 2, 1, NULL },
+        // Another check's negative: lsl w0, w1, #4 ; lsr w0, w5, #12.
+        { { 0x531C6C20u, 0x530C7CA0u }, 2, 1, NULL },
+        // One load kills two: mov x1, #1 ; mov x2, #2 ; ldp x1, x2, [x0] ;
+        // nop -- the second finding reports on the next instruction.
+        { { 0xD2800021u, 0xD2800042u, 0xA9400801u, 0xD503201Fu }, 4, 2, NULL },
+        // A plain MOVZ is a producer; one the next word continues with a
+        // MOVK (a JIT patch site's shape), and the MOVK, are not.
+        { { 0xD2800030u, 0xD2800070u }, 2, 1, NULL },
+        { { 0xD2800030u, 0xF2A00050u, 0xD2800070u }, 3, 0, NULL },
+        // A branch target between the two does not matter: only the
+        // first instruction goes (mov x3, #7 ; add ; mov x3, #8 ;
+        // cbz x9 back to the add).
+        { { 0xD28000E3u, 0x8B0700C5u, 0xD2800103u, 0xB4FFFFC9u }, 4, 1, NULL },
+        // NOP is transparent.
+        { { 0xD28000E3u, 0xD503201Fu, 0xD2800103u }, 3, 1, NULL },
+        // Reads keep the value live: an ALU source, a stored register,
+        // an LSE atomic's Rs, the killer's own source, a load's base.
+        { { 0xD28000E3u, 0x91000464u, 0xD2800103u }, 3, 0, NULL },
+        { { 0xD28000E3u, 0xF9000003u, 0xD2800103u }, 3, 0, NULL },
+        { { 0xD28000E3u, 0xF8230004u, 0xD2800103u }, 3, 0, NULL },
+        { { 0xD2800020u, 0x91000800u }, 2, 0, NULL },
+        { { 0x91002041u, 0xA9400C21u }, 2, 0, NULL },
+        // Leaving straight-line code leaves it unproven: a conditional
+        // branch (and BC.cond), a system call (x16 is its number on
+        // Darwin), a system instruction.
+        { { 0xD28000E3u, 0xB4000060u, 0xD2800103u }, 3, 0, NULL },
+        { { 0xD28000E3u, 0x54000070u, 0xD2800103u }, 3, 0, NULL },
+        { { 0xD2800030u, 0xD4001001u, 0xD2800050u }, 3, 0, NULL },
+        { { 0xD28000E3u, 0xD51B4201u, 0xD2800103u }, 3, 0, NULL },
+        // Not producers: a flag setter, an SP write.
+        { { 0xAB020023u, 0xD2800023u }, 2, 0, NULL },
+        { { 0x9100029Fu, 0x910002BFu }, 2, 0, NULL },
+        // A recompute of the value is check_value_recompute's, as the
+        // killer (add x4, x25, #0xc8 ; ldur ; add x4, x25, #0xc8) and as
+        // the producer (mov x3, #7 ; str x3 ; mov x3, #7 ; mov x3, #8).
+        { { 0x91032324u, 0xF85D03A2u, 0x91032324u }, 3, 0, NULL },
+        { { 0xD28000E3u, 0xF9000003u, 0xD28000E3u, 0xD2800103u }, 4, 0, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, kDeadWrite,
+                                detail, sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "dead_write case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+
+    // The window: fifteen undecided instructions fit, sixteen expire it.
+    // (The filler writes distinct registers, so none is dead itself.)
+    for (int fill = 15; fill <= 16; fill++) {
+        uint8_t big[4 + 16 * 4 + 4];
+        movz_x(&big[0], 3, 7, 0);
+        for (int i = 0; i < fill; i++) {
+            movz_w(&big[4 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 1));
+        }
+        size_t at = 4 + (size_t)fill * 4;
+        movz_x(&big[at], 3, 8, 0);
+        assert(run_named_buffer_check(big, at + 4, kDeadWrite, NULL, 0)
+               == (fill == 15 ? 1 : 0));
     }
 }
 
@@ -9500,7 +9610,7 @@ static void test_mov_zero_to_xzr(void)
     // to substitute.
     movz_x(&code[0], 0, 0, 0);
     ldur_x(&code[4], 0, 1, -8);     // LDUR X0, [X1, #-8]
-    assert(run_x0_dead(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_x0_dead(code, 8) == 0););
 
     // Unscaled store whose base is the zeroed register: the same hole
     // as the scaled case above, and the same guard closes it. Only Rt
@@ -10717,7 +10827,7 @@ static void test_extend_cvtf_fold(void)
     sxtw_x(&code[0], 8, 0);
     cvtf_gpr(&code[4], 1, 1, 0, 0, 9);
     movz_x(&code[8], 8, 1, 0);
-    assert(run_helper_check(code, 12) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // -- Negative: the extended register is read again before
     //    dying -- the extend must stay. --
@@ -11386,7 +11496,7 @@ static void test_add_ldr_register_offset(void)
     // Negative: LDR base != ADD's Rd.
     add_x_lsl(&code[0], 3, 1, 2, 0);
     ldr_x_uimm0(&code[4], 3, 5);  // base x5 != x3
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Negative: LDR's Rt != ADD's Rd (would leave Xt alive).
     add_x_lsl(&code[0], 3, 1, 2, 0);
@@ -11648,7 +11758,7 @@ static void test_sxtw_ldr_fold(void)
     // Unsigned-offset LDR (not the register-offset form) does not match.
     sxtw_x(&code[0], 0, 1);
     ldr_x_uimm0(&code[4], 0, 3);   // ldr x0, [x3]
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Intervening instruction expires the pending SXTW.
     sxtw_x(&code[0], 0, 1);
@@ -12678,7 +12788,7 @@ static void test_cssc_ctz(void)
     // The CLZ must read the reversed register.
     write_le32(&code[0], 0xDAC00000u | (1u << 5) | 0u);
     write_le32(&code[4], 0xDAC01000u | (2u << 5) | 0u);
-    assert(run_cssc_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_cssc_check(code, 8) == 0););
 
     // Width mismatch.
     write_le32(&code[0], 0xDAC00000u | (1u << 5) | 0u);
@@ -14147,7 +14257,7 @@ static void test_add_ldr_imm_offset(void)
     // Negative: LDR base != ADD's Rd.
     add_x_imm(&code[0], 3, 1, 16);
     ldr_x_uimm0(&code[4], 3, 5);  // base x5 != x3
-    assert(run_helper_check(code, 8) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Negative: LDR's Rt != ADD's Rd (would leave x3 alive).
     add_x_imm(&code[0], 3, 1, 16);
@@ -14893,7 +15003,7 @@ static void test_add_stlr_fold(void)
     // Negative: store base is not the ADD's Rd.
     add_x_imm(&code[0], 16, 1, 8);
     stlr_w(&code[4], 0, 17);
-    assert(run_lrcpc2_reg_dead(code, 8, 16) == 0);
+    DEAD_WRITES_UNCOUNTED(assert(run_lrcpc2_reg_dead(code, 8, 16) == 0););
 
     // Negative: the stored data register is the address temp -- the
     // folded store would read the deleted sum.
@@ -15172,7 +15282,7 @@ static void test_pac_jump_table(void)
     adr_(&code[12], 17, 0);
     add_x(&code[16], 16, 17, 16);
     br_(&code[20], 16);
-    assert(run_pac_audit_check(code, 24) == 1);
+    DEAD_WRITES_UNCOUNTED(assert(run_pac_audit_check(code, 24) == 1););
 }
 
 // The zero-discriminator rung of the PAC audit ladder: BRAAZ/BRABZ
@@ -17266,6 +17376,7 @@ int main(void)
     test_copy_add_sub_fold();
     test_sp_mov_overwritten();
     test_value_recompute();
+    test_dead_write();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

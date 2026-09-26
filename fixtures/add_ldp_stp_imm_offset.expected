@@ -30,6 +30,10 @@ ADD + LDP foldable to immediate-offset LDP at offset: 0x38 <_main+0x38>: -> ldp 
   add x8, x1, #0x1f8
   ldp x8, x20, [x8]
 
+register write overwritten unread at offset: 0x50 <_main+0x50>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x1, #0x10
+  ldp x8, x20, [x9]
+
 ADD foldable into every access it feeds at offset: 0x60 <_main+0x60>: -> rebase the access on x1, deleting the add (3 instructions)
   add x8, x1, #0x10
   ldp x8, x20, [x8]  -> [x1, #0x10]
@@ -38,21 +42,46 @@ ADD + STP foldable to immediate-offset STP at offset: 0x6c <_main+0x6c>: -> stp 
   add x8, x1, #0x10
   stp x3, x4, [x8]
 
+register write overwritten unread at offset: 0x74 <_main+0x74>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  add x8, sp, #0x30
+
 ADD + STP foldable to immediate-offset STP at offset: 0x78 <_main+0x78>: -> stp x1, x2, [sp, #0x20] (2 instructions)
   add x8, sp, #0x30
   stp x1, x2, [x8, #-0x10]
+
+register write overwritten unread at offset: 0x80 <_main+0x80>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  add x8, x1, #0x10
 
 ADD + LDP foldable to immediate-offset LDP at offset: 0x84 <_main+0x84>: -> ldp x3, x4, [x1, #0x10] (2 instructions)
   add x8, x1, #0x10
   ldp x3, x4, [x8]
 
+register write overwritten unread at offset: 0x8c <_main+0x8c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  add x8, x1, #0x20
+
 ADD + STP foldable to immediate-offset STP at offset: 0x90 <_main+0x90>: -> stp q8, q9, [x1, #0x20] (2 instructions)
   add x8, x1, #0x20
   stp q8, q9, [x8]
 
+register write overwritten unread at offset: 0x98 <_main+0x98>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  add x8, x1, #0x10
+
+register write overwritten unread at offset: 0xa4 <_main+0xa4>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  add x8, x1, #0x10
+
+register write overwritten unread at offset: 0xb0 <_main+0xb0>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  add x8, x1, #0x10
+
 Optimization opportunities by type:
        9  ADD + LDP foldable to immediate-offset LDP
+       7  register write overwritten unread
        3  ADD + STP foldable to immediate-offset STP
        1  ADD foldable into every access it feeds
 
-13 optimization opportunities in 50 instructions
+20 optimization opportunities in 50 instructions

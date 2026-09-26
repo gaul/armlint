@@ -2,27 +2,91 @@ MOV + variable shift foldable to immediate shift at offset: 0x0 <_main>: -> lsl 
   movz x8, #0x5
   lsl x0, x1, x8
 
+register write overwritten unread at offset: 0x8 <_main+0x8>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #5
+
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x0 is overwritten before any read (1 instructions)
+  lsl x0, x1, x8
+  ... 2 instructions ...
+  lsr x0, x1, x8
+
 MOV + variable shift foldable to immediate shift at offset: 0xc <_main+0xc>: -> lsr x0, x1, #5 (2 instructions)
   movz x8, #0x5
   lsr x0, x1, x8
+
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov w8, #7
+
+register write overwritten unread at offset: 0x10 <_main+0x10>: -> delete; x0 is overwritten before any read (1 instructions)
+  lsr x0, x1, x8
+  ... 2 instructions ...
+  asr w0, w1, w8
 
 MOV + variable shift foldable to immediate shift at offset: 0x18 <_main+0x18>: -> asr w0, w1, #7 (2 instructions)
   movz w8, #0x7
   asr w0, w1, w8
 
+register write overwritten unread at offset: 0x20 <_main+0x20>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #9
+  mov x8, #0xd
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; w0 is overwritten before any read (1 instructions)
+  asr w0, w1, w8
+  ... 2 instructions ...
+  ror x0, x1, x8
+
 MOV + variable shift foldable to immediate shift at offset: 0x24 <_main+0x24>: -> ror x0, x1, #13 (2 instructions)
   movz x8, #0xd
   ror x0, x1, x8
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #0x43
+
+register write overwritten unread at offset: 0x28 <_main+0x28>: -> delete; x0 is overwritten before any read (1 instructions)
+  ror x0, x1, x8
+  ... 2 instructions ...
+  lsl x0, x1, x8
 
 MOV + variable shift foldable to immediate shift at offset: 0x30 <_main+0x30>: -> lsl x0, x1, #3 (2 instructions)
   movz x8, #0x43
   lsl x0, x1, x8
 
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #5
+
 MOV + variable shift foldable to immediate shift at offset: 0x3c <_main+0x3c>: -> lsl x8, x1, #5 (2 instructions)
   movz x8, #0x5
   lsl x8, x1, x8
 
+register write overwritten unread at offset: 0x40 <_main+0x40>: -> delete; x8 is overwritten before any read (1 instructions)
+  lsl x8, x1, x8
+  mov x8, #0x40
+
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; x0 is overwritten before any read (1 instructions)
+  lsl x0, x1, x8
+  ... 4 instructions ...
+  lsl x0, x1, x8
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #9
+  mov x8, #5
+
+register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; x0 is overwritten before any read (1 instructions)
+  lsl x0, x1, x8
+  ... 2 instructions ...
+  lsl x0, x8, x8
+
+register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x0 is overwritten before any read (1 instructions)
+  lsl x0, x8, x8
+  ... 2 instructions ...
+  lsl x0, x1, x9
+
 Optimization opportunities by type:
+      14  register write overwritten unread
        6  MOV + variable shift foldable to immediate shift
 
-6 optimization opportunities in 26 instructions
+20 optimization opportunities in 26 instructions

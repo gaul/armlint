@@ -2136,6 +2136,99 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Not covered: FP and SIMD registers, values through memory (a store's
   value reloaded), and the rebuilt MOVZ/MOVK chains above; see TODO.md.
 
+## Register write overwritten unread
+
+* A pure register write whose value is overwritten before any
+  instruction reads it did nothing, and deletes:
+
+  ```
+  add  x4, x25, x16     ; JavaScriptCore Baseline: a metadata pointer
+  ldur x2, [x29, #-0xa8]
+  mov  x16, #0x3898
+  add  x4, x25, x16     ->  delete the first ADD
+
+  sub  w4, w4, #8       ; SpiderMonkey Ion
+  ldr  w4, [x10, #4]    ->  delete the SUB
+
+  mov  x4, #0           ; V8: zeroed, then loaded from the constant pool
+  ldr  w4, #literal     ->  delete the MOV
+  ```
+
+* **Producers** are the GPR writes `check_value_recompute` decodes --
+  ADD/SUB, the logical forms, move-wide, bitfield, EXTR, the CSEL
+  family, ADC/SBC, multiply, divide, variable shift, CRC32, the
+  1-source group, ADR/ADRP -- less a flag setter (its NZCV would need a
+  proof of its own), an SP write (the MOV-to-SP check's, with its
+  signal-frame caveat), a write of x29 or x30 (the frame record, which
+  a signal-time unwinder or profiler reads between any two
+  instructions -- gc's prologue sets x29 twice on purpose, which
+  accounted for 20 of go's first 100), a MOVK or the MOVZ/MOVN its next
+  word continues (a JIT's patch site), and a recompute of the value the
+  register already holds (the other check deletes that one).
+* **The proof** is the forward register-liveness scan the deferred folds
+  already use, run per register: a read keeps the value live, a write
+  that does not read it first proves it dead, and anything leaving
+  straight-line code -- any branch, a call, a return, an exception
+  instruction, UDF, a system instruction but NOP/BTI/the barriers -- or
+  sixteen instructions without an answer leaves it unproven. A decoded
+  instruction's reads and write are exact, so only the others reach the
+  classifier. Deleting the FIRST instruction needs no side-entry gate: a
+  path entering between the two never ran it, and the path through it
+  reaches the overwrite without a read. When one instruction kills two
+  pending writes (an LDP), the second finding reports on the next
+  instruction.
+* **Recompute pairs belong to the other check.** An overwrite that
+  recomputes the value the register already holds (`add x4, x25, #0xc8
+  ; ldur ; add x4, x25, #0xc8`) makes the first write dead and the
+  second redundant -- one of the two can go, not both --
+  and `check_value_recompute` already reports the second. In the first
+  JavaScriptCore file that rule sets aside 17,744 dead writes, and
+  85,833 producers are recomputes the other check claims: the scratch
+  census that ranked this check, which could only recognize exact
+  recomputes, constants and copy-backs, overestimated what was left
+  for it about fourfold.
+* **The shared classifier had three holes**, all found by this check's
+  findings and all closed conservatively for every check that proves a
+  register dead: an operand Capstone 5 gives no access flags was not
+  read -- the SVE forms it decodes (`add w20, w29, #1 ; mov w19, w29 ;
+  index z16.s, w20, #1 ; ... ; lsr x20, x29, #32` in OpenSSL's SVE
+  ChaCha20), MTE's IRG (`mov w8, #1 ; irg x22, x22, x8` in dyld's
+  allocator) and the FP16 `fmov h2, w11` (rustc) all read a GPR that
+  way; BC.cond, whose bit 4 the branch mask pinned, was not a branch;
+  and an exception instruction was not a terminator, though a system
+  call reads its number and argument registers. The eleven false
+  findings those holes made are gone, the exhaustive 2^32 register
+  sweep still reports no violation, and no other check's count moved.
+* The 2026-08 sweep closed "pure write immediately clobbered" at four
+  sites, all go assembler templates -- right for compiled code, where
+  dead-code elimination runs after register allocation. The population
+  is in JIT code.
+* **Corpus, 2026-09-26** (166.6M instructions): **14,195** findings, no
+  other check moved. JavaScriptCore 7,923 -- DFG 3,958 (a register
+  zeroed, then reloaded by an LDP), DFG and FTL OSR exits 2,095 (the
+  tag register rebuilt with `orr x28, x27, #2` and then restored from
+  the frame), YarrJIT 1,209, Baseline 340, WasmOMG 182, FTL 77, WasmBBQ
+  62. V8 3,255 (a register zeroed or copied, then loaded from the
+  constant pool or overwritten by the next MOV). SpiderMonkey Ion 2,610
+  (2,254 `sub wN, wN, #k ; ldr wN, [...]`), Baseline 168, Octane 92,
+  RegExp 36, Other 23. go 80; rustc 3, clang 3, libcrypto 2 (OpenSSL's
+  AES-XTS perlasm: `mov w6, w5 ; ld1 ; subs ; add w6, w5, #2`). About
+  3% more scan time.
+* **Verification.** `test_dead_write` (22 word-level cases and the
+  window at 15 and 16), `fixtures/dead_write.s`, and `tools/rwfuzz
+  dead`, which plants a write, a gap and an overwrite that may or may
+  not read it first: 100,000 programs, 420,845 deletions executed, 0
+  mismatches; the control arm, deleting an unflagged write its
+  register gets again within four slots, changed the result in 84,204
+  of 246,450 cases; builds with one proof removed -- reads not keeping
+  the value live, the classifier skipped, flag setters admitted, the
+  scan run past branches -- mismatched within 5,000 programs (5,157,
+  86, 760, 706). The fixtures of 45 other checks gain the dead writes
+  their back-to-back fragments contain; each was matched against the
+  scanner's independent model (361 of 382 agree, the rest explained by
+  the window and the exclusions above). ASan/UBSan clean; the unit
+  tests pass against Capstone 6.0.0-Alpha11.
+
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when

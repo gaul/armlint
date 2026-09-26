@@ -50,6 +50,9 @@ typedef struct {
 #define LVN_SLOTS 33u
 #define LVN_NONE 0xFFu
 #define LVN_TABLE 64u
+// Proven-dead writes check_dead_write can hold before reporting them,
+// one per instruction.
+#define DW_READY_MAX 4u
 
 // What a remembered computation's number names.
 enum {
@@ -58,6 +61,28 @@ enum {
     LVN_KIND_CONST,         // an absolute constant
     LVN_KIND_REL,           // an ADR/ADRP-derived, image-relative value
 };
+
+// A pure GPR data-processing instruction, decoded for value numbering:
+// its GPR result's slot (0..30 or LVN_SP; LVN_NONE for a flags-only
+// compare), whether it also writes or reads NZCV, its inputs in field
+// order (LVN_NONE for ZR), and its word with the register fields
+// cleared. `copy` marks the X-form MOV spellings -- ORR from ZR with no
+// shift, and ADD/SUB #0 -- whose result is their source's value; a W
+// form zero-extends, which is a different value and not a copy.
+typedef struct {
+    unsigned out;
+    bool sets_flags;
+    bool reads_flags;
+    bool sf;
+    bool pcrel;
+    bool copy;
+    unsigned copy_src;
+    bool move_wide;
+    bool movk;
+    unsigned nin;
+    unsigned in[3];
+    uint32_t key_word;
+} lvn_op;
 
 typedef struct {
     uint32_t epoch;         // the region the entry belongs to; 0 = empty
@@ -341,6 +366,27 @@ struct armlint_state {
     bool lvn_prev_valid;
     uint32_t lvn_prev_op;       // the instruction before this one
     lvn_entry lvn_table[LVN_TABLE];
+    // check_value_recompute's reading of the instruction at
+    // lvn_cur_offset, for check_dead_write after it in the registry:
+    // the decode (when lvn_cur_pure), and whether the instruction
+    // recomputes the value its destination already holds.
+    bool lvn_cur_valid;
+    bool lvn_cur_pure;
+    bool lvn_cur_same;
+    size_t lvn_cur_offset;
+    lvn_op lvn_cur_op;
+
+    // check_dead_write: per register, the pure write whose value waits
+    // to be read (live) or overwritten unread (dead) -- dw_mask marks
+    // the registers with one -- and proven-dead writes not yet reported
+    // (a check reports one finding per instruction).
+    uint32_t dw_mask;
+    bool dw_sf[31];
+    unsigned dw_window[31];
+    size_t dw_offset[31];
+    char dw_disasm[31][ARMLINT_FINDING_LINE_LEN];
+    armlint_finding dw_ready[DW_READY_MAX];
+    unsigned dw_ready_n;
 
     // Pending CMP Rn, #0 awaiting an adjacent sign-materializing
     // CSET/CSETM (cond LT or MI) -- the sign-bit-shift shape.
@@ -1571,6 +1617,8 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
     return produced;
 }
 
+static bool dw_emit(armlint_state *state, armlint_finding *out);
+
 bool armlint_flush(armlint_state *state, armlint_finding *out)
 {
     // The shift, CMP, and TST checks never produce a finding from flush
@@ -1598,6 +1646,8 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->bsx_active = false;
     state->lra_active = false;
     state->lvn_valid = false;
+    state->lvn_cur_valid = false;
+    state->dw_mask = 0;
     state->alr_active = false;
     state->aul_active = false;
     state->cmp_active = false;
@@ -1676,9 +1726,19 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
         // whole classes of unproven pendings).
         armlint_finding discard;
         mov_close(state, &discard);
+        state->dw_ready_n = 0;
         return true;
     }
-    return mov_close(state, out);
+    if (mov_close(state, out)) {
+        state->dw_ready_n = 0;
+        return true;
+    }
+    // A dead write proven by the region's last instruction and still
+    // waiting (one instruction killed two) is reported here, when no
+    // other finding claims the one slot.
+    bool dead = dw_emit(state, out);
+    state->dw_ready_n = 0;
+    return dead;
 }
 
 static void mov_record_entry(armlint_state *state, unsigned opc,
@@ -3457,6 +3517,15 @@ static void insn_reg_access(const cs_insn *insn, int reg,
                     }
                 } else if (o->access & (CS_AC_READ | CS_AC_WRITE)) {
                     *reads = true;
+                } else if (o->access == 0) {
+                    // No access flags at all: Capstone 5 leaves whole
+                    // classes so -- the SVE forms it decodes among them
+                    // (`index z16.s, w20, #1`, `mov z18.s, w6`), whose
+                    // GPR is a source a scan must not walk past. A read
+                    // is the conservative reading; the classes whose
+                    // flagless operand is also written are recovered
+                    // as writes by insn_gpr_write_mask.
+                    *reads = true;
                 }
             }
         } else if (o->type == ARM64_OP_MEM) {
@@ -3625,12 +3694,16 @@ static void insn_reg_access(const cs_insn *insn, int reg,
 liveness_t classify_reg_liveness(const cs_insn *insn, int reg)
 {
     uint32_t op = insn_word(insn);
-    // Control transfers: B.cond, B/BL, CBZ/CBNZ, TBZ/TBNZ, BR/BLR/RET.
-    if ((op & 0xFF000010u) == 0x54000000u
+    // Control transfers: B.cond and BC.cond (bit 4 free), B/BL,
+    // CBZ/CBNZ, TBZ/TBNZ, BR/BLR/RET. And the exception-generating
+    // instructions (SVC/HVC/SMC/BRK/HLT/DCPS): a system call reads its
+    // argument and number registers, which Capstone does not list.
+    if ((op & 0xFF000000u) == 0x54000000u
             || (op & 0x7C000000u) == 0x14000000u
             || (op & 0x7E000000u) == 0x34000000u
             || (op & 0x7E000000u) == 0x36000000u
-            || (op & 0xFE000000u) == 0xD6000000u) {
+            || (op & 0xFE000000u) == 0xD6000000u
+            || (op & 0xFF000000u) == 0xD4000000u) {
         return LIV_TERM_UNSAFE;
     }
     bool reads, writes;
@@ -11135,28 +11208,6 @@ static uint32_t lvn_const_number(armlint_state *state, uint64_t value,
     return lvn_number(state, &key);
 }
 
-// A pure GPR data-processing instruction, decoded for value numbering:
-// its GPR result's slot (0..30 or LVN_SP; LVN_NONE for a flags-only
-// compare), whether it also writes or reads NZCV, its inputs in field
-// order (LVN_NONE for ZR), and its word with the register fields
-// cleared. `copy` marks the X-form MOV spellings -- ORR from ZR with no
-// shift, and ADD/SUB #0 -- whose result is their source's value; a W
-// form zero-extends, which is a different value and not a copy.
-typedef struct {
-    unsigned out;
-    bool sets_flags;
-    bool reads_flags;
-    bool sf;
-    bool pcrel;
-    bool copy;
-    unsigned copy_src;
-    bool move_wide;
-    bool movk;
-    unsigned nin;
-    unsigned in[3];
-    uint32_t key_word;
-} lvn_op;
-
 static bool decode_lvn_op(uint32_t op, lvn_op *p)
 {
     memset(p, 0, sizeof(*p));
@@ -11561,6 +11612,7 @@ bool check_value_recompute(armlint_state *state, const cs_insn *insn,
 {
     if (insn->size != 4) {
         state->lvn_valid = false;
+        state->lvn_cur_valid = false;
         return false;
     }
     // A side entry reaches this instruction with values the region's
@@ -11574,6 +11626,13 @@ bool check_value_recompute(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
     lvn_op p;
     bool pure = decode_lvn_op(op, &p);
+    state->lvn_cur_valid = true;
+    state->lvn_cur_offset = offset;
+    state->lvn_cur_pure = pure;
+    state->lvn_cur_same = false;
+    if (pure) {
+        state->lvn_cur_op = p;
+    }
     uint32_t vn_result = 0;
     uint32_t vn_flags = 0;
     bool numbered = false;
@@ -11611,6 +11670,7 @@ bool check_value_recompute(armlint_state *state, const cs_insn *insn,
     if (numbered
             && (p.out == LVN_NONE || state->lvn_vn[p.out] == vn_result)
             && (!p.sets_flags || state->lvn_vn[LVN_NZCV] == vn_flags)) {
+        state->lvn_cur_same = true;
         // Shapes another check owns, or that are not the code's to
         // change: a move-wide sequence may be a JIT's patch site, whose
         // placeholder MOVKs change nothing until patched (a MOVK, or
@@ -11781,6 +11841,139 @@ bool check_value_recompute(armlint_state *state, const cs_insn *insn,
         state->lvn_valid = false;
     }
     return found;
+}
+
+// check_dead_write: report the oldest proven-dead write waiting.
+static bool dw_emit(armlint_state *state, armlint_finding *out)
+{
+    if (state->dw_ready_n == 0) {
+        return false;
+    }
+    *out = state->dw_ready[0];
+    state->dw_ready_n--;
+    memmove(&state->dw_ready[0], &state->dw_ready[1],
+            state->dw_ready_n * sizeof(state->dw_ready[0]));
+    return true;
+}
+
+// Whether no pending write survives this instruction: a control transfer
+// of any kind (its target may read the register), an exception
+// instruction (a system call reads its argument registers, which
+// Capstone does not list), UDF, and every system instruction but NOP,
+// BTI and the barriers (the PAC hints read x16, x17 and x30).
+static bool dw_ends_scan(uint32_t op)
+{
+    if ((op & 0xFF000000u) == 0x54000000u          // B.cond, BC.cond
+            || (op & 0x7C000000u) == 0x14000000u   // B, BL
+            || (op & 0x7E000000u) == 0x34000000u   // CBZ/CBNZ
+            || (op & 0x7E000000u) == 0x36000000u   // TBZ/TBNZ
+            || (op & 0xFE000000u) == 0xD6000000u   // BR/BLR/RET...
+            || (op & 0xFF000000u) == 0xD4000000u   // SVC/HVC/SMC/BRK/HLT
+            || (op & 0xFFFF0000u) == 0) {          // UDF
+        return true;
+    }
+    return (op & 0xFFC00000u) == 0xD5000000u
+        && !(op == 0xD503201Fu
+             || (op & 0xFFFFFF3Fu) == 0xD503241Fu
+             || (op & 0xFFFFF01Fu) == 0xD503301Fu);
+}
+
+// Detect a pure register write overwritten before any read; see
+// armlint.h.
+bool check_dead_write(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->dw_mask = 0;
+        return dw_emit(state, out);
+    }
+    uint32_t op = insn_word(insn);
+    // check_value_recompute has just read this instruction.
+    bool read = state->lvn_cur_valid && state->lvn_cur_offset == offset;
+    const lvn_op *p = read && state->lvn_cur_pure ? &state->lvn_cur_op
+                                                  : NULL;
+    bool same = read && state->lvn_cur_same;
+
+    if (dw_ends_scan(op)) {
+        state->dw_mask = 0;
+    }
+    for (unsigned r = 0; (state->dw_mask >> r) != 0; r++) {
+        if (((state->dw_mask >> r) & 1u) == 0) {
+            continue;
+        }
+        // A decoded instruction's reads and write are exact; anything
+        // else asks the register classifier.
+        liveness_t liv;
+        if (p != NULL) {
+            liv = LIV_UNKNOWN;
+            for (unsigned i = 0; i < p->nin; i++) {
+                if (p->in[i] == r) {
+                    liv = LIV_READ;
+                }
+            }
+            if (liv == LIV_UNKNOWN && p->out == r) {
+                liv = LIV_OVERWRITE;
+            }
+        } else {
+            liv = classify_reg_liveness(insn, (int)r);
+        }
+        if (liv == LIV_UNKNOWN) {
+            if (--state->dw_window[r] == 0) {
+                state->dw_mask &= ~(1u << r);
+            }
+            continue;
+        }
+        state->dw_mask &= ~(1u << r);
+        // An overwrite that recomputes the value the register holds
+        // makes the pair check_value_recompute's: it deletes the
+        // second, and the first is only dead if that one stays.
+        if (liv != LIV_OVERWRITE || same
+                || state->dw_ready_n >= DW_READY_MAX) {
+            continue;
+        }
+        armlint_finding *f = &state->dw_ready[state->dw_ready_n++];
+        unsigned gap = (unsigned)((offset - state->dw_offset[r]) / 4u) - 1u;
+        f->name = "register write overwritten unread";
+        f->start_offset = state->dw_offset[r];
+        f->insn_count = 1;
+        clear_finding_strings(f);
+        snprintf(f->detail, sizeof(f->detail),
+            "-> delete; %c%u is overwritten before any read",
+            state->dw_sf[r] ? 'x' : 'w', r);
+        snprintf(f->lines[0], sizeof(f->lines[0]), "%s",
+            state->dw_disasm[r]);
+        unsigned line = 1;
+        if (gap > 0) {
+            snprintf(f->lines[line++], sizeof(f->lines[0]),
+                "... %u instruction%s ...", gap, gap == 1u ? "" : "s");
+        }
+        insn_text(f->lines[line], sizeof(f->lines[line]), insn);
+    }
+
+    // Open: a pure GPR write -- not SP, and not x29/x30 (the frame
+    // record, which a signal-time unwinder or profiler reads between any
+    // two instructions); not a flag setter (its flags would need their
+    // own proof), not a recompute (the other check's), and not a
+    // move-wide instruction that may be a JIT's patch site.
+    if (p != NULL && p->out < 29u && !p->sets_flags && !same && !p->movk) {
+        bool patch = false;
+        if (p->move_wide && state->buf != NULL
+                && offset + 8u <= state->buf_len) {
+            uint32_t next = buf_word_at(state->buf, offset + 4u);
+            patch = (next & 0x7F800000u) == 0x72800000u
+                && (next & 0x1Fu) == (op & 0x1Fu);
+        }
+        if (!patch) {
+            unsigned rd = p->out;
+            state->dw_mask |= 1u << rd;
+            state->dw_sf[rd] = p->sf;
+            state->dw_window[rd] = LIVENESS_WINDOW;
+            state->dw_offset[rd] = offset;
+            insn_text(state->dw_disasm[rd], sizeof(state->dw_disasm[rd]),
+                      insn);
+        }
+    }
+    return dw_emit(state, out);
 }
 
 // Conditional compare, register form: CCMN (op = 0) / CCMP (op = 1),
@@ -19162,6 +19355,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_copy_add_sub_fold,
     check_sp_mov_overwritten,
     check_value_recompute,
+    check_dead_write,
     check_cset_recompare,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,

@@ -2,33 +2,88 @@ MNEG by constant foldable to neg/sub at offset: 0x0 <_main>: -> neg x3, x2 (2 in
   movz x0, #0x1
   mneg x3, x2, x0
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
+  mneg x3, x2, x0
+
 MNEG by constant foldable to neg/sub at offset: 0x8 <_main+0x8>: -> neg x3, x2, lsl #3 (2 instructions)
   movz x0, #0x8
   mneg x3, x2, x0
+
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
+  mneg x3, x0, x2
 
 MNEG by constant foldable to neg/sub at offset: 0x10 <_main+0x10>: -> neg x3, x2, lsl #1 (2 instructions)
   movz x0, #0x2
   mneg x3, x0, x2
 
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x0, x2
+  ... 1 instruction ...
+  mneg w3, w2, w0
+
 MNEG by constant foldable to neg/sub at offset: 0x18 <_main+0x18>: -> neg w3, w2, lsl #2 (2 instructions)
   movz w0, #0x4
   mneg w3, w2, w0
 
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; w3 is overwritten before any read (1 instructions)
+  mneg w3, w2, w0
+  ... 1 instruction ...
+  mneg x3, x2, x0
+
 MNEG by constant foldable to neg/sub at offset: 0x20 <_main+0x20>: -> sub x3, x2, x2, lsl #2 (2 instructions)
   movz x0, #0x3
+  mneg x3, x2, x0
+
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
   mneg x3, x2, x0
 
 MNEG by constant foldable to neg/sub at offset: 0x28 <_main+0x28>: -> sub x3, x2, x2, lsl #3 (2 instructions)
   movz x0, #0x7
   mneg x3, x2, x0
 
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
+  mneg x3, x2, x0
+
 MNEG by constant foldable to neg/sub at offset: 0x30 <_main+0x30>: -> sub x3, x2, x2, lsl #4 (2 instructions)
   movz x0, #0xf
+  mneg x3, x2, x0
+
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
   mneg x3, x2, x0
 
 MNEG by constant foldable to neg/sub at offset: 0x38 <_main+0x38>: -> neg x3, x2, lsl #32 (2 instructions)
   movz x0, #0x1, lsl #32
   mneg x3, x2, x0
+
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
+  mneg x3, x2, x0
+
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
+  mneg x3, x2, x0
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
+  mneg x3, x2, x0
+
+register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x3 is overwritten before any read (1 instructions)
+  mneg x3, x2, x0
+  ... 1 instruction ...
+  msub x3, x2, x0, x4
 
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x58 <_main+0x58>: -> sub x3, x4, x2, lsl #3 (2 instructions)
   movz x0, #0x8
@@ -38,14 +93,20 @@ register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> del
   mov x0, #8
   mov x0, #8
 
+register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x3 is overwritten before any read (1 instructions)
+  msub x3, x2, x0, x4
+  ... 1 instruction ...
+  mul x3, x2, x0
+
 MUL by constant foldable to shift/add at offset: 0x60 <_main+0x60>: -> lsl x3, x2, #3 (2 instructions)
   movz x0, #0x8
   mul x3, x2, x0
 
 Optimization opportunities by type:
+      12  register write overwritten unread
        8  MNEG by constant foldable to neg/sub
        1  MOV + MADD/MSUB foldable to shifted ADD/SUB
        1  MUL by constant foldable to shift/add
        1  register already holds the recomputed value
 
-11 optimization opportunities in 28 instructions
+23 optimization opportunities in 28 instructions

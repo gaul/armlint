@@ -4,7 +4,12 @@ low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x0 <_main>: -> mov w0, 
 low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x4 <_main+0x4>: -> mov w2, w3 (1 instructions)
   ubfx x2, x3, #0, #0x20
 
+register write overwritten unread at offset: 0x10 <_main+0x10>: -> delete; x6 is overwritten before any read (1 instructions)
+  and x6, x7, #0xffff
+  ubfx x6, x7, #0, #0x10
+
 Optimization opportunities by type:
        2  low-32 zero-extension foldable to MOV Wd, Wn
+       1  register write overwritten unread
 
-2 optimization opportunities in 13 instructions
+3 optimization opportunities in 13 instructions

@@ -33,6 +33,11 @@ LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0x64 <_main+0x64>: -> swp
   stlxr w10, x2, [x0]
   cbnz w10, #0x64
 
+register write overwritten unread at offset: 0x70 <_main+0x70>: -> delete; w10 is overwritten before any read (1 instructions)
+  mov w10, w19
+  ... 2 instructions ...
+  stxr w10, x9, [x0]
+
 LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xb4 <_main+0xb4>: -> mov x8, x1 ; cas x8, x2, [x0] ; cmp x8, x1 (5 instructions)
   ldxr x8, [x0]
   cmp x8, x1
@@ -56,5 +61,6 @@ LDXR/STXR loop foldable to LSE atomic (LSE) at offset: 0xe4 <_main+0xe4>: -> mov
 
 Optimization opportunities by type:
        9  LDXR/STXR loop foldable to LSE atomic (LSE)
+       1  register write overwritten unread
 
-9 optimization opportunities in 84 instructions
+10 optimization opportunities in 84 instructions

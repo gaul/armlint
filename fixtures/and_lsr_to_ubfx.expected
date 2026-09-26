@@ -2,28 +2,70 @@ AND+LSR foldable into UBFX at offset: 0x0 <_main>: -> ubfx w0, w1, #4, #8 (2 ins
   and w0, w1, #0xff0
   lsr w0, w0, #4
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #4
+  and w0, w1, #0xff
+
 AND+LSR foldable into UBFX at offset: 0x8 <_main+0x8>: -> ubfx w0, w1, #4, #4 (2 instructions)
   and w0, w1, #0xff
   lsr w0, w0, #4
+
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #4
+  and w0, w1, #0xff0
 
 AND+LSR foldable into UBFX at offset: 0x10 <_main+0x10>: -> ubfx w0, w1, #6, #6 (2 instructions)
   and w0, w1, #0xff0
   lsr w0, w0, #6
 
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #6
+  and x0, x1, #0xffff00
+
 AND+LSR foldable into UBFX at offset: 0x18 <_main+0x18>: -> ubfx x0, x1, #8, #16 (2 instructions)
   and x0, x1, #0xffff00
   lsr x0, x0, #8
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x0 is overwritten before any read (1 instructions)
+  lsr x0, x0, #8
+  and w0, w1, #0xff0
 
 AND+LSR foldable into UBFX at offset: 0x20 <_main+0x20>: -> ubfx w0, w1, #11, #1 (2 instructions)
   and w0, w1, #0xff0
   lsr w0, w0, #11
 
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #0xb
+  and w0, w1, #0xff00
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #4
+  and w0, w1, #0xff0
+
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #0xc
+  and w0, w1, #0xf0f0f0f
+
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #4
+  ands w0, w1, #0xff0
+
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #4
+  and w0, w1, #0xff0
+
 register already holds the recomputed value at offset: 0x50 <_main+0x50>: -> delete; w0 already holds this value (set 0x8 bytes back) (1 instructions)
   and w0, w1, #0xff0
   and w0, w1, #0xff0
 
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; w5 is overwritten before any read (1 instructions)
+  lsr w5, w0, #4
+  ... 1 instruction ...
+  mov w5, #1
+
 Optimization opportunities by type:
+      10  register write overwritten unread
        5  AND+LSR foldable into UBFX
        1  register already holds the recomputed value
 
-6 optimization opportunities in 24 instructions
+16 optimization opportunities in 24 instructions

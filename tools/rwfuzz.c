@@ -34,6 +34,8 @@
 //          CBZ/CBNZ it renders.
 //   lvn    check_value_recompute: delete the instruction whose result its
 //          destination (and NZCV) already holds.
+//   dead   check_dead_write: delete the write whose value is overwritten
+//          before anything reads it.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -466,6 +468,31 @@ static void plant_recompute(void)
         push(add_x(c, b, d));
         break;
     }
+    }
+}
+
+// dead: a write of r, a gap, and an overwrite of r that may or may not
+// read it first.
+static void plant_dead_write(void)
+{
+    unsigned r = body_reg(), a = body_reg(), b = body_reg();
+    switch (rr(7)) {
+    case 0: push(add_x(r, a, b)); break;
+    case 1: push(addi_w(r, a, rr(4096))); break;
+    case 2: push(movz_x(r, rr(0x10000), rr(4))); break;
+    case 3: push(ubfm_x(r, a, rr(64), 63)); break;
+    case 4: push(csel_x(r, a, b, rr(14))); break;
+    case 5: push(adds_x(r, a, b)); break;      // its flags may be read
+    default: push(madd_w(r, a, b, body_reg())); break;
+    }
+    plant_gap();
+    unsigned c = body_reg(), d = body_reg();
+    switch (rr(5)) {
+    case 0: push(movz_w(r, rr(0x10000), rr(2))); break;
+    case 1: push(ldr_x(r, rr(32))); break;
+    case 2: push(add_x(r, c, d)); break;       // may read r
+    case 3: push(eor_w(r, c, d)); break;       // may read r
+    default: push(ldadd_x(c, r)); break;       // reads c, loads r
     }
 }
 
@@ -978,6 +1005,50 @@ static bool lvn_control(int i, uint32_t *alt)
     return true;
 }
 
+// dead: the finding's one instruction, the dead write, is deleted.
+static bool dead_apply(const hit_t *h, uint32_t *code)
+{
+    return lvn_apply(h, code);
+}
+
+static size_t dead_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+// The overwrite is not the next instruction: some slot between writes
+// another register.
+static bool dead_special(const hit_t *h)
+{
+    size_t next = h->start + 1u;
+    return next < (size_t)epi_start
+        && (prog[next] & 31u) != (prog[h->start] & 31u);
+}
+
+// Control: delete an unflagged ALU or move write whose register the next
+// four slots write again.
+static bool dead_control(int i, uint32_t *alt)
+{
+    uint32_t w = prog[i];
+    bool alu = (w & 0x1F000000u) == 0x0B000000u        // add/sub (shifted)
+        || (w & 0x1F000000u) == 0x0A000000u            // logical (shifted)
+        || (w & 0x1F800000u) == 0x11000000u            // add/sub (immediate)
+        || (w & 0x1F800000u) == 0x12800000u            // move wide
+        || (w & 0x1F800000u) == 0x13000000u            // bitfield
+        || (w & 0x1FE00000u) == 0x1A800000u            // csel family
+        || (w & 0x1F000000u) == 0x1B000000u;           // 3-source
+    if (!alu || ((w >> 29) & 1u) != 0 || (w & 31u) == 31u) {
+        return false;
+    }
+    for (int j = i + 1; j < epi_start && j <= i + 4; j++) {
+        if ((prog[j] & 31u) == (w & 31u)) {
+            alt[i] = NOP;
+            return true;
+        }
+    }
+    return false;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -1003,6 +1074,9 @@ static const mode_t_ modes[] = {
                "ADR/ADRP of an address its register already holds" },
       "not adjacent", plant_recompute, lvn_apply, lvn_slot, lvn_special,
       lvn_control },
+    { "dead", { "register write overwritten unread", NULL },
+      "across a gap", plant_dead_write, dead_apply, dead_slot, dead_special,
+      dead_control },
 };
 
 static bool wanted(const char *name)
@@ -1018,7 +1092,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn\n");
+            "zext|ubfx|ccmp|lvn|dead\n");
 }
 
 int main(int argc, char **argv)

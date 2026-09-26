@@ -14,7 +14,13 @@ CMP + CCMP chain decidable by one compare at offset: 0x24 <_main+0x24>: -> cmp x
   ccmp x8, #4, #0, ne
   cset w0, eq
 
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; w0 is overwritten before any read (1 instructions)
+  cset w0, eq
+  ... 3 instructions ...
+  cset w0, eq
+
 Optimization opportunities by type:
        3  CMP + CCMP chain decidable by one compare
+       1  register write overwritten unread
 
-3 optimization opportunities in 30 instructions
+4 optimization opportunities in 30 instructions

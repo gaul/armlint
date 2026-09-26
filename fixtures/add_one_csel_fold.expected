@@ -2,6 +2,10 @@ ADD #1 + CSEL foldable to CSINC at offset: 0x0 <_main>: -> csinc x3, x2, x1, lt 
   add x3, x1, #1
   csel x3, x2, x3, lt
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x3 is overwritten before any read (1 instructions)
+  csel x3, x2, x3, lt
+  add x3, x1, #1
+
 ADD #1 + CSEL foldable to CSINC at offset: 0x8 <_main+0x8>: -> csinc x3, x2, x1, ge (2 instructions)
   add x3, x1, #1
   csel x3, x3, x2, lt
@@ -10,7 +14,17 @@ ADD #1 + CSEL foldable to CSINC at offset: 0x10 <_main+0x10>: -> csinc w1, w2, w
   add w1, w1, #1
   csel w1, w2, w1, eq
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x3 is overwritten before any read (1 instructions)
+  csel x3, x3, x2, lt
+  ... 2 instructions ...
+  add x3, x1, #2
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x3 is overwritten before any read (1 instructions)
+  csel x3, x2, x3, lt
+  add x3, x1, #1
+
 Optimization opportunities by type:
        3  ADD #1 + CSEL foldable to CSINC
+       3  register write overwritten unread
 
-3 optimization opportunities in 11 instructions
+6 optimization opportunities in 11 instructions

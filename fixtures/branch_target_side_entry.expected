@@ -6,6 +6,11 @@ ADD + LDR foldable to immediate-offset LDR at offset: 0x2c <_main+0x2c>: -> ldr 
   add x12, x12, #0x10
   ldr x12, [x12]
 
+register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; x0 is overwritten before any read (1 instructions)
+  mov x0, x8
+  ... 2 instructions ...
+  ldr x0, [x19, #0x20]
+
 MOV #0 + use foldable to ZR at offset: 0x68 <_main+0x68>: -> orr x0, xzr, xzr (2 instructions)
   movz x8, #0x0
   orr x0, xzr, x8
@@ -14,5 +19,6 @@ Optimization opportunities by type:
        1  ADD + LDR foldable to immediate-offset LDR
        1  ADD + LDR foldable to pre-indexed LDR
        1  MOV #0 + use foldable to ZR
+       1  register write overwritten unread
 
-3 optimization opportunities in 30 instructions
+4 optimization opportunities in 30 instructions

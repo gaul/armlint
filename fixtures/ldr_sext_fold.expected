@@ -2,6 +2,10 @@ load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x0 <_main>: -> ldrs
   ldrb w3, [x1]
   sxtb w3, w3
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; w3 is overwritten before any read (1 instructions)
+  sxtb w3, w3
+  ldrb w3, [x1]
+
 load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x8 <_main+0x8>: -> ldrsb x3, [x1] (2 instructions)
   ldrb w3, [x1]
   sxtb x3, w3
@@ -14,24 +18,56 @@ load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x18 <_main+0x18>: -
   ldr w2, [sp, #4]
   sxtw x2, w2
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x3 is overwritten before any read (1 instructions)
+  sxtb x3, w3
+  ... 4 instructions ...
+  ldrb w3, [x1]
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x2 is overwritten before any read (1 instructions)
+  sxtw x2, w2
+  ... 2 instructions ...
+  ldr w2, [x1]
+
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; w3 is overwritten before any read (1 instructions)
+  sxth w3, w3
+  ... 2 instructions ...
+  ldrb w3, [x1]
+
 load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x38 <_main+0x38>: -> ldrsb x8, [x9] (2 instructions)
   ldrsb w8, [x9]
   sxtb x8, w8
+
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; x8 is overwritten before any read (1 instructions)
+  sxtb x8, w8
+  ldrsb w8, [x9]
 
 load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x40 <_main+0x40>: -> ldrsb x8, [x9] (2 instructions)
   ldrsb w8, [x9]
   sxtw x8, w8
 
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; x8 is overwritten before any read (1 instructions)
+  sxtw x8, w8
+  ldrsh w8, [x9, #2]
+
 load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x48 <_main+0x48>: -> ldrsh x8, [x9, #0x2] (2 instructions)
   ldrsh w8, [x9, #2]
   sxth x8, w8
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x8 is overwritten before any read (1 instructions)
+  sxth x8, w8
+  ldrsh w8, [x9]
+
+register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x8 is overwritten before any read (1 instructions)
+  sxtb x8, w8
+  ldrsb w8, [x9]
 
 redundant sign-extension after sign-extending op at offset: 0x58 <_main+0x58>: sxtb w8, w8 is a no-op (sign already extended from bit 7) (2 instructions)
   ldrsb w8, [x9]
   sxtb w8, w8
 
 Optimization opportunities by type:
+       8  register write overwritten unread
        7  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
        1  redundant sign-extension after sign-extending op
 
-8 optimization opportunities in 25 instructions
+16 optimization opportunities in 25 instructions

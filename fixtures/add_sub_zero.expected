@@ -7,7 +7,13 @@ ADD/SUB #0 is redundant at offset: 0x4 <_main+0x4>: add x0, x0, #0 is a no-op (1
 ADD/SUB #0 is redundant at offset: 0x8 <_main+0x8>: sub w2, w3, #0 -> mov w2, w3 (1 instructions)
   sub w2, w3, #0
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x0 is overwritten before any read (1 instructions)
+  add x0, x1, #4
+  ... 1 instruction ...
+  adrp x0, #0
+
 Optimization opportunities by type:
        3  ADD/SUB #0 is redundant
+       1  register write overwritten unread
 
-3 optimization opportunities in 8 instructions
+4 optimization opportunities in 8 instructions

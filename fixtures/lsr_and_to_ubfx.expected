@@ -14,6 +14,10 @@ LSR+AND foldable into UBFX at offset: 0x10 <_main+0x10>: -> ubfx w4, w5, #4, #4 
   lsr w4, w5, #4
   and w4, w4, #0xf
 
+register write overwritten unread at offset: 0x20 <_main+0x20>: -> delete; x8 is overwritten before any read (1 instructions)
+  lsr x8, x9, #8
+  and x8, x10, #0xff
+
 ASR+AND foldable into UBFX at offset: 0x34 <_main+0x34>: -> ubfx w13, w14, #8, #8 (2 instructions)
   asr w13, w14, #8
   and w13, w13, #0xff
@@ -30,5 +34,6 @@ Optimization opportunities by type:
        4  LSR+AND foldable into UBFX
        2  ASR+AND foldable into UBFX
        1  redundant zero-extension after zeroing op
+       1  register write overwritten unread
 
-7 optimization opportunities in 26 instructions
+8 optimization opportunities in 26 instructions

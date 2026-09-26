@@ -2,20 +2,45 @@ MUL by constant foldable to shift/add at offset: 0x0 <_main>: -> lsl x3, x2, #3 
   movz x0, #0x8
   mul x3, x2, x0
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 1 instruction ...
+  mul x3, x2, x0
+
 MUL by constant foldable to shift/add at offset: 0x8 <_main+0x8>: -> add x3, x2, x2, lsl #1 (2 instructions)
   movz x0, #0x3
   mul x3, x2, x0
+
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 1 instruction ...
+  mul w3, w2, w0
 
 MUL by constant foldable to shift/add at offset: 0x10 <_main+0x10>: -> lsl w3, w2, #4 (2 instructions)
   movz w0, #0x10
   mul w3, w2, w0
 
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; w3 is overwritten before any read (1 instructions)
+  mul w3, w2, w0
+  ... 1 instruction ...
+  mul x3, x0, x2
+
 MUL by constant foldable to shift/add at offset: 0x18 <_main+0x18>: -> add x3, x2, x2, lsl #2 (2 instructions)
   movz x0, #0x5
   mul x3, x0, x2
 
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x0, x2
+  ... 1 instruction ...
+  mul x3, x2, x0
+
 MUL by constant foldable to shift/add at offset: 0x20 <_main+0x20>: -> lsl x3, x2, #32 (2 instructions)
   movz x0, #0x1, lsl #32
+  mul x3, x2, x0
+
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 2 instructions ...
   mul x3, x2, x0
 
 MUL by constant foldable to shift/add at offset: 0x28 <_main+0x28>: -> add x3, x2, x2, lsl #16 (3 instructions)
@@ -23,13 +48,43 @@ MUL by constant foldable to shift/add at offset: 0x28 <_main+0x28>: -> add x3, x
   movk x0, #0x1
   mul x3, x2, x0
 
+register write overwritten unread at offset: 0x30 <_main+0x30>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 1 instruction ...
+  mul x3, x2, x0
+
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 1 instruction ...
+  mul x3, x2, x0
+
+register write overwritten unread at offset: 0x40 <_main+0x40>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 1 instruction ...
+  mul x3, x2, x0
+
+register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 1 instruction ...
+  mul x3, x2, x1
+
 register already holds the recomputed value at offset: 0x54 <_main+0x54>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
   mov x0, #8
   mov x0, #8
 
+register write overwritten unread at offset: 0x50 <_main+0x50>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x1
+  ... 2 instructions ...
+  mul x3, x2, x0
+
 register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> delete; x0 already holds this value (set 0x14 bytes back) (1 instructions)
   mov x0, #8
   mov x0, #8
+
+register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mul x3, x2, x0
+  ... 1 instruction ...
+  madd x3, x2, x0, x4
 
 MOV + MADD/MSUB foldable to shifted ADD/SUB at offset: 0x60 <_main+0x60>: -> add x3, x4, x2, lsl #3 (2 instructions)
   movz x0, #0x8
@@ -39,9 +94,15 @@ register already holds the recomputed value at offset: 0x68 <_main+0x68>: -> del
   mov x0, #8
   mov x0, #8
 
+register write overwritten unread at offset: 0x64 <_main+0x64>: -> delete; x3 is overwritten before any read (1 instructions)
+  madd x3, x2, x0, x4
+  ... 1 instruction ...
+  mul x3, x0, x0
+
 Optimization opportunities by type:
+      12  register write overwritten unread
        6  MUL by constant foldable to shift/add
        3  register already holds the recomputed value
        1  MOV + MADD/MSUB foldable to shifted ADD/SUB
 
-10 optimization opportunities in 29 instructions
+22 optimization opportunities in 29 instructions

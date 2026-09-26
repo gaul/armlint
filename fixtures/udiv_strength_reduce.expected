@@ -2,36 +2,97 @@ UDIV by constant foldable to shift at offset: 0x0 <_main>: -> lsr x3, x2, #3 (2 
   movz x0, #0x8
   udiv x3, x2, x0
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  udiv w3, w2, w0
+
 UDIV by constant foldable to shift at offset: 0x8 <_main+0x8>: -> lsr w3, w2, #4 (2 instructions)
   movz w0, #0x10
   udiv w3, w2, w0
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; w3 is overwritten before any read (1 instructions)
+  udiv w3, w2, w0
+  ... 1 instruction ...
+  udiv x3, x2, x0
+
 UDIV by constant foldable to shift at offset: 0x10 <_main+0x10>: -> lsr x3, x2, #10 (2 instructions)
   movz x0, #0x400
+  udiv x3, x2, x0
+
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
   udiv x3, x2, x0
 
 UDIV by constant foldable to shift at offset: 0x18 <_main+0x18>: -> lsr x3, x2, #32 (2 instructions)
   movz x0, #0x1, lsl #32
   udiv x3, x2, x0
 
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  udiv x3, x2, x0
+
 UDIV by constant foldable to shift at offset: 0x20 <_main+0x20>: -> lsr x3, x2, #16 (2 instructions)
   movz x0, #0x1, lsl #16
   udiv x3, x2, x0
+
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  udiv x3, x2, x0
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  udiv x3, x2, x0
+
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  udiv x3, x2, x0
+
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  udiv x3, x2, x0
+
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  udiv x3, x0, x2
 
 register already holds the recomputed value at offset: 0x50 <_main+0x50>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
   mov x0, #8
   mov x0, #8
 
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x0, x2
+  ... 2 instructions ...
+  udiv x3, x2, x0
+
 register already holds the recomputed value at offset: 0x5c <_main+0x5c>: -> delete; x0 already holds this value (set 0x14 bytes back) (1 instructions)
   mov x0, #8
   mov x0, #8
+
+register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; x3 is overwritten before any read (1 instructions)
+  udiv x3, x2, x0
+  ... 1 instruction ...
+  sdiv x3, x2, x0
 
 register already holds the recomputed value at offset: 0x64 <_main+0x64>: -> delete; x0 already holds this value (set 0x1c bytes back) (1 instructions)
   mov x0, #8
   mov x0, #8
 
+register write overwritten unread at offset: 0x60 <_main+0x60>: -> delete; x3 is overwritten before any read (1 instructions)
+  sdiv x3, x2, x0
+  ... 1 instruction ...
+  udiv x3, x0, x0
+
 Optimization opportunities by type:
+      12  register write overwritten unread
        5  UDIV by constant foldable to shift
        3  register already holds the recomputed value
 
-8 optimization opportunities in 28 instructions
+20 optimization opportunities in 28 instructions

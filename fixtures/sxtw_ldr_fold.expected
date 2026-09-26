@@ -42,13 +42,22 @@ SXTW + register-offset STR foldable into the store at offset: 0x50 <_main+0x50>:
   sxtw x0, w1
   str x5, [x3, x0]
 
+register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; x0 is overwritten before any read (1 instructions)
+  mov x0, #1
+  sxtw x0, w1
+
 SXTW + register-offset STR foldable into the store at offset: 0x5c <_main+0x5c>: -> str w5, [x3, w1, sxtw #2] (2 instructions)
   sxtw x0, w1
   str w5, [x3, x0, lsl #2]
+
+register write overwritten unread at offset: 0x64 <_main+0x64>: -> delete; x0 is overwritten before any read (1 instructions)
+  mov x0, #2
+  sxtw x0, w1
 
 Optimization opportunities by type:
        7  SXTW + register-offset LDR foldable into the load
        3  register already holds the recomputed value
        2  SXTW + register-offset STR foldable into the store
+       2  register write overwritten unread
 
-12 optimization opportunities in 31 instructions
+14 optimization opportunities in 31 instructions

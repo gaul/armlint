@@ -86,6 +86,11 @@ register already holds the recomputed value at offset: 0x58 <_main+0x58>: -> del
   mov x0, #0
   mov x0, #0
 
+register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x3 is overwritten before any read (1 instructions)
+  add x3, x2, x0
+  ... 1 instruction ...
+  sub x3, x0, x2
+
 MOV #0 + use foldable to ZR at offset: 0x58 <_main+0x58>: -> sub x3, xzr, x2 (2 instructions)
   movz x0, #0x0
   sub x3, x0, x2
@@ -113,6 +118,11 @@ register already holds the recomputed value at offset: 0x70 <_main+0x70>: -> del
   mov x0, #0
   mov x0, #0
 
+register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x3 is overwritten before any read (1 instructions)
+  sub x3, x0, x2
+  ... 5 instructions ...
+  and x3, x2, x0
+
 MOV #0 + use foldable to ZR at offset: 0x70 <_main+0x70>: -> and x3, x2, xzr (2 instructions)
   movz x0, #0x0
   and x3, x2, x0
@@ -121,6 +131,11 @@ register already holds the recomputed value at offset: 0x78 <_main+0x78>: -> del
   mov x0, #0
   mov x0, #0
 
+register write overwritten unread at offset: 0x74 <_main+0x74>: -> delete; x3 is overwritten before any read (1 instructions)
+  and x3, x2, x0
+  ... 1 instruction ...
+  orr x3, x2, x0
+
 MOV #0 + use foldable to ZR at offset: 0x78 <_main+0x78>: -> orr x3, x2, xzr (2 instructions)
   movz x0, #0x0
   orr x3, x2, x0
@@ -128,6 +143,11 @@ MOV #0 + use foldable to ZR at offset: 0x78 <_main+0x78>: -> orr x3, x2, xzr (2 
 register already holds the recomputed value at offset: 0x80 <_main+0x80>: -> delete; x0 already holds this value (set 0x80 bytes back) (1 instructions)
   mov x0, #0
   mov x0, #0
+
+register write overwritten unread at offset: 0x7c <_main+0x7c>: -> delete; x3 is overwritten before any read (1 instructions)
+  orr x3, x2, x0
+  ... 1 instruction ...
+  eor x3, x2, x0
 
 MOV #0 + use foldable to ZR at offset: 0x80 <_main+0x80>: -> eor x3, x2, xzr (2 instructions)
   movz x0, #0x0
@@ -151,6 +171,11 @@ register already holds the recomputed value at offset: 0xa0 <_main+0xa0>: -> del
 register already holds the recomputed value at offset: 0xa8 <_main+0xa8>: -> delete; x0 already holds this value (set 0x10 bytes back) (1 instructions)
   mov x0, #0
   mov x0, #0
+
+register write overwritten unread at offset: 0x84 <_main+0x84>: -> delete; x3 is overwritten before any read (1 instructions)
+  eor x3, x2, x0
+  ... 9 instructions ...
+  add x3, x1, x2
 
 register already holds the recomputed value at offset: 0xb0 <_main+0xb0>: -> delete; x0 already holds this value (set 0x18 bytes back) (1 instructions)
   mov x0, #0
@@ -212,6 +237,11 @@ register already holds the recomputed value at offset: 0x138 <_main+0x138>: -> d
   mov x0, #0
   mov w0, #0
 
+register write overwritten unread at offset: 0x134 <_main+0x134>: -> delete; x3 is overwritten before any read (1 instructions)
+  csel x3, x0, x2, ne
+  ... 1 instruction ...
+  csneg w3, w2, w0, lt
+
 MOV #0 + use foldable to ZR at offset: 0x138 <_main+0x138>: -> csneg w3, w2, wzr, lt (2 instructions)
   movz w0, #0x0
   csneg w3, w2, w0, lt
@@ -228,13 +258,19 @@ register already holds the recomputed value at offset: 0x148 <_main+0x148>: -> d
   mov x0, #0
   mov x0, #0
 
+register write overwritten unread at offset: 0x13c <_main+0x13c>: -> delete; w3 is overwritten before any read (1 instructions)
+  csneg w3, w2, w0, lt
+  ... 3 instructions ...
+  csel x3, x0, x0, ne
+
 CSEL same-operand identity at offset: 0x14c <_main+0x14c>: csel x3, x0, x0, ne -> mov x3, x0 (cond irrelevant: both branches = x0) (1 instructions)
   csel x3, x0, x0, ne
 
 Optimization opportunities by type:
       29  register already holds the recomputed value
       24  MOV #0 + use foldable to ZR
+       7  register write overwritten unread
        6  compare whose flags are overwritten unread
        1  CSEL same-operand identity
 
-60 optimization opportunities in 85 instructions
+67 optimization opportunities in 85 instructions

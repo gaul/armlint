@@ -5,12 +5,22 @@ CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x0 <_main>: -> lsr x0, 
 compare whose flags are overwritten unread at offset: 0x8 <_main+0x8>: -> delete; NZCV overwritten unread by cmp w1, #0 (1 instructions)
   cmp x9, #0
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x0 is overwritten before any read (1 instructions)
+  cset x0, lt
+  ... 2 instructions ...
+  cset w0, lt
+
 CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0xc <_main+0xc>: -> lsr w0, w1, #31 (2 instructions)
   cmp w1, #0
   cset w0, lt
 
 compare whose flags are overwritten unread at offset: 0x14 <_main+0x14>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
   cmp w9, #0
+
+register write overwritten unread at offset: 0x10 <_main+0x10>: -> delete; w0 is overwritten before any read (1 instructions)
+  cset w0, lt
+  ... 2 instructions ...
+  cset x0, mi
 
 CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x18 <_main+0x18>: -> lsr x0, x1, #63 (2 instructions)
   cmp x1, #0
@@ -19,6 +29,11 @@ CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x18 <_main+0x18>: -> ls
 compare whose flags are overwritten unread at offset: 0x20 <_main+0x20>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
   cmp x9, #0
 
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x0 is overwritten before any read (1 instructions)
+  cset x0, mi
+  ... 2 instructions ...
+  csetm x0, lt
+
 CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x24 <_main+0x24>: -> asr x0, x1, #63 (2 instructions)
   cmp x1, #0
   csetm x0, lt
@@ -26,17 +41,42 @@ CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x24 <_main+0x24>: -> as
 compare whose flags are overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
   cmp x9, #0
 
+register write overwritten unread at offset: 0x28 <_main+0x28>: -> delete; x0 is overwritten before any read (1 instructions)
+  csetm x0, lt
+  ... 2 instructions ...
+  cset x0, ge
+
 compare whose flags are overwritten unread at offset: 0x38 <_main+0x38>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
   cmp x9, #0
+
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; x0 is overwritten before any read (1 instructions)
+  cset x0, ge
+  ... 2 instructions ...
+  cset x0, eq
 
 compare whose flags are overwritten unread at offset: 0x44 <_main+0x44>: -> delete; NZCV overwritten unread by cmp x1, #1 (1 instructions)
   cmp x9, #0
 
+register write overwritten unread at offset: 0x40 <_main+0x40>: -> delete; x0 is overwritten before any read (1 instructions)
+  cset x0, eq
+  ... 2 instructions ...
+  cset x0, lt
+
 compare whose flags are overwritten unread at offset: 0x50 <_main+0x50>: -> delete; NZCV overwritten unread by cmp w1, #0 (1 instructions)
   cmp x9, #0
 
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x0 is overwritten before any read (1 instructions)
+  cset x0, lt
+  ... 2 instructions ...
+  csetm x0, lt
+
 compare whose flags are overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; NZCV overwritten unread by cmp x1, #0 (1 instructions)
   cmp x9, #0
+
+register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; x0 is overwritten before any read (1 instructions)
+  csetm x0, lt
+  ... 2 instructions ...
+  cset x0, lt
 
 branch to the next instruction is a no-op at offset: 0x68 <_main+0x68>: -> delete: control falls through either way (1 instructions)
   b.lt #0x6c
@@ -47,7 +87,8 @@ CMP #0 + sign CSET/CSETM foldable to LSR/ASR at offset: 0x6c <_main+0x6c>: -> as
 
 Optimization opportunities by type:
        8  compare whose flags are overwritten unread
+       8  register write overwritten unread
        5  CMP #0 + sign CSET/CSETM foldable to LSR/ASR
        1  branch to the next instruction is a no-op
 
-14 optimization opportunities in 30 instructions
+22 optimization opportunities in 30 instructions

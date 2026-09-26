@@ -1,0 +1,36 @@
+register write overwritten unread at offset: 0x0 <_main>: -> delete; x4 is overwritten before any read (1 instructions)
+  add x4, x25, x16
+  ... 2 instructions ...
+  add x4, x25, x16
+
+register write overwritten unread at offset: 0x18 <_main+0x18>: -> delete; w4 is overwritten before any read (1 instructions)
+  sub w4, w4, #8
+  ldr w4, [x10, #4]
+
+register write overwritten unread at offset: 0x28 <_main+0x28>: -> delete; x4 is overwritten before any read (1 instructions)
+  mov x4, #0
+  ldrb w4, [x3, #0xc]
+
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; x1 is overwritten before any read (1 instructions)
+  mov x1, #1
+  ... 1 instruction ...
+  ldp x1, x2, [x0]
+
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; x2 is overwritten before any read (1 instructions)
+  mov x2, #2
+  ldp x1, x2, [x0]
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x3 is overwritten before any read (1 instructions)
+  mov x3, #7
+  ... 1 instruction ...
+  mov x3, #8
+
+register already holds the recomputed value at offset: 0xa8 <_main+0xa8>: -> delete; x4 already holds this value (set 0x8 bytes back) (1 instructions)
+  add x4, x25, #0xc8
+  add x4, x25, #0xc8
+
+Optimization opportunities by type:
+       6  register write overwritten unread
+       1  register already holds the recomputed value
+
+7 optimization opportunities in 52 instructions

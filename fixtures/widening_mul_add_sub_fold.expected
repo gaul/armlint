@@ -2,33 +2,73 @@ SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x0 <_main>: -> smadd
   smull x8, w0, w1
   add x8, x8, x2
 
+register write overwritten unread at offset: 0x4 <_main+0x4>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x8, x2
+  smull x8, w0, w1
+
 SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x8 <_main+0x8>: -> smaddl x8, w0, w1, x2 (2 instructions)
   smull x8, w0, w1
   add x8, x2, x8
+
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x2, x8
+  smull x8, w0, w1
 
 SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x10 <_main+0x10>: -> smsubl x8, w0, w1, x2 (2 instructions)
   smull x8, w0, w1
   sub x8, x2, x8
 
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x8 is overwritten before any read (1 instructions)
+  sub x8, x2, x8
+  umull x8, w0, w1
+
 SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x18 <_main+0x18>: -> umaddl x8, w0, w1, x2 (2 instructions)
   umull x8, w0, w1
   add x8, x8, x2
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x8, x2
+  umull x8, w0, w1
 
 SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x20 <_main+0x20>: -> umsubl x8, w0, w1, x2 (2 instructions)
   umull x8, w0, w1
   sub x8, x2, x8
 
+register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; x8 is overwritten before any read (1 instructions)
+  sub x8, x2, x8
+  smull x8, w0, w1
+
 SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x28 <_main+0x28>: -> smaddl x8, w0, w1, x0 (2 instructions)
   smull x8, w0, w1
   add x8, x8, x0
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x8, x0
+  smull x8, w0, w1
 
 SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL at offset: 0x30 <_main+0x30>: -> smnegl x8, w0, w1 (2 instructions)
   smull x8, w0, w1
   neg x8, x8
 
+register write overwritten unread at offset: 0x34 <_main+0x34>: -> delete; x8 is overwritten before any read (1 instructions)
+  neg x8, x8
+  umull x8, w0, w1
+
 SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL at offset: 0x38 <_main+0x38>: -> umnegl x8, w0, w1 (2 instructions)
   umull x8, w0, w1
   neg x8, x8
+
+register write overwritten unread at offset: 0x3c <_main+0x3c>: -> delete; x8 is overwritten before any read (1 instructions)
+  neg x8, x8
+  smull x8, w0, w1
+
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; w8 is overwritten before any read (1 instructions)
+  add w8, w8, w2
+  smull x8, w0, w1
+
+register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x8 is overwritten before any read (1 instructions)
+  sub x8, x8, x2
+  smull x8, w0, w1
 
 SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL at offset: 0x58 <_main+0x58>: -> smaddl x9, w0, w1, x2 (2 instructions)
   smull x8, w0, w1
@@ -38,13 +78,26 @@ register already holds the recomputed value at offset: 0x60 <_main+0x60>: -> del
   smull x8, w0, w1
   smull x8, w0, w1
 
+register write overwritten unread at offset: 0x64 <_main+0x64>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x8, x8
+  smull x8, w0, w1
+
+register write overwritten unread at offset: 0x70 <_main+0x70>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x8, x2
+  smaddl x8, w0, w1, x3
+
+register write overwritten unread at offset: 0x78 <_main+0x78>: -> delete; x8 is overwritten before any read (1 instructions)
+  add x8, x8, x2
+  smull x8, w0, w1
+
 register already holds the recomputed value at offset: 0x80 <_main+0x80>: -> delete; x9 already holds this value (set 0x24 bytes back) (1 instructions)
   add x9, x8, x2
   add x9, x8, x2
 
 Optimization opportunities by type:
+      13  register write overwritten unread
        7  SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
        2  SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL
        2  register already holds the recomputed value
 
-11 optimization opportunities in 36 instructions
+24 optimization opportunities in 36 instructions

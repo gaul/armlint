@@ -13,6 +13,11 @@ BFI synthesis via AND-UBFIZ-ORR at offset: 0x3c <_main+0x3c>: -> bfi x0, x1, #8,
   ubfiz x2, x1, #8, #8
   orr x0, x0, x2
 
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x4 is overwritten before any read (1 instructions)
+  mov x4, #1
+  ... 15 instructions ...
+  ubfiz w4, w5, #4, #4
+
 BFI synthesis via AND-UBFIZ-ORR at offset: 0x4c <_main+0x4c>: -> bfi w3, w5, #4, #4 (3 instructions)
   and w3, w3, #0xffffff0f
   ubfiz w4, w5, #4, #4
@@ -32,5 +37,6 @@ Optimization opportunities by type:
        3  BFI synthesis via AND-UBFIZ-ORR
        2  BFXIL synthesis via AND-AND-ORR
        1  redundant zero-extension after zeroing op
+       1  register write overwritten unread
 
-6 optimization opportunities in 31 instructions
+7 optimization opportunities in 31 instructions

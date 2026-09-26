@@ -2,19 +2,40 @@ load + SCVTF/UCVTF via GPR foldable to FP load + convert at offset: 0x0 <_main>:
   ldr w8, [x1]
   scvtf s0, w8
 
+register write overwritten unread at offset: 0x8 <_main+0x8>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #1
+  ldr w8, [x1, #4]
+
 load + SCVTF/UCVTF via GPR foldable to FP load + convert at offset: 0xc <_main+0xc>: -> ldr s0, [x1, #0x4] ; ucvtf s0, s0 (2 instructions)
   ldr w8, [x1, #4]
   ucvtf s0, w8
+
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #1
+  ldr x8, [x1, #8]
 
 load + SCVTF/UCVTF via GPR foldable to FP load + convert at offset: 0x18 <_main+0x18>: -> ldr d0, [x1, #0x8] ; scvtf d0, d0 (2 instructions)
   ldr x8, [x1, #8]
   scvtf d0, x8
 
+register write overwritten unread at offset: 0x20 <_main+0x20>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ldr w8, [sp]
+
 load + SCVTF/UCVTF via GPR foldable to FP load + convert at offset: 0x24 <_main+0x24>: -> ldr s0, [sp] ; scvtf s0, s0 (2 instructions)
   ldr w8, [sp]
   scvtf s0, w8
 
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #1
+  ldr w8, [x1]
+
+register write overwritten unread at offset: 0x38 <_main+0x38>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #1
+  ldrh w8, [x1]
+
 Optimization opportunities by type:
+       5  register write overwritten unread
        4  load + SCVTF/UCVTF via GPR foldable to FP load + convert
 
-4 optimization opportunities in 21 instructions
+9 optimization opportunities in 21 instructions
