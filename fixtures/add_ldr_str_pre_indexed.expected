@@ -138,17 +138,25 @@ ADD + LDP foldable to immediate-offset LDP at offset: 0x104 <_main+0x104>: -> ld
   add x11, x11, #0x10
   ldp x11, x2, [x11]
 
+ADD + LDR foldable to pre-indexed LDR at offset: 0x118 <_main+0x118>: -> ldrsw x21, [x20, #0x4]! (2 instructions)
+  add x20, x20, #0x4
+  ldrsw x21, [x20]
+
+SUB + LDR foldable to pre-indexed LDR at offset: 0x120 <_main+0x120>: -> ldrsb w23, [x22, #-0x1]! (2 instructions)
+  sub x22, x22, #0x1
+  ldrsb w23, [x22]
+
 Optimization opportunities by type:
-       8  ADD + LDR foldable to pre-indexed LDR
+       9  ADD + LDR foldable to pre-indexed LDR
        7  LDR + ADD foldable to post-indexed LDR
        5  ADD + STR foldable to pre-indexed STR
        4  ADD + LDP foldable to pre-indexed LDP
        3  STR + ADD foldable to post-indexed STR
        2  ADD + LDR foldable to immediate-offset LDR
+       2  SUB + LDR foldable to pre-indexed LDR
        2  SUB + STP foldable to pre-indexed STP
        1  ADD + LDP foldable to immediate-offset LDP
        1  LDR + SUB foldable to post-indexed LDR
-       1  SUB + LDR foldable to pre-indexed LDR
        1  SUB + STR foldable to pre-indexed STR
 
-35 optimization opportunities in 71 instructions
+37 optimization opportunities in 77 instructions

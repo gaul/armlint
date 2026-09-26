@@ -1053,8 +1053,12 @@ struct armlint_state {
     // the same way -- every such form has a post-indexed counterpart,
     // and an FP Rt can never alias the integer base.
     // lspi_pending_is_sw flags LDPSW (4-byte transfers into Xt
-    // destinations). Strict adjacency: any non-matching instruction
-    // expires the state.
+    // destinations). An integer single load carries its mnemonic and
+    // destination width from decode_int_load_uimm in
+    // lspi_pending_ld_mnem / lspi_pending_ld_wx (NULL otherwise), so
+    // the sign-extending LDRSB/LDRSH (Wt or Xt) and LDRSW fold like
+    // the zero-extending loads: each has a post-indexed form. Strict
+    // adjacency: any non-matching instruction expires the state.
     bool lspi_pending;
     bool lspi_pending_is_load;
     bool lspi_pending_is_fp;
@@ -1064,6 +1068,8 @@ struct armlint_state {
     unsigned lspi_pending_rn;
     unsigned lspi_pending_rt;
     unsigned lspi_pending_rt2;
+    const char *lspi_pending_ld_mnem;
+    char lspi_pending_ld_wx;
     size_t lspi_pending_offset;
     char lspi_pending_disasm[ARMLINT_FINDING_LINE_LEN];
 
@@ -18925,8 +18931,10 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
             bool is_load = state->lspi_pending_is_load;
             bool is_fp = state->lspi_pending_is_fp;
             bool is_pair = state->lspi_pending_is_pair;
+            const char *ld_mnem = state->lspi_pending_ld_mnem;
             const char *mnem = is_pair
                 ? pair_mnemonic(is_load, state->lspi_pending_is_sw)
+                : ld_mnem != NULL ? ld_mnem
                 : ls_mnemonic(is_fp, is_load, size);
             const char *idx_sign = is_sub ? "-" : "";
             const char *upd_mnem = is_sub ? "sub" : "add";
@@ -18968,8 +18976,13 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
                     state->lspi_pending_rt2);
                 snprintf(rts, sizeof(rts), "%s, %s", rt_buf, rt2_buf);
             } else {
-                format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size,
-                    state->lspi_pending_rt);
+                if (ld_mnem != NULL) {
+                    format_reg(rt_buf, sizeof(rt_buf),
+                        state->lspi_pending_ld_wx, state->lspi_pending_rt);
+                } else {
+                    format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size,
+                        state->lspi_pending_rt);
+                }
                 snprintf(rts, sizeof(rts), "%s", rt_buf);
             }
             if (state->lspi_pending_rn == 31) {
@@ -19000,7 +19013,10 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
     // or a zero-offset LDP/STP/LDPSW pair? Only the zero-offset case
     // folds cleanly: a non-zero offset plus a post-index update has
     // no single-instruction rewrite (pre-indexed handles a different
-    // pattern).
+    // pattern). The integer loads include the sign-extending ones
+    // (irregexp's backtrack pop is ldrsw + add); PRFM, whose Rt is a
+    // prefetch operation and which has no post-indexed form, does not
+    // decode as a load.
     unsigned size, imm12, rn, rt;
     unsigned rt2 = 0;
     int pair_imm7 = 0;
@@ -19009,7 +19025,10 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
     bool is_fp = false;
     bool is_pair = false;
     bool is_sw = false;
-    if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
+    const char *ld_mnem = NULL;
+    char ld_wx = 'x';
+    if (decode_int_load_uimm(op, &size, &ld_mnem, &ld_wx, &imm12, &rn,
+                             &rt)
             && imm12 == 0) {
         opened = true;
         is_load = true;
@@ -19043,9 +19062,11 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
         state->lspi_pending_rn = rn;
         state->lspi_pending_rt = rt;
         state->lspi_pending_rt2 = rt2;
+        state->lspi_pending_ld_mnem = ld_mnem;
+        state->lspi_pending_ld_wx = ld_wx;
         state->lspi_pending_offset = offset;
-        const char *mnem = is_pair
-            ? pair_mnemonic(is_load, is_sw)
+        const char *mnem = is_pair ? pair_mnemonic(is_load, is_sw)
+            : ld_mnem != NULL ? ld_mnem
             : ls_mnemonic(is_fp, is_load, size);
         char rt_buf[8];
         char rts[20];
@@ -19056,7 +19077,11 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
                 rt2);
             snprintf(rts, sizeof(rts), "%s, %s", rt_buf, rt2_buf);
         } else {
-            format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+            if (ld_mnem != NULL) {
+                format_reg(rt_buf, sizeof(rt_buf), ld_wx, rt);
+            } else {
+                format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+            }
             snprintf(rts, sizeof(rts), "%s", rt_buf);
         }
         if (rn == 31) {
@@ -19099,7 +19124,13 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
         bool is_fp = false;
         bool is_pair = false;
         bool is_sw = false;
-        if (decode_ldr_uimm_any_size(op, &size, &imm12, &rn, &rt)
+        // An integer load names its own mnemonic and destination
+        // width, so the sign-extending LDRSB/LDRSH/LDRSW, which have
+        // pre-indexed forms too, fold like the rest.
+        const char *ld_mnem = NULL;
+        char ld_wx = 'x';
+        if (decode_int_load_uimm(op, &size, &ld_mnem, &ld_wx, &imm12, &rn,
+                                 &rt)
                 && imm12 == 0
                 && rn == state->lspr_pending_rd) {
             matched = true;
@@ -19160,8 +19191,10 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
         bool side_entry = matched
             && offset_is_branch_target(state, offset);
         if (matched && !rt_aliases_rn && imm_in_range && !side_entry) {
-            const char *mnem = is_pair
-                ? pair_mnemonic(is_load, is_sw)
+            // ld_mnem is set only when the integer-load decode matched
+            // (no other decoder's word is an integer load).
+            const char *mnem = is_pair ? pair_mnemonic(is_load, is_sw)
+                : ld_mnem != NULL ? ld_mnem
                 : ls_mnemonic(is_fp, is_load, size);
 
             // rts holds the data-register list: one register for a
@@ -19176,7 +19209,11 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
                     size, rt2);
                 snprintf(rts, sizeof(rts), "%s, %s", rt_buf, rt2_buf);
             } else {
-                format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+                if (ld_mnem != NULL) {
+                    format_reg(rt_buf, sizeof(rt_buf), ld_wx, rt);
+                } else {
+                    format_ls_rt(rt_buf, sizeof(rt_buf), is_fp, size, rt);
+                }
                 snprintf(rts, sizeof(rts), "%s", rt_buf);
             }
 

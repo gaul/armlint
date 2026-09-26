@@ -161,4 +161,14 @@ _main:
     add     x27, x27, #0x60
     ldp     x3, x4, [x27]
 
+    // P) The sign-extending loads have pre-indexed forms too.
+    add     x20, x20, #4
+    ldrsw   x21, [x20]              // -> ldrsw x21, [x20, #4]!
+    sub     x22, x22, #1
+    ldrsb   w23, [x22]              // -> ldrsb w23, [x22, #-1]!
+
+    // N) PRFM loads nothing and has no pre-indexed form.
+    add     x24, x24, #64
+    prfm    pldl1keep, [x24]
+
     ret

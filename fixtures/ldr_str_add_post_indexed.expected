@@ -146,17 +146,29 @@ STP + ADD foldable to post-indexed STP at offset: 0x10c <_main+0x10c>: -> stp xz
   stp xzr, xzr, [sp]
   add sp, sp, #0x10
 
+LDR + ADD foldable to post-indexed LDR at offset: 0x114 <_main+0x114>: -> ldrsw x20, [x21], #0x4 (2 instructions)
+  ldrsw x20, [x21]
+  add x21, x21, #0x4
+
+LDR + ADD foldable to post-indexed LDR at offset: 0x11c <_main+0x11c>: -> ldrsb w22, [x23], #0x1 (2 instructions)
+  ldrsb w22, [x23]
+  add x23, x23, #0x1
+
+LDR + SUB foldable to post-indexed LDR at offset: 0x124 <_main+0x124>: -> ldrsh x24, [x25], #-0x2 (2 instructions)
+  ldrsh x24, [x25]
+  sub x25, x25, #0x2
+
 Optimization opportunities by type:
-       8  LDR + ADD foldable to post-indexed LDR
+      10  LDR + ADD foldable to post-indexed LDR
        6  ADD + LDR foldable to pre-indexed LDR
        6  ADD + STR foldable to pre-indexed STR
        5  STR + ADD foldable to post-indexed STR
        4  LDP + ADD foldable to post-indexed LDP
-       2  LDR + SUB foldable to post-indexed LDR
+       3  LDR + SUB foldable to post-indexed LDR
        2  SUB + LDR foldable to pre-indexed LDR
        1  LDP + SUB foldable to post-indexed LDP
        1  STP + ADD foldable to post-indexed STP
        1  STP + SUB foldable to post-indexed STP
        1  STR + SUB foldable to post-indexed STR
 
-37 optimization opportunities in 70 instructions
+40 optimization opportunities in 78 instructions

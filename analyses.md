@@ -4258,6 +4258,18 @@ there, so they would want the pool bit alone.
   is integer-only. The post-indexed encoding already expresses "load/store
   from `[xn]` and then bump `xn` by ±imm", so the rewrite is a literal
   source-to-encoding fold with no semantic change.
+* The sign-extending loads fold too: `LDRSB`/`LDRSH` into a W or an X
+  register, and `LDRSW`, each of which has a post-indexed form
+  (`ldrsw x2, [x3] ; add x3, x3, #4` -> `ldrsw x2, [x3], #4`). `PRFM`,
+  which takes `LDRSW`'s opc at size 11, loads nothing and has none.
+  Until 2026-09-26 the check decoded only the zero-extending loads,
+  which hid its largest population. SpiderMonkey's irregexp pops its
+  backtrack stack with exactly that pair (`SMRegExpMacroAssembler::Pop`):
+  18,266 times in the JetStream 3 dump and 800 times under Octane. go
+  adds 113, every one gc's nil check -- `ldrsb x27, [x0]`, a byte load
+  into the assembler's scratch register that faults on a nil pointer --
+  followed by a field's address, `add x0, x0, #8`; the post-indexed
+  load faults at the same PC. No other check's count moved.
 * Pairs fold the same way: `ldp xt, xu, [xn] ; add xn, xn, #imm` ->
   `ldp xt, xu, [xn], #imm`, covering the integer W/X pairs, `LDPSW`,
   and the SIMD&FP S/D/Q pairs. The flagship shape is the canonical
@@ -4320,6 +4332,11 @@ there, so they would want the pool bit alone.
   is integer-only. The pre-indexed encoding already expresses "bump `xn` by
   ±imm and then load/store from the new `xn`", which is exactly what
   the source sequence does.
+* The sign-extending loads (`LDRSB`/`LDRSH` into W or X, `LDRSW`) fold
+  on the same terms: `add x9, x9, #1 ; ldrsb x12, [x9]` ->
+  `ldrsb x12, [x9, #1]!`. clang-24 has 4, each a string pointer
+  advanced by a byte and then read (`StringLiteralParser` and the HLSL
+  root-signature lexer).
 * Pairs fold the same way: `sub sp, sp, #imm ; stp x29, x30, [sp]`
   -> `stp x29, x30, [sp, #-imm]!` is THE canonical frame prologue,
   and the fold covers the integer W/X pairs, `LDPSW`, and the

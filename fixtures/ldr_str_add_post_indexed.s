@@ -152,4 +152,19 @@ _main:
     stp     xzr, xzr, [sp]
     add     sp, sp, #16             // -> stp xzr, xzr, [sp], #16
 
+    // P) The sign-extending loads have post-indexed forms too:
+    //    irregexp's backtrack pop, then LDRSB into a W register and
+    //    LDRSH into an X register.
+    ldrsw   x20, [x21]
+    add     x21, x21, #4            // -> ldrsw x20, [x21], #4
+    ldrsb   w22, [x23]
+    add     x23, x23, #1            // -> ldrsb w22, [x23], #1
+    ldrsh   x24, [x25]
+    sub     x25, x25, #2            // -> ldrsh x24, [x25], #-2
+
+    // N) PRFM takes LDRSW's opc at size 11, but it loads nothing and
+    //    has no post-indexed form.
+    prfm    pldl1keep, [x26]
+    add     x26, x26, #64
+
     ret

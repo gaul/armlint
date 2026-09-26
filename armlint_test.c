@@ -16003,6 +16003,23 @@ static void test_lse_cas(void)
     assert(run_lse_check(code, 24) == 0);
 }
 
+// Run instruction words through the writeback folds, counting the
+// findings named `name` and copying the first one's detail: the
+// sign-extending loads fold under the LDR names, and their rendering
+// (mnemonic and destination width) is what those cases check.
+static int run_wb_words(const uint32_t *words, size_t n, const char *name,
+                        char *detail)
+{
+    uint8_t code[16];
+    assert(n * 4u <= sizeof(code));
+    for (size_t i = 0; i < n; i++) {
+        write_le32(&code[4u * i], words[i]);
+    }
+    detail[0] = '\0';
+    return run_named_buffer_check(code, n * 4u, name, detail,
+                                  ARMLINT_FINDING_DETAIL_LEN);
+}
+
 static void test_ldr_str_add_post_indexed(void)
 {
     uint8_t code[12];
@@ -16272,6 +16289,46 @@ static void test_ldr_str_add_post_indexed(void)
     ldp_x_soff(&code[0], 3, 4, 1, 1);
     add_x_imm(&code[4], 1, 1, 16);
     assert(run_helper_check(code, 8) == 0);
+
+    // -- Sign-extending loads: LDRSB/LDRSH (Wt or Xt) and LDRSW have
+    // post-indexed forms too, and render with their own mnemonic and
+    // destination width. The LDRSW pop is irregexp's, 18,266 times in
+    // SpiderMonkey's JetStream 3 dump. --
+    char d[ARMLINT_FINDING_DETAIL_LEN];
+    const char *post_add = "LDR + ADD foldable to post-indexed LDR";
+    const char *post_sub = "LDR + SUB foldable to post-indexed LDR";
+    const uint32_t ldrsw_pop[] = {
+        0xB9800062u,    // ldrsw x2, [x3]
+        0x91001063u,    // add   x3, x3, #4
+    };
+    assert(run_wb_words(ldrsw_pop, 2, post_add, d) == 1);
+    assert(strcmp(d, "-> ldrsw x2, [x3], #0x4") == 0);
+    const uint32_t ldrsb_w[] = {
+        0x39C00062u,    // ldrsb w2, [x3]
+        0x91000463u,    // add   x3, x3, #1
+    };
+    assert(run_wb_words(ldrsb_w, 2, post_add, d) == 1);
+    assert(strcmp(d, "-> ldrsb w2, [x3], #0x1") == 0);
+    const uint32_t ldrsh_x[] = {
+        0x79800062u,    // ldrsh x2, [x3]
+        0xD1000863u,    // sub   x3, x3, #2
+    };
+    assert(run_wb_words(ldrsh_x, 2, post_sub, d) == 1);
+    assert(strcmp(d, "-> ldrsh x2, [x3], #-0x2") == 0);
+    // A load into its own base is an UNPREDICTABLE writeback whether
+    // or not it sign-extends.
+    const uint32_t ldrsw_self[] = {
+        0xB9800063u,    // ldrsw x3, [x3]
+        0x91001063u,    // add   x3, x3, #4
+    };
+    assert(run_wb_words(ldrsw_self, 2, post_add, d) == 0);
+    // PRFM takes LDRSW's opc at size 11, but it loads nothing and has
+    // no post-indexed form.
+    const uint32_t prfm_bump[] = {
+        0xF9800060u,    // prfm pldl1keep, [x3]
+        0x91002063u,    // add  x3, x3, #8
+    };
+    assert(run_wb_words(prfm_bump, 2, post_add, d) == 0);
 }
 
 static void test_add_ldr_str_pre_indexed(void)
@@ -16571,6 +16628,34 @@ static void test_add_ldr_str_pre_indexed(void)
     sub_x_imm(&code[4], 27, 27, 16);
     ldr_x_uimm0(&code[8], 3, 27);
     assert(run_helper_check(code, 12) == 1);
+
+    // -- Sign-extending loads have pre-indexed forms as well. --
+    char d[ARMLINT_FINDING_DETAIL_LEN];
+    const char *pre_add = "ADD + LDR foldable to pre-indexed LDR";
+    const char *pre_sub = "SUB + LDR foldable to pre-indexed LDR";
+    const uint32_t add_ldrsw[] = {
+        0x91001063u,    // add   x3, x3, #4
+        0xB9800062u,    // ldrsw x2, [x3]
+    };
+    assert(run_wb_words(add_ldrsw, 2, pre_add, d) == 1);
+    assert(strcmp(d, "-> ldrsw x2, [x3, #0x4]!") == 0);
+    const uint32_t sub_ldrsb[] = {
+        0xD1000463u,    // sub   x3, x3, #1
+        0x39C00062u,    // ldrsb w2, [x3]
+    };
+    assert(run_wb_words(sub_ldrsb, 2, pre_sub, d) == 1);
+    assert(strcmp(d, "-> ldrsb w2, [x3, #-0x1]!") == 0);
+    const uint32_t add_ldrsh_w[] = {
+        0x91000863u,    // add   x3, x3, #2
+        0x79C00062u,    // ldrsh w2, [x3]
+    };
+    assert(run_wb_words(add_ldrsh_w, 2, pre_add, d) == 1);
+    assert(strcmp(d, "-> ldrsh w2, [x3, #0x2]!") == 0);
+    const uint32_t add_prfm[] = {
+        0x91002063u,    // add  x3, x3, #8
+        0xF9800060u,    // prfm pldl1keep, [x3]
+    };
+    assert(run_wb_words(add_prfm, 2, pre_add, d) == 0);
 }
 
 // Cross-validate classify_liveness (armlint's hand-rolled NZCV
