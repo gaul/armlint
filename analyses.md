@@ -644,8 +644,90 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
     `ldrsb w0, [x1] ; uxtb w0, w0` would need `ldrb w0, [x1]` --
     dropping the load loses the access.
   The last two shapes have valid one-instruction rewrites that
-  re-source the consumer rather than delete the producer; armlint
-  conservatively reports neither, and stays silent on all of these.
+  re-source the consumer rather than delete the producer. This check
+  stays silent on all of these; the register shape is the
+  [AND/extend chain](#andextend-chain-foldable-to-one) fold's, which
+  reports `uxtb w0, w1`, and the load shape is reported by neither.
+
+## AND/extend chain foldable to one
+
+* The mirror of the two redundant-extension checks above. They delete
+  a *second* mask or extension that changes nothing; this deletes, or
+  merges away, a *first* one whose effect the second discards. The
+  producer is an AND-type op, leaving `Rs & mask` (`AND #imm`,
+  `UXTB`/`UXTH`/`UBFX #0, #w`, `MOV Wd, Wm`), or an SXT-type one,
+  sign-extending a low field (`SXTB`/`SXTH`/`SXTW`/`SBFX #0, #w`); the
+  consumer, adjacent and reading its destination, is `AND`/`ANDS`/`TST
+  #imm`, `UXT*`/`UBFX #0` or `SXT*`/`SBFX #0`. The pair is one
+  instruction in three ways:
+  * **The consumer reads only bits the producer passed through
+    unchanged**, so it can read the producer's source instead:
+    `and w8, w8, #0xff ; and w8, w8, #0x3f` -> `and w8, w8, #0x3f`
+    (rustc's UTF-8 decoding), `sxtw x0, w1 ; sxtb w0, w0` ->
+    `sxtb w0, w1` (the .NET 11 post's TruncateAfterWidening, where the
+    idea came from), `mov w0, w2 ; and x19, x0, #0x7fffffff` ->
+    `and x19, x2, #0x7fffffff`.
+  * **Both are masks**: one `AND` of the intersection, when it
+    encodes. `and w9, w20, #0xffffff00 ; and w9, w9, #0xffff` ->
+    `and w9, w20, #0xff00`. When only the W form encodes it, the
+    rewrite is W-form -- a W write zero-extends, so the X result is the
+    same: `and x8, x21, #0xffffffff ; and x8, x8, #0xfffffffffffffffd`
+    -> `and w8, w21, #0xfffffffd`. An empty intersection is
+    `mov Rd, #0`.
+  * **An SXT followed by a wider SXT, or by a mask keeping all of it**,
+    is the producer's own extension at the consumer's width or into the
+    consumer's register: `sxtb w8, w9 ; sxtw x8, w8` -> `sxtb x8, w9`.
+    (Not a no-op: the W producer left bits 63:32 zero.)
+* An `ANDS`/`TST` consumer recomputes N and Z from the same value at
+  the same width, and C = V = 0 either way, so its flags survive every
+  rewrite that keeps its width -- which rules out the W-form merge (N
+  would move from bit 63 to bit 31) and the empty intersection (a MOV
+  sets no flags). An `ANDS` producer is never deleted: its flags would
+  go with it.
+* **What the redundant-extension checks own stays theirs.** A consumer
+  that overwrites the producer's destination and changes nothing is
+  their shape -- the rewrite deletes the consumer -- and every in-place
+  case `check_redundant_zext` and `check_redundant_sext`'s first arm
+  report is such a no-op, so this check refuses exactly those. An
+  `ANDS` in that position cannot be deleted (it owes the flags), so
+  there it merges into the producer instead: `and w8, w9, #0xf ;
+  ands w8, w8, #0xff` -> `ands w8, w9, #0xf`. The in-place SXT whose
+  field an in-place zero-extension keeps is `check_redundant_sext`'s
+  dead-sign-extension arm, decided here with that arm's own consumer
+  decoders. On 300,000 random encoding pairs the three checks never
+  report the same pair. The one intended overlap is
+  `check_and_lo32_mov`, which respells an X-form low-32 mask that this
+  check deletes when a second mask follows.
+* The rewrite deletes the producer, so its destination must be dead
+  after the consumer: a consumer that overwrites it proves that on the
+  spot, and any other defers through the forward register-liveness
+  scan (`defer_dead_mov`). The central side-entry gate drops a pair
+  whose consumer is a branch target -- a path entering there sees
+  whatever the other predecessor left in the register.
+* **Verified against a reference model.** `tools/net11scan.py` carries
+  the same classification in Python, checked by its `--selftest`
+  against the two-instruction semantics for 556,690 classified pairs.
+  The C check was then compared with it on 600,000 random pairs (half
+  with in-place producers, for the dead-SXT exclusion): the two agree
+  on every pair, and every one of the 146,898 rewrites armlint
+  rendered, assembled back with llvm-mc, computes the chain's value
+  with the chain's destination and source, `ANDS` staying `ANDS` at
+  the same width.
+* Corpus (2026-09, 57.2M instructions): **352 findings** -- librustc_driver
+  1.97.1 143, a Release clang 24 95, uutils 0.10.0 62, the SpiderMonkey
+  JIT under Octane 32, dyld 8, the V8 JIT under Octane 7, libcrypto
+  3.6.4 3, ssh 2, go and bash 0 -- and no other check's count moved.
+  All use the first two arms: 239 narrowings and 113 merges. The UTF-8
+  continuation-byte decode `and w8, w8, #0xff ; and w8, w8, #0x3f` is
+  69 of rustc's and 45 of uutils', and `and x16, x12, #0x7f ;
+  tst x16, #0x40` (or `#0xff`) 26 and 17 more; 44 of clang's are
+  `and x8, xN, #0xffffffff` followed by a mask clearing one bit (bit 2,
+  30 or 1), which merges into one W-form `and`; every SpiderMonkey
+  finding is a `mov w, w` zero-extension that the next instruction
+  narrows (`sxtb`, `and #0xff`, `sxtw`, ...). The census counts 897
+  candidates (405 in place): every in-place one that did not become a
+  finding has a branch into its consumer -- 113 in clang, 7 in rustc
+  -- and the rest failed the liveness proof.
 
 ## self-op identities (`AND/ORR/EOR/SUB/BIC/ORN/EON Rd, Rs, Rs`)
 
@@ -2176,6 +2258,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   instruction outright, which beats respelling it. In practice not one
   of the 40 findings shares an offset with another check's, so no
   precedence machinery is warranted. The fixtures pin both directions.
+  The [AND/extend chain](#andextend-chain-foldable-to-one) fold, added
+  later, does share offsets: where the truncated value is only masked
+  again (`and x8, x21, #0xffffffff ; and x8, x8,
+  #0xfffffffffffffffd`) it deletes the instruction this check
+  respells -- 22 sites in a Release clang 24 and 18 in librustc_driver
+  1.97.1. Both reports stand; the deletion is the larger saving.
 
 ## UMOV of lane 0 foldable to FMOV
 

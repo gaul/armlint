@@ -381,6 +381,19 @@ struct armlint_state {
     // the producer) stays sound for all of these and does not read this.
     bool sxt_dead_ok;
 
+    // AND-type or SXT-type producer pending a narrower consumer for
+    // check_and_ext_chain (see aec_role): aec_mask is an AND-type
+    // producer's mask, aec_field an SXT-type producer's field width.
+    bool aec_active;
+    bool aec_is_sext;
+    bool aec_is_64bit;
+    uint64_t aec_mask;
+    unsigned aec_field;
+    unsigned aec_rd;
+    unsigned aec_rn;
+    size_t aec_offset;
+    char aec_producer_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Deferred CMP/TST + B.EQ/NE finding awaiting forward NZCV-liveness
     // verification. Only one of CMP or TST can be pending at a time
     // (a CMP would overwrite or be overwritten by a TST), so the
@@ -1531,6 +1544,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->xtc_active = false;
     state->wzx_active = false;
     state->sxt_active = false;
+    state->aec_active = false;
     state->sv_active = false;
     state->sv_cmp_active = false;
     state->zs_active = false;
@@ -7362,6 +7376,344 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
         state->sxt_offset = offset;
         snprintf(state->sxt_producer_disasm,
             sizeof(state->sxt_producer_disasm),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+
+    return produced;
+}
+
+// === AND/extend chain: a mask or extension narrowed by a later one ===
+//
+// The value model behind check_and_ext_chain. An AND-type op leaves
+// Rs & mask in Rd: AND/ANDS #imm; UXTB/UXTH/UBFX #0, #w (UBFM with
+// immr = 0), whose mask is the low w bits; and MOV Wd, Wm, whose W
+// write keeps the low 32. An SXT-type op sign-extends the low `field`
+// bits of Rs to its own width: SXTB/SXTH/SXTW/SBFX #0, #w (SBFM with
+// immr = 0). A W-form op leaves bits 63..32 zero either way.
+enum aec_spelling { AEC_AND, AEC_ANDS, AEC_UBFM, AEC_SBFM, AEC_MOVW };
+
+typedef struct {
+    enum aec_spelling spell;
+    bool is_sext;
+    bool is_64bit;
+    uint64_t mask;      // AND-type: the mask, within the op's width
+    unsigned field;     // SXT-type: 1 <= field < datasize
+    unsigned rd;
+    unsigned rn;
+} aec_role;
+
+static bool decode_aec_role(uint32_t op, aec_role *r)
+{
+    unsigned sf = (op >> 31) & 1u;
+    unsigned datasize = sf ? 64u : 32u;
+    memset(r, 0, sizeof(*r));
+    r->is_64bit = sf != 0;
+    r->rd = op & 0x1Fu;
+    r->rn = (op >> 5) & 0x1Fu;
+
+    // MOV Wd, Wm: ORR Wd, WZR, Wm, LSL #0.
+    if ((op & 0xFFE0FFE0u) == 0x2A0003E0u) {
+        r->spell = AEC_MOVW;
+        r->rn = (op >> 16) & 0x1Fu;
+        r->mask = 0xFFFFFFFFu;
+        return true;
+    }
+    // Logical (immediate): AND (opc 00) and ANDS (opc 11).
+    if ((op & 0x1F800000u) == 0x12000000u) {
+        unsigned opc = (op >> 29) & 0x3u;
+        unsigned n = (op >> 22) & 1u;
+        if ((opc != 0u && opc != 3u) || (!sf && n)) {
+            return false;
+        }
+        if (!decode_bitmask_imm_value(n, (op >> 16) & 0x3Fu,
+                (op >> 10) & 0x3Fu, datasize, &r->mask)) {
+            return false;
+        }
+        r->spell = opc == 3u ? AEC_ANDS : AEC_AND;
+        return true;
+    }
+    // Bitfield: SBFM (opc 00) or UBFM (opc 10) with immr = 0 and
+    // N == sf keeps the low imms+1 bits, sign- or zero-extended. The
+    // full-width copy (imms = datasize-1) extends nothing, and imms
+    // >= 32 in the W form is UNDEFINED; both fail the field test.
+    if ((op & 0x1F800000u) == 0x13000000u) {
+        unsigned opc = (op >> 29) & 0x3u;
+        unsigned n = (op >> 22) & 1u;
+        unsigned immr = (op >> 16) & 0x3Fu;
+        unsigned imms = (op >> 10) & 0x3Fu;
+        if ((opc != 0u && opc != 2u) || n != sf || immr != 0u
+                || imms + 1u >= datasize) {
+            return false;
+        }
+        if (opc == 2u) {
+            r->spell = AEC_UBFM;
+            r->mask = ((uint64_t)1 << (imms + 1u)) - 1u;
+        } else {
+            r->spell = AEC_SBFM;
+            r->is_sext = true;
+            r->field = imms + 1u;
+        }
+        return true;
+    }
+    return false;
+}
+
+// The low n bits, 0 <= n <= 63.
+static uint64_t aec_low(unsigned n)
+{
+    return ((uint64_t)1 << n) - 1u;
+}
+
+// For a producer, the bits of Rs it passes into Rd unchanged; for a
+// consumer, the bits of Rd its result depends on. The two coincide:
+// an AND-type op's mask, an SXT-type op's low field.
+static uint64_t aec_bits(const aec_role *r)
+{
+    return r->is_sext ? aec_low(r->field) : r->mask;
+}
+
+// True when C leaves P's result unchanged as a 64-bit register value,
+// C(P(x)) == P(x) for every x.
+static bool aec_consumer_is_noop(const aec_role *p, const aec_role *c)
+{
+    if (!p->is_sext && !c->is_sext) {
+        return (p->mask & ~c->mask) == 0;
+    }
+    if (p->is_sext && c->is_sext) {
+        return c->field >= p->field && c->is_64bit == p->is_64bit;
+    }
+    if (!p->is_sext) {
+        // A mask entirely below C's sign bit: C extends a zero.
+        return p->mask <= aec_low(c->field - 1u);
+    }
+    // An SXT-type P fills its whole width; only a C mask covering
+    // all of it keeps it.
+    return (width_mask(p->is_64bit ? 64u : 32u) & ~c->mask) == 0;
+}
+
+enum aec_fold {
+    AEC_NONE,
+    AEC_NARROW,     // C alone, reading Rs
+    AEC_MERGE,      // one AND (ANDS) with the intersected mask
+    AEC_ZERO,       // the intersection is empty: MOV Rd, #0
+    AEC_RESEXT,     // SXT then a wider SXT: P's extension at C's width
+    AEC_RETARGET,   // C adds nothing to an SXT: P, writing C's Rd
+};
+
+// Decide which one instruction computes C(P(Rs)). *out_mask and
+// *out_merge_w describe AEC_MERGE: the mask, and whether it must be
+// rendered in the W form (a mask only W can encode, correct because
+// the W write zero-extends -- never for ANDS, whose N flag would move
+// from bit 63 to bit 31).
+static enum aec_fold classify_aec(const aec_role *p, const aec_role *c,
+                                  uint32_t c_op, uint64_t *out_mask,
+                                  bool *out_merge_w)
+{
+    unsigned cw = c->is_64bit ? 64u : 32u;
+    bool in_place = c->rd == p->rd;
+    bool noop = aec_consumer_is_noop(p, c);
+    bool c_flags = c->spell == AEC_ANDS;
+
+    // A no-op C that overwrites P's destination is the redundant-
+    // extension checks' shape: delete C, not P. Every in-place case
+    // check_redundant_zext and check_redundant_sext's first arm
+    // report is such a no-op. An ANDS is never deletable (it owes the
+    // flags), so its no-op case merges into P below instead.
+    if (noop && in_place && !c_flags) {
+        return AEC_NONE;
+    }
+
+    uint64_t reads = aec_bits(c) & width_mask(cw);
+    if ((reads & aec_bits(p)) == reads && !noop) {
+        // An in-place SXT whose low field an in-place zero-extension
+        // keeps is check_redundant_sext's dead-sign-extension arm,
+        // decided with its own consumer decoders.
+        unsigned z_c, z_rd, z_rn;
+        if (p->is_sext && p->rn == p->rd && in_place
+                && (decode_ubfm_zext(c_op, &z_c, &z_rd, &z_rn)
+                    || decode_and_imm_lowmask(c_op, &z_c, &z_rd, &z_rn))
+                && z_c <= p->field) {
+            return AEC_NONE;
+        }
+        return AEC_NARROW;
+    }
+
+    if (!p->is_sext && (!c->is_sext || noop)) {
+        uint64_t m = p->mask & aec_bits(c) & width_mask(cw);
+        if (m == 0) {
+            // ANDS still owes the flags of a zero result.
+            return c_flags ? AEC_NONE : AEC_ZERO;
+        }
+        *out_mask = m;
+        *out_merge_w = false;
+        if (is_bitmask_immediate(m, cw)) {
+            return AEC_MERGE;
+        }
+        if (!c_flags && cw == 64u && m <= 0xFFFFFFFFu
+                && is_bitmask_immediate(m, 32u)) {
+            *out_merge_w = true;
+            return AEC_MERGE;
+        }
+        return AEC_NONE;
+    }
+    if (c_flags) {
+        return AEC_NONE;
+    }
+    unsigned pw = p->is_64bit ? 64u : 32u;
+    if (p->is_sext && c->is_sext && c->field >= p->field && c->field <= pw) {
+        return AEC_RESEXT;
+    }
+    if (p->is_sext && !c->is_sext && noop) {
+        return AEC_RETARGET;
+    }
+    return AEC_NONE;
+}
+
+// Render an SBFM #0, #field (sign extension of the low field) at the
+// given width, preferring the SXTB/SXTH/SXTW aliases.
+static void render_aec_sext(char *buf, size_t sz, bool is_64bit,
+                            unsigned field, unsigned rd, unsigned rn)
+{
+    char w_or_x = is_64bit ? 'x' : 'w';
+    if (field == 8u || field == 16u || (field == 32u && is_64bit)) {
+        snprintf(buf, sz, "sxt%c %c%u, w%u",
+            field == 8u ? 'b' : field == 16u ? 'h' : 'w', w_or_x, rd, rn);
+    } else {
+        snprintf(buf, sz, "sbfx %c%u, %c%u, #0, #%u",
+            w_or_x, rd, w_or_x, rn, field);
+    }
+}
+
+// Render a mask applied at the given width in C's own spelling: UBFM
+// consumers as UXTB/UXTH or UBFX #0, the rest as AND, or ANDS/TST for
+// a flag-setting C.
+static void render_aec_mask(char *buf, size_t sz, enum aec_spelling spell,
+                            bool is_64bit, uint64_t mask, unsigned rd,
+                            unsigned rn)
+{
+    char w_or_x = is_64bit ? 'x' : 'w';
+    if (spell == AEC_UBFM) {
+        unsigned w = bits_used64(mask);
+        if (!is_64bit && (w == 8u || w == 16u)) {
+            snprintf(buf, sz, "uxt%c w%u, w%u", w == 8u ? 'b' : 'h', rd, rn);
+        } else {
+            snprintf(buf, sz, "ubfx %c%u, %c%u, #0, #%u",
+                w_or_x, rd, w_or_x, rn, w);
+        }
+    } else if (spell == AEC_ANDS && rd == 31) {
+        snprintf(buf, sz, "tst %c%u, #0x%" PRIx64, w_or_x, rn, mask);
+    } else {
+        snprintf(buf, sz, "%s %c%u, %c%u, #0x%" PRIx64,
+            spell == AEC_ANDS ? "ands" : "and",
+            w_or_x, rd, w_or_x, rn, mask);
+    }
+}
+
+bool check_and_ext_chain(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out)
+{
+    bool produced = false;
+
+    if (insn->size != 4) {
+        state->aec_active = false;
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    aec_role c;
+    bool is_role = decode_aec_role(op, &c);
+
+    // (1) Close: does this op read only what the pending producer
+    //     passed through, or apply a second mask to it?
+    if (state->aec_active) {
+        aec_role p = {
+            .spell = state->aec_is_sext ? AEC_SBFM : AEC_AND,
+            .is_sext = state->aec_is_sext,
+            .is_64bit = state->aec_is_64bit,
+            .mask = state->aec_mask,
+            .field = state->aec_field,
+            .rd = state->aec_rd,
+            .rn = state->aec_rn,
+        };
+        // MOV Wd, Wm is a producer only (a consumer MOV is a copy, the
+        // copy-chain checks' shape). AND to SP and a UBFM/SBFM to ZR
+        // are not consumers; ANDS to ZR is TST, which is.
+        uint64_t merge_mask = 0;
+        bool merge_w = false;
+        enum aec_fold fold = AEC_NONE;
+        if (is_role && c.spell != AEC_MOVW && c.rn == p.rd
+                && (c.rd != 31 || c.spell == AEC_ANDS)) {
+            fold = classify_aec(&p, &c, op, &merge_mask, &merge_w);
+        }
+        if (fold != AEC_NONE) {
+            char rewrite[ARMLINT_FINDING_LINE_LEN];
+            switch (fold) {
+            case AEC_NARROW:
+                if (c.is_sext) {
+                    render_aec_sext(rewrite, sizeof(rewrite), c.is_64bit,
+                        c.field, c.rd, p.rn);
+                } else {
+                    render_aec_mask(rewrite, sizeof(rewrite), c.spell,
+                        c.is_64bit, c.mask, c.rd, p.rn);
+                }
+                break;
+            case AEC_MERGE:
+                render_aec_mask(rewrite, sizeof(rewrite),
+                    c.spell == AEC_ANDS ? AEC_ANDS : AEC_AND,
+                    c.is_64bit && !merge_w, merge_mask, c.rd, p.rn);
+                break;
+            case AEC_ZERO:
+                snprintf(rewrite, sizeof(rewrite), "mov %c%u, #0",
+                    c.is_64bit ? 'x' : 'w', c.rd);
+                break;
+            case AEC_RESEXT:
+                render_aec_sext(rewrite, sizeof(rewrite), c.is_64bit,
+                    p.field, c.rd, p.rn);
+                break;
+            case AEC_RETARGET:
+            default:
+                render_aec_sext(rewrite, sizeof(rewrite), p.is_64bit,
+                    p.field, c.rd, p.rn);
+                break;
+            }
+
+            out->name = "AND/extend chain foldable to one";
+            out->start_offset = state->aec_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail), "-> %s", rewrite);
+            snprintf(out->lines[0], sizeof(out->lines[0]),
+                "%s", state->aec_producer_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+
+            // The rewrite deletes P, so its destination must be dead
+            // after C: a C that overwrites it proves that on the spot;
+            // any other C defers through the register-liveness scan.
+            if (c.rd == p.rd) {
+                produced = true;
+            } else {
+                defer_dead_mov(state, out, p.rd);
+            }
+        }
+        // Strict adjacency.
+        state->aec_active = false;
+    }
+
+    // (2) Open: an AND-type or SXT-type producer. ANDS is out (its
+    //     flags would go with it), as are an SP/ZR destination and a
+    //     ZR source (a constant, not a mask).
+    if (is_role && c.spell != AEC_ANDS && c.rd != 31 && c.rn != 31) {
+        state->aec_active = true;
+        state->aec_is_sext = c.is_sext;
+        state->aec_is_64bit = c.is_64bit;
+        state->aec_mask = c.mask;
+        state->aec_field = c.field;
+        state->aec_rd = c.rd;
+        state->aec_rn = c.rn;
+        state->aec_offset = offset;
+        snprintf(state->aec_producer_disasm,
+            sizeof(state->aec_producer_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
@@ -17556,6 +17908,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_and_lo32_mov,
     check_redundant_zext,
     check_redundant_sext,
+    check_and_ext_chain,
     check_lsl_lsr_to_ubfx,
     check_lsr_and_to_ubfx,
     check_and_lsr_to_ubfx,

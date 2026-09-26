@@ -126,6 +126,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [zeroing producer + `uxtb`/`uxth`/`uxtw`/`and`](analyses.md#redundant-zero-extension-after-a-producer-that-already-zeroed-those-bits) | drop the zero-extension |
 | [`mov xd, xd`](analyses.md#mov-xd-xd-is-a-literal-no-op) | remove (architectural no-op) |
 | [sign-extending producer + `sxtb`/`sxth`/`sxtw`](analyses.md#redundant-sign-extension-after-a-producer-that-already-replicated-the-sign) | drop the sign-extension |
+| [`and`/`uxt*`/`sxt*`/`mov Wd, Wm` + a narrower `and`/`ands`/`tst`/`uxt*`/`sxt*`](analyses.md#andextend-chain-foldable-to-one) | the second reading the first's source, or one `and` of the intersected masks |
 | [`and`/`orr`/`eor`/`sub`/`bic`/`orn`/`eon` with `Rs, Rs`](analyses.md#self-op-identities-andorreorsubbicorneon-rd-rs-rs) | `mov` / zero / all-ones |
 | [`ldr`+`ldr` / `str`+`str` (consecutive)](analyses.md#adjacent-ldrstr-foldable-into-ldpstp) | `ldp`/`stp` (integer or FP/SIMD, and `ldpsw`) |
 | [`str wzr`+`str wzr` (consecutive zero stores)](analyses.md#adjacent-zero-stores-foldable-into-str-xzr) | `str`/`stur xzr` |

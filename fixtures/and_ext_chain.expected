@@ -1,0 +1,63 @@
+AND/extend chain foldable to one at offset: 0x0 <_main>: -> and w8, w8, #0x3f (2 instructions)
+  and w8, w8, #0xff
+  and w8, w8, #0x3f
+
+AND/extend chain foldable to one at offset: 0x8 <_main+0x8>: -> sxtb w0, w1 (2 instructions)
+  sxtw x0, w1
+  sxtb w0, w0
+
+AND/extend chain foldable to one at offset: 0x10 <_main+0x10>: -> and w2, w2, #0xfffffff (2 instructions)
+  mov w2, w2
+  and w2, w2, #0xfffffff
+
+AND/extend chain foldable to one at offset: 0x18 <_main+0x18>: -> and w9, w20, #0xff00 (2 instructions)
+  and w9, w20, #0xffffff00
+  and w9, w9, #0xffff
+
+low-32 zero-extension foldable to MOV Wd, Wn at offset: 0x20 <_main+0x20>: -> mov w8, w21 (1 instructions)
+  and x8, x21, #0xffffffff
+
+AND/extend chain foldable to one at offset: 0x20 <_main+0x20>: -> and w8, w21, #0xfffffffd (2 instructions)
+  and x8, x21, #0xffffffff
+  and x8, x8, #0xfffffffffffffffd
+
+AND/extend chain foldable to one at offset: 0x28 <_main+0x28>: -> ands w10, w11, #0xf (2 instructions)
+  and w10, w11, #0xff
+  ands w10, w10, #0xf
+
+AND/extend chain foldable to one at offset: 0x30 <_main+0x30>: -> mov w12, #0 (2 instructions)
+  and w12, w13, #0xf0
+  and w12, w12, #0xf
+
+AND/extend chain foldable to one at offset: 0x38 <_main+0x38>: -> sxtb x14, w15 (2 instructions)
+  sxtb w14, w15
+  sxtw x14, w14
+
+AND/extend chain foldable to one at offset: 0x40 <_main+0x40>: -> and x19, x2, #0x7fffffff (2 instructions)
+  mov w0, w2
+  and x19, x0, #0x7fffffff
+
+AND/extend chain foldable to one at offset: 0x4c <_main+0x4c>: -> tst w12, #0x60 (2 instructions)
+  and w16, w12, #0x7f
+  tst w16, #0x60
+
+redundant zero-extension after zeroing op at offset: 0x5c <_main+0x5c>: and w3, w3, #0xffff is a no-op (bits >= 8 already zero) (2 instructions)
+  and w3, w3, #0xff
+  and w3, w3, #0xffff
+
+redundant sign-extension after sign-extending op at offset: 0x64 <_main+0x64>: sxth w4, w4 is a no-op (sign already extended from bit 7) (2 instructions)
+  sxtb w4, w5
+  sxth w4, w4
+
+dead sign-extension masked by zero-extension at offset: 0x6c <_main+0x6c>: sxth w6, w6 is dead -- uxtb w6, w6 clears bits >= 8 (S = 16) (2 instructions)
+  sxth w6, w6
+  uxtb w6, w6
+
+Optimization opportunities by type:
+      10  AND/extend chain foldable to one
+       1  dead sign-extension masked by zero-extension
+       1  low-32 zero-extension foldable to MOV Wd, Wn
+       1  redundant sign-extension after sign-extending op
+       1  redundant zero-extension after zeroing op
+
+14 optimization opportunities in 40 instructions

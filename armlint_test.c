@@ -4360,6 +4360,10 @@ static void test_mov_reg_self(void)
     assert(run_helper_check(code, 8) == 2);
 }
 
+static const char *const kAec = "AND/extend chain foldable to one";
+static const char *const kDeadSext =
+    "dead sign-extension masked by zero-extension";
+
 static void test_redundant_sext(void)
 {
     uint8_t code[16];
@@ -4635,24 +4639,29 @@ static void test_redundant_sext(void)
     //    changes the result (and, for a load, discards the memory
     //    access). The single-instruction equivalent re-sources the
     //    consumer / narrows the load -- it is not "delete the producer"
-    //    -- so these are (conservatively) left unflagged. --
+    //    -- so this check leaves them unflagged. For a register
+    //    producer that re-sourcing is check_and_ext_chain's rewrite,
+    //    which reports each of the next three instead. --
 
     // sxtb w0, w1 ; uxtb w0, w0 -- Rn != Rd. Net = zext(w1[7:0]);
     // dropping the sxtb makes uxtb read a stale w0 (equivalent would be
     // uxtb w0, w1).
     sxtb_w(&code[0], 0, 1);
     uxtb_w(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8, kDeadSext) == 0);
+    assert(run_named_check(code, 8, kAec) == 1);    // -> uxtb w0, w1
 
     // sxth x0, w1 ; uxth w0, w0 -- Rn != Rd, X-form producer.
     sxth_x(&code[0], 0, 1);
     uxth_w(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8, kDeadSext) == 0);
+    assert(run_named_check(code, 8, kAec) == 1);    // -> uxth w0, w1
 
     // sxtb w0, w1 ; and w0, w0, #0xff -- Rn != Rd, AND-mask consumer.
     sxtb_w(&code[0], 0, 1);
     and_w_ff(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_named_check(code, 8, kDeadSext) == 0);
+    assert(run_named_check(code, 8, kAec) == 1);    // -> and w0, w1, #0xff
 
     // ldrsb w0, [x1] ; uxtb w0, w0 -- load producer: dropping it loses
     // the memory read (equivalent would be ldrb w0, [x1]).
@@ -4788,6 +4797,264 @@ static void test_redundant_sext(void)
     sbfx_w(&code[0], 0, 1, 4, 5);
     and_w_lowmask(&code[4], 0, 0, 5);
     assert(run_helper_check(code, 8) == 0);
+}
+
+// ANDS (immediate) from raw (N, immr, imms) fields; Rd = 31 is TST.
+static void ands_imm_raw(uint8_t out[4], int is64, unsigned rd, unsigned rn,
+                         unsigned N, unsigned immr, unsigned imms)
+{
+    uint32_t op = (is64 ? 0xF2000000u : 0x72000000u)
+        | ((N & 1u) << 22)
+        | ((immr & 0x3Fu) << 16)
+        | ((imms & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5)
+        | (rd & 0x1Fu);
+    write_le32(out, op);
+}
+
+static void test_and_ext_chain(void)
+{
+    uint8_t code[32];
+
+    // -- Narrow, in place: C reads only bits P passes through, and
+    //    overwrites P's destination, so it emits on the spot. --
+
+    // and w8, w8, #0xff ; and w8, w8, #0x3f -> and w8, w8, #0x3f
+    // (rustc's UTF-8 decoding).
+    and_w_ff(&code[0], 8, 8);
+    and_run(&code[4], 0, 8, 8, 0, 6);
+    assert(run_named_check(code, 8, kAec) == 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // and w8, w9, #0xffff ; and w8, w8, #0x1ff -> and w8, w9, #0x1ff.
+    and_w_ffff(&code[0], 8, 9);
+    and_run(&code[4], 0, 8, 8, 0, 9);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // sxtw x0, w1 ; sxtb w0, w0 -> sxtb w0, w1 (the .NET 11 post's
+    // TruncateAfterWidening).
+    sxtw_x(&code[0], 0, 1);
+    sxtb_w(&code[4], 0, 0);
+    assert(run_named_check(code, 8, kAec) == 1);
+    assert(run_helper_check(code, 8) == 1);
+
+    // uxth w8, w9 ; sxtb w8, w8 -> sxtb w8, w9: a mask passing bits
+    // 15..0 feeds an extension reading 7..0.
+    uxth_w(&code[0], 8, 9);
+    sxtb_w(&code[4], 8, 8);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // sxth w8, w9 ; and w8, w8, #0xff -> and w8, w9, #0xff.
+    sxth_w(&code[0], 8, 9);
+    and_w_ff(&code[4], 8, 8);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // mov w2, w2 ; and w2, w2, #0xfffffff -> and w2, w2, #0xfffffff
+    // (SpiderMonkey): the W read ignores what the MOV cleared.
+    mov_w_reg(&code[0], 2, 2);
+    and_run(&code[4], 0, 2, 2, 0, 28);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // and x8, x9, #0xffffffff ; sxtw x8, w8 -> sxtw x8, w9. The
+    // producer alone is also check_and_lo32_mov's respelling.
+    and_x_ff32(&code[0], 8, 9);
+    sxtw_x(&code[4], 8, 8);
+    assert(run_named_check(code, 8, kAec) == 1);
+    assert(run_helper_check(code, 8) == 2);
+
+    // and x8, x9, #0xffffffffff ; ubfx x8, x8, #0, #36 -> ubfx x8, x9,
+    // #0, #36: an X-form UBFM consumer inside the mask.
+    and_run(&code[0], 1, 8, 9, 0, 40);
+    ubfx_x(&code[4], 8, 8, 0, 36);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // and w8, w9, #0xff ; ands w8, w8, #0xf -> ands w8, w9, #0xf: the
+    // same value at the same width, so the same flags.
+    and_w_ff(&code[0], 8, 9);
+    ands_imm_raw(&code[4], 0, 8, 8, 0, 0, 3);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // -- Narrow and merge, deferred: a C writing elsewhere needs P's
+    //    destination dead, proved by a later overwrite. --
+
+    // mov w0, w2 ; and x19, x0, #0x7fffffff -> and x19, x2, #0x7fffffff.
+    mov_w_reg(&code[0], 0, 2);
+    and_run(&code[4], 1, 19, 0, 0, 31);
+    assert(run_named_reg_dead(code, 8, 0, kAec) == 1);
+    assert(run_named_check(code, 8, kAec) == 0);    // no proof: silent
+
+    // and w8, w9, #0xffff ; tst w8, #0x1ff -> tst w9, #0x1ff.
+    and_w_ffff(&code[0], 8, 9);
+    tst_w_run(&code[4], 8, 8);
+    assert(run_named_reg_dead(code, 8, 8, kAec) == 1);
+
+    // and w19, w8, #1 ; and w0, w19, #1 -> and w0, w8, #0x1: equal
+    // masks, so C changes nothing -- but it writes elsewhere, and
+    // with w19 dead the pair is one AND.
+    and_run(&code[0], 0, 19, 8, 0, 1);
+    and_run(&code[4], 0, 0, 19, 0, 1);
+    assert(run_named_reg_dead(code, 8, 19, kAec) == 1);
+
+    // A read of P's destination before any overwrite keeps P:
+    // mov w0, w2 ; and x19, x0, #0x7fffffff ; add x1, x0, #1.
+    mov_w_reg(&code[0], 0, 2);
+    and_run(&code[4], 1, 19, 0, 0, 31);
+    add_x_imm(&code[8], 1, 0, 1);
+    assert(run_named_reg_dead(code, 12, 0, kAec) == 0);
+
+    // -- Merge: two masks, one AND of their intersection. --
+
+    // and w9, w20, #0xffffff00 ; and w9, w9, #0xffff
+    //   -> and w9, w20, #0xff00.
+    and_run(&code[0], 0, 9, 20, 8, 24);
+    and_w_ffff(&code[4], 9, 9);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // and x8, x21, #0xffffffff ; and x8, x8, #0xfffffffffffffffd
+    //   -> and w8, w21, #0xfffffffd: only the W form encodes the
+    //   intersection, and the W write zero-extends (clang).
+    and_x_ff32(&code[0], 8, 21);
+    and_run(&code[4], 1, 8, 8, 2, 63);
+    assert(run_named_check(code, 8, kAec) == 1);
+    assert(run_helper_check(code, 8) == 2);         // + and_lo32_mov
+
+    // and w8, w9, #0xff ; and x10, x8, #0xff00ff00ff00ff
+    //   -> and x10, x9, #0xff: an X read of a W result sees zeros above
+    //   bit 31.
+    and_w_ff(&code[0], 8, 9);
+    and_imm_raw(&code[4], 1, 10, 8, 0, 0, 0x27);    // #0x00ff00ff00ff00ff
+    assert(run_named_reg_dead(code, 8, 8, kAec) == 1);
+
+    // and w8, w9, #0xf ; ands w8, w8, #0xff -> ands w8, w9, #0xf: an
+    // in-place C that changes nothing is normally the redundant-
+    // extension checks' to delete, but an ANDS owes its flags, so it
+    // absorbs P instead.
+    and_run(&code[0], 0, 8, 9, 0, 4);
+    ands_imm_raw(&code[4], 0, 8, 8, 0, 0, 7);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // -- Zero, re-extension, retarget. --
+
+    // and w8, w9, #0xf0 ; and w8, w8, #0xf -> mov w8, #0.
+    and_run(&code[0], 0, 8, 9, 4, 4);
+    and_run(&code[4], 0, 8, 8, 0, 4);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // sxtb w8, w9 ; sxtw x8, w8 -> sxtb x8, w9: a wider SXT at a
+    // wider width re-extends P's field (not a no-op: the W producer
+    // left bits 63..32 zero).
+    sxtb_w(&code[0], 8, 9);
+    sxtw_x(&code[4], 8, 8);
+    assert(run_named_check(code, 8, kAec) == 1);
+
+    // sxtb w9, w9 ; sxtw x8, w9 -> sxtb x8, w9, deferred on w9.
+    sxtb_w(&code[0], 9, 9);
+    sxtw_x(&code[4], 8, 9);
+    assert(run_named_reg_dead(code, 8, 9, kAec) == 1);
+
+    // sxtb w8, w9 ; and x10, x8, #0xffffffff -> sxtb w10, w9: the mask
+    // keeps every bit the W producer wrote.
+    sxtb_w(&code[0], 8, 9);
+    and_x_ff32(&code[4], 10, 8);
+    assert(run_named_reg_dead(code, 8, 8, kAec) == 1);
+
+    // -- A chain of three: each link folds against the previous. --
+    and_w_ffff(&code[0], 8, 8);
+    and_w_ff(&code[4], 8, 8);
+    and_run(&code[8], 0, 8, 8, 0, 4);
+    assert(run_named_check(code, 12, kAec) == 2);
+
+    // -- Negatives. --
+
+    // In-place C that changes nothing: delete C, which the redundant-
+    // extension checks report; this one stays out.
+    and_w_ff(&code[0], 8, 8);
+    and_w_ff(&code[4], 8, 8);
+    assert(run_named_check(code, 8, kAec) == 0);
+    assert(run_helper_check(code, 8) == 1);         // redundant zext
+    and_w_ff(&code[0], 8, 9);
+    and_w_ffff(&code[4], 8, 8);
+    assert(run_named_check(code, 8, kAec) == 0);
+    assert(run_helper_check(code, 8) == 1);
+    sxtb_w(&code[0], 8, 9);
+    sxth_w(&code[4], 8, 8);
+    assert(run_named_check(code, 8, kAec) == 0);
+    assert(run_helper_check(code, 8) == 1);         // redundant sext
+
+    // An in-place SXT whose field an in-place zero-extension keeps:
+    // check_redundant_sext's dead arm, not this check.
+    sxth_w(&code[0], 0, 0);
+    uxtb_w(&code[4], 0, 0);
+    assert(run_named_check(code, 8, kAec) == 0);
+    assert(run_named_check(code, 8, kDeadSext) == 1);
+
+    // C reads a different register.
+    and_w_ff(&code[0], 8, 9);
+    and_run(&code[4], 0, 8, 10, 0, 4);
+    assert(run_named_check(code, 8, kAec) == 0);
+
+    // Not adjacent.
+    and_w_ff(&code[0], 8, 9);
+    nop_insn(&code[4]);
+    and_run(&code[8], 0, 8, 8, 0, 4);
+    assert(run_named_check(code, 12, kAec) == 0);
+
+    // The intersection does not encode: and w8, w9, #0xf0f0f0f0 ;
+    // and w8, w8, #0xffffff00 would need #0xf0f0f000.
+    and_imm_raw(&code[0], 0, 8, 9, 0, 4, 0x33);     // #0xf0f0f0f0
+    and_run(&code[4], 0, 8, 8, 8, 24);
+    assert(run_named_check(code, 8, kAec) == 0);
+
+    // An ANDS producer: its flags would go with it.
+    ands_imm_raw(&code[0], 0, 8, 9, 0, 0, 7);
+    and_run(&code[4], 0, 10, 8, 0, 4);
+    assert(run_named_reg_dead(code, 8, 8, kAec) == 0);
+
+    // A TST of an empty intersection still owes Z = 1, N = 0: there is
+    // no MOV #0 for flags.
+    and_run(&code[0], 0, 8, 9, 4, 4);
+    tst_w_run(&code[4], 8, 3);
+    assert(run_named_reg_dead(code, 8, 8, kAec) == 0);
+
+    // An ANDS merge that only the W form encodes: N would move from
+    // bit 63 to bit 31.
+    and_x_ff32(&code[0], 8, 21);
+    ands_imm_raw(&code[4], 1, 8, 8, 1, 62, 62);     // #0xfffffffffffffffd
+    assert(run_named_check(code, 8, kAec) == 0);
+
+    // An X mask reaching past a W SXT's field: sxtb w8, w9 ;
+    // and x10, x8, #0xffff reads sign copies.
+    sxtb_w(&code[0], 8, 9);
+    and_run(&code[4], 1, 10, 8, 0, 16);
+    assert(run_named_reg_dead(code, 8, 8, kAec) == 0);
+
+    // A relocating producer (UBFX with lsb > 0) is not a mask.
+    ubfx_w(&code[0], 8, 9, 4, 8);
+    and_run(&code[4], 0, 8, 8, 0, 4);
+    assert(run_named_check(code, 8, kAec) == 0);
+
+    // AND to SP (Rd = 31 in AND-immediate) is not a consumer, and a
+    // ZR source makes the producer a constant, not a mask.
+    and_w_ff(&code[0], 8, 9);
+    and_run(&code[4], 0, 31, 8, 0, 4);
+    assert(run_named_check(code, 8, kAec) == 0);
+    and_w_ff(&code[0], 8, 31);
+    and_run(&code[4], 0, 8, 8, 0, 4);
+    assert(run_named_check(code, 8, kAec) == 0);
+
+    // A MOV consumer is a copy, the copy-chain checks' shape.
+    and_w_ff(&code[0], 8, 9);
+    mov_w_reg(&code[4], 10, 8);
+    assert(run_named_reg_dead(code, 8, 8, kAec) == 0);
+
+    // A branch onto C: the side entry reaches C without P, so C must
+    // keep reading P's destination.
+    b_(&code[0], 8);
+    and_w_ff(&code[4], 8, 8);
+    and_run(&code[8], 0, 8, 8, 0, 6);
+    assert(run_buffer_check(code, 12) == 0);
+    nop_insn(&code[0]);
+    assert(run_buffer_check(code, 12) == 1);
 }
 
 static void test_redundant_cmp_after_s_variant(void)
@@ -16448,6 +16715,7 @@ int main(void)
     test_and_lsr_lsl_fold();
     test_mov_reg_self();
     test_redundant_sext();
+    test_and_ext_chain();
     test_redundant_cmp_after_s_variant();
     test_zero_cmp_to_s_variant();
     test_sub_cmp_fold();

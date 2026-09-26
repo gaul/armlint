@@ -741,6 +741,45 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
 bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// The mirror of the two redundant-extension checks: where they delete
+// a second mask or extension that changes nothing, this deletes (or
+// merges away) a FIRST one whose effect the second discards. A
+// producer P -- AND #imm, UXTB/UXTH/UBFX #0, MOV Wd, Wm (AND-type,
+// leaving Rs & mask), or SXTB/SXTH/SXTW/SBFX #0 (SXT-type,
+// sign-extending a low field) -- immediately followed by a consumer C
+// of P's destination -- AND/ANDS/TST #imm, UXT*/UBFX #0, SXT*/SBFX #0
+// -- is one instruction when:
+//   C reads only bits P passes through unchanged: C, reading Rs
+//     and w8, w8, #0xff ; and w8, w8, #0x3f  -> and w8, w8, #0x3f
+//     sxtw x0, w1 ; sxtb w0, w0              -> sxtb w0, w1
+//     mov w0, w2 ; and x19, x0, #0x7fffffff  -> and x19, x2, #0x7fffffff
+//   both are masks: one AND of their intersection, when it encodes
+//     and w9, w20, #0xffffff00 ; and w9, w9, #0xffff -> and w9, w20, #0xff00
+//   (in the W form when only W encodes it and C sets no flags, the W
+//   write zero-extending; MOV #0 when the intersection is empty and C
+//   sets no flags);
+//   an SXT is followed by a wider SXT, or by a mask keeping all of it:
+//   P's extension at C's width, or P writing C's destination.
+// Each rewrite computes C(P(Rs)) exactly; ANDS/TST, which recompute
+// N and Z from the same value at the same width, keep their flags.
+//
+// Excluded: a C that overwrites P's destination and changes nothing --
+// check_redundant_zext's and check_redundant_sext's first arm's shape,
+// whose rewrite deletes C instead (an ANDS is never deletable and
+// merges into P) -- and an in-place SXT whose field an in-place
+// zero-extension keeps, check_redundant_sext's second arm, decided
+// with that arm's own decoders. ANDS producers (their flags would go
+// with them), SP and ZR destinations, and ZR sources are left out.
+//
+// The rewrite deletes P, so its destination must be dead after C: a C
+// that overwrites it proves that on the spot, and any other C defers
+// through the forward register-liveness scan (defer_dead_mov). May
+// co-fire with check_and_lo32_mov, which respells an X-form low-32
+// mask as MOV Wd, Wn where this check deletes it. Reported as
+// "AND/extend chain foldable to one".
+bool check_and_ext_chain(armlint_state *state, const cs_insn *insn,
+                         size_t offset, armlint_finding *out);
+
 // Detect LSL Rd, Rs, #a immediately followed by LSR/ASR Rd, Rd, #b
 // with b >= a. The pair extracts bits Rs[datasize-a-1 .. b-a] and
 // zero- or sign-extends them; equivalent to a single UBFX/SBFX

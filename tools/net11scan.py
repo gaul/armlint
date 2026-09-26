@@ -484,9 +484,9 @@ def s_ccmp_chain(w):
 #   resext   SXT then a wider SXT: P's extension at C's width
 #   retarget C adds nothing to P's value: P, writing Rd
 # Excluded: C in place (Rd == Rt) and a no-op given P -- the
-# redundant-extension checks' shape (delete C) -- and an in-place SXT
-# made dead by an in-place zero-extension, check_redundant_sext's
-# second arm.
+# redundant-extension checks' shape (delete C), unless C is ANDS, which
+# owes its flags and so merges instead -- and an in-place SXT made dead
+# by an in-place zero-extension, check_redundant_sext's second arm.
 
 def mask_role(x):
     """(kind, k, width, rd, rn, spelling): kind 'and' with its mask or
@@ -547,7 +547,7 @@ def classify_mask_chain(x, y):
         noop = p[1] < (1 << (c[1] - 1))
     else:
         noop = (((1 << pw) - 1) & ~c[1]) == 0
-    if noop and in_place:
+    if noop and in_place and not flags:
         return None
     reads = (c[1] if c[0] == "and" else (1 << c[1]) - 1) & cmask
     passes = p[1] if p[0] == "and" else (1 << p[1]) - 1
@@ -777,6 +777,7 @@ CLASSIFY = {
     "sxth w8, w8\nand w8, w8, #0xff": None,
     "and w8, w9, #0xf0\ntst w8, #0xf": None,
     "and x8, x21, #0xffffffff\nands x8, x8, #0xfffffffffffffffd": None,
+    "and w8, w9, #0xf\nands w8, w8, #0xff": "merge",
 }
 
 
