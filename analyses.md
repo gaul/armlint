@@ -1312,13 +1312,15 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   two adjustments on the same register with the intermediate untouched
   across the gap and no control transfer between -- is 6,039, so about
   one in eight survives the deadness proof and the side-entry gate.
-* **Where the shape comes from.** Two unrelated LLVM behaviours
-  produce it in roughly equal measure. Classifying librustc_driver's
-  26,929 findings by what feeds the opening instruction: 13,607
-  (50.6%) are global-address arithmetic, where the open is the `add`
-  of an `adrp`/`add` page pair; 12,875 (47.8%) are stack-address
-  arithmetic, where the open is `sp`- or frame-pointer-relative; 447
-  (1.6%) are neither.
+* **Where the shape comes from.** Two unrelated behaviours produce it
+  in roughly equal measure: LLVM's instruction selection and the
+  linker's GOT relaxation. Classifying the findings by what feeds the
+  opening instruction: of librustc_driver's 27,595, 14,074 (51.0%)
+  are global-address arithmetic, where the open is the `add` of an
+  `adrp`/`add` page pair; 13,096 (47.5%) are stack-address
+  arithmetic, where the open is `sp`- or frame-pointer-relative; 425
+  (1.5%) are neither. clang-24's 37,258 split 14,379 / 21,675 /
+  1,204.
 * **The stack half is instruction selection.** A bare `ISD::FrameIndex`
   is selected to `ADDXri <FI>, 0` with a hardcoded zero immediate (the
   `ISD::FrameIndex` case in `AArch64DAGToDAGISel::Select`), so an
@@ -1339,18 +1341,33 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   interior pointers specifically. Nothing downstream repairs it:
   `LocalStackSlotAllocation` leaves the pair untouched, and
   `AArch64MIPeepholeOpt` coalesces `ADDXrr` but not `ADDXri` chains.
-* **The global half is a declined relocation fold.**
-  `performGlobalAddressCombine` in `AArch64ISelLowering.cpp` normally
-  folds a constant offset into the symbol's relocation addend, giving
-  `adrp x8, sym@PAGE+16 ; add x8, x8, sym@PAGEOFF+16`. It declines in
-  three cases, and each declined fold leaves a third instruction
-  behind: when the offset runs past the object's size
-  (`Offset > getTypeAllocSize`), the dominant shape here; when the
-  same global is also used at a smaller offset, which trips its
-  "require that the new offset is larger" guard; and when the offset
-  is negative, which it skips with the comment that those "aren't
-  really common enough to matter" -- borne out here, where only 50 of
-  the 13,607 global chains close with a `sub`.
+* **The global half is the linker's GOT relaxation.** 13,990 of
+  librustc_driver's 14,074 global chains, and 14,253 of clang-24's
+  14,379, are one shape: a C++ vtable's address point, the vtable
+  symbol `__ZTV...` plus 16, stored into a new object. The compiler
+  reaches a vtable that another translation unit defines through the
+  GOT, since it might live in another image:
+
+      adrp x8, __ZTV1A@GOTPAGE
+      ldr  x8, [x8, __ZTV1A@GOTPAGEOFF]
+      add  x8, x8, #16
+
+  When the vtable turns out to be in the same image, the linker
+  rewrites the GOT load into `add x8, x8, #pageoff` and leaves the
+  `add #16` behind. Two translation units built by Xcode's clang and
+  linked into a dylib by ld-27037.1 reproduce it exactly: `adrp x8,
+  0x4000 <__ZTV1A> ; add x8, x8, #0x0 ; add x8, x8, #0x10`. This
+  section used to blame `performGlobalAddressCombine`, which folds a
+  constant offset into a symbol's relocation addend
+  (`sym@PAGEOFF+16`) and declines when the offset runs past the
+  object's size. It never sees these offsets: the 16 applies after
+  the load. Of the other 210 global chains, the 185 whose target is a
+  named object stay inside it, so the size decline could cover at
+  most the remaining 25. Folding the address point is the linker's
+  to do. LLVM marks the ADRP and the GOT load with an AdrpLdrGot
+  optimization hint, but no hint covers the ADD after them, and
+  ld-27037.1 applies none of the hints anyway (see the ADR/ADRP note
+  under [value numbering](#value-already-in-its-register-local-value-numbering)).
 * **The two halves are not equally actionable.** The stack half is a
   plain missed optimization -- the constant is available at selection
   and the frame-index rewrite already accepts it. Folding it there
@@ -1362,21 +1379,24 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   global chain does not yet exist. The global half is a *relink*-level
   observation, for the same reason as the `adrp`+`add` note under
   [`ADD/SUB #0 is redundant`](#addsub-0-is-redundant): armlint reads
-  the linked image, where `pageoff` is resolved and it can check that
-  `pageoff + K` still encodes, but the compiler emitting the
-  relocation cannot prove that statically. Both halves are sound
-  rewrites of the binary in hand, which is what the check reports.
-* The stack half explains the distribution. The check reports 26,929
-  findings in `librustc_driver` (26.0M instructions) against 37 in
-  dyld, 11 in go, 11 in libcrypto, 5 in ssh and 4 in bash -- 1,037 per
-  million instructions against 229, 44 and 34 for the C and C++
-  binaries. rustc's frames are large and full of interior pointers --
-  enum payloads, iterator and future state, `&mut` borrows into locals
-  -- and every one that escapes to a call rather than being loaded
-  through pays the extra `add`. The corpus has no large C program,
-  though, so that ratio mixes language with program size. The second
-  immediate is a field offset in both halves: median 16 bytes, 98.6%
-  under 256.
+  the linked image, where the GOT load is already an ADD and it can
+  check that `pageoff + 16` still encodes, but the compiler, which
+  cannot know the vtable will be in the same image, has to emit the
+  load. Both halves are sound rewrites of the binary in hand, which is
+  what the check reports.
+* **The rate is C++, not Rust.** The check reports 27,595 findings in
+  `librustc_driver` (26.0M instructions) and 37,258 in clang-24
+  (21.9M), against 46 in dyld, 11 in go, 11 in libcrypto, 5 in ssh and
+  1 in bash. But librustc_driver links LLVM in statically, compiled
+  from C++ by Xcode's clang, and by the containing function's symbol
+  that part of it -- 12.5M instructions not in a Rust-mangled
+  function -- holds 25,786 of the findings, 2,071 per million
+  instructions. The 13.5M instructions in Rust functions hold 1,809,
+  134 per million, and clang-24, all C++, runs at 1,703. So what the
+  check measures here is large C++ frames and C++ vtables; the Rust
+  rate sits between dyld's 272 per million and ssh's 44. In the stack
+  half the second immediate is a field offset; in the global half it
+  is 16, the address point.
 * Verification: `tools/shapescan.py` independently identifies 46,115
   candidate chains in `librustc_driver`; armlint reports a strict
   subset of them, with no finding outside that set, the remainder
@@ -2062,8 +2082,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   different constant-pool entries that landed on one page (18 of 18
   sampled in rustc: `adrp x8, 0x64b8000 ; ldr q1, [x8, #0x620] ; adrp
   x8, 0x64b8000 ; ldr q2, [x8, #0x630]`), symbols the compiler could
-  not have merged; ld64's AdrpAdrp optimization hint, which turns the
-  second into a NOP, is the relink that fixes them. go's are its
+  not have merged. LLVM marks such a pair with an AdrpAdrp
+  optimization hint, which ld64 applied by turning the second ADRP
+  into a NOP, but Apple's current linker, ld-27037.1, applies none of
+  the hints: linking a two-file test, it left an AdrpAdd pair and an
+  AdrpLdrGot pair unchanged with the target in range of a single
+  `adr`. It also ignores `-ld_classic`, so on macOS only a different
+  linker could fix them. go's are its
   assembler rematerializing a global's page into REGTMP (x27) for every
   access, the same global twice included -- a code-generation choice,
   but one no compiler flag reaches. Either way they are counted apart.
