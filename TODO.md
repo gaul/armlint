@@ -173,6 +173,7 @@ here with measured populations so it is not re-investigated.
 
 | Item | Notes |
 | --- | --- |
+| Pair forwarding across base registers | The LDP/STP findings note a slot in flight only through the same base register ([analyses.md](analyses.md#adjacent-ldrstr-foldable-into-ldpstp)). SpiderMonkey's Baseline pushes through x20 and reloads through x29, 1.13M reverse-order LDP findings with no note, so the note misses the largest JIT population. Relating the two bases needs value numbering across the frame setup (`sub x20, x29, #k`, then pushes that move x20 by known amounts) rather than one base register |
 | Split fusion pairs (cmp+b.cond, aese+aesmc same-dest, adrp+add) | Informational: "these should be adjacent"; per-core tables from the SOGs |
 | Render `mov xd, #0` (not `mov xd, xzr`) and `movi v0.2d, #0` (not `movi d0, #0`) | Apple eliminates only those spellings at rename; rendering tweaks to existing checks |
 | Loaded value as base not offset (`[x9, x8]` → `[x8, x9]` when x8 was just loaded) | Apple guide §4.6.7: 1 cycle of address-generation latency |

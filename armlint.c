@@ -16236,6 +16236,211 @@ bool check_simd_cmp_zero(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// A memory access decoded straight from its word, for the pair
+// forwarding scan below: the base register (31 = SP), whether it
+// loads, whether it moves one register or two, the bytes it touches
+// relative to the base's value before it executes (unknown for a
+// register offset), the base update a writeback applies afterwards,
+// and the integer registers a load writes (32 = none; register 31 in
+// a data field is ZR).
+typedef struct {
+    unsigned rn;
+    bool load;
+    bool single;
+    bool known;
+    int64_t lo, hi;
+    bool writeback;
+    int64_t wb;
+    unsigned rt, rt2;
+} fwd_access;
+
+// Decode the plain load/store classes -- unsigned offset, unscaled,
+// pre- and post-indexed, unprivileged, register offset, and the pair
+// forms in each addressing mode -- in both register files, with the
+// masks word_ldst_reg_liveness uses. PRFM, STGP and the unallocated
+// size/opc slots decline; atomics, exclusives and the PAC loads sit in
+// other classes and decline as well.
+static bool decode_fwd_access(uint32_t op, fwd_access *a)
+{
+    bool v = ((op >> 26) & 1u) != 0;
+    a->rn = (op >> 5) & 0x1Fu;
+    a->known = true;
+    a->writeback = false;
+    a->wb = 0;
+    a->rt = 32u;
+    a->rt2 = 32u;
+    unsigned rt = op & 0x1Fu;
+    if ((op & 0x3B000000u) == 0x39000000u
+            || (op & 0x3B200000u) == 0x38000000u
+            || (op & 0x3B200C00u) == 0x38200800u) {
+        unsigned size = op >> 30;
+        unsigned opc = (op >> 22) & 3u;
+        unsigned lg2;
+        if (v) {
+            // opc<1> selects the 128-bit Q form, at size 00 only.
+            lg2 = size | ((opc >> 1) << 2);
+            if (lg2 > 4u) {
+                return false;
+            }
+            a->load = (opc & 1u) != 0;
+        } else {
+            lg2 = size;
+            if ((opc == 2u && size == 3u) || (opc == 3u && size >= 2u)) {
+                return false;       // PRFM, or unallocated
+            }
+            a->load = opc != 0u;
+            if (a->load && rt != 31u) {
+                a->rt = rt;
+            }
+        }
+        a->single = true;
+        if ((op & 0x3B000000u) == 0x39000000u) {
+            a->lo = (int64_t)((op >> 10) & 0xFFFu) << lg2;
+        } else if ((op & 0x3B200000u) == 0x38000000u) {
+            int64_t imm9 = (int64_t)((op >> 12) & 0x1FFu);
+            imm9 = (imm9 ^ 0x100) - 0x100;
+            if (v && ((op >> 10) & 3u) == 2u) {
+                return false;       // no SIMD&FP unprivileged form
+            }
+            switch ((op >> 10) & 3u) {
+            case 1u:                // post-indexed: access, then bump
+                a->lo = 0;
+                a->writeback = true;
+                a->wb = imm9;
+                break;
+            case 3u:                // pre-indexed: bump, then access
+                a->lo = imm9;
+                a->writeback = true;
+                a->wb = imm9;
+                break;
+            default:                // unscaled, unprivileged
+                a->lo = imm9;
+                break;
+            }
+        } else {
+            a->known = false;       // register offset
+            a->lo = 0;
+        }
+        a->hi = a->lo + ((int64_t)1 << lg2);
+        return true;
+    }
+    if ((op & 0x3A000000u) == 0x28000000u) {
+        unsigned opc = op >> 30;
+        unsigned mode = (op >> 23) & 3u;
+        a->load = ((op >> 22) & 1u) != 0;
+        int64_t size;
+        if (v) {
+            if (opc == 3u) {
+                return false;
+            }
+            size = (int64_t)4 << opc;
+        } else if (opc == 0u || (opc == 1u && a->load && mode != 0u)) {
+            size = 4;               // W pair, LDPSW
+        } else if (opc == 2u) {
+            size = 8;
+        } else {
+            return false;           // STGP, unallocated
+        }
+        int64_t imm7 = (int64_t)((op >> 15) & 0x7Fu);
+        imm7 = ((imm7 ^ 0x40) - 0x40) * size;
+        a->single = false;
+        a->lo = mode == 1u ? 0 : imm7;
+        a->hi = a->lo + 2 * size;
+        if (mode == 1u || mode == 3u) {
+            a->writeback = true;
+            a->wb = imm7;
+        }
+        if (a->load && !v) {
+            unsigned rt2 = (op >> 10) & 0x1Fu;
+            a->rt = rt != 31u ? rt : 32u;
+            a->rt2 = rt2 != 31u ? rt2 : 32u;
+        }
+        return true;
+    }
+    return false;
+}
+
+// Whether a word leaves base register `rn` (31 = SP) as it found it,
+// as far as this word-level decoding can prove: a data-processing
+// write elsewhere, or an access that neither loads into it nor writes
+// it back. Everything else -- control transfers, system instructions
+// but NOP, atomics, SIMD&FP data processing -- ends the scan.
+static bool word_keeps_base(uint32_t op, unsigned rn)
+{
+    lvn_op p;
+    if (decode_lvn_op(op, &p)) {
+        return p.out != rn;
+    }
+    fwd_access a;
+    if (decode_fwd_access(op, &a)) {
+        return !(a.writeback && a.rn == rn) && a.rt != rn && a.rt2 != rn;
+    }
+    return op == 0xD503201Fu;
+}
+
+// Apple's cores do not forward a store to a pair load, or a pair store
+// to a later load (Lemire's 2024 M2 measurement: two STRs read back by
+// one LDP ran 2.35x slower than by two LDRs; SpiderMonkey dropped
+// LDP/STP from its push and pop on Darwin for the same reason). So a
+// pair fold can cost time where its slots are in flight in the store
+// buffer. For an LDP, look back from its first load for the youngest
+// store to one of its slots; for an STP, look on from its second store
+// for the first access to one. Either counts only when it moves a
+// single register -- a pair on the other side forwards no better
+// unfolded -- and only through the same base register, unchanged in
+// between, with no branch target or control transfer crossed, within
+// LIVENESS_WINDOW instructions. Returns the distance in instructions,
+// or 0. A different base that aliases the slots -- SpiderMonkey's
+// pushes through x20, reloaded through x29 -- is beyond it.
+static unsigned pair_forwarding_distance(const armlint_state *state,
+                                         size_t first, size_t last,
+                                         bool load, unsigned rn,
+                                         int64_t lo, int64_t hi)
+{
+    if (state->buf == NULL) {
+        return 0;
+    }
+    fwd_access a;
+    if (load) {
+        size_t pos = first;
+        for (unsigned i = 1; i <= LIVENESS_WINDOW; i++) {
+            if (pos < 4u || pos > state->buf_len
+                    || offset_is_branch_target(state, pos)) {
+                return 0;
+            }
+            pos -= 4u;
+            uint32_t op = buf_word_at(state->buf, pos);
+            // Its range relative to the base the pair sees: a
+            // writeback moved the base by wb after it stored.
+            if (decode_fwd_access(op, &a) && a.rn == rn && !a.load
+                    && a.known && a.lo - a.wb < hi && lo < a.hi - a.wb) {
+                return a.single ? i : 0;
+            }
+            if (!word_keeps_base(op, rn)) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+    size_t pos = last;
+    for (unsigned i = 1; i <= LIVENESS_WINDOW; i++) {
+        pos += 4u;
+        if (pos > state->buf_len || state->buf_len - pos < 4u
+                || offset_is_branch_target(state, pos)) {
+            return 0;
+        }
+        uint32_t op = buf_word_at(state->buf, pos);
+        if (decode_fwd_access(op, &a) && a.rn == rn && a.known
+                && a.lo < hi && lo < a.hi) {
+            return a.load && a.single ? i : 0;
+        }
+        if (!word_keeps_base(op, rn)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
 bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out)
 {
@@ -16417,6 +16622,21 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
             snprintf(out->detail, sizeof(out->detail),
                 "-> %s %s, %s, [%s, #%d]",
                 pair_mnem, rt1_buf, rt2_buf, rn_buf, low_off);
+            // The fold is sound either way; where one of the pair's
+            // slots is in flight, say what it costs on Apple cores.
+            unsigned dist = pair_forwarding_distance(state,
+                state->lsp_offset, offset, is_load, rn, low_off,
+                (int64_t)low_off + 2 * xfer);
+            if (dist != 0) {
+                size_t n = strlen(out->detail);
+                snprintf(out->detail + n, sizeof(out->detail) - n,
+                    is_load
+                        ? " (Apple cores: the store %u instruction%s "
+                          "earlier would not forward to the pair)"
+                        : " (Apple cores: the pair would not forward to "
+                          "the load %u instruction%s later)",
+                    dist, dist == 1u ? "" : "s");
+            }
         }
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->lsp_disasm);

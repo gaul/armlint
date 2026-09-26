@@ -130,7 +130,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [sign-extending producer + `sxtb`/`sxth`/`sxtw`](analyses.md#redundant-sign-extension-after-a-producer-that-already-replicated-the-sign) | drop the sign-extension |
 | [`and`/`uxt*`/`sxt*`/`mov Wd, Wm` + a narrower `and`/`ands`/`tst`/`uxt*`/`sxt*`](analyses.md#andextend-chain-foldable-to-one) | the second reading the first's source, or one `and` of the intersected masks |
 | [`and`/`orr`/`eor`/`sub`/`bic`/`orn`/`eon` with `Rs, Rs`](analyses.md#self-op-identities-andorreorsubbicorneon-rd-rs-rs) | `mov` / zero / all-ones |
-| [`ldr`+`ldr` / `str`+`str` (consecutive)](analyses.md#adjacent-ldrstr-foldable-into-ldpstp) | `ldp`/`stp` (integer or FP/SIMD, and `ldpsw`) |
+| [`ldr`+`ldr` / `str`+`str` (consecutive)](analyses.md#adjacent-ldrstr-foldable-into-ldpstp) | `ldp`/`stp` (integer or FP/SIMD, and `ldpsw`); notes where a slot is in flight, since Apple cores do not forward a store to a pair load or a pair store to a load |
 | [`str wzr`+`str wzr` (consecutive zero stores)](analyses.md#adjacent-zero-stores-foldable-into-str-xzr) | `str`/`stur xzr` |
 | [`stp wzr, wzr` (W-form)](analyses.md#stp-wzr-wzr-foldable-into-str-xzr) | `str`/`stur xzr` |
 | [`movi #0` + vector `cmeq`/`cmge`/`cmgt` (or FP `fcm*`)](analyses.md#zeroing-movi-then-vector-compare-foldable-to-compare-with-zero) | `cmeq`/`cmge`/`cmgt`/`cmle`/`cmlt Vd, X, #0` (drop the `movi`) |

@@ -988,6 +988,40 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   where a single `LDR`/`STR` works under `SCTLR_EL1.A = 0`).
 * Pre- and post-indexed forms remain deferred: they write back to the
   base, so they are not interchangeable with a plain pair.
+* **Apple cores do not forward to or from a pair.** A store is normally
+  forwarded straight to a load that reads it before the store reaches
+  the cache. Daniel Lemire measured an M2 failing to do that for a pair
+  load in 2024: two STRs read back by one LDP ran 2.35x slower than by
+  two LDRs (1.6 against 0.68 ms a loop), where Graviton 3 ran the pair
+  faster. SpiderMonkey stopped using LDP/STP in its push and pop on
+  Darwin because forwarding "to/from LDP/STP instructions doesn't seem
+  to work on some Apple Silicons" (Firefox Bug 2073458, September
+  2026). So the fold is sound everywhere but can cost time on Apple
+  silicon where the pair's slots are in flight, and a finding says so
+  when it can see that:
+  an LDP whose slots the youngest store before it wrote, or an STP
+  whose slots the first access after it reads, when that neighbour
+  moves a single register (a pair there forwards no better unfolded),
+  through the same base register with nothing writing it in between,
+  no branch target or control transfer crossed, and within sixteen
+  instructions. The finding appends, for example, `(Apple cores: the
+  store 1 instruction earlier would not forward to the pair)`; its name
+  and count do not change.
+  * A store through another base register is not traced, even where
+    it aliases. SpiderMonkey's Baseline pushes an operand through its
+    stack pointer x20 and reads both operands back through x29, 1.13M
+    times in the JetStream 3 dump, and those findings carry no note.
+    So the note is a lower bound: on Apple targets, check any pair
+    near stores to the same memory.
+  * Corpus (166.2M instructions): 31,366 of about 1.88M pair findings
+    carry it. JavaScriptCore has 28,730, 23,564 of them reverse-order
+    LDPs that read back a frame slot a `stur` wrote the instruction
+    before (Baseline's `stur x0, [x29, #-0x50] ; ldur x1, [x29,
+    #-0x48] ; ldur x0, [x29, #-0x50]`). SpiderMonkey has 2,634 and LLVM
+    output 2, each of those two a volatile stack slot (dyld's
+    `mach_continuous_time`, OpenSSL's `DH_compute_key`); V8 and go have
+    none. The scan runs only when a pair finding is emitted and costs no
+    measurable time.
 * Constraints checked: same base register `Rn`; same access size
   (both W, both X, or the same S/D/Q); same direction (load/load or
   store/store); consecutive offsets (`imm12_2 = imm12_1 + 1` in

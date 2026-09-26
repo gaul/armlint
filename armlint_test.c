@@ -6799,6 +6799,176 @@ static void test_and_orr_shift_bfi(void)
     assert(run_buffer_check(code, 12) == 1);
 }
 
+// Run instruction words through every check with the buffer set (the
+// pair forwarding scan reads it), counting findings named `name` and
+// copying the first one's detail.
+static int run_fwd_words(const uint32_t *words, size_t n, const char *name,
+                         char *detail)
+{
+    uint8_t code[128];
+    assert(n * 4u <= sizeof(code));
+    for (size_t i = 0; i < n; i++) {
+        write_le32(&code[4u * i], words[i]);
+    }
+    detail[0] = '\0';
+    return run_named_buffer_check(code, n * 4u, name, detail,
+                                  ARMLINT_FINDING_DETAIL_LEN);
+}
+
+// The coalescer's LDP/STP findings name the forwarding they would cost
+// on Apple cores where one of the pair's slots is in flight: a store
+// just before an LDP to one of its slots, a load just after an STP of
+// one, through the same base with nothing moving it in between.
+static void test_pair_forwarding_caveat(void)
+{
+    char d[ARMLINT_FINDING_DETAIL_LEN];
+    const char *ldp = "adjacent LDRs foldable into LDP";
+    const char *stp = "adjacent STRs foldable into STP";
+    const uint32_t NOP = 0xD503201Fu, RET = 0xD65F03C0u;
+
+    // JavaScriptCore's frame-slot reload: stored, then read back as
+    // half of the pair.
+    const uint32_t jsc[] = {
+        0xF81D03A0u,    // stur x0, [x29, #-0x30]
+        0xF85D03A0u,    // ldur x0, [x29, #-0x30]
+        0xF85D83A1u,    // ldur x1, [x29, #-0x28]
+        RET,
+    };
+    assert(run_fwd_words(jsc, 4, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48] (Apple cores: the store "
+                     "1 instruction earlier would not forward to the pair)")
+           == 0);
+
+    // No store before it: the plain rendering.
+    const uint32_t plain[] = { NOP, 0xF85D03A0u, 0xF85D83A1u, RET };
+    assert(run_fwd_words(plain, 4, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48]") == 0);
+
+    // A store through another base register is not traced, even where
+    // it may alias.
+    const uint32_t other_base[] = {
+        0xF81D0380u,    // stur x0, [x28, #-0x30]
+        0xF85D03A0u, 0xF85D83A1u, RET,
+    };
+    assert(run_fwd_words(other_base, 4, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48]") == 0);
+
+    // A write to the base in between: the store's slot is elsewhere.
+    const uint32_t moved[] = {
+        0xF81D03A0u,    // stur x0, [x29, #-0x30]
+        0xD10043BDu,    // sub  x29, x29, #16
+        0xF85D03A0u, 0xF85D83A1u, RET,
+    };
+    assert(run_fwd_words(moved, 5, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48]") == 0);
+
+    // The youngest store to the slots is a pair: the loads forward no
+    // better unfolded.
+    const uint32_t younger_pair[] = {
+        0xF81D03A0u,    // stur x0, [x29, #-0x30]
+        0xA93D1BA5u,    // stp  x5, x6, [x29, #-0x30]
+        0xF85D03A0u, 0xF85D83A1u, RET,
+    };
+    assert(run_fwd_words(younger_pair, 5, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48]") == 0);
+
+    // A branch target at the pair: another path arrives without the
+    // store.
+    const uint32_t entered[] = {
+        0x14000002u,    // b    +8 (onto the first load)
+        0xF81D03A0u,    // stur x0, [x29, #-0x30]
+        0xF85D03A0u, 0xF85D83A1u, RET,
+    };
+    assert(run_fwd_words(entered, 5, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48]") == 0);
+
+    // Writeback stores: a push's slot is the new base, a post-indexed
+    // store's is the old one.
+    const uint32_t push[] = {
+        0xF81F0FE0u,    // str  x0, [sp, #-16]!
+        0xF94003E0u,    // ldr  x0, [sp]
+        0xF94007E1u,    // ldr  x1, [sp, #8]
+        RET,
+    };
+    assert(run_fwd_words(push, 4, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [sp, #0] (Apple cores: the store 1 "
+                     "instruction earlier would not forward to the pair)")
+           == 0);
+    const uint32_t post[] = {
+        0xF80107E0u,    // str  x0, [sp], #16
+        0xF85F03E1u,    // ldur x1, [sp, #-16]
+        0xF85F83E2u,    // ldur x2, [sp, #-8]
+        RET,
+    };
+    assert(run_fwd_words(post, 4, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x1, x2, [sp, #-16] (Apple cores: the store 1 "
+                     "instruction earlier would not forward to the pair)")
+           == 0);
+
+    // The window is sixteen instructions: fifteen NOPs between leave
+    // the store at the edge, sixteen put it out of reach.
+    uint32_t far[20];
+    far[0] = 0xF81D03A0u;
+    for (unsigned i = 1; i <= 15u; i++) {
+        far[i] = NOP;
+    }
+    far[16] = 0xF85D03A0u;
+    far[17] = 0xF85D83A1u;
+    far[18] = RET;
+    assert(run_fwd_words(far, 19, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48] (Apple cores: the store "
+                     "16 instructions earlier would not forward to the "
+                     "pair)") == 0);
+    uint32_t farther[21];
+    farther[0] = 0xF81D03A0u;
+    for (unsigned i = 1; i <= 16u; i++) {
+        farther[i] = NOP;
+    }
+    farther[17] = 0xF85D03A0u;
+    farther[18] = 0xF85D83A1u;
+    farther[19] = RET;
+    assert(run_fwd_words(farther, 20, ldp, d) == 1);
+    assert(strcmp(d, "-> ldp x0, x1, [x29, #-48]") == 0);
+
+    // STP: a later single load of part of either slot.
+    const uint32_t spill[] = {
+        0xF9000BE2u,    // str  x2, [sp, #16]
+        0xF9000FE3u,    // str  x3, [sp, #24]
+        0x91000529u,    // add  x9, x9, #1
+        0xB94017E4u,    // ldr  w4, [sp, #20]
+        RET,
+    };
+    assert(run_fwd_words(spill, 5, stp, d) == 1);
+    assert(strcmp(d, "-> stp x2, x3, [sp, #16] (Apple cores: the pair "
+                     "would not forward to the load 2 instructions later)")
+           == 0);
+
+    // A later store to the slot comes first: the load forwards from it.
+    const uint32_t restored[] = {
+        0xF9000BE2u, 0xF9000FE3u,
+        0xF9000BE9u,    // str  x9, [sp, #16]
+        0xF9400BE4u,    // ldr  x4, [sp, #16]
+        RET,
+    };
+    assert(run_fwd_words(restored, 5, stp, d) == 1);
+    assert(strcmp(d, "-> stp x2, x3, [sp, #16]") == 0);
+
+    // A pair load of the slots, and a return before any load: no note.
+    const uint32_t pair_back[] = {
+        0xF9000BE2u, 0xF9000FE3u,
+        0xA94117E4u,    // ldp  x4, x5, [sp, #16]
+        RET,
+    };
+    assert(run_fwd_words(pair_back, 4, stp, d) == 1);
+    assert(strcmp(d, "-> stp x2, x3, [sp, #16]") == 0);
+    const uint32_t returned[] = {
+        0xF9000BE2u, 0xF9000FE3u, RET,
+        0xB94017E4u,    // ldr  w4, [sp, #20]
+    };
+    assert(run_fwd_words(returned, 4, stp, d) == 1);
+    assert(strcmp(d, "-> stp x2, x3, [sp, #16]") == 0);
+}
+
 static void test_ldp_stp_coalesce(void)
 {
     uint8_t code[24];
@@ -17615,6 +17785,7 @@ int main(void)
     test_bfxil_synth();
     test_and_orr_shift_bfi();
     test_ldp_stp_coalesce();
+    test_pair_forwarding_caveat();
     test_simd_cmp_zero();
     test_stp_wzr_to_str_xzr();
     test_mul_strength_reduce();
