@@ -16390,8 +16390,9 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
     // 6 splits the bitfield operands and flags PACGA correctly since
     // Alpha10, and reports SYSL's Xt as the pure write it is since
     // upstream aa91e738 (through Alpha10 it was a flagged read), which
-    // the CI pin is past. A regression in any of the three now fails
-    // the sweep loudly instead of being silently excused.
+    // 6.0.0-Alpha11, the CI pin, includes. A regression in any of the
+    // three now fails the sweep loudly instead of being silently
+    // excused.
     // Scope: the SVE and SME vector spaces are excluded. armlint models
     // neither, and Capstone 5 -- the version it ships against -- cannot
     // decode most of them, so its driver skips those words as data and
@@ -16427,8 +16428,8 @@ static int liveness_check_word(csh handle, cs_insn *insn, uint32_t word)
     // -- so every non-alias following a `ret` inherited a phantom x30
     // read. That fired 2^24 times on PRFM (literal), the one opcode
     // chunk that is wholly decodable AND wholly non-alias, so nothing
-    // inside it ever reset the field. Upstream cd4bb2a3 fixed it and CI
-    // pins past that.
+    // inside it ever reset the field. Upstream cd4bb2a3 fixed it; the
+    // CI pin, 6.0.0-Alpha11, includes the fix.
     //
     // The read set is usable as an oracle only while that holds, so
     // assert it rather than working around it. Excusing the phantom

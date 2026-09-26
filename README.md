@@ -254,22 +254,18 @@ ARMLINT_LIVENESS_SWEEP=1 ARMLINT_LIVENESS_SWEEP_THREADS="$(sysctl -n hw.ncpu)" \
 
 ### Testing against Capstone 6
 
-Capstone 6 (in alpha as of mid-2026) rewrote the AArch64 module from
+Capstone 6 (in alpha as of 2026) rewrote the AArch64 module from
 LLVM. armlint compiles against it unchanged via Capstone's
-compatibility header, and CI tracks the pinned revision below. It is a
-commit rather than the newest tag (6.0.0-Alpha10) because the tag
-still leaves `insn->alias_id` stale on non-alias instructions (the
-sweep's oracle then reports a phantom `x30` read after every `ret`)
-and still mis-reports the SYSL and integer-STLUR operands, which the
-pin's revision gets right. To reproduce locally:
+compatibility header, and CI tracks the 6.0.0-Alpha11 tag. Before
+Alpha11 it tracked a commit instead: Alpha10 still leaves
+`insn->alias_id` stale on non-alias instructions (the sweep's oracle
+then reports a phantom `x30` read after every `ret`) and still
+mis-reports the SYSL and integer-STLUR operands, and Alpha11 is the
+first tag with all three fixed. To reproduce locally:
 
 ```sh
-git init capstone6
-git -C capstone6 remote add origin \
-    https://github.com/capstone-engine/capstone.git
-git -C capstone6 fetch --depth 1 origin \
-    aa91e7381569c98bbbf6671b1b25f2da15952b4f
-git -C capstone6 checkout FETCH_HEAD
+git clone --depth 1 --branch 6.0.0-Alpha11 \
+    https://github.com/capstone-engine/capstone.git capstone6
 cmake -B capstone6/build -S capstone6 -DCMAKE_BUILD_TYPE=Release
 cmake --build capstone6/build -j8
 make clean   # never mix objects built against different Capstone ABIs
@@ -286,9 +282,10 @@ version corroborates cases the other cannot. Capstone 6's model is the
 sharper oracle -- it is what caught armlint treating a FEAT_MOPS main
 stage as a kill of its own source pointer -- while 5.x is what armlint
 ships against and so is what its corrections are written for;
-`make integration-test` is expected to show a handful of cosmetic
-snapshot diffs under v6 (it prints shift/bitfield immediates in
-decimal and drops `#` on `adr`/`ldr`-literal operands), so the
+`make integration-test` is expected to show cosmetic snapshot diffs
+under v6 -- 22 of the 100 under Alpha11, which prints shift immediates
+in decimal and drops `#` on PC-relative operands (branch targets,
+`adr`, `ldr` literals), with every finding identical -- so the
 fixtures remain pinned to Capstone 5.x rendering until v6 stabilizes.
 
 ## Usage

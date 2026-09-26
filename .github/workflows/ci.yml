@@ -75,24 +75,26 @@ jobs:
     # armlint compiles against it unchanged via the compatibility header,
     # so track it continuously to be ready when distros ship v6. The
     # snapshot fixtures are deliberately NOT run here: they pin Capstone
-    # 5.x rendering, and v6 cosmetically diverges in 7 of them (decimal
-    # shift/bitfield immediates, no `#` on adr/ldr-literal operands) --
-    # revisit when v6 reaches beta/stable.
+    # 5.x rendering, and under 6.0.0-Alpha11 22 of the 100 differ, all
+    # cosmetically (shift immediates in decimal, no `#` on PC-relative
+    # operands -- branch targets, adr, ldr literals) with every
+    # finding identical -- revisit when v6 reaches beta/stable.
     runs-on: ubuntu-26.04-arm
     env:
-      # A commit, not the 6.0.0-Alpha10 tag: the tag predates three
-      # AArch64 fixes the sweeps lean on. cd4bb2a3 stopped
+      # The 6.0.0-Alpha11 tag, the first to carry three AArch64 fixes
+      # the sweeps lean on; until it this job pinned a commit past them
+      # (aa91e738), since Alpha10 predates all three. cd4bb2a3 stopped
       # map_set_alias_id from leaving insn->alias_id at the PREVIOUS
       # instruction's value when this one is not an alias -- through
       # it, AArch64_reg_access reported a phantom x30 read on every
       # non-alias decoded after a `ret`. d82c7265 and aa91e738 fixed
       # the integer-STLUR and SYSL operands, which lets the register
-      # oracle run under 6 with no exemptions at all. Alpha10 is still
-      # the newest tag, so there is nothing to bump to. Bumped
+      # oracle run under 6 with no exemptions at all. Bumped
       # deliberately, not automatically: rendering and decode behavior
       # can shift between revisions, which is exactly what this job is
-      # meant to surface.
-      CAPSTONE6_REV: aa91e7381569c98bbbf6671b1b25f2da15952b4f
+      # meant to surface. Any ref github.com serves works here, a tag
+      # or a commit SHA.
+      CAPSTONE6_REV: 6.0.0-Alpha11
       # Must be passed as make ARGUMENTS, not environment: the Makefile
       # assigns CAPSTONE_CFLAGS/CAPSTONE_LIBS with :=, which beats the
       # environment but yields to the command line.
@@ -112,8 +114,9 @@ jobs:
       - name: Build Capstone 6 from source
         run: |
           if [ ! -f capstone6/build/libcapstone.a ]; then
-            # `clone --branch` accepts only refs, so fetch the pinned
-            # commit directly; github.com serves any reachable SHA.
+            # Fetched rather than cloned so the pin can be a tag or a
+            # commit: `clone --branch` accepts only refs, while
+            # github.com serves any reachable SHA to a fetch.
             git init -q capstone6
             git -C capstone6 remote add origin \
               https://github.com/capstone-engine/capstone.git
@@ -176,7 +179,7 @@ jobs:
     runs-on: ubuntu-26.04-arm
     env:
       # Keep in step with build-capstone6, which explains the pin.
-      CAPSTONE6_REV: aa91e7381569c98bbbf6671b1b25f2da15952b4f
+      CAPSTONE6_REV: 6.0.0-Alpha11
       CAPSTONE6_CFLAGS: >-
         -I${{ github.workspace }}/capstone6/include
         -DCAPSTONE_AARCH64_COMPAT_HEADER
@@ -193,8 +196,9 @@ jobs:
       - name: Build Capstone 6 from source
         run: |
           if [ ! -f capstone6/build/libcapstone.a ]; then
-            # `clone --branch` accepts only refs, so fetch the pinned
-            # commit directly; github.com serves any reachable SHA.
+            # Fetched rather than cloned so the pin can be a tag or a
+            # commit: `clone --branch` accepts only refs, while
+            # github.com serves any reachable SHA to a fetch.
             git init -q capstone6
             git -C capstone6 remote add origin \
               https://github.com/capstone-engine/capstone.git
