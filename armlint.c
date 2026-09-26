@@ -317,9 +317,11 @@ struct armlint_state {
     size_t xtc_offset;
     char xtc_disasm[ARMLINT_FINDING_LINE_LEN];
 
-    // Producer of bits-above-N guaranteed zero, pending a redundant
-    // zero-extension consumer that re-zeros those bits. wzx_zero_from
-    // is the threshold P: the producer guarantees bits >= P are zero.
+    // Per-register facts for the redundant-zero-extension check: bit r
+    // of wzx_valid says bits >= wzx_zero_from[r] of Xr are known zero,
+    // as the producer at wzx_offset[r] (rendered in
+    // wzx_producer_disasm[r]) left them, with nothing writing Xr since.
+    // The threshold P:
     //   UBFM (W or X form)     -> P from the field geometry (see
     //                             decode_zeroing_producer); covers
     //                             LSR / UBFX / UXTB / UXTH producers
@@ -329,12 +331,14 @@ struct armlint_state {
     //   other W-form ALU / LDR Wt / LDRSB/LDRSH Wt -> P=32
     //   LDRH Wt -> P=16
     //   LDRB Wt -> P=8
-    // A consumer that clears bits >= C is redundant iff P <= C.
-    bool wzx_active;
-    unsigned wzx_rd;
-    unsigned wzx_zero_from;
-    size_t wzx_offset;
-    char wzx_producer_disasm[ARMLINT_FINDING_LINE_LEN];
+    //   B/H/W atomics, LDAPR, LDAR/LDAXR/LDXR/LDLAR -> P=8/16/32
+    // A consumer that clears bits >= C is redundant iff P <= C. Every
+    // fact ends at a branch target, a call, an unconditional transfer
+    // or the end of the region (see check_redundant_zext).
+    uint32_t wzx_valid;
+    uint8_t wzx_zero_from[31];
+    size_t wzx_offset[31];
+    char wzx_producer_disasm[31][ARMLINT_FINDING_LINE_LEN];
 
     // Producer of "Rd[W-1..S] = sign(Rd[S-1])" pending a redundant
     // sign-extension consumer. Parallel to wzx_* but tracks two values:
@@ -1542,7 +1546,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->crc_cmp_active = false;
     state->pending_crc_active = false;
     state->xtc_active = false;
-    state->wzx_active = false;
+    state->wzx_valid = 0;
     state->sxt_active = false;
     state->aec_active = false;
     state->sv_active = false;
@@ -3553,6 +3557,63 @@ static bool insn_writes_reg(const cs_insn *insn, int reg)
     bool reads, writes;
     insn_reg_access(insn, reg, &reads, &writes);
     return writes;
+}
+
+// Every GPR the instruction may write, as a mask over the 0..30
+// encoding numbers, erring toward MORE writes: a fact carried across
+// instructions (check_redundant_zext's) survives only what this
+// leaves out, so a missed write is the unsound direction and an extra
+// one costs nothing but the fact. insn_reg_access errs the other way
+// for its deadness proofs, and two of its gaps matter here. A
+// writeback base is only a read there -- Capstone 5 flags the MEM
+// operand of `ldr x0, [x1], #8` read-only, though the load advances
+// x1 -- so the base of any writeback address counts as written. And
+// the GPR operands Capstone 5 leaves with no access flags at all (the
+// atomics, CAS/CASP, LDRAA/LDRAB, MOPS, the SVE scalar and MTE forms,
+// STLUR) are recovered there only as reads; here every flagless one
+// counts as written, including STLUR's stored register, which is
+// merely conservative. The compares' source registers, which
+// Capstone flags as written, are not (insn_writes_no_gpr), nor is a
+// SIMD register post-index's increment register, which Capstone 5
+// also flags (see insn_reg_access). No detail means everything.
+static uint32_t insn_gpr_write_mask(const cs_insn *insn)
+{
+    const cs_detail *detail = insn->detail;
+    if (detail == NULL || insn->size != 4) {
+        return 0x7FFFFFFFu;
+    }
+    uint32_t op = insn_word(insn);
+    bool no_gpr_write = insn_writes_no_gpr(op);
+    const cs_arm64 *a = &detail->arm64;
+    uint32_t mask = 0;
+    for (int i = 0; i < a->op_count; i++) {
+        const cs_arm64_op *o = &a->operands[i];
+        int r = -1;
+        if (o->type == ARM64_OP_REG) {
+            if ((o->access & CS_AC_WRITE) != 0 ? !no_gpr_write
+                                               : o->access == 0) {
+                r = arm64_gpr_num(o->reg);
+            }
+        } else if (o->type == ARM64_OP_MEM && a->writeback) {
+            r = arm64_gpr_num(o->mem.base);
+        }
+        if (r >= 0) {
+            mask |= 1u << r;
+        }
+    }
+    for (uint8_t i = 0; i < detail->regs_write_count; i++) {
+        int r = arm64_gpr_num(detail->regs_write[i]);
+        if (r >= 0) {
+            mask |= 1u << r;
+        }
+    }
+    if ((op & 0xBE800000u) == 0x0C800000u) {
+        unsigned rm = (op >> 16) & 0x1Fu;
+        if (rm != 31u && rm != ((op >> 5) & 0x1Fu)) {
+            mask &= ~(1u << rm);
+        }
+    }
+    return mask;
 }
 
 bool armlint_advance_pending(armlint_state *state, const cs_insn *insn,
@@ -6971,6 +7032,10 @@ static unsigned bits_used64(uint64_t v)
 //   other W-form DP       P = 32 (the W write zeros X[63:32]).
 //   W-form integer loads  P = 8 (LDRB) / 16 (LDRH) / 32 (LDR /
 //                         LDRSB / LDRSH Wt).
+//   B/H/W atomics and     P = 8 / 16 / 32 by access size: the LSE
+//   acquire/exclusive     LD<op>/SWP/LDAPR return the old value
+//   loads                 zero-extended, as LDXR/LDAXR/LDLAR/LDAR
+//                         load it.
 //
 // An X-form producer whose computed P is 64 guarantees nothing and is
 // not matched.
@@ -7072,14 +7137,49 @@ static bool decode_zeroing_producer(uint32_t op, unsigned *out_rd,
         }
     }
 
+    // The B/H/W atomics and the load-acquire/exclusive forms load a
+    // value zero-extended by access size: size (bits 31..30) 00/01/10
+    // gives P = 8/16/32, and the X forms (11) bound nothing. These come
+    // first because the integer-load masks below match some of the
+    // atomics too, with a looser P.
+    unsigned size = op >> 30;
+    // LSE atomics: size 111 0 00 A R 1 Rs o3 opc 00 Rn Rt, the
+    // LD<op> family (o3 = 0), SWP (o3 = 1, opc = 000) and LDAPR (o3 =
+    // 1, opc = 100). Each returns the old memory value in Rt
+    // zero-extended, the signed min/max included -- their signedness
+    // is the memory update's. The other o3 = 1 encodings are left
+    // out (LD64B/ST64B sit there). Rt = 31 is a ST<op> alias with no
+    // destination, already refused above.
+    if ((op & 0x3F200C00u) == 0x38200000u && size != 3u) {
+        unsigned o3 = (op >> 15) & 1u;
+        unsigned opc = (op >> 12) & 0x7u;
+        if (o3 == 0u || opc == 0u || opc == 4u) {
+            *out_rd = rd;
+            *out_zero_from = 8u << size;
+            return true;
+        }
+    }
+    // Load-exclusive and load-acquire, single register: size 001000
+    // o2 1 0 Rs o0 Rt2 Rn Rt -- L (bit 22) set and o1 (bit 21) clear,
+    // which leaves out the stores, the pair forms and CAS/CASP.
+    // LDXR, LDAXR, LDLAR and LDAR.
+    if ((op & 0x3F600000u) == 0x08400000u && size != 3u) {
+        *out_rd = rd;
+        *out_zero_from = 8u << size;
+        return true;
+    }
+
     // Integer loads with Wt destination. The "load/store register"
     // family shares bits 29..27 = 111 and bit 26 = 0 (V=0, general
     // register). bits 31..30 = size, bits 23..22 = opc select the
     // operation; bits 25..24 distinguish addressing modes (00 covers
     // unscaled / pre-/post-index / register offset, 01 is the
     // unsigned-immediate offset). The mask 0xFEC00000 leaves bit 24
-    // free so all modes match; we exclude bit 25 = 1 (which selects
-    // SIMD/FP or atomic-op families).
+    // free so all modes match, and bit 25 = 1 (a different class)
+    // out. It leaves bit 21 and bits 11..10 free as well, so the
+    // atomics sharing opc's bit patterns would match with the bound
+    // of the load they alias -- true, but looser; they are decoded
+    // exactly above.
     //
     //   LDRB  Wt: size=00, opc=01  -> P=8
     //   LDRH  Wt: size=01, opc=01  -> P=16
@@ -7096,70 +7196,116 @@ static bool decode_zeroing_producer(uint32_t op, unsigned *out_rd,
     return false;
 }
 
+// The producer need not sit right before the consumer. Each register
+// carries its own fact -- bits >= P known zero, and the instruction
+// that made them so -- from its producer until anything writes it
+// again, so the JITs' habit of re-zero-extending a value loaded or
+// computed a few instructions earlier is caught as well as the
+// adjacent pair:
+//     ldr  w2, [x17, w2, uxtw]      ; P = 32
+//     ldr  w16, [x26, #0x39d0]      ; a counter bump and a call setup
+//     add  w16, w16, #1             ; that leave w2 alone
+//     str  w16, [x26, #0x39d0]
+//     mov  w2, w2                   ; a no-op
+// Writes are taken from insn_gpr_write_mask, which over-reports rather
+// than miss one. Nothing else is tracked across the gap, so no
+// liveness question arises: the consumer is deleted because it
+// computes what the register already holds. A branch target ends
+// every fact, since a side entry arrives without them; so do a call
+// (the callee may write anything), an unconditional transfer (the next
+// instruction is reachable only as a branch target, and not every
+// target is a direct one) and an exception or UDF. Conditional
+// branches do not: the fall-through path keeps its registers. The
+// finding spans the producer through the consumer, so the central
+// side-entry gate also covers the gap.
+//
+// A consumer that changes nothing leaves its register's fact standing
+// -- the value is the producer's still, and a second redundant mask
+// of it reports against the same producer. One that does change the
+// value is itself a producer, and replaces the fact.
 bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out)
 {
-    bool produced = false;
-
     if (insn->size != 4) {
-        state->wzx_active = false;
+        state->wzx_valid = 0;
         return false;
+    }
+    if (state->wzx_valid != 0 && offset_is_branch_target(state, offset)) {
+        state->wzx_valid = 0;
     }
 
     uint32_t op = insn_word(insn);
 
     // (1) Close: is this a UBFM/AND-imm/MOV-self consumer that clears
     //     bits already known zero?
-    if (state->wzx_active) {
-        unsigned c, c_rd, c_rn;
-        bool is_ubfm = decode_ubfm_zext(op, &c, &c_rd, &c_rn);
-        bool is_and  = !is_ubfm && decode_and_imm_lowmask(op, &c, &c_rd, &c_rn);
-        bool is_mov  = false;
-        if (!is_ubfm && !is_and) {
-            is_mov = decode_mov_w_self(op, &c, &c_rd);
-            if (is_mov) {
-                // MOV Wd, Wd has Rn=WZR in the encoding; Rm==Rd is
-                // enforced by the decoder, so the "operand register"
-                // that must match the producer's Rd is Rd itself.
-                c_rn = c_rd;
-            }
+    unsigned c, c_rd, c_rn;
+    bool is_ubfm = decode_ubfm_zext(op, &c, &c_rd, &c_rn);
+    bool is_and  = !is_ubfm && decode_and_imm_lowmask(op, &c, &c_rd, &c_rn);
+    bool is_mov  = false;
+    if (!is_ubfm && !is_and) {
+        is_mov = decode_mov_w_self(op, &c, &c_rd);
+        if (is_mov) {
+            // MOV Wd, Wd has Rn=WZR in the encoding; Rm==Rd is enforced
+            // by the decoder, so the register the fact must cover is Rd
+            // itself.
+            c_rn = c_rd;
         }
+    }
+    if ((is_ubfm || is_and || is_mov)
+            && c_rd == c_rn && c_rd < 31u
+            && (state->wzx_valid & (1u << c_rd)) != 0
+            && state->wzx_zero_from[c_rd] <= c) {
+        size_t start = state->wzx_offset[c_rd];
+        unsigned span = (unsigned)((offset - start) / 4u + 1u);
+        out->name = "redundant zero-extension after zeroing op";
+        out->start_offset = start;
+        out->insn_count = span;
+        clear_finding_strings(out);
 
-        if ((is_ubfm || is_and || is_mov)
-                && c_rd == state->wzx_rd
-                && c_rn == state->wzx_rd
-                && state->wzx_zero_from <= c) {
-            out->name = "redundant zero-extension after zeroing op";
-            out->start_offset = state->wzx_offset;
-            out->insn_count = 2;
-            clear_finding_strings(out);
-
-            snprintf(out->detail, sizeof(out->detail),
-                "%s %s is a no-op (bits >= %u already zero)",
-                insn->mnemonic, insn->op_str, state->wzx_zero_from);
-            snprintf(out->lines[0], sizeof(out->lines[0]),
-                "%s", state->wzx_producer_disasm);
-            snprintf(out->lines[1], sizeof(out->lines[1]),
-                "%s %s", insn->mnemonic, insn->op_str);
-            produced = true;
+        snprintf(out->detail, sizeof(out->detail),
+            "%s %s is a no-op (bits >= %u already zero)",
+            insn->mnemonic, insn->op_str, state->wzx_zero_from[c_rd]);
+        snprintf(out->lines[0], sizeof(out->lines[0]),
+            "%s", state->wzx_producer_disasm[c_rd]);
+        unsigned line = 1;
+        if (span > 2u) {
+            snprintf(out->lines[line++], sizeof(out->lines[0]),
+                "... %u instruction%s ...", span - 2u,
+                span == 3u ? "" : "s");
         }
-        // Strict adjacency: any non-matching instruction expires.
-        state->wzx_active = false;
+        snprintf(out->lines[line], sizeof(out->lines[0]),
+            "%s %s", insn->mnemonic, insn->op_str);
+        return true;
     }
 
-    // (2) Open: is this a producer that zeros some high-bit region?
+    // (2) Every register written loses its fact; a producer that zeros
+    //     some high-bit region opens a new one for its destination
+    //     (which it always writes, whatever Capstone says).
+    uint32_t written = insn_gpr_write_mask(insn);
     unsigned p_rd, p_zero_from;
-    if (decode_zeroing_producer(op, &p_rd, &p_zero_from)) {
-        state->wzx_active = true;
-        state->wzx_rd = p_rd;
-        state->wzx_zero_from = p_zero_from;
-        state->wzx_offset = offset;
-        snprintf(state->wzx_producer_disasm,
-            sizeof(state->wzx_producer_disasm),
+    bool is_producer = decode_zeroing_producer(op, &p_rd, &p_zero_from);
+    if (is_producer) {
+        written |= 1u << p_rd;
+    }
+    state->wzx_valid &= ~written;
+    if (is_producer) {
+        state->wzx_valid |= 1u << p_rd;
+        state->wzx_zero_from[p_rd] = (uint8_t)p_zero_from;
+        state->wzx_offset[p_rd] = offset;
+        snprintf(state->wzx_producer_disasm[p_rd],
+            sizeof(state->wzx_producer_disasm[p_rd]),
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
-    return produced;
+    // (3) B/BL, the branch-register class (BR/BLR/RET/ERET and their
+    //     PAC forms), exception generation and UDF end every fact.
+    if ((op & 0x7C000000u) == 0x14000000u
+            || (op & 0xFE000000u) == 0xD6000000u
+            || (op & 0xFF000000u) == 0xD4000000u
+            || (op & 0xFFFF0000u) == 0) {
+        state->wzx_valid = 0;
+    }
+    return false;
 }
 
 // Decode an SBFM sign-extending alias (SXTB / SXTH / SXTW). Returns

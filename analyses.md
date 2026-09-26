@@ -571,6 +571,78 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   shape with the width capped. The two findings offer equivalent
   one-instruction outcomes -- drop the dead AND, or fuse the pair
   -- and both are reported, like the CMP-drop/CBZ-fold overlap.
+* The producer need not sit directly before the consumer. Each
+  register carries its own fact -- `P`, and the instruction that set
+  it -- until something writes the register again, so a mask is
+  caught wherever it lands. The shape that motivated it is
+  JavaScriptCore's WasmBBQ tier re-zero-extending an `i32` it loaded
+  a few instructions earlier:
+
+  ```
+  ldr   w2, [x17, w2, uxtw]     ; P = 32
+  ldr   w16, [x26, #0x39d0]     ; a tier-up counter bump and a
+  add   w16, w16, #1            ; call setup that leave w2 alone
+  str   w16, [x26, #0x39d0]
+  ldur  x3, [x19, #0x58]
+  mov   w8, #0x4670
+  mov   w2, w2                  ; a no-op
+  ```
+
+  LLVM's are the cross-block version, a mask that survived into the
+  block after its load's (`ldrh w10, [x9] ; ldr x9, [x9, #8] ;
+  cmp x10, #0xc ; b.eq ... ; and w10, w10, #0xffff`).
+  * What ends a fact is anything that may write the register. That
+    set comes from `insn_gpr_write_mask`, which over-reports rather
+    than miss one, because a missed write is the unsound direction.
+    It counts the base of a writeback address -- Capstone 5 flags
+    `ldr x0, [x1], #8`'s base as read only -- and every GPR operand
+    Capstone 5 leaves without access flags (the atomics, CAS/CASP,
+    MOPS, `LDRAA`/`LDRAB`, the SVE and MTE scalar forms); an
+    earlier scanner that trusted `cs_regs_access` instead carried a
+    fact through `ldaddalb w0, w0, [x8]` as if w0 still held the
+    `mov w0, #0` before it. Every fact also ends at a branch target
+    (a side entry arrives without it), a call (the callee may write
+    anything), an unconditional transfer (the next instruction is
+    reachable only as a target, and not every target is direct), an
+    exception or `UDF`, and the end of the region. A conditional
+    branch keeps them: the fall-through path keeps its registers.
+  * The finding spans the producer through the consumer, so the
+    central side-entry gate covers the gap too, and prints the gap
+    as one elided line (`... 4 instructions ...`).
+  * A consumer that changes nothing leaves the fact in place, so
+    `ldrb w0, [x1] ; mov w0, w0 ; uxtb w0, w0` reports both against
+    the `LDRB` (strict adjacency took the `MOV` as the `UXTB`'s
+    producer, `P = 32`, and missed the second). One that changes the
+    value is a producer itself and replaces the fact.
+  * The same change added the B/H/W LSE atomics (`LD<op>`, `SWP`,
+    `LDAPR`) and the load-acquire/exclusive forms (`LDAR`, `LDAXR`,
+    `LDXR`, `LDLAR`) as producers: each returns its value
+    zero-extended by access size. The integer-load masks already
+    matched some atomics, with the looser bound of the load they
+    alias (`ldaddalb` decoded as `LDRSB W`, `P = 32`), so the
+    atomics are decoded first. JavaScriptCore's atomic byte load is
+    `mov w0, #0 ; ldaddalb w0, w0, [x8] ; and w0, w0, #0xff`, and
+    go's `internal/runtime/atomic` loads are `ldarb w1, [x0] ;
+    ubfx x1, x1, #0, #8`.
+  * Corpus, JIT dumps included (166.6M instructions: the eight
+    compiled binaries, V8 and SpiderMonkey on Octane, SpiderMonkey
+    and JavaScriptCore on JetStream 3): 28,528 more findings and
+    no other check moved. JavaScriptCore 27,183 (95% WasmBBQ),
+    rustc 640, clang 452, go 84 (61 `ldarb` and 21 `ldar` +
+    zero-extension -- adjacent, the atomics being new producers),
+    SpiderMonkey 88, uutils 43, V8 34, ssh 4. The earlier
+    JavaScriptCore zero-extension fix (its `js3-zfix3` dump) took the
+    adjacent ones from 3,028 to 55 and left the gapped ones (27,027
+    to 26,714): an emitter-side fix wants the same per-register fact.
+  * Verified by execution: 300,000 random programs of W/X arithmetic,
+    loads, atomics, compares, forward branches and calls, run
+    natively before and after deleting each of the 476,957 consumers
+    armlint flagged (342,039 across a gap) on six random register,
+    flag and memory states each, gave identical `x0..x7` and NZCV
+    every time. The harness has teeth: deleting consumers armlint
+    did not flag changed the result 87,354 times in 185,504, and
+    builds with write invalidation or the call reset removed fail
+    within 2,000 programs.
 
 ## `MOV Xd, Xd` is a literal no-op
 

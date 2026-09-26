@@ -1,0 +1,23 @@
+redundant zero-extension after zeroing op at offset: 0x0 <_main>: mov w2, w2 is a no-op (bits >= 32 already zero) (5 instructions)
+  ldr w2, [x17, w2, uxtw]
+  ... 3 instructions ...
+  mov w2, w2
+
+redundant zero-extension after zeroing op at offset: 0x14 <_main+0x14>: and w10, w10, #0xffff is a no-op (bits >= 16 already zero) (5 instructions)
+  ldrh w10, [x9]
+  ... 3 instructions ...
+  and w10, w10, #0xffff
+
+redundant zero-extension after zeroing op at offset: 0x28 <_main+0x28>: mov w0, w0 is a no-op (bits >= 8 already zero) (2 instructions)
+  ldrb w0, [x1]
+  mov w0, w0
+
+redundant zero-extension after zeroing op at offset: 0x28 <_main+0x28>: uxtb w0, w0 is a no-op (bits >= 8 already zero) (4 instructions)
+  ldrb w0, [x1]
+  ... 2 instructions ...
+  uxtb w0, w0
+
+Optimization opportunities by type:
+       4  redundant zero-extension after zeroing op
+
+4 optimization opportunities in 28 instructions

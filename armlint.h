@@ -717,16 +717,30 @@ bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
 // Detect a producer that provably zeros bits 63..P of its destination,
-// immediately followed by an in-place zero-extension consumer that
-// clears bits >= C with P <= C -- a no-op. Producers: any W-form
-// data-processing write (P=32) and the W-form integer loads (P=8/16/32
-// by access width), with sharper value-derived thresholds -- in both W
-// and X form -- for UBFM (P from the field geometry, covering
-// LSR/UBFX/UXTB/UXTH), AND/ANDS immediate (P = top set bit of the mask
-// + 1), MOVZ (P = bit count of the known value), and CSINC Rd, ZR, ZR
-// (CSET: P = 1). Consumers: an in-place UBFM with immr=0 of any width
+// followed -- directly or after instructions that leave the register
+// alone -- by an in-place zero-extension consumer that clears bits
+// >= C with P <= C: a no-op. Producers: any W-form data-processing
+// write (P=32) and the W-form integer loads (P=8/16/32 by access
+// width; the B/H/W LSE atomics, LDAPR and the load-acquire and
+// load-exclusive forms too), with sharper value-derived thresholds --
+// in both W and X form -- for UBFM (P from the field geometry,
+// covering LSR/UBFX/UXTB/UXTH), AND/ANDS immediate (P = top set bit of
+// the mask + 1), MOVZ (P = bit count of the known value), and
+// CSINC Rd, ZR, ZR (CSET: P = 1). Consumers: an in-place UBFM with
+// immr=0 of any width
 // (UXTB/UXTH/UXTW and general UBFX #0, #C), an AND with a contiguous
 // low mask (C = mask width), or MOV Wd, Wd (C = 32 via the W write).
+//
+// Each register keeps its own fact from its producer until anything
+// writes it again (writeback bases, atomics and the other operands
+// Capstone 5 leaves unflagged included), and every fact ends at a
+// branch target, a call, an unconditional transfer, an exception or
+// UDF, and the end of the region; a conditional branch keeps them,
+// since the fall-through path keeps its registers. A consumer that
+// changes nothing leaves the fact in place, so a second one reports
+// against the same producer. The finding spans the producer through
+// the consumer -- the central side-entry gate covers the gap too --
+// and renders the gap as one elided line.
 bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 

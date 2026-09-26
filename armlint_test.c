@@ -3462,12 +3462,117 @@ static void test_redundant_zext(void)
     uxtw(&code[4], 5, 0);
     assert(run_named_check(code, 8, zext_name) == 0);
 
-    // -- Negative: intervening instruction expires wzx state. --
+    // -- A gap that leaves the register alone keeps the fact. --
 
+    // add w0, w1, w2 ; movz w5, #1 ; uxtw x0, w0 -- the MOVZ writes
+    // another register, so the UXTW is a no-op exactly as it would be
+    // adjacent. (Until the per-register facts this asserted 0: strict
+    // adjacency expired the producer.)
     add_w(&code[0], 0, 1, 2);
     movz_w(&code[4], 5, 1);
     uxtw(&code[8], 0, 0);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_named_check(code, 12, zext_name) == 1);
+
+    // ldrb w0, [x1] ; add x5, x6, x7 ; cmp w0, #1 ; and w0, w0, #0xff
+    // -- an X-form write elsewhere and a compare that reads w0 (which
+    // Capstone flags as a write of its first source) both keep it.
+    ldrb_w(&code[0], 0, 1, 0);
+    write_le32(&code[4], 0x8B0700C5u);      // add x5, x6, x7
+    write_le32(&code[8], 0x7100041Fu);      // cmp w0, #1
+    and_w_ff(&code[12], 0, 0);
+    assert(run_named_check(code, 16, zext_name) == 1);
+
+    // ldrb w0, [x1], #1 ; uxtb w0, w0 -- a writeback load's base is
+    // advanced, its destination still zero-extended (P = 8).
+    write_le32(&code[0], 0x38401420u);      // ldrb w0, [x1], #1
+    uxtb_w(&code[4], 0, 0);
+    assert(run_named_check(code, 8, zext_name) == 1);
+
+    // ldrb w0, [x1] ; mov w0, w0 ; uxtb w0, w0 -- the MOV changes
+    // nothing, so the fact is still the LDRB's (P = 8) and the UXTB is
+    // a second no-op against it. Strict adjacency took the MOV as the
+    // UXTB's producer (P = 32 > 8) and reported one.
+    ldrb_w(&code[0], 0, 1, 0);
+    mov_w_reg(&code[4], 0, 0);
+    uxtb_w(&code[8], 0, 0);
+    assert(run_named_check(code, 12, zext_name) == 2);
+
+    // -- A write to the register in the gap ends the fact. --
+
+    // ldrb w0, [x1] ; add x0, x0, #1 ; uxtb w0, w0 -- an X-form write.
+    ldrb_w(&code[0], 0, 1, 0);
+    write_le32(&code[4], 0x91000400u);      // add x0, x0, #1
+    uxtb_w(&code[8], 0, 0);
+    assert(run_named_check(code, 12, zext_name) == 0);
+
+    // ldrb w0, [x1] ; movk x0, #1, lsl #48 ; mov w0, w0 -- a
+    // read-modify-write sets bits above 32.
+    ldrb_w(&code[0], 0, 1, 0);
+    write_le32(&code[4], 0xF2E00020u);      // movk x0, #1, lsl #48
+    mov_w_reg(&code[8], 0, 0);
+    assert(run_named_check(code, 12, zext_name) == 0);
+
+    // ldrb w1, [x2] ; ldr x3, [x1], #8 ; uxtb w1, w1 -- a writeback
+    // base, which Capstone 5 flags only as read.
+    ldrb_w(&code[0], 1, 2, 0);
+    write_le32(&code[4], 0xF8408423u);      // ldr x3, [x1], #8
+    uxtb_w(&code[8], 1, 1);
+    assert(run_named_check(code, 12, zext_name) == 0);
+
+    // add w0, w1, w2 ; ldadd x3, x0, [x4] ; mov w0, w0 -- an atomic's
+    // loaded register, which Capstone 5 leaves without access flags.
+    add_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xF8230080u);      // ldadd x3, x0, [x4]
+    mov_w_reg(&code[8], 0, 0);
+    assert(run_named_check(code, 12, zext_name) == 0);
+
+    // -- Calls, transfers and exceptions end every fact. --
+
+    // add w0, w1, w2 ; bl #8 ; mov w0, w0 -- the callee may write w0.
+    add_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0x94000002u);      // bl #8
+    mov_w_reg(&code[8], 0, 0);
+    assert(run_named_check(code, 12, zext_name) == 0);
+
+    // add w0, w1, w2 ; b #8 ; mov w0, w0 -- reachable only as a target.
+    add_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0x14000002u);      // b #8
+    mov_w_reg(&code[8], 0, 0);
+    assert(run_named_check(code, 12, zext_name) == 0);
+
+    // add w0, w1, w2 ; svc #0 ; mov w0, w0.
+    add_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xD4000001u);      // svc #0
+    mov_w_reg(&code[8], 0, 0);
+    assert(run_named_check(code, 12, zext_name) == 0);
+
+    // -- Side entries. A conditional branch in the gap keeps the fact
+    //    on the fall-through; a branch landing in the gap or on the
+    //    consumer ends it. --
+
+    // add w0, w1, w2 ; cbz x9, #8 ; mov w0, w0 ; ret -- the CBZ
+    // jumps past the consumer, to the RET.
+    add_w(&code[0], 0, 1, 2);
+    write_le32(&code[4], 0xB4000049u);      // cbz x9, #8
+    mov_w_reg(&code[8], 0, 0);
+    write_le32(&code[12], 0xD65F03C0u);     // ret
+    assert(run_buffer_check(code, 16) == 1);
+
+    // add w0, w1, w2 ; movz w5, #1 ; mov w0, w0 ; cbnz x9, #-4 -- the
+    // loop branch lands on the consumer, reaching it without the ADD.
+    add_w(&code[0], 0, 1, 2);
+    movz_w(&code[4], 5, 1);
+    mov_w_reg(&code[8], 0, 0);
+    write_le32(&code[12], 0xB5FFFFE9u);     // cbnz x9, #-4
+    assert(run_buffer_check(code, 16) == 0);
+
+    // add w0, w1, w2 ; movz w5, #1 ; mov w0, w0 ; cbnz x9, #-8 -- it
+    // lands in the gap instead.
+    add_w(&code[0], 0, 1, 2);
+    movz_w(&code[4], 5, 1);
+    mov_w_reg(&code[8], 0, 0);
+    write_le32(&code[12], 0xB5FFFFC9u);     // cbnz x9, #-8
+    assert(run_buffer_check(code, 16) == 0);
 
     // -- Negative: lone UXTW with no preceding W-form producer.
 
@@ -3531,6 +3636,53 @@ static void test_redundant_zext(void)
     ldrb_w(&code[0], 0, 1, 0);
     and_w_ff(&code[4], 0, 0);
     assert(run_helper_check(code, 8) == 1);
+
+    // The atomics and the load-acquire/exclusive forms zero-extend by
+    // access size as well. ldaddb w0, w1, [x2] ; and w1, w1, #0xff --
+    // the old byte comes back in w1 (JavaScriptCore's atomic byte load
+    // is `mov w0, #0 ; ldaddalb w0, w0, [x8] ; and w0, w0, #0xff`).
+    write_le32(&code[0], 0x38200041u);      // ldaddb w0, w1, [x2]
+    and_w_ff(&code[4], 1, 1);
+    assert(run_named_check(code, 8, zext_name) == 1);
+
+    // ldaddalb w0, w1, [x2] ; and w1, w1, #0xff -- the acquire-release
+    // form, whose encoding the LDRSB W mask also matches (P = 32 > 8,
+    // no finding) unless the atomics are decoded first.
+    write_le32(&code[0], 0x38E00041u);      // ldaddalb w0, w1, [x2]
+    and_w_ff(&code[4], 1, 1);
+    assert(run_named_check(code, 8, zext_name) == 1);
+
+    // ldsmaxh w0, w1, [x2] ; uxth w1, w1 -- the signed min/max return
+    // the old value zero-extended too.
+    write_le32(&code[0], 0x78204041u);      // ldsmaxh w0, w1, [x2]
+    uxth_w(&code[4], 1, 1);
+    assert(run_named_check(code, 8, zext_name) == 1);
+
+    // ldarb w0, [x1] ; uxtb w0, w0.
+    write_le32(&code[0], 0x08DFFC20u);      // ldarb w0, [x1]
+    uxtb_w(&code[4], 0, 0);
+    assert(run_named_check(code, 8, zext_name) == 1);
+
+    // ldxr w4, [x5] ; mov w4, w4.
+    write_le32(&code[0], 0x885F7CA4u);      // ldxr w4, [x5]
+    mov_w_reg(&code[4], 4, 4);
+    assert(run_named_check(code, 8, zext_name) == 1);
+
+    // ldaxrh w2, [x3] ; uxtb w2, w2 -- P = 16 > C = 8. NOT redundant.
+    write_le32(&code[0], 0x485FFC62u);      // ldaxrh w2, [x3]
+    uxtb_w(&code[4], 2, 2);
+    assert(run_named_check(code, 8, zext_name) == 0);
+
+    // ldadd x0, x1, [x2] ; mov w1, w1 -- the X form bounds nothing.
+    write_le32(&code[0], 0xF8200041u);      // ldadd x0, x1, [x2]
+    mov_w_reg(&code[4], 1, 1);
+    assert(run_named_check(code, 8, zext_name) == 0);
+
+    // casb w0, w1, [x2] ; uxtb w0, w0 -- CAS returns the old value in
+    // Rs, which the producer table does not model. Not flagged.
+    write_le32(&code[0], 0x08A07C41u);      // casb w0, w1, [x2]
+    uxtb_w(&code[4], 0, 0);
+    assert(run_named_check(code, 8, zext_name) == 0);
 
     // ldrh w0, [x1] ; and w0, w0, #0xffff -- LDRH (P=16) + AND W #0xFFFF (C=16).
     ldrh_w(&code[0], 0, 1, 0);

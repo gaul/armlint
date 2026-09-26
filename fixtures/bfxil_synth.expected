@@ -18,6 +18,11 @@ BFI synthesis via AND-UBFIZ-ORR at offset: 0x4c <_main+0x4c>: -> bfi w3, w5, #4,
   ubfiz w4, w5, #4, #4
   orr w3, w3, w4
 
+redundant zero-extension after zeroing op at offset: 0x1c <_main+0x1c>: and x6, x6, #0xffffffffffffff is a no-op (bits >= 1 already zero) (17 instructions)
+  mov x6, #1
+  ... 15 instructions ...
+  and x6, x6, #0xffffffffffffff
+
 BFI synthesis via AND-UBFIZ-ORR at offset: 0x5c <_main+0x5c>: -> bfi x6, x7, #56, #8 (3 instructions)
   and x6, x6, #0xffffffffffffff
   lsl x8, x7, #0x38
@@ -26,5 +31,6 @@ BFI synthesis via AND-UBFIZ-ORR at offset: 0x5c <_main+0x5c>: -> bfi x6, x7, #56
 Optimization opportunities by type:
        3  BFI synthesis via AND-UBFIZ-ORR
        2  BFXIL synthesis via AND-AND-ORR
+       1  redundant zero-extension after zeroing op
 
-5 optimization opportunities in 31 instructions
+6 optimization opportunities in 31 instructions
