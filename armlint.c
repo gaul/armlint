@@ -3646,6 +3646,12 @@ static uint32_t insn_gpr_write_mask(const cs_insn *insn)
     uint32_t op = insn_word(insn);
     bool no_gpr_write = insn_writes_no_gpr(op);
     const cs_arm64 *a = &detail->arm64;
+    // Capstone 6 keeps the writeback flag only in the common detail;
+    // 5 sets the architecture's own.
+    bool writeback = detail->writeback;
+#if CS_API_MAJOR < 6
+    writeback = writeback || a->writeback;
+#endif
     uint32_t mask = 0;
     for (int i = 0; i < a->op_count; i++) {
         const cs_arm64_op *o = &a->operands[i];
@@ -3655,7 +3661,7 @@ static uint32_t insn_gpr_write_mask(const cs_insn *insn)
                                                : o->access == 0) {
                 r = arm64_gpr_num(o->reg);
             }
-        } else if (o->type == ARM64_OP_MEM && a->writeback) {
+        } else if (o->type == ARM64_OP_MEM && writeback) {
             r = arm64_gpr_num(o->mem.base);
         }
         if (r >= 0) {
