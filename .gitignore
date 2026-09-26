@@ -4,4 +4,5 @@ libarmlint.a
 *.o
 tools/pairscan
 tools/defuse
+tools/rwfuzz
 tools/*.dSYM/

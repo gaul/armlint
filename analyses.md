@@ -481,9 +481,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   clang 3, rustc 2. The .NET 11 census had counted 661 in-place
   `ASR` pairs and 73 out-of-place `LSR` ones as ceilings; the deadness
   proof keeps half the latter.
-* Verified by execution with the harness described under the
-  redundant zero-extension check: 300,000 random programs with
-  planted shift + mask pairs, each of the 816,010 folds armlint
+* Verified by execution (`tools/rwfuzz ubfx`, the harness described
+  under the redundant zero-extension check): 300,000 random programs
+  with planted shift + mask pairs, each of the 816,010 folds armlint
   reported (192,451 of them out of place) run natively against the
   original on six random states, gave identical `x0..x7` and NZCV
   every time. Folding the 511,868 pairs armlint refused anyway
@@ -673,8 +673,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
     JavaScriptCore zero-extension fix (its `js3-zfix3` dump) took the
     adjacent ones from 3,028 to 55 and left the gapped ones (27,027
     to 26,714): an emitter-side fix wants the same per-register fact.
-  * Verified by execution: 300,000 random programs of W/X arithmetic,
-    loads, atomics, compares, forward branches and calls, run
+  * Verified by execution (`tools/rwfuzz zext`): 300,000 random
+    programs of W/X arithmetic, loads, atomics, compares, forward
+    branches and calls, run
     natively before and after deleting each of the 476,957 consumers
     armlint flagged (342,039 across a gap) on six random register,
     flag and memory states each, gave identical `x0..x7` and NZCV
@@ -2158,9 +2159,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   ceiling; of the rest, 40 put an instruction between the chain and
   its reader, which strict adjacency leaves out, and the others fail
   the NZCV proof on one edge or the other.
-* Verified by execution with the harness described under the
-  redundant zero-extension check: 300,000 random programs with
-  planted chains of two to four compares -- small constants, and
+* Verified by execution (`tools/rwfuzz ccmp`, the harness described
+  under the redundant zero-extension check): 300,000 random programs
+  with planted chains of two to four compares -- small constants, and
   small register values often enough to land on the boundaries -- and
   `B.cond` or CSEL-family readers. Each of the 135,281 rewrites
   armlint reported (37,749 with a branch reader), applied as its

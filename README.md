@@ -609,7 +609,8 @@ largest encodable bound.
 ## Mining tools
 
 `tools/` holds the research utilities that feed armlint's check
-backlog, built separately with `make tools`:
+backlog -- and one that checks the checks -- built separately with
+`make tools`:
 
 * `tools/pairscan` counts adjacent-instruction pairs by normalized
   shape (registers collapsed to classes, immediates to `#0`/`#i`)
@@ -641,6 +642,17 @@ backlog, built separately with `make tools`:
   instructions into one, while the half that overflows it can only be
   split into two singles at no size saving. 8,775 against 17,565
   across the corpus. Carries its own `--selftest`; needs numpy.
+* `tools/rwfuzz` checks a shipped check's advice by running it. It
+  generates random AArch64 programs, applies each rewrite armlint
+  suggests for one check to a copy, and runs original and rewrite
+  natively from the same random registers, flags and memory: any
+  difference is a soundness bug. A control arm applies the rewrite
+  where armlint refused to, so a harness that stopped seeing
+  differences would show it. Modes cover the redundant
+  zero-extension, shift + mask and CMP + CCMP chain checks
+  (`tools/rwfuzz -n 100000 zext`); a new rewrite gets a mode of its
+  own. Needs an AArch64 host, since the programs run natively, and
+  links `libarmlint.a`.
 
 The workflow that produced several of the current checks: compile a
 representative corpus, run `pairscan` to rank pair shapes, classify

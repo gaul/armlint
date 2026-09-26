@@ -53,13 +53,17 @@ integration-test-regen: armlint
 
 # Corpus-mining research utilities (see "Mining tools" in README.md);
 # not part of the default build or test targets.
-tools: tools/pairscan tools/defuse
+tools: tools/pairscan tools/defuse tools/rwfuzz
 
 tools/pairscan: tools/pairscan.c
 	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) $< $(CAPSTONE_LIBS) -o $@
 
 tools/defuse: tools/defuse.c
 	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) $< $(CAPSTONE_LIBS) -o $@
+
+# Drives the check registry itself, so it links the library.
+tools/rwfuzz: tools/rwfuzz.c libarmlint.a armlint.h
+	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -I. $< libarmlint.a $(CAPSTONE_LIBS) -o $@
 
 # The default goal: everything that ships, without running the suites.
 build: lib armlint
@@ -73,6 +77,7 @@ clean:
 		libarmlint.a \
 		tools/pairscan \
 		tools/defuse \
+		tools/rwfuzz \
 		*.o
 
 .PHONY: all build clean lib test integration-test integration-test-regen tools
