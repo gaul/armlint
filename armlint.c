@@ -53,6 +53,8 @@ typedef struct {
 // Proven-dead writes check_dead_write can hold before reporting them,
 // one per instruction.
 #define DW_READY_MAX 4u
+// Recent flag setters the known-value engine remembers per region.
+#define KV_REP_MAX 8u
 
 // What a remembered computation's number names.
 enum {
@@ -93,6 +95,77 @@ typedef struct {
     uint64_t value;         // a constant's value
     uint32_t vn;            // the number of the result
 } lvn_entry;
+
+// Known register values (the kv_* engine behind check_branch_decided):
+// what straight-line code has established about a GPR's value -- the
+// bits known to be zero and known to be one, and the unsigned and signed
+// ranges of its W view (index 0) and X view (index 1). A register
+// without one is unconstrained.
+typedef struct {
+    uint64_t k0;
+    uint64_t k1;
+    uint64_t ulo[2];
+    uint64_t uhi[2];
+    int64_t slo[2];
+    int64_t shi[2];
+} kv_fact;
+
+// The flag setter NZCV holds the result of, when it compares a register
+// with a known value -- CMP/CMN/TST (or SUBS/ADDS/ANDS) against an
+// immediate, or against a register whose value is known: the operation,
+// its width, the register and the version of it compared, the other
+// operand's value, and what was known of the register then.
+enum { KV_CMP_NONE, KV_CMP_SUB, KV_CMP_ADD, KV_CMP_AND };
+typedef struct {
+    uint8_t kind;
+    bool sf;
+    unsigned rn;
+    uint32_t rn_ver;
+    uint64_t imm;
+    kv_fact fact;
+} kv_cmp;
+
+// A flag setter a later one can repeat: its word, the versions of the
+// registers it read, and the flag states still possible after the
+// branches that tested it, with the instruction that last narrowed them.
+typedef struct {
+    uint32_t epoch;         // the region the entry belongs to; 0 = empty
+    uint32_t word;
+    uint32_t ver[2];
+    uint16_t states;
+    size_t src_offset;
+    char src_text[ARMLINT_FINDING_LINE_LEN];
+} kv_rep;
+
+// Conditional branch kinds, for the fall-through facts.
+enum { KV_BR_NONE, KV_BR_CBZ, KV_BR_CBNZ, KV_BR_TBZ, KV_BR_TBNZ, KV_BR_COND };
+
+// An instruction's effects, decoded when it arrives and applied when the
+// next one does (see kv_sync): the GPRs it may write, the facts its
+// decoded results carry, what it leaves in NZCV, and the fall-through
+// facts of a conditional branch.
+typedef struct {
+    size_t offset;
+    uint32_t op;
+    bool ends_region;
+    uint32_t written;
+    unsigned nfact;
+    unsigned freg[2];
+    kv_fact fact[2];
+    bool nzcv_written;
+    uint16_t nzcv_states;       // with what is known of the operands
+    uint16_t nzcv_kind;         // what the operation alone allows
+    kv_cmp cmp;
+    bool rep;
+    uint32_t rep_ver[2];
+    uint8_t br;
+    uint8_t br_cond;
+    uint8_t br_bit;
+    uint8_t br_reg;
+    bool br_sf;
+    char mnem[16];
+    char text[ARMLINT_FINDING_LINE_LEN];
+} kv_pend;
 
 struct armlint_state {
     // MOV chain (MOVZ/MOVN followed by zero or more MOVKs).
@@ -375,6 +448,41 @@ struct armlint_state {
     bool lvn_cur_same;
     size_t lvn_cur_offset;
     lvn_op lvn_cur_op;
+
+    // Known register values (the kv_* engine; see kv_sync). Per GPR,
+    // the fact (kv_known marks the registers with one) and the
+    // instruction that last narrowed it; per GPR and SP, the writes this
+    // region (the repeat table's key). For NZCV, the flag states still
+    // possible and the instruction that last narrowed them; the flag
+    // setter, and the states its operation alone allows; the compare
+    // that set it, valid while kv_cmp_ver is the NZCV version, with its
+    // repeat-table entry; and the recent flag setters a later one can
+    // repeat. kv_pending holds the instruction at kv_at, whose effects
+    // the next one applies.
+    bool kv_valid;
+    bool kv_seen;
+    size_t kv_at;
+    uint32_t kv_at_op;
+    uint32_t kv_epoch;
+    uint32_t kv_known;
+    kv_fact kv_facts[31];
+    size_t kv_src_offset[31];
+    char kv_src_text[31][ARMLINT_FINDING_LINE_LEN];
+    uint32_t kv_ver[32];
+    uint32_t kv_nzcv_ver;
+    uint16_t kv_nzcv_states;
+    size_t kv_nzcv_src_offset;
+    char kv_nzcv_src_text[ARMLINT_FINDING_LINE_LEN];
+    uint16_t kv_setter_kind;
+    size_t kv_setter_offset;
+    char kv_setter_mnem[16];
+    char kv_setter_text[ARMLINT_FINDING_LINE_LEN];
+    kv_cmp kv_last_cmp;
+    uint32_t kv_cmp_ver;
+    int kv_cmp_rep;
+    kv_rep kv_reps[KV_REP_MAX];
+    unsigned kv_rep_next;
+    kv_pend kv_pending;
 
     // check_dead_write: per register, the pure write whose value waits
     // to be read (live) or overwritten unread (dead) -- dw_mask marks
@@ -1388,6 +1496,9 @@ void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
 {
     state->buf = buf;
     state->buf_len = len;
+    // A new buffer's first instruction does not follow the old one's
+    // last, whatever its offset.
+    state->kv_seen = false;
     free(state->branch_targets);
     state->branch_targets = scan_branch_targets(buf, len, state->features,
         &state->branch_target_slots);
@@ -1670,6 +1781,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lvn_valid = false;
     state->lvn_cur_valid = false;
     state->dw_mask = 0;
+    state->kv_valid = false;
     state->cwc_active = false;
     state->pending_cwc_active = false;
     state->alr_active = false;
@@ -12000,6 +12112,1517 @@ bool check_dead_write(armlint_state *state, const cs_insn *insn,
     return dw_emit(state, out);
 }
 
+// === Known register values (kv_*) and decided branches ===
+//
+// What straight-line code has established about each GPR's value: the
+// bits known to be zero and known to be one, and the unsigned and signed
+// range of its W and X views. A constant makes every bit known -- any
+// result a decoded instruction computes from known inputs, a MOVZ or
+// MOVN, a logical immediate from ZR -- and so does a copy of one. A
+// zeroing producer knows the bits it clears (an AND, a bitfield
+// extract, a narrow or W-form load, any W-form write), a CSET that its
+// result is 0 or 1, a CSEL what its two sources agree on. A conditional
+// branch tells its fall-through path what failed: CBZ that the register
+// is not zero, CBNZ that it is, TBZ that the bit is set, TBNZ that it is
+// clear, and B.cond after a compare with a known value -- CMP/CMN/TST
+// with an immediate, or with a register holding a known one -- a bound
+// on the register compared.
+//
+// NZCV carries the set of flag states still possible: a flag setter
+// leaves the states its operation can produce (a SUBS never sets Z
+// without C, an ANDS clears C and V, known operands leave exactly one
+// state), and each B.cond that falls through removes the states its
+// condition accepts. A flag setter repeating an earlier one -- the same
+// word, its registers unwritten since -- sets the same flags, so it
+// keeps what the branches after the first one learned.
+//
+// A value a MOVK builds is not known: a JIT's patch site is a MOVZ/MOVK
+// sequence whose placeholder is not the value it will hold once patched
+// (check_value_recompute's reason too), and nothing derived from one is
+// known either. ADR/ADRP values move with the image and are not tracked.
+//
+// The engine applies an instruction's effects when the next instruction
+// arrives (kv_sync), so every check reading it sees the state before the
+// instruction at hand, wherever the check sits in the registry. Its
+// region is check_value_recompute's: every fact ends at a branch target
+// (a side entry arrives without them), after B/BL/BR/BLR/RET,
+// exceptions, UDF and every system instruction but NOP, BTI, the
+// barriers and MRS, and at a flush. Writes come from the decoded result
+// or, for anything else, from insn_gpr_write_mask, which over-reports
+// rather than miss one.
+
+// Flag states a flag setter can leave, bit (N << 3 | Z << 2 | C << 1 |
+// V) set for each. A subtraction sets Z only with C set and N and V
+// clear; an addition sets Z only with N clear, C and V not both clear
+// unless both operands were zero; ANDS/BICS clear C and V; FCMP leaves
+// one of four.
+#define KV_STATES_ANY  0xFFFFu
+#define KV_STATES_SUB  (0x0F0Fu | (1u << 6))
+#define KV_STATES_ADD  (0x0F0Fu | (1u << 4) | (1u << 6) | (1u << 7))
+#define KV_STATES_AND  ((1u << 0) | (1u << 4) | (1u << 8))
+#define KV_STATES_FCMP ((1u << 2) | (1u << 3) | (1u << 6) | (1u << 8))
+
+static uint64_t kv_ones(unsigned n)
+{
+    return n >= 64u ? UINT64_MAX : ((uint64_t)1 << n) - 1u;
+}
+
+static uint64_t kv_mask(bool sf)
+{
+    return sf ? UINT64_MAX : 0xFFFFFFFFu;
+}
+
+// A value of the view as a signed number.
+static int64_t kv_signed(uint64_t v, unsigned view)
+{
+    return view != 0 ? (int64_t)v : (int64_t)(int32_t)(uint32_t)v;
+}
+
+static void kv_fact_unknown(kv_fact *f)
+{
+    f->k0 = 0;
+    f->k1 = 0;
+    f->ulo[0] = 0;
+    f->uhi[0] = 0xFFFFFFFFu;
+    f->ulo[1] = 0;
+    f->uhi[1] = UINT64_MAX;
+    f->slo[0] = INT32_MIN;
+    f->shi[0] = INT32_MAX;
+    f->slo[1] = INT64_MIN;
+    f->shi[1] = INT64_MAX;
+}
+
+static void kv_fact_const(kv_fact *f, uint64_t v)
+{
+    kv_fact_unknown(f);
+    f->k0 = ~v;
+    f->k1 = v;
+}
+
+static bool kv_fact_unconstrained(const kv_fact *f)
+{
+    return f->k0 == 0 && f->k1 == 0 && f->ulo[0] == 0
+        && f->uhi[0] == 0xFFFFFFFFu && f->ulo[1] == 0
+        && f->uhi[1] == UINT64_MAX && f->slo[0] == INT32_MIN
+        && f->shi[0] == INT32_MAX && f->slo[1] == INT64_MIN
+        && f->shi[1] == INT64_MAX;
+}
+
+// The unsigned and signed range of one view, the known bits and the
+// other view folded in. An empty range (lo > hi) means the facts
+// contradict each other: the path is not reachable, and nothing is
+// decided on it.
+static void kv_range(const kv_fact *f, unsigned view, uint64_t *lo,
+                     uint64_t *hi, int64_t *slo, int64_t *shi)
+{
+    uint64_t mask = kv_mask(view != 0);
+    uint64_t sbit = view != 0 ? (uint64_t)1 << 63 : (uint64_t)1 << 31;
+    uint64_t kmin = f->k1 & mask;
+    uint64_t kmax = ~f->k0 & mask;
+    *lo = f->ulo[view] > kmin ? f->ulo[view] : kmin;
+    *hi = f->uhi[view] < kmax ? f->uhi[view] : kmax;
+    if (view != 0 && (f->k0 >> 32) == 0xFFFFFFFFu) {
+        // The top half is zero: X is the W view zero-extended.
+        *lo = f->ulo[0] > *lo ? f->ulo[0] : *lo;
+        *hi = f->uhi[0] < *hi ? f->uhi[0] : *hi;
+    }
+    if (view == 0 && f->uhi[1] <= 0xFFFFFFFFu) {
+        // X fits in 32 bits: W is X.
+        *lo = f->ulo[1] > *lo ? f->ulo[1] : *lo;
+        *hi = f->uhi[1] < *hi ? f->uhi[1] : *hi;
+    }
+    *slo = f->slo[view];
+    *shi = f->shi[view];
+    if (*lo <= *hi && (*hi < sbit || *lo >= sbit)) {
+        // One sign throughout: the unsigned range is a signed one.
+        int64_t a = kv_signed(*lo, view);
+        int64_t b = kv_signed(*hi, view);
+        *slo = a > *slo ? a : *slo;
+        *shi = b < *shi ? b : *shi;
+    }
+    if (*slo <= *shi && (*slo >= 0 || *shi < 0)) {
+        uint64_t a = (uint64_t)*slo & mask;
+        uint64_t b = (uint64_t)*shi & mask;
+        *lo = a > *lo ? a : *lo;
+        *hi = b < *hi ? b : *hi;
+    }
+}
+
+// The register's value as the facts pin it (X view).
+static bool kv_fact_exact(const kv_fact *f, uint64_t *value)
+{
+    if ((f->k0 | f->k1) == UINT64_MAX) {
+        *value = f->k1;
+        return (f->k0 & f->k1) == 0;
+    }
+    uint64_t lo, hi;
+    int64_t slo, shi;
+    kv_range(f, 1, &lo, &hi, &slo, &shi);
+    if (lo != hi) {
+        return false;
+    }
+    *value = lo;
+    return true;
+}
+
+static void kv_get(const armlint_state *state, unsigned r, kv_fact *f)
+{
+    if (r < 31u && ((state->kv_known >> r) & 1u) != 0) {
+        *f = state->kv_facts[r];
+    } else {
+        kv_fact_unknown(f);
+    }
+}
+
+// The known value of an input register; register 31 is ZR unless `sp`
+// says the field names SP there, whose value is not tracked.
+static bool kv_value(const armlint_state *state, unsigned r, bool sp,
+                     uint64_t *value)
+{
+    if (r == 31u) {
+        *value = 0;
+        return !sp;
+    }
+    if (((state->kv_known >> r) & 1u) == 0) {
+        return false;
+    }
+    return kv_fact_exact(&state->kv_facts[r], value);
+}
+
+// NZCV of the compare kinds, as bits N << 3 | Z << 2 | C << 1 | V.
+static unsigned kv_flags(unsigned kind, uint64_t a, uint64_t b, bool sf)
+{
+    unsigned width = sf ? 64u : 32u;
+    uint64_t mask = kv_mask(sf);
+    a &= mask;
+    b &= mask;
+    uint64_t r;
+    unsigned c = 0, v = 0;
+    unsigned sa = (unsigned)(a >> (width - 1u)) & 1u;
+    unsigned sb = (unsigned)(b >> (width - 1u)) & 1u;
+    if (kind == KV_CMP_SUB) {
+        r = (a - b) & mask;
+        c = a >= b;
+        unsigned sr = (unsigned)(r >> (width - 1u)) & 1u;
+        v = sa != sb && sr != sa;
+    } else if (kind == KV_CMP_ADD) {
+        r = (a + b) & mask;
+        c = r < a;
+        unsigned sr = (unsigned)(r >> (width - 1u)) & 1u;
+        v = sa == sb && sr != sa;
+    } else {
+        r = a & b;
+    }
+    unsigned n = (unsigned)(r >> (width - 1u)) & 1u;
+    return n << 3 | (r == 0 ? 1u : 0u) << 2 | c << 1 | v;
+}
+
+static bool kv_cond_holds(unsigned cond, unsigned nzcv)
+{
+    bool n = (nzcv & 8u) != 0, z = (nzcv & 4u) != 0;
+    bool c = (nzcv & 2u) != 0, v = (nzcv & 1u) != 0;
+    bool r;
+    switch (cond >> 1) {
+    case 0: r = z; break;
+    case 1: r = c; break;
+    case 2: r = n; break;
+    case 3: r = v; break;
+    case 4: r = c && !z; break;
+    case 5: r = n == v; break;
+    case 6: r = n == v && !z; break;
+    default: return true;
+    }
+    return (cond & 1u) != 0 ? !r : r;
+}
+
+// 1 when every possible state passes the condition, 0 when none does,
+// -1 when some do (or no state is possible: an unreachable path).
+static int kv_eval_states(unsigned cond, uint16_t states)
+{
+    bool pass = false, fail = false;
+    for (unsigned s = 0; s < 16u; s++) {
+        if (((states >> s) & 1u) != 0) {
+            if (kv_cond_holds(cond, s)) {
+                pass = true;
+            } else {
+                fail = true;
+            }
+        }
+    }
+    return pass == fail ? -1 : pass ? 1 : 0;
+}
+
+// The states that fail the condition: what its fall-through keeps.
+static uint16_t kv_states_failing(unsigned cond)
+{
+    uint16_t m = 0;
+    for (unsigned s = 0; s < 16u; s++) {
+        if (!kv_cond_holds(cond, s)) {
+            m |= (uint16_t)(1u << s);
+        }
+    }
+    return m;
+}
+
+static uint64_t kv_ror(uint64_t x, unsigned r, unsigned width)
+{
+    uint64_t mask = kv_ones(width);
+    x &= mask;
+    r %= width;
+    return r == 0 ? x : ((x >> r) | (x << (width - r))) & mask;
+}
+
+// Rm's value through a shifted-register operand's LSL/LSR/ASR/ROR.
+static uint64_t kv_shift_value(uint64_t x, unsigned type, unsigned amount,
+                               bool sf)
+{
+    unsigned width = sf ? 64u : 32u;
+    uint64_t mask = kv_mask(sf);
+    x &= mask;
+    amount %= width;
+    if (amount == 0) {
+        return x;
+    }
+    switch (type) {
+    case 0:
+        return (x << amount) & mask;
+    case 1:
+        return x >> amount;
+    case 2:
+        return (uint64_t)(kv_signed(x, sf ? 1u : 0u) >> amount) & mask;
+    default:
+        return kv_ror(x, amount, width);
+    }
+}
+
+// The same operand's known bits: an LSL knows the bits it shifts in are
+// zero, an LSR the top ones, an ASR the top ones when the sign bit is
+// known, and a rotation moves what it knows.
+static void kv_shift_bits(uint64_t *k0, uint64_t *k1, unsigned type,
+                          unsigned amount, bool sf)
+{
+    unsigned width = sf ? 64u : 32u;
+    uint64_t mask = kv_mask(sf);
+    uint64_t z = *k0 & mask, o = *k1 & mask;
+    amount %= width;
+    if (amount == 0) {
+        *k0 = z;
+        *k1 = o;
+        return;
+    }
+    uint64_t fill = mask & ~(mask >> amount);   // the top `amount` bits
+    switch (type) {
+    case 0:
+        *k0 = ((z << amount) | kv_ones(amount)) & mask;
+        *k1 = (o << amount) & mask;
+        break;
+    case 1:
+        *k0 = (z >> amount) | fill;
+        *k1 = o >> amount;
+        break;
+    case 2: {
+        uint64_t sign = (uint64_t)1 << (width - 1u);
+        *k0 = (z >> amount) | ((z & sign) != 0 ? fill : 0);
+        *k1 = (o >> amount) | ((o & sign) != 0 ? fill : 0);
+        break;
+    }
+    default:
+        *k0 = kv_ror(z, amount, width);
+        *k1 = kv_ror(o, amount, width);
+        break;
+    }
+}
+
+// Rm's value through an extended-register operand: UXTB..SXTX, then
+// LSL #0..4.
+static uint64_t kv_extend_value(uint64_t x, unsigned option, unsigned shift,
+                                bool sf)
+{
+    switch (option) {
+    case 0: x &= 0xFFu; break;
+    case 1: x &= 0xFFFFu; break;
+    case 2: x &= 0xFFFFFFFFu; break;
+    case 4: x = (uint64_t)(int64_t)(int8_t)(uint8_t)x; break;
+    case 5: x = (uint64_t)(int64_t)(int16_t)(uint16_t)x; break;
+    case 6: x = (uint64_t)(int64_t)(int32_t)(uint32_t)x; break;
+    default: break;
+    }
+    return (x << shift) & kv_mask(sf);
+}
+
+// The architectural BFM/SBFM/UBFM (opc 01/00/10): the rotated source
+// field under wmask over the destination (zero for SBFM/UBFM), with the
+// bits outside tmask from the destination or, for SBFM, the field's
+// sign.
+static void kv_bitfield_masks(bool sf, unsigned immr, unsigned imms,
+                              uint64_t *wmask, uint64_t *tmask)
+{
+    unsigned width = sf ? 64u : 32u;
+    unsigned d = (imms - immr) & (width - 1u);
+    *wmask = kv_ror(kv_ones(imms + 1u), immr, width);
+    *tmask = kv_ones(d + 1u);
+}
+
+static uint64_t kv_bitfield_value(unsigned opc, bool sf, unsigned immr,
+                                  unsigned imms, uint64_t dst, uint64_t src)
+{
+    unsigned width = sf ? 64u : 32u;
+    uint64_t mask = kv_mask(sf);
+    uint64_t wmask, tmask;
+    kv_bitfield_masks(sf, immr, imms, &wmask, &tmask);
+    if (opc != 1u) {
+        dst = 0;
+    }
+    uint64_t bot = (dst & ~wmask) | (kv_ror(src, immr, width) & wmask);
+    uint64_t top = opc == 0u ? (((src >> imms) & 1u) != 0 ? mask : 0) : dst;
+    return ((top & ~tmask) | (bot & tmask)) & mask;
+}
+
+// The same for known bits: (d0, d1) the destination's, (s0, s1) the
+// source's.
+static void kv_bitfield_bits(unsigned opc, bool sf, unsigned immr,
+                             unsigned imms, uint64_t d0, uint64_t d1,
+                             uint64_t s0, uint64_t s1, uint64_t *k0,
+                             uint64_t *k1)
+{
+    unsigned width = sf ? 64u : 32u;
+    uint64_t mask = kv_mask(sf);
+    uint64_t wmask, tmask;
+    kv_bitfield_masks(sf, immr, imms, &wmask, &tmask);
+    if (opc != 1u) {
+        d0 = mask;
+        d1 = 0;
+    }
+    uint64_t b0 = (d0 & ~wmask) | (kv_ror(s0, immr, width) & wmask);
+    uint64_t b1 = (d1 & ~wmask) | (kv_ror(s1, immr, width) & wmask);
+    uint64_t t0 = d0, t1 = d1;
+    if (opc == 0u) {
+        uint64_t bit = (uint64_t)1 << imms;
+        t0 = (s0 & bit) != 0 ? mask : 0;
+        t1 = (s1 & bit) != 0 ? mask : 0;
+    }
+    *k0 = ((t0 & ~tmask) | (b0 & tmask)) & mask;
+    *k1 = ((t1 & ~tmask) | (b1 & tmask)) & mask;
+}
+
+static uint64_t kv_umulh(uint64_t a, uint64_t b)
+{
+    uint64_t a0 = a & 0xFFFFFFFFu, a1 = a >> 32;
+    uint64_t b0 = b & 0xFFFFFFFFu, b1 = b >> 32;
+    uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    uint64_t mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu) + (p10 & 0xFFFFFFFFu);
+    return p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+}
+
+static uint64_t kv_smulh(uint64_t a, uint64_t b)
+{
+    uint64_t h = kv_umulh(a, b);
+    if ((int64_t)a < 0) {
+        h -= b;
+    }
+    if ((int64_t)b < 0) {
+        h -= a;
+    }
+    return h;
+}
+
+// The data-processing (1 source) group on a known value: RBIT, REV16,
+// REV32/REV, CLZ, CLS and the CSSC CTZ/CNT/ABS.
+static uint64_t kv_one_source(unsigned opc, uint64_t a, bool sf)
+{
+    unsigned width = sf ? 64u : 32u;
+    uint64_t mask = kv_mask(sf);
+    uint64_t v = 0;
+    a &= mask;
+    switch (opc) {
+    case 0:                                             // RBIT
+        for (unsigned i = 0; i < width; i++) {
+            v |= ((a >> i) & 1u) << (width - 1u - i);
+        }
+        return v;
+    case 1:                                             // REV16
+        return ((a & 0x00FF00FF00FF00FFull) << 8
+                | (a >> 8 & 0x00FF00FF00FF00FFull)) & mask;
+    case 2:                                             // REV32 / W REV
+    case 3:                                             // REV
+        for (unsigned i = 0; i < width; i += 8u) {
+            unsigned j = opc == 3u || !sf ? width - 8u - i
+                                          : (i & ~31u) + 24u - (i & 31u);
+            v |= ((a >> i) & 0xFFu) << j;
+        }
+        return v;
+    case 4:                                             // CLZ
+        return width - bits_used64(a);
+    case 5: {                                           // CLS
+        uint64_t y = ((a >> 1) ^ a) & (mask >> 1);
+        return width - 1u - bits_used64(y);
+    }
+    case 6:                                             // CTZ
+        if (a == 0) {
+            return width;
+        }
+        while (((a >> v) & 1u) == 0) {
+            v++;
+        }
+        return v;
+    case 7:                                             // CNT
+        while (a != 0) {
+            v += a & 1u;
+            a >>= 1;
+        }
+        return v;
+    default:                                            // ABS
+        return kv_signed(a, sf ? 1u : 0u) < 0 ? (0 - a) & mask : a;
+    }
+}
+
+// The data-processing (2 source) group on known values: UDIV/SDIV (a
+// zero divisor gives zero, and SDIV's one overflow its dividend), the
+// variable shifts, and the CSSC SMAX/UMAX/SMIN/UMIN. CRC32 is not
+// modelled.
+static bool kv_two_source(unsigned opc, uint64_t a, uint64_t b, bool sf,
+                          uint64_t *value)
+{
+    unsigned view = sf ? 1u : 0u;
+    unsigned width = sf ? 64u : 32u;
+    uint64_t mask = kv_mask(sf);
+    a &= mask;
+    b &= mask;
+    int64_t sa = kv_signed(a, view), sb = kv_signed(b, view);
+    int64_t min = sf ? INT64_MIN : INT32_MIN;
+    switch (opc) {
+    case 2:
+        *value = b == 0 ? 0 : a / b;
+        return true;
+    case 3:
+        *value = sb == 0 ? 0 : (sa == min && sb == -1) ? a
+                                 : (uint64_t)(sa / sb) & mask;
+        return true;
+    case 8: case 9: case 10: case 11:
+        *value = kv_shift_value(a, opc - 8u, (unsigned)(b % width), sf);
+        return true;
+    case 24:
+        *value = sa > sb ? a : b;
+        return true;
+    case 25:
+        *value = a > b ? a : b;
+        return true;
+    case 26:
+        *value = sa < sb ? a : b;
+        return true;
+    case 27:
+        *value = a < b ? a : b;
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The value a decoded pure instruction writes to its GPR when what is
+// known of its inputs determines it -- every class decode_lvn_op
+// decodes but ADR/ADRP (image-relative), MOVK (a patch site's
+// placeholder), the flag readers and CRC32.
+static bool kv_op_value(const armlint_state *state, uint32_t op,
+                        const lvn_op *p, uint64_t *value)
+{
+    bool sf = p->sf;
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned ra = (op >> 10) & 0x1Fu;
+    bool sub = ((op >> 30) & 1u) != 0;
+    uint64_t a, b, c, v;
+    if (p->pcrel || p->movk || p->reads_flags) {
+        return false;
+    }
+    if ((op & 0x1F800000u) == 0x11000000u) {
+        // ADD/SUB (immediate): Rn = 31 is SP.
+        if (!kv_value(state, rn, true, &a)) {
+            return false;
+        }
+        uint64_t imm = (uint64_t)((op >> 10) & 0xFFFu)
+            << (((op >> 22) & 1u) != 0 ? 12u : 0u);
+        v = sub ? a - imm : a + imm;
+    } else if ((op & 0x1F800000u) == 0x12000000u) {
+        // Logical (immediate): Rn = 31 is ZR.
+        uint64_t imm;
+        if (!decode_bitmask_imm_value((op >> 22) & 1u, (op >> 16) & 0x3Fu,
+                                      (op >> 10) & 0x3Fu, sf ? 64u : 32u,
+                                      &imm)
+                || !kv_value(state, rn, false, &a)) {
+            return false;
+        }
+        unsigned opc = (op >> 29) & 3u;
+        v = opc == 1u ? (a | imm) : opc == 2u ? (a ^ imm) : (a & imm);
+    } else if ((op & 0x1F800000u) == 0x12800000u) {
+        // MOVZ/MOVN (MOVK was refused above).
+        unsigned hw = (op >> 21) & 3u;
+        uint64_t imm = (uint64_t)((op >> 5) & 0xFFFFu) << (16u * hw);
+        v = ((op >> 29) & 3u) == 2u ? imm : ~imm;
+    } else if ((op & 0x1F800000u) == 0x13000000u) {
+        // Bitfield: BFM also keeps bits of Rd.
+        unsigned opc = (op >> 29) & 3u;
+        uint64_t dst = 0;
+        if (!kv_value(state, rn, false, &a)
+                || (opc == 1u && !kv_value(state, rd, false, &dst))) {
+            return false;
+        }
+        v = kv_bitfield_value(opc, sf, (op >> 16) & 0x3Fu,
+                              (op >> 10) & 0x3Fu, dst, a);
+    } else if ((op & 0x1F800000u) == 0x13800000u) {
+        // EXTR: the low half of (Rn:Rm) >> lsb.
+        if (!kv_value(state, rn, false, &a)
+                || !kv_value(state, rm, false, &b)) {
+            return false;
+        }
+        unsigned lsb = (op >> 10) & 0x3Fu;
+        uint64_t mask = kv_mask(sf);
+        a &= mask;
+        b &= mask;
+        v = lsb == 0 ? b : (b >> lsb) | (a << ((sf ? 64u : 32u) - lsb));
+    } else if ((op & 0x1F000000u) == 0x0A000000u) {
+        // Logical (shifted register), BIC/ORN/EON inverting Rm.
+        if (!kv_value(state, rn, false, &a)
+                || !kv_value(state, rm, false, &b)) {
+            return false;
+        }
+        b = kv_shift_value(b, (op >> 22) & 3u, (op >> 10) & 0x3Fu, sf);
+        if (((op >> 21) & 1u) != 0) {
+            b = ~b;
+        }
+        unsigned opc = (op >> 29) & 3u;
+        v = opc == 1u ? (a | b) : opc == 2u ? (a ^ b) : (a & b);
+    } else if ((op & 0x1F200000u) == 0x0B000000u) {
+        // ADD/SUB (shifted register).
+        if (!kv_value(state, rn, false, &a)
+                || !kv_value(state, rm, false, &b)) {
+            return false;
+        }
+        b = kv_shift_value(b, (op >> 22) & 3u, (op >> 10) & 0x3Fu, sf);
+        v = sub ? a - b : a + b;
+    } else if ((op & 0x1F200000u) == 0x0B200000u) {
+        // ADD/SUB (extended register): Rn = 31 is SP.
+        if (!kv_value(state, rn, true, &a)
+                || !kv_value(state, rm, false, &b)) {
+            return false;
+        }
+        b = kv_extend_value(b, (op >> 13) & 7u, (op >> 10) & 7u, sf);
+        v = sub ? a - b : a + b;
+    } else if ((op & 0x1F000000u) == 0x1B000000u) {
+        // MADD/MSUB, the widening multiply-adds, SMULH/UMULH.
+        unsigned op31 = (op >> 21) & 7u;
+        bool minus = ((op >> 15) & 1u) != 0;
+        if (!kv_value(state, rn, false, &a)
+                || !kv_value(state, rm, false, &b)) {
+            return false;
+        }
+        if (op31 == 2u || op31 == 6u) {
+            v = op31 == 6u ? kv_umulh(a, b) : kv_smulh(a, b);
+        } else {
+            if (!kv_value(state, ra, false, &c)) {
+                return false;
+            }
+            uint64_t prod;
+            if (op31 == 1u) {
+                prod = (uint64_t)((int64_t)(int32_t)(uint32_t)a
+                                  * (int64_t)(int32_t)(uint32_t)b);
+            } else if (op31 == 5u) {
+                prod = (a & 0xFFFFFFFFu) * (b & 0xFFFFFFFFu);
+            } else {
+                prod = a * b;
+            }
+            v = minus ? c - prod : c + prod;
+        }
+    } else if ((op & 0x5FE00000u) == 0x1AC00000u) {
+        if (!kv_value(state, rn, false, &a)
+                || !kv_value(state, rm, false, &b)
+                || !kv_two_source((op >> 10) & 0x3Fu, a, b, sf, &v)) {
+            return false;
+        }
+    } else if ((op & 0x5FE00000u) == 0x5AC00000u) {
+        if (!kv_value(state, rn, false, &a)) {
+            return false;
+        }
+        v = kv_one_source((op >> 10) & 0x3Fu, a, sf);
+    } else {
+        return false;
+    }
+    *value = v & kv_mask(sf);
+    return true;
+}
+
+// The known bits of Rn or Rm as an instruction reads them (31: ZR).
+static void kv_in_bits(const armlint_state *state, unsigned r,
+                       uint64_t *k0, uint64_t *k1)
+{
+    if (r == 31u) {
+        *k0 = UINT64_MAX;
+        *k1 = 0;
+        return;
+    }
+    kv_fact f;
+    kv_get(state, r, &f);
+    *k0 = f.k0;
+    *k1 = f.k1;
+}
+
+// What a decoded pure instruction's GPR result is known to be: its value
+// when that is determined, else the bits its operation pins and, for the
+// X-form copies, all its source's facts. A W-form result's top half is
+// zero whatever else is known.
+static void kv_op_fact(const armlint_state *state, uint32_t op,
+                       const lvn_op *p, kv_fact *out)
+{
+    uint64_t v;
+    if (kv_op_value(state, op, p, &v)) {
+        kv_fact_const(out, v);
+        return;
+    }
+    kv_fact_unknown(out);
+    bool sf = p->sf;
+    uint64_t mask = kv_mask(sf);
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    uint64_t a0, a1, b0, b1;
+    if (p->copy && !(p->copy_src == 31u)) {
+        // X-form MOV, or ADD/SUB #0 (whose 31 is SP: nothing known).
+        kv_get(state, p->copy_src, out);
+        return;
+    }
+    if ((op & 0xFFE0FFE0u) == 0x2A0003E0u) {
+        // MOV Wd, Wm: Wm's W view, zero-extended.
+        kv_fact f;
+        kv_get(state, rm, &f);
+        out->k0 = f.k0 & 0xFFFFFFFFu;
+        out->k1 = f.k1 & 0xFFFFFFFFu;
+        kv_range(&f, 0, &out->ulo[0], &out->uhi[0], &out->slo[0],
+                 &out->shi[0]);
+        if (out->ulo[0] > out->uhi[0] || out->slo[0] > out->shi[0]) {
+            kv_fact_unknown(out);
+        }
+    } else if (p->pcrel || p->movk) {
+        // Image-relative, or a patch site.
+    } else if ((op & 0x1F800000u) == 0x12000000u
+            && ((op >> 29) & 3u) != 3u) {
+        // AND/ORR/EOR (immediate).
+        uint64_t imm;
+        if (decode_bitmask_imm_value((op >> 22) & 1u, (op >> 16) & 0x3Fu,
+                                     (op >> 10) & 0x3Fu, sf ? 64u : 32u,
+                                     &imm)) {
+            kv_in_bits(state, rn, &a0, &a1);
+            unsigned opc = (op >> 29) & 3u;
+            if (opc == 0u) {
+                out->k0 = a0 | ~imm;
+                out->k1 = a1 & imm;
+            } else if (opc == 1u) {
+                out->k0 = a0 & ~imm;
+                out->k1 = a1 | imm;
+            } else {
+                out->k0 = (a0 & ~imm) | (a1 & imm);
+                out->k1 = (a1 & ~imm) | (a0 & imm);
+            }
+        }
+    } else if ((op & 0x1F000000u) == 0x0A000000u
+            && ((op >> 29) & 3u) != 3u) {
+        // AND/ORR/EOR/BIC/ORN/EON (shifted register).
+        kv_in_bits(state, rn, &a0, &a1);
+        kv_in_bits(state, rm, &b0, &b1);
+        kv_shift_bits(&b0, &b1, (op >> 22) & 3u, (op >> 10) & 0x3Fu, sf);
+        if (((op >> 21) & 1u) != 0) {
+            uint64_t t = b0;
+            b0 = b1;
+            b1 = t;
+        }
+        unsigned opc = (op >> 29) & 3u;
+        if (opc == 0u) {
+            out->k0 = a0 | b0;
+            out->k1 = a1 & b1;
+        } else if (opc == 1u) {
+            out->k0 = a0 & b0;
+            out->k1 = a1 | b1;
+        } else {
+            out->k0 = (a0 & b0) | (a1 & b1);
+            out->k1 = (a0 & b1) | (a1 & b0);
+        }
+    } else if ((op & 0x1F800000u) == 0x13000000u) {
+        // Bitfield: what the field operation keeps of what is known.
+        unsigned opc = (op >> 29) & 3u;
+        uint64_t d0 = 0, d1 = 0;
+        kv_in_bits(state, rn, &a0, &a1);
+        if (opc == 1u) {
+            kv_in_bits(state, op & 0x1Fu, &d0, &d1);
+        }
+        kv_bitfield_bits(opc, sf, (op >> 16) & 0x3Fu, (op >> 10) & 0x3Fu,
+                         d0, d1, a0, a1, &out->k0, &out->k1);
+    } else if ((op & 0x5FE00000u) == 0x5AC00000u
+            && ((op >> 10) & 0x3Fu) >= 4u && ((op >> 10) & 0x3Fu) <= 7u) {
+        // CLZ/CLS/CTZ/CNT count at most 64.
+        out->k0 = ~(uint64_t)0x7F;
+    } else if ((op & 0x7FE00C00u) == 0x1A800400u && rn == 31u && rm == 31u) {
+        // CSINC Rd, ZR, ZR (CSET): 0 or 1.
+        out->k0 = ~(uint64_t)1;
+    } else if ((op & 0x7FE00C00u) == 0x1A800000u) {
+        // CSEL: whatever its two sources agree on.
+        kv_fact f, g;
+        uint64_t zero = 0;
+        if (rn == 31u) {
+            kv_fact_const(&f, zero);
+        } else {
+            kv_get(state, rn, &f);
+        }
+        if (rm == 31u) {
+            kv_fact_const(&g, zero);
+        } else {
+            kv_get(state, rm, &g);
+        }
+        out->k0 = f.k0 & g.k0;
+        out->k1 = f.k1 & g.k1;
+        unsigned view = sf ? 1u : 0u;
+        uint64_t flo, fhi, glo, ghi;
+        int64_t fslo, fshi, gslo, gshi;
+        kv_range(&f, view, &flo, &fhi, &fslo, &fshi);
+        kv_range(&g, view, &glo, &ghi, &gslo, &gshi);
+        if (flo <= fhi && glo <= ghi && fslo <= fshi && gslo <= gshi) {
+            out->ulo[view] = flo < glo ? flo : glo;
+            out->uhi[view] = fhi > ghi ? fhi : ghi;
+            out->slo[view] = fslo < gslo ? fslo : gslo;
+            out->shi[view] = fshi > gshi ? fshi : gshi;
+        }
+    }
+    out->k0 &= mask;
+    out->k1 &= mask;
+    if (!sf) {
+        out->k0 |= 0xFFFFFFFF00000000ull;
+    }
+}
+
+// A decoded flag setter's effect on NZCV: the states it can leave (one,
+// when both operands are known), the compare the flags remember when its
+// second operand is a known value and its first a register, and whether
+// a later identical setter can repeat it (not when it reads NZCV, or SP,
+// whose writes the engine does not count).
+static void kv_flag_setter(const armlint_state *state, uint32_t op,
+                           const lvn_op *p, kv_pend *pd)
+{
+    pd->nzcv_written = true;
+    pd->nzcv_states = KV_STATES_ANY;
+    pd->nzcv_kind = KV_STATES_ANY;
+    if (p->reads_flags) {
+        return;     // ADCS/SBCS, CCMP/CCMN
+    }
+    bool sf = p->sf;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned kind = ((op >> 30) & 1u) != 0 ? KV_CMP_SUB : KV_CMP_ADD;
+    bool rn_sp = false, has_rm = true, known;
+    uint64_t b;
+    if ((op & 0x1F800000u) == 0x11000000u) {
+        rn_sp = true;
+        has_rm = false;
+        b = (uint64_t)((op >> 10) & 0xFFFu)
+            << (((op >> 22) & 1u) != 0 ? 12u : 0u);
+        known = true;
+    } else if ((op & 0x1F800000u) == 0x12000000u) {
+        kind = KV_CMP_AND;
+        has_rm = false;
+        known = decode_bitmask_imm_value((op >> 22) & 1u, (op >> 16) & 0x3Fu,
+                                         (op >> 10) & 0x3Fu, sf ? 64u : 32u,
+                                         &b);
+    } else if ((op & 0x1F200000u) == 0x0B000000u) {
+        known = kv_value(state, rm, false, &b);
+        b = known ? kv_shift_value(b, (op >> 22) & 3u, (op >> 10) & 0x3Fu, sf)
+                  : 0;
+    } else if ((op & 0x1F200000u) == 0x0B200000u) {
+        rn_sp = true;
+        known = kv_value(state, rm, false, &b);
+        b = known ? kv_extend_value(b, (op >> 13) & 7u, (op >> 10) & 7u, sf)
+                  : 0;
+    } else if ((op & 0x1F000000u) == 0x0A000000u) {
+        kind = KV_CMP_AND;
+        known = kv_value(state, rm, false, &b);
+        b = known ? kv_shift_value(b, (op >> 22) & 3u, (op >> 10) & 0x3Fu, sf)
+                  : 0;
+        if (((op >> 21) & 1u) != 0) {
+            b = ~b;
+        }
+    } else {
+        return;
+    }
+    pd->nzcv_states = kind == KV_CMP_SUB ? KV_STATES_SUB
+                    : kind == KV_CMP_ADD ? KV_STATES_ADD : KV_STATES_AND;
+    pd->nzcv_kind = pd->nzcv_states;
+    if (rn == 31u && rn_sp) {
+        return;
+    }
+    uint64_t a;
+    if (known && kv_value(state, rn, false, &a)) {
+        pd->nzcv_states = (uint16_t)(1u << kv_flags(kind, a, b, sf));
+    }
+    if (known) {
+        pd->cmp.kind = (uint8_t)kind;
+        pd->cmp.sf = sf;
+        pd->cmp.rn = rn;
+        pd->cmp.imm = b & kv_mask(sf);
+        if (rn == 31u) {
+            kv_fact_const(&pd->cmp.fact, 0);
+            pd->cmp.rn_ver = 0;
+        } else {
+            kv_get(state, rn, &pd->cmp.fact);
+            pd->cmp.rn_ver = state->kv_ver[rn];
+        }
+    }
+    pd->rep = true;
+    pd->rep_ver[0] = rn == 31u ? 0 : state->kv_ver[rn];
+    pd->rep_ver[1] = !has_rm || rm == 31u ? 0 : state->kv_ver[rm];
+}
+
+// Start a region: nothing known.
+static void kv_reset(armlint_state *state)
+{
+    state->kv_epoch++;
+    if (state->kv_epoch == 0) {
+        memset(state->kv_reps, 0, sizeof(state->kv_reps));
+        state->kv_epoch = 1;
+    }
+    state->kv_known = 0;
+    state->kv_nzcv_states = KV_STATES_ANY;
+    state->kv_nzcv_src_offset = SIZE_MAX;
+    state->kv_setter_kind = KV_STATES_ANY;
+    state->kv_setter_offset = SIZE_MAX;
+    state->kv_last_cmp.kind = KV_CMP_NONE;
+    state->kv_cmp_rep = -1;
+    state->kv_valid = true;
+}
+
+// Decode the instruction at `offset`, whose effects the next sync
+// applies. Its text is kept when it may become a fact's source.
+static void kv_record(armlint_state *state, const cs_insn *insn,
+                      size_t offset, uint32_t op)
+{
+    kv_pend *pd = &state->kv_pending;
+    pd->offset = offset;
+    pd->op = op;
+    pd->ends_region = lvn_ends_region(op);
+    pd->nfact = 0;
+    pd->nzcv_written = false;
+    pd->nzcv_states = KV_STATES_ANY;
+    pd->nzcv_kind = KV_STATES_ANY;
+    pd->cmp.kind = KV_CMP_NONE;
+    pd->rep = false;
+    pd->br = KV_BR_NONE;
+    bool source = false;
+
+    lvn_op p;
+    if (decode_lvn_op(op, &p)) {
+        pd->written = p.out < 31u ? 1u << p.out : 0;
+        if (p.out < 31u) {
+            kv_op_fact(state, op, &p, &pd->fact[0]);
+            pd->freg[0] = p.out;
+            pd->nfact = 1;
+            source = true;
+        }
+        if (p.sets_flags) {
+            kv_flag_setter(state, op, &p, pd);
+            source = true;
+        }
+    } else {
+        pd->written = insn_gpr_write_mask(insn);
+        unsigned rd, zero_from;
+        if (decode_zeroing_producer(op, &rd, &zero_from)) {
+            // A load zero-extending what it loads (which it always
+            // writes, whatever Capstone says).
+            pd->written |= 1u << rd;
+            kv_fact_unknown(&pd->fact[0]);
+            pd->fact[0].k0 = ~kv_ones(zero_from);
+            pd->freg[0] = rd;
+            pd->nfact = 1;
+            source = true;
+        }
+        pd->nzcv_written = lvn_writes_nzcv(insn, op, classify_liveness(op));
+        if ((op & 0xFF20FC07u) == 0x1E202000u) {
+            pd->nzcv_states = KV_STATES_FCMP;   // FCMP/FCMPE
+            pd->nzcv_kind = KV_STATES_FCMP;
+            source = true;
+        }
+        if ((op & 0xFF000000u) == 0x54000000u && (op & 0xFu) < 14u) {
+            pd->br = KV_BR_COND;                // B.cond, BC.cond
+            pd->br_cond = (uint8_t)(op & 0xFu);
+        } else if ((op & 0x7E000000u) == 0x34000000u) {
+            pd->br = ((op >> 24) & 1u) != 0 ? KV_BR_CBNZ : KV_BR_CBZ;
+            pd->br_reg = (uint8_t)(op & 0x1Fu);
+            pd->br_sf = (op >> 31) != 0;
+        } else if ((op & 0x7E000000u) == 0x36000000u) {
+            pd->br = ((op >> 24) & 1u) != 0 ? KV_BR_TBNZ : KV_BR_TBZ;
+            pd->br_reg = (uint8_t)(op & 0x1Fu);
+            pd->br_bit = (uint8_t)((op >> 31) << 5 | ((op >> 19) & 0x1Fu));
+        }
+        source = source || pd->br != KV_BR_NONE;
+    }
+    if (source) {
+        insn_text(pd->text, sizeof(pd->text), insn);
+    }
+    if (pd->nzcv_written) {
+        snprintf(pd->mnem, sizeof(pd->mnem), "%s", insn->mnemonic);
+    }
+}
+
+// Narrow a fact by a compare's condition failing: what its B.cond's
+// fall-through learns about the register compared.
+static void kv_refine_cmp(kv_fact *f, const kv_cmp *k, unsigned cond)
+{
+    unsigned view = k->sf ? 1u : 0u;
+    uint64_t mask = kv_mask(k->sf);
+    uint64_t imm = k->imm & mask;
+    int64_t simm = kv_signed(imm, view);
+    uint64_t *lo = &f->ulo[view], *hi = &f->uhi[view];
+    int64_t *slo = &f->slo[view], *shi = &f->shi[view];
+    uint64_t eq;
+    if (k->kind == KV_CMP_AND) {
+        if (cond == 1u) {
+            f->k0 |= imm;                   // NE failed: Rn & imm == 0
+        } else if (cond == 0u && imm != 0 && (imm & (imm - 1u)) == 0) {
+            f->k1 |= imm;                   // EQ failed: the one bit set
+        }
+        return;
+    }
+    if (k->kind == KV_CMP_ADD) {
+        if (cond > 1u) {
+            return;
+        }
+        eq = (0 - imm) & mask;              // Rn + imm == 0
+    } else {
+        eq = imm;
+    }
+    switch (cond) {
+    case 0:                                 // EQ failed: Rn != eq
+        if (*lo == eq && eq < mask) {
+            *lo = eq + 1u;
+        }
+        if (*hi == eq && eq > 0) {
+            *hi = eq - 1u;
+        }
+        break;
+    case 1:                                 // NE failed: Rn == eq
+        *lo = eq;
+        *hi = eq;
+        *slo = kv_signed(eq, view);
+        *shi = kv_signed(eq, view);
+        f->k0 = (f->k0 & ~mask) | (~eq & mask);
+        f->k1 = (f->k1 & ~mask) | eq;
+        break;
+    case 2:                                 // HS failed: Rn < imm
+        if (imm != 0 && imm - 1u < *hi) {
+            *hi = imm - 1u;
+        }
+        break;
+    case 3:                                 // LO failed: Rn >= imm
+        if (imm > *lo) {
+            *lo = imm;
+        }
+        break;
+    case 8:                                 // HI failed: Rn <= imm
+        if (imm < *hi) {
+            *hi = imm;
+        }
+        break;
+    case 9:                                 // LS failed: Rn > imm
+        if (imm < mask && imm + 1u > *lo) {
+            *lo = imm + 1u;
+        }
+        break;
+    case 10:                                // GE failed: Rn < imm
+        if (simm > (view != 0 ? INT64_MIN : INT32_MIN) && simm - 1 < *shi) {
+            *shi = simm - 1;
+        }
+        break;
+    case 11:                                // LT failed: Rn >= imm
+        if (simm > *slo) {
+            *slo = simm;
+        }
+        break;
+    case 12:                                // GT failed: Rn <= imm
+        if (simm < *shi) {
+            *shi = simm;
+        }
+        break;
+    case 13:                                // LE failed: Rn > imm
+        if (simm < (view != 0 ? INT64_MAX : INT32_MAX) && simm + 1 > *slo) {
+            *slo = simm + 1;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// Store a register's narrowed fact, with the instruction at `offset` as
+// its source -- unless it says nothing new, which leaves the source that
+// established what it does say.
+static void kv_narrowed(armlint_state *state, unsigned r, const kv_fact *f,
+                        size_t offset, const char *text)
+{
+    kv_fact before;
+    kv_get(state, r, &before);
+    if (memcmp(f, &before, sizeof(*f)) == 0) {
+        return;
+    }
+    state->kv_facts[r] = *f;
+    state->kv_known |= 1u << r;
+    state->kv_src_offset[r] = offset;
+    memcpy(state->kv_src_text[r], text, ARMLINT_FINDING_LINE_LEN);
+}
+
+// Apply the pending instruction's effects: its writes, the facts its
+// results carry, its flags, and a conditional branch's fall-through.
+static void kv_commit(armlint_state *state)
+{
+    const kv_pend *pd = &state->kv_pending;
+    if (pd->ends_region) {
+        kv_reset(state);
+        return;
+    }
+    state->kv_known &= ~pd->written;
+    for (uint32_t w = pd->written & 0x7FFFFFFFu; w != 0; w &= w - 1u) {
+        state->kv_ver[__builtin_ctz(w)]++;
+    }
+    for (unsigned i = 0; i < pd->nfact; i++) {
+        unsigned r = pd->freg[i];
+        if (kv_fact_unconstrained(&pd->fact[i])) {
+            continue;
+        }
+        state->kv_facts[r] = pd->fact[i];
+        state->kv_known |= 1u << r;
+        state->kv_src_offset[r] = pd->offset;
+        memcpy(state->kv_src_text[r], pd->text, ARMLINT_FINDING_LINE_LEN);
+    }
+
+    if (pd->nzcv_written) {
+        state->kv_nzcv_ver++;
+        state->kv_nzcv_states = pd->nzcv_states;
+        state->kv_nzcv_src_offset = pd->offset;
+        memcpy(state->kv_nzcv_src_text, pd->text, ARMLINT_FINDING_LINE_LEN);
+        state->kv_setter_kind = pd->nzcv_kind;
+        state->kv_setter_offset = pd->offset;
+        memcpy(state->kv_setter_mnem, pd->mnem, sizeof(pd->mnem));
+        memcpy(state->kv_setter_text, pd->text, ARMLINT_FINDING_LINE_LEN);
+        state->kv_last_cmp = pd->cmp;
+        state->kv_cmp_ver = state->kv_nzcv_ver;
+        state->kv_cmp_rep = -1;
+        if (pd->rep) {
+            for (unsigned i = 0; i < KV_REP_MAX; i++) {
+                kv_rep *e = &state->kv_reps[i];
+                if (e->epoch == state->kv_epoch && e->word == pd->op
+                        && e->ver[0] == pd->rep_ver[0]
+                        && e->ver[1] == pd->rep_ver[1]) {
+                    // The same flags again, and what was learned of them.
+                    state->kv_nzcv_states &= e->states;
+                    state->kv_nzcv_src_offset = e->src_offset;
+                    memcpy(state->kv_nzcv_src_text, e->src_text,
+                           ARMLINT_FINDING_LINE_LEN);
+                    state->kv_cmp_rep = (int)i;
+                    break;
+                }
+            }
+            if (state->kv_cmp_rep < 0) {
+                unsigned i = state->kv_rep_next++ % KV_REP_MAX;
+                kv_rep *e = &state->kv_reps[i];
+                e->epoch = state->kv_epoch;
+                e->word = pd->op;
+                e->ver[0] = pd->rep_ver[0];
+                e->ver[1] = pd->rep_ver[1];
+                e->states = state->kv_nzcv_states;
+                e->src_offset = pd->offset;
+                memcpy(e->src_text, pd->text, ARMLINT_FINDING_LINE_LEN);
+                state->kv_cmp_rep = (int)i;
+            }
+        }
+    }
+
+    unsigned r = pd->br_reg;
+    switch (pd->br) {
+    case KV_BR_COND: {
+        unsigned cond = pd->br_cond;
+        bool current = state->kv_cmp_ver == state->kv_nzcv_ver;
+        state->kv_nzcv_states &= kv_states_failing(cond);
+        state->kv_nzcv_src_offset = pd->offset;
+        memcpy(state->kv_nzcv_src_text, pd->text, ARMLINT_FINDING_LINE_LEN);
+        if (current && state->kv_cmp_rep >= 0) {
+            kv_rep *e = &state->kv_reps[state->kv_cmp_rep];
+            if (e->epoch == state->kv_epoch) {
+                e->states = state->kv_nzcv_states;
+                e->src_offset = pd->offset;
+                memcpy(e->src_text, pd->text, ARMLINT_FINDING_LINE_LEN);
+            }
+        }
+        const kv_cmp *k = &state->kv_last_cmp;
+        if (current && k->kind != KV_CMP_NONE && k->rn < 31u
+                && state->kv_ver[k->rn] == k->rn_ver) {
+            kv_fact f;
+            kv_get(state, k->rn, &f);
+            kv_refine_cmp(&f, k, cond);
+            kv_narrowed(state, k->rn, &f, pd->offset, pd->text);
+        }
+        break;
+    }
+    case KV_BR_CBZ:
+    case KV_BR_CBNZ:
+        if (r < 31u) {
+            kv_fact f;
+            kv_get(state, r, &f);
+            unsigned view = pd->br_sf ? 1u : 0u;
+            if (pd->br == KV_BR_CBZ) {
+                // Not taken: not zero, in its view and so in X.
+                f.ulo[view] = f.ulo[view] > 0 ? f.ulo[view] : 1u;
+                f.ulo[1] = f.ulo[1] > 0 ? f.ulo[1] : 1u;
+            } else {
+                // Not taken: zero in its view.
+                uint64_t mask = kv_mask(pd->br_sf);
+                f.k0 |= mask;
+                f.k1 &= ~mask;
+                f.ulo[view] = 0;
+                f.uhi[view] = 0;
+                f.slo[view] = 0;
+                f.shi[view] = 0;
+            }
+            kv_narrowed(state, r, &f, pd->offset, pd->text);
+        }
+        break;
+    case KV_BR_TBZ:
+    case KV_BR_TBNZ:
+        if (r < 31u) {
+            kv_fact f;
+            kv_get(state, r, &f);
+            uint64_t bit = (uint64_t)1 << pd->br_bit;
+            if (pd->br == KV_BR_TBZ) {
+                f.k1 |= bit;        // not taken: the bit is set
+            } else {
+                f.k0 |= bit;        // not taken: the bit is clear
+            }
+            kv_narrowed(state, r, &f, pd->offset, pd->text);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// Bring the engine to `offset`: apply the previous instruction's effects
+// (or start a region, if this one does not follow it or is a branch
+// target) and record this one's. A no-op for the second check to ask at
+// the same instruction.
+static void kv_sync(armlint_state *state, const cs_insn *insn, size_t offset)
+{
+    uint32_t op = insn_word(insn);
+    if (state->kv_seen && state->kv_at == offset && state->kv_at_op == op) {
+        return;
+    }
+    if (state->kv_valid && state->kv_seen && offset == state->kv_at + 4u) {
+        kv_commit(state);
+    } else {
+        kv_reset(state);
+    }
+    if (offset_is_branch_target(state, offset)) {
+        kv_reset(state);
+    }
+    kv_record(state, insn, offset, op);
+    state->kv_seen = true;
+    state->kv_at = offset;
+    state->kv_at_op = op;
+}
+
+// Whether a compare's condition holds, given what is known of the
+// register it compared: 1 always, 0 never, -1 undecided.
+static int kv_eval_cmp(const kv_cmp *k, const kv_fact *f, unsigned cond)
+{
+    unsigned view = k->sf ? 1u : 0u;
+    uint64_t mask = kv_mask(k->sf);
+    uint64_t lo, hi;
+    int64_t slo, shi;
+    kv_range(f, view, &lo, &hi, &slo, &shi);
+    if (lo > hi || slo > shi || (f->k0 & f->k1 & mask) != 0) {
+        return -1;
+    }
+    uint64_t imm = k->imm & mask;
+    int64_t simm = kv_signed(imm, view);
+    if (lo == hi) {
+        return kv_cond_holds(cond, kv_flags(k->kind, lo, imm, k->sf)) ? 1 : 0;
+    }
+    if (k->kind == KV_CMP_AND) {
+        // Rn & imm: which of N and Z the known bits leave possible (C
+        // and V are clear).
+        uint64_t top = (uint64_t)1 << (k->sf ? 63 : 31);
+        uint64_t may = ~f->k0 & mask & kv_ones(bits_used64(hi)) & imm;
+        uint64_t must = f->k1 & mask & imm;
+        uint16_t states = 0;
+        for (unsigned n = 0; n < 2u; n++) {
+            for (unsigned z = 0; z < 2u; z++) {
+                if ((n != 0 && z != 0) || (z != 0 && must != 0)
+                        || (z == 0 && may == 0)
+                        || (n != 0 && (may & top) == 0)
+                        || (n == 0 && (must & top) != 0)) {
+                    continue;
+                }
+                states |= (uint16_t)(1u << (n << 3 | z << 2));
+            }
+        }
+        return kv_eval_states(cond, states);
+    }
+    uint64_t eq = k->kind == KV_CMP_ADD ? (0 - imm) & mask : imm;
+    if (cond <= 1u) {
+        bool may_equal = eq >= lo && eq <= hi
+            && kv_signed(eq, view) >= slo && kv_signed(eq, view) <= shi
+            && (eq & f->k0 & mask) == 0 && (~eq & f->k1 & mask) == 0;
+        if (may_equal) {
+            return -1;
+        }
+        return cond == 0u ? 0 : 1;
+    }
+    if (k->kind == KV_CMP_ADD) {
+        return -1;
+    }
+    switch (cond) {
+    case 2: return lo >= imm ? 1 : hi < imm ? 0 : -1;
+    case 3: return lo >= imm ? 0 : hi < imm ? 1 : -1;
+    case 8: return lo > imm ? 1 : hi <= imm ? 0 : -1;
+    case 9: return lo > imm ? 0 : hi <= imm ? 1 : -1;
+    case 10: return slo >= simm ? 1 : shi < simm ? 0 : -1;
+    case 11: return slo >= simm ? 0 : shi < simm ? 1 : -1;
+    case 12: return slo > simm ? 1 : shi <= simm ? 0 : -1;
+    case 13: return slo > simm ? 0 : shi <= simm ? 1 : -1;
+    default: return -1;
+    }
+}
+
+static void kv_reg_name(char *buf, size_t size, unsigned r, bool sf)
+{
+    if (r == 31u) {
+        snprintf(buf, size, "%s", sf ? "xzr" : "wzr");
+    } else {
+        snprintf(buf, size, "%c%u", sf ? 'x' : 'w', r);
+    }
+}
+
+static void kv_signed_hex(char *buf, size_t size, int64_t v)
+{
+    if (v < 0) {
+        snprintf(buf, size, "-0x%" PRIx64, (uint64_t)0 - (uint64_t)v);
+    } else {
+        snprintf(buf, size, "0x%" PRIx64, (uint64_t)v);
+    }
+}
+
+// What the facts say about a compared register, for a decision the
+// compare's condition got from them.
+static void kv_describe_cmp(char *buf, size_t size, const kv_cmp *k,
+                            const kv_fact *f, unsigned cond, bool taken)
+{
+    unsigned view = k->sf ? 1u : 0u;
+    uint64_t mask = kv_mask(k->sf);
+    char reg[8];
+    kv_reg_name(reg, sizeof(reg), k->rn, k->sf);
+    uint64_t lo, hi;
+    int64_t slo, shi;
+    kv_range(f, view, &lo, &hi, &slo, &shi);
+    const char *what = NULL;
+    if (k->kind == KV_CMP_AND && lo != hi) {
+        uint64_t m = k->imm & mask;
+        uint64_t top = (uint64_t)1 << (k->sf ? 63 : 31);
+        uint64_t may = ~f->k0 & mask & kv_ones(bits_used64(hi)) & m;
+        uint64_t must = f->k1 & mask & m;
+        if (may == 0) {
+            what = "is 0";
+        } else if (cond <= 1u && must != 0) {
+            what = "is nonzero";
+        } else if ((may & top) == 0) {
+            what = must != 0 ? "is positive" : "is not negative";
+        } else if ((must & top) != 0) {
+            what = "is negative";
+        } else if (must != 0) {
+            what = "is nonzero";
+        }
+    }
+    if (lo == hi) {
+        snprintf(buf, size, "%s is 0x%" PRIx64, reg, lo);
+    } else if (what != NULL) {
+        snprintf(buf, size, "%s & 0x%" PRIx64 " %s", reg, k->imm & mask,
+                 what);
+    } else if (cond >= 10u && cond <= 13u
+            ? slo == (view != 0 ? INT64_MIN : INT32_MIN)
+              && shi == (view != 0 ? INT64_MAX : INT32_MAX)
+            : lo == 0 && hi == mask) {
+        snprintf(buf, size, "%s value of %s passes %s against 0x%" PRIx64,
+                 taken ? "every" : "no", reg, a64_cond_names[cond],
+                 k->imm & mask);
+    } else if (cond >= 10u && cond <= 13u) {
+        char a[24], b[24];
+        kv_signed_hex(a, sizeof(a), slo);
+        kv_signed_hex(b, sizeof(b), shi);
+        snprintf(buf, size, "%s is in [%s, %s]", reg, a, b);
+    } else {
+        snprintf(buf, size, "%s is in [0x%" PRIx64 ", 0x%" PRIx64 "]", reg, lo,
+                 hi);
+    }
+}
+
+// Detect a conditional branch whose outcome the path to it already
+// decides; see armlint.h.
+bool check_branch_decided(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->kv_valid = false;
+        return false;
+    }
+    kv_sync(state, insn, offset);
+    uint32_t op = insn_word(insn);
+    int64_t disp;
+    if ((op & 0xFF000000u) == 0x54000000u
+            || (op & 0x7E000000u) == 0x34000000u) {
+        disp = (int64_t)((int32_t)(((op >> 5) & 0x7FFFFu) << 13) >> 13);
+    } else if ((op & 0x7E000000u) == 0x36000000u) {
+        disp = (int64_t)((int32_t)(((op >> 5) & 0x3FFFu) << 18) >> 18);
+    } else {
+        return false;
+    }
+    if (disp == 1) {
+        return false;       // check_branch_to_next deletes it either way
+    }
+
+    int taken = -1;
+    char why[80];
+    const char *src_text = NULL;
+    size_t src_offset = SIZE_MAX;
+    if ((op & 0xFF000000u) == 0x54000000u) {
+        unsigned cond = op & 0xFu;
+        if (cond >= 14u) {
+            return false;
+        }
+        // First the flag setter's operation alone (a TST never sets C),
+        // then the compare that set the flags with what is known of its
+        // register -- now, if it is unwritten since (the branches
+        // between may have narrowed it), else as it was -- and last the
+        // states the branches before this one left.
+        taken = kv_eval_states(cond, state->kv_setter_kind);
+        if (taken >= 0) {
+            snprintf(why, sizeof(why), "%s cannot set flags that %s %s",
+                     state->kv_setter_mnem, taken != 0 ? "fail" : "pass",
+                     a64_cond_names[cond]);
+            src_text = state->kv_setter_text;
+            src_offset = state->kv_setter_offset;
+        }
+        const kv_cmp *k = &state->kv_last_cmp;
+        if (taken < 0 && state->kv_cmp_ver == state->kv_nzcv_ver
+                && k->kind != KV_CMP_NONE) {
+            kv_fact f = k->fact;
+            bool now = k->rn < 31u && state->kv_ver[k->rn] == k->rn_ver
+                && ((state->kv_known >> k->rn) & 1u) != 0;
+            if (now) {
+                f = state->kv_facts[k->rn];
+            }
+            taken = kv_eval_cmp(k, &f, cond);
+            if (taken >= 0) {
+                kv_describe_cmp(why, sizeof(why), k, &f, cond, taken != 0);
+                if (now) {
+                    src_text = state->kv_src_text[k->rn];
+                    src_offset = state->kv_src_offset[k->rn];
+                } else {
+                    src_text = state->kv_setter_text;
+                    src_offset = state->kv_setter_offset;
+                }
+            }
+        }
+        if (taken < 0) {
+            taken = kv_eval_states(cond, state->kv_nzcv_states);
+            if (taken >= 0) {
+                snprintf(why, sizeof(why), "the flags here cannot %s %s",
+                         taken != 0 ? "fail" : "pass", a64_cond_names[cond]);
+            }
+        }
+        if (taken >= 0 && src_text == NULL
+                && state->kv_nzcv_src_offset != SIZE_MAX) {
+            src_text = state->kv_nzcv_src_text;
+            src_offset = state->kv_nzcv_src_offset;
+        }
+    } else {
+        unsigned r = op & 0x1Fu;
+        bool nz = ((op >> 24) & 1u) != 0;
+        bool sf = (op >> 31) != 0;
+        kv_fact f;
+        if (r == 31u) {
+            kv_fact_const(&f, 0);
+        } else {
+            kv_get(state, r, &f);
+        }
+        char reg[8];
+        if ((op & 0x7E000000u) == 0x34000000u) {
+            // CBZ/CBNZ: taken when the register is zero / not zero.
+            unsigned view = sf ? 1u : 0u;
+            uint64_t lo, hi;
+            int64_t slo, shi;
+            kv_range(&f, view, &lo, &hi, &slo, &shi);
+            kv_reg_name(reg, sizeof(reg), r, sf);
+            if (lo <= hi && slo <= shi && (hi == 0 || lo > 0)) {
+                bool zero = hi == 0;
+                taken = zero != nz ? 1 : 0;
+                if (lo == hi) {
+                    snprintf(why, sizeof(why), "%s is 0x%" PRIx64, reg, lo);
+                } else {
+                    snprintf(why, sizeof(why), "%s is nonzero", reg);
+                }
+            }
+        } else {
+            // TBZ/TBNZ: taken when the bit is clear / set.
+            unsigned bit = (op >> 31) << 5 | ((op >> 19) & 0x1Fu);
+            uint64_t m = (uint64_t)1 << bit;
+            bool clear = (f.k0 & m) != 0, set = (f.k1 & m) != 0;
+            if (!clear && !set) {
+                uint64_t lo, hi;
+                int64_t slo, shi;
+                kv_range(&f, bit < 32u ? 0u : 1u, &lo, &hi, &slo, &shi);
+                clear = lo <= hi && hi < m;
+            }
+            kv_reg_name(reg, sizeof(reg), r, bit >= 32u);
+            if (clear != set) {
+                taken = clear != nz ? 1 : 0;
+                snprintf(why, sizeof(why), "bit %u of %s is %u", bit, reg,
+                         set ? 1u : 0u);
+            }
+        }
+        if (taken >= 0 && r < 31u && ((state->kv_known >> r) & 1u) != 0) {
+            src_text = state->kv_src_text[r];
+            src_offset = state->kv_src_offset[r];
+        }
+    }
+    if (taken < 0) {
+        return false;
+    }
+
+    out->name = taken != 0 ? "conditional branch that is always taken"
+                           : "conditional branch that is never taken";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    char known[40] = "";
+    if (src_text != NULL) {
+        snprintf(known, sizeof(known), " (known 0x%zx bytes back)",
+                 offset - src_offset);
+    }
+    if (taken != 0) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> b 0x%" PRIx64 "; always taken: %s%s",
+            insn->address + (uint64_t)(disp * 4), why, known);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> delete; never taken: %s%s", why, known);
+    }
+    unsigned line = 0;
+    if (src_text != NULL) {
+        snprintf(out->lines[line++], sizeof(out->lines[0]), "%s", src_text);
+    }
+    insn_text(out->lines[line], sizeof(out->lines[line]), insn);
+    return true;
+}
+
 // === CMP of a 32-bit value against 2^32 - k (check_cmp_cmn_w) ===
 
 // The target of a direct branch at `offset`, and whether it is
@@ -20016,6 +21639,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_aut_ret,
     check_br_x30,
     check_branch_to_next,
+    check_branch_decided,
     check_lse_rmw,
     check_pac_lr_spill,
     check_pac_raw_indirect,

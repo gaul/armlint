@@ -38,6 +38,8 @@
 //          before anything reads it.
 //   cmn    check_cmp_cmn_w: delete the MOV of 2^32 - k and turn the 64-bit
 //          CMP into the W-form CMN the finding renders.
+//   branch check_branch_decided: delete a conditional branch that is never
+//          taken, or make an always-taken one a B to its target.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -161,6 +163,7 @@ static uint32_t madd_w(unsigned d, unsigned n, unsigned m, unsigned a) { return 
 static uint32_t cmp_imm(bool x, bool cmn, unsigned n, unsigned i) { return (x ? 0x80000000u : 0) | (cmn ? 0x3100001Fu : 0x7100001Fu) | (i & 0xFFFu) << 10 | n << 5; }
 static uint32_t ccmp_imm(bool x, bool ccmn, unsigned n, unsigned i, unsigned nzcv, unsigned c) { return (x ? 0x80000000u : 0) | (ccmn ? 0x3A400800u : 0x7A400800u) | (i & 31u) << 16 | c << 12 | n << 5 | nzcv; }
 static uint32_t cmp_x(unsigned n, unsigned m) { return 0xEB00001Fu | m << 16 | n << 5; }
+static uint32_t cmp_w(unsigned n, unsigned m) { return 0x6B00001Fu | m << 16 | n << 5; }
 static uint32_t cmn_w_imm(unsigned n, unsigned i, bool lsl12) { return 0x3100001Fu | (lsl12 ? 1u << 22 : 0) | (i & 0xFFFu) << 10 | n << 5; }
 static uint32_t tst_w_low(unsigned n, unsigned w) { return 0x7200001Fu | (w - 1u) << 10 | n << 5; }
 static uint32_t ldrb_w(unsigned t, unsigned i) { return 0x39400000u | (i & 0xFFFu) << 10 | REG_BUF << 5 | t; }
@@ -175,6 +178,8 @@ static uint32_t ldaddb_w(unsigned s, unsigned t) { return 0x38200000u | s << 16 
 static uint32_t ldadd_x(unsigned s, unsigned t) { return 0xF8200000u | s << 16 | REG_BUF << 5 | t; }
 // Branches take their displacement in words.
 static uint32_t cbz(bool x, bool nonzero, unsigned t, int words) { return (x ? 0x80000000u : 0) | (nonzero ? 0x35000000u : 0x34000000u) | ((unsigned)words & 0x7FFFFu) << 5 | t; }
+static uint32_t tbz(bool nonzero, unsigned t, unsigned bit, int words) { return (bit >> 5) << 31 | (nonzero ? 0x37000000u : 0x36000000u) | (bit & 31u) << 19 | ((unsigned)words & 0x3FFFu) << 5 | t; }
+static uint32_t b_(int words) { return 0x14000000u | ((unsigned)words & 0x3FFFFFFu); }
 static uint32_t b_cond(unsigned c, int words) { return 0x54000000u | ((unsigned)words & 0x7FFFFu) << 5 | c; }
 static uint32_t bl(int words) { return 0x94000000u | ((unsigned)words & 0x3FFFFFFu); }
 
@@ -211,9 +216,11 @@ typedef struct {
     int kind;
     uint32_t word;      // SLOT_PLAIN
     int target;         // SLOT_BRANCH/SLOT_READER: body index, or the end
-    unsigned reg;       // SLOT_BRANCH: the CBZ/CBNZ register
+    unsigned reg;       // SLOT_BRANCH: the CBZ/CBNZ/TBZ/TBNZ register
     unsigned cond;      // SLOT_BRANCH/SLOT_READER: the B.cond condition
-    unsigned form;      // SLOT_BRANCH: 0 CBZ, 1 CBNZ, 2 B.cond
+    unsigned form;      // SLOT_BRANCH: 0 CBZ X, 1 CBNZ W, 2 B.cond,
+                        // 3 CBZ W, 4 CBNZ X, 5 TBZ, 6 TBNZ
+    unsigned bit;       // SLOT_BRANCH: the TBZ/TBNZ bit
 } slot_t;
 
 #define BODY_MAX 40
@@ -536,6 +543,86 @@ static void plant_cmp_cmn(void)
     }
 }
 
+// branch: a branch of a known form on register r (or the flags).
+static void push_branch(unsigned form, unsigned reg, unsigned cond,
+                        unsigned bit)
+{
+    if (nbody < BODY_MAX) {
+        body[nbody++] = (slot_t){ .kind = SLOT_BRANCH, .reg = reg,
+                                  .cond = cond, .form = form, .bit = bit };
+    }
+}
+
+// A zero or bit test of r, now and then of a width or bit the fact
+// does not cover.
+static void push_test(unsigned r)
+{
+    unsigned form = 3u + rr(4);
+    unsigned bit = rr(3) == 0 ? rr(64) : rr(8);
+    if (rr(4) == 0) {
+        form = rr(2);           // the X CBZ / W CBNZ forms
+    }
+    push_branch(form, r, 0, bit);
+}
+
+// branch: something that establishes a fact about r or the flags, a
+// gap, and a branch the fact may decide -- a second test of r, a
+// compare of r with another immediate, a repeated compare, a branch on
+// a constant or on the bits a producer left.
+static void plant_decided(void)
+{
+    unsigned r = body_reg();
+    bool x = rr(2) == 0;
+    switch (rr(7)) {
+    case 0:
+        push_test(r);
+        break;
+    case 1:
+        push(cmp_imm(x, rr(4) == 0, r, small_imm()));
+        push_branch(2, 0, rr(14), 0);
+        break;
+    case 2: {
+        uint32_t c = rr(2) == 0 ? cmp_x(r, body_reg())
+                                : cmp_imm(x, rr(4) == 0, r, small_imm());
+        push(c);
+        push_branch(2, 0, rr(14), 0);
+        plant_gap();
+        push(c);
+        push_branch(2, 0, rr(14), 0);
+        return;
+    }
+    case 3:
+        push(rr(2) == 0 ? movz_x(r, rr(4) == 0 ? rr(0x10000) : rr(48), 0)
+                        : movn_w(r, rr(48)));
+        break;
+    case 6: {
+        // A W compare with a negative constant, under any condition.
+        unsigned c = (r + 1u + rr(7)) % 8u;
+        push(movn_w(c, rr(48)));
+        push(cmp_w(r, c));
+        push_branch(2, 0, rr(14), 0);
+        plant_gap();
+        push(cmp_w(r, c));
+        push_branch(2, 0, rr(14), 0);
+        return;
+    }
+    case 4:
+        push(producer(r));
+        break;
+    default:
+        push(tst_w_low(r, lowmask_width(false)));
+        push_branch(2, 0, rr(2), 0);            // b.eq / b.ne
+        break;
+    }
+    plant_gap();
+    if (rr(2) == 0) {
+        push(cmp_imm(x, rr(4) == 0, r, small_imm()));
+        push_branch(2, 0, rr(14), 0);
+    } else {
+        push_test(r);
+    }
+}
+
 static void gen_body(void (*plant)(void))
 {
     nbody = 0;
@@ -590,9 +677,16 @@ static void assemble(void)
             prog[at] = s->word;
             break;
         case SLOT_BRANCH:
-            prog[at] = s->form == 2 ? b_cond(s->cond, words)
-                                    : cbz(s->form == 0, s->form == 1,
-                                          s->reg, words);
+            switch (s->form) {
+            case 2: prog[at] = b_cond(s->cond, words); break;
+            case 3: prog[at] = cbz(false, false, s->reg, words); break;
+            case 4: prog[at] = cbz(true, true, s->reg, words); break;
+            case 5: prog[at] = tbz(false, s->reg, s->bit, words); break;
+            case 6: prog[at] = tbz(true, s->reg, s->bit, words); break;
+            default:
+                prog[at] = cbz(s->form == 0, s->form == 1, s->reg, words);
+                break;
+            }
             break;
         case SLOT_READER:
             prog[at] = b_cond(s->cond, words);
@@ -720,7 +814,7 @@ static void run(const uint32_t *code, const regs_t *in, regs_t *out)
 
 static uint64_t edge_value(void)
 {
-    switch (rr(9)) {
+    switch (rr(10)) {
     case 0: return 0;
     case 1: return ~0ull;
     case 2: return 0xFFFFFFFFull;
@@ -728,6 +822,7 @@ static uint64_t edge_value(void)
     case 4: return 0xFFFFFFFF00000000ull | rr(0x10000);
     case 5: return rr(4) == 0 ? rr(0x1000) : rr(48);
     case 6: return 0 - (uint64_t)rr(48);
+    case 7: return (uint64_t)(1u + rr(3)) << 32;    // W zero, X not
     default: return rnd();
     }
 }
@@ -1146,6 +1241,59 @@ static bool cmn_control(int i, uint32_t *alt)
     return true;
 }
 
+// branch: "-> delete; never taken: ..." deletes the branch, "-> b 0x...;
+// always taken: ..." makes it a B with the same displacement.
+static int32_t branch_disp(uint32_t w)
+{
+    if ((w & 0x7E000000u) == 0x36000000u) {
+        return (int32_t)(((w >> 5) & 0x3FFFu) << 18) >> 18;
+    }
+    return (int32_t)(((w >> 5) & 0x7FFFFu) << 13) >> 13;
+}
+
+static bool branch_apply(const hit_t *h, uint32_t *code)
+{
+    if (h->count != 1u || !in_body(h->start, h->start)) {
+        return false;
+    }
+    if (strncmp(h->detail, "-> delete; never taken", 22) == 0) {
+        code[h->start] = NOP;
+        return true;
+    }
+    unsigned long long target;
+    if (sscanf(h->detail, "-> b 0x%llx; always taken", &target) != 1
+            || target != h->start * 4u
+                          + (uint64_t)(int64_t)branch_disp(code[h->start]) * 4u) {
+        return false;
+    }
+    code[h->start] = b_(branch_disp(code[h->start]));
+    return true;
+}
+
+static size_t branch_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+static bool branch_special(const hit_t *h)
+{
+    return strstr(h->detail, "always taken") != NULL;
+}
+
+// Control: delete an unflagged conditional branch, or make it a B.
+static bool branch_control(int i, uint32_t *alt)
+{
+    uint32_t w = prog[i];
+    bool cond = ((w & 0xFF000010u) == 0x54000000u && (w & 0xFu) < 14u)
+        || (w & 0x7E000000u) == 0x34000000u
+        || (w & 0x7E000000u) == 0x36000000u;
+    if (!cond || rr(2) != 0) {
+        return false;
+    }
+    alt[i] = rr(2) == 0 ? NOP : b_(branch_disp(w));
+    return true;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -1178,6 +1326,10 @@ static const mode_t_ modes[] = {
                "W-form CMN", NULL },
       "with a branch reader", plant_cmp_cmn, cmn_apply, cmn_slot,
       cmn_special, cmn_control },
+    { "branch", { "conditional branch that is never taken",
+                  "conditional branch that is always taken" },
+      "always taken", plant_decided, branch_apply, branch_slot,
+      branch_special, branch_control },
 };
 
 static bool wanted(const char *name)
@@ -1193,7 +1345,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn|branch\n");
 }
 
 int main(int argc, char **argv)

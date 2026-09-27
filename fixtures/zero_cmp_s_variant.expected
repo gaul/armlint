@@ -102,6 +102,10 @@ ADD/SUB/AND/BIC + zero-CMP foldable to S-variant at offset: 0xb0 <_main+0xb0>: -
 compare whose flags are overwritten unread at offset: 0xb8 <_main+0xb8>: -> delete; NZCV overwritten unread by cmp w0, #0 (1 instructions)
   ccmp w3, w4, #0, eq
 
+conditional branch that is always taken at offset: 0xc4 <_main+0xc4>: -> b 0x104; always taken: w0 is in [0x0, 0xff0] (known 0x8 bytes back) (1 instructions)
+  and w0, w1, #0xff0
+  b.ge #0x104
+
 compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0xc0 <_main+0xc0>: -> tbz w0, #31, 0x104 (2 instructions)
   cmp w0, #0
   b.ge 0x104
@@ -121,6 +125,10 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0xdc <_main+0xdc>: -> cbz 
   cmp w0, #0
   b.eq 0x104
 
+conditional branch that is never taken at offset: 0xf0 <_main+0xf0>: -> delete; never taken: w0 is 0x7 (known 0x8 bytes back) (1 instructions)
+  mov w0, #7
+  b.eq #0x104
+
 compare-zero branch foldable into CBZ/CBNZ at offset: 0xec <_main+0xec>: -> cbz w0, 0x104 (2 instructions)
   cmp w0, #0
   b.eq 0x104
@@ -139,5 +147,7 @@ Optimization opportunities by type:
        2  compare whose flags are overwritten unread
        1  branch to the next instruction is a no-op
        1  compare-zero signed-branch foldable into TBZ/TBNZ
+       1  conditional branch that is always taken
+       1  conditional branch that is never taken
 
-34 optimization opportunities in 66 instructions
+36 optimization opportunities in 66 instructions

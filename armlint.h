@@ -563,6 +563,55 @@ bool check_br_x30(armlint_state *state, const cs_insn *insn,
 bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect a conditional branch whose outcome the straight-line path to
+// it already decides:
+//     mov  w8, #1
+//     cbz  x8, L            -> delete (never taken: x8 is 0x1)
+//     ldr  w8, [sp, #8]     ; clang: llvm::Expected's flag, tested twice
+//     tbnz w8, #0, L1
+//     str  w8, [x19]
+//     tbz  w8, #0, L2       -> b L2 (always taken: bit 0 of w8 is 0)
+//     cmp  x1, #6 ; b.hs L  ; a switch lowered to a compare tree
+//     cmp  x1, #4 ; b.le L
+//     cmp  x1, #5
+//     b.eq L                -> b L (always taken: x1 is 0x5)
+// B.cond/BC.cond, CBZ/CBNZ and TBZ/TBNZ are decided from what the
+// known-value engine (the kv_* functions in armlint.c) has established
+// about their register or flags: the bits known zero and one and the
+// unsigned and signed ranges of each GPR -- from constants (any result
+// a decoded instruction computes from known inputs), zeroing producers
+// (an AND, a bitfield extract, a narrow or W-form load, any W-form
+// write, a CSET), copies, and the fall-through of every conditional
+// branch before it (CBZ: not zero; CBNZ: zero; TBZ: the bit set;
+// TBNZ: clear; B.cond after a compare with an immediate or a known
+// register: a bound) -- and, for the flags, the set of states still
+// possible: those the flag setter can leave (exactly one when its
+// operands are known; a SUBS sets Z only with C, an ANDS clears C and
+// V), less those each B.cond that fell through accepts. A flag setter
+// repeating an earlier one on unwritten registers keeps what the
+// branches after the first learned. A never-taken branch is deleted; an
+// always-taken one becomes B to the same target, which also leaves the
+// code after it unreachable from here.
+//
+// The facts hold on the straight-line path only: every one ends at a
+// branch target (a side entry arrives without them), after B/BL/BR/
+// BLR/RET, exceptions, UDF and every system instruction but NOP, BTI,
+// the barriers and MRS, and at a flush; conditional branches keep them,
+// since the fall-through keeps its registers. Writes come from the
+// decoded instruction, else from insn_gpr_write_mask, which
+// over-reports rather than miss one. A value a MOVK builds is never
+// known: a JIT's patch site is a MOVZ/MOVK sequence whose placeholder
+// is not the value it holds once patched (check_value_recompute's
+// reason too), so a branch on one is not decided; ADR/ADRP values move
+// with the image and are not tracked either. The finding is the branch
+// alone, with the instruction that established the deciding fact shown
+// first. A branch to the next instruction is check_branch_to_next's,
+// and the conditions AL and NV decide nothing to report. Reported as
+// "conditional branch that is never taken" and "conditional branch
+// that is always taken".
+bool check_branch_decided(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect the Armv8.0 exclusive-monitor retry loop and suggest the
 // single Armv8.1 FEAT_LSE atomic (-m lse). Three shapes, matched
 // with strict adjacency plus exact branch targets:

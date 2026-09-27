@@ -39,13 +39,27 @@ static csh g_handle;
 static const char *g_uncounted;
 static const char *const kDeadWrite = "register write overwritten unread";
 
+// Likewise check_branch_decided's findings, while set: several
+// fragments end in a branch their own instructions decide -- a compare
+// of ZR, a TST whose mask cannot reach N, a CBZ of a register a MOV or
+// an AND just set -- and those tests are about the other check.
+static bool g_branches_uncounted;
+
 static bool counted(const armlint_finding *f)
 {
+    if (g_branches_uncounted
+            && strncmp(f->name, "conditional branch that is ", 27) == 0) {
+        return false;
+    }
     return g_uncounted == NULL || strcmp(f->name, g_uncounted) != 0;
 }
 
 #define DEAD_WRITES_UNCOUNTED(stmt) \
     do { g_uncounted = kDeadWrite; stmt; g_uncounted = NULL; } while (0)
+
+#define DECIDED_BRANCHES_UNCOUNTED(stmt) \
+    do { g_branches_uncounted = true; stmt; g_branches_uncounted = false; } \
+    while (0)
 
 static int run_check(const uint8_t *code, size_t code_size)
 {
@@ -2148,13 +2162,13 @@ static void test_cmp_zero_branch(void)
     tst_w_reg(&code[0], 31, 31);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // cmp wzr, wzr ; b.eq -- Rn=31 excluded.
     cmp_w_reg(&code[0], 31, 31);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // -- Positive: sign-bit branch idioms. CMP/TST + B.LT/GE/MI/PL
     //    folds to TBZ/TBNZ on the sign bit (datasize - 1). --
@@ -2288,7 +2302,7 @@ static void test_cmp_zero_branch(void)
     ands_w(&code[0], 31, 0, 0);
     b_cond(&code[4], 8 /* HI */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // tst w0, w0 ; b.eq ; ret -- the eq/ne fold still applies to the
     // TST form (flag; Z is form-independent).
@@ -2364,7 +2378,7 @@ static void test_cmp_zero_branch(void)
     cmn_w_reg(&code[0], 31, 31);
     b_cond(&code[4], 0 /* EQ */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 }
 
 static void test_tst_branch(void)
@@ -2468,7 +2482,7 @@ static void test_tst_branch(void)
     b_cond(&code[4], 0, 8);
     b_cond(&code[8], 11 /* LT */, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 16) == 0););
 
     // -- Negative: not EQ/NE. --
 
@@ -2476,7 +2490,7 @@ static void test_tst_branch(void)
     tst_w_bit(&code[0], 0, 0);
     b_cond(&code[4], 11 /* LT */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // -- Negative: intervening instruction expires tst_active. --
 
@@ -2492,7 +2506,7 @@ static void test_tst_branch(void)
     tst_w_bit(&code[0], 31, 0);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // -- Lone TST without consumer. --
 
@@ -2671,7 +2685,7 @@ static void test_single_bit_cbz(void)
     cbz_cbnz(&code[4], 0, 0, 8, 2);      // cbz w8
     add_x(&code[8], 1, 2, 3);
     movz_x(&code[12], 8, 0, 0);
-    assert(run_helper_check(code, 16) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 16) == 0););
 
     // -- Negative: ANDS (flag-setting) is not a producer. --
 
@@ -2719,7 +2733,7 @@ static void test_single_bit_cbz(void)
     and_w_bit(&code[0], 8, 31, 4);
     cbz_cbnz(&code[4], 0, 0, 8, 2);
     movz_w(&code[8], 8, 1);     // not #0: w8 already holds zero
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 }
 
 // CSET Rd, cond -- takes the logical CSET condition and encodes the
@@ -2947,7 +2961,7 @@ static void test_cset_fold(void)
     tbz_tbnz(&code[4], 0, true, 3, 2, 8);    // tbnz w8, #3
     add_x(&code[8], 1, 2, 3);
     movz_w(&code[12], 8, 0);
-    assert(run_helper_check(code, 16) == 0);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 16) == 0););
 
     // TBZ of a different register is not a consumer.
     cset_(&code[0], 0, 8, 5);
@@ -5673,7 +5687,8 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 20) == 1););
+    DECIDED_BRANCHES_UNCOUNTED(DEAD_WRITES_UNCOUNTED(
+        assert(run_helper_check(code, 20) == 1);););
 
     // A read-modify-write of Rd in the gap breaks it just the same
     // (EOR is not itself a producer, so nothing reopens the slot):
@@ -9268,6 +9283,160 @@ static void test_cmp_cmn_w(void)
                     && strcmp(detail, cases[i].detail) != 0)) {
             fprintf(stderr, "cmp_cmn_w case %zu: %d findings, detail "
                     "\"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
+// check_branch_decided over instruction words with the buffer set, for
+// both of its finding names: never taken, always taken, or neither.
+enum { NONE, NEVER, ALWAYS };
+
+static void test_branch_decided(void)
+{
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // mov w8, #1 ; cbz x8, 1f ; ret ; 1: ret
+        { { 0x52800028u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
+          "-> delete; never taken: x8 is 0x1 (known 0x4 bytes back)" },
+        // ldr w8, [sp, #8] ; tbnz w8, #0, 1f ; str w8, [x19] ; tbz w8, #0, 1f ; ret ; 1: ret
+        { { 0xB9400BE8u, 0x37000088u, 0xB9000268u, 0x36000048u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, ALWAYS,
+          "-> b 0x14; always taken: bit 0 of w8 is 0 (known 0x8 bytes back)" },
+        // cmp x1, #6 ; b.hs 1f ; cmp x1, #4 ; b.le 1f ; cmp x1, #5 ; b.eq 1f ; ret ; 1: ret
+        { { 0xF100183Fu, 0x540000C2u, 0xF100103Fu, 0x5400008Du, 0xF100143Fu,
+            0x54000040u, 0xD65F03C0u, 0xD65F03C0u }, 8, ALWAYS,
+          "-> b 0x1c; always taken: x1 is 0x5 (known 0x8 bytes back)" },
+        // cmp x0, #5 ; b.eq 1f ; add x2, x2, #1 ; cmp x0, #5 ; b.eq 1f ; ret ; 1: ret
+        { { 0xF100141Fu, 0x540000A0u, 0x91000442u, 0xF100141Fu, 0x54000040u,
+            0xD65F03C0u, 0xD65F03C0u }, 7, NEVER,
+          "-> delete; never taken: the flags here cannot pass eq "
+          "(known 0xc bytes back)" },
+        // cbz x23, 1f ; ldrb w8, [x23, #8] ; cbz x23, 1f ; ret ; 1: ret
+        { { 0xB4000097u, 0x394022E8u, 0xB4000057u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: x23 is nonzero (known 0x8 bytes back)" },
+        // cbnz x0, 1f ; cbz x0, 1f ; ret ; 1: ret
+        { { 0xB5000060u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 4, ALWAYS,
+          "-> b 0xc; always taken: x0 is 0x0 (known 0x4 bytes back)" },
+        // cbz w0, 1f ; cbz x0, 1f ; ret ; 1: ret
+        { { 0x34000060u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
+          "-> delete; never taken: x0 is nonzero (known 0x4 bytes back)" },
+        // cbz x0, 1f ; cbz w0, 1f ; ret ; 1: ret
+        { { 0xB4000060u, 0x34000040u, 0xD65F03C0u, 0xD65F03C0u }, 4, NONE, NULL },
+        // tst x0, #4 ; b.ne 1f ; tbnz w0, #2, 1f ; ret ; 1: ret
+        { { 0xF27E001Fu, 0x54000061u, 0x37100040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: bit 2 of w0 is 0 (known 0x4 bytes back)" },
+        // tst w0, #1 ; b.hs 1f ; ret ; 1: ret
+        { { 0x7200001Fu, 0x54000042u, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
+          "-> delete; never taken: tst cannot set flags that pass hs "
+          "(known 0x4 bytes back)" },
+        // cmp x0, #0 ; b.lo 1f ; ret ; 1: ret
+        { { 0xF100001Fu, 0x54000043u, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
+          "-> delete; never taken: no value of x0 passes lo against 0x0 "
+          "(known 0x4 bytes back)" },
+        // ldrb w5, [x1] ; tbnz w5, #31, 1f ; ret ; 1: ret
+        { { 0x39400025u, 0x37F80045u, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
+          "-> delete; never taken: bit 31 of w5 is 0 (known 0x4 bytes back)" },
+        // ldrb w3, [x0] ; cmp x3, #0xff ; b.hi 1f ; ret ; 1: ret
+        { { 0x39400003u, 0xF103FC7Fu, 0x54000048u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: x3 is in [0x0, 0xff] (known 0x8 bytes back)" },
+        // cmp w0, #10 ; b.ge 1f ; cmp w0, #20 ; b.lt 1f ; ret ; 1: ret
+        { { 0x7100281Fu, 0x5400008Au, 0x7100501Fu, 0x5400004Bu, 0xD65F03C0u,
+            0xD65F03C0u }, 6, ALWAYS,
+          "-> b 0x14; always taken: w0 is in [-0x80000000, 0x9] (known "
+          "0x8 bytes back)" },
+        // mov x9, #3 ; mov x10, x9 ; cmp x10, #3 ; b.ne 1f ; ret ; 1: ret
+        { { 0xD2800069u, 0xAA0903EAu, 0xF1000D5Fu, 0x54000041u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, NEVER,
+          "-> delete; never taken: x10 is 0x3 (known 0x8 bytes back)" },
+        // mov w8, #0 ; add w9, w8, #2 ; cbz w9, 1f ; ret ; 1: ret
+        { { 0x52800008u, 0x11000909u, 0x34000049u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: w9 is 0x2 (known 0x4 bytes back)" },
+        // cbz wzr, 1f ; ret ; 1: ret
+        { { 0x3400005Fu, 0xD65F03C0u, 0xD65F03C0u }, 3, ALWAYS,
+          "-> b 0x8; always taken: wzr is 0x0" },
+        // fcmp d0, d1 ; b.vs 1f ; b.vs 1f ; ret ; 1: ret
+        { { 0x1E612000u, 0x54000066u, 0x54000046u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: the flags here cannot pass vs "
+          "(known 0x4 bytes back)" },
+        // mov w9, #0x7fff ; cmp w27, w9 ; b.hs 1f ; cmp w27, #8, lsl #12 ; b.hs 1f ; ret ; 1: ret
+        { { 0x528FFFE9u, 0x6B09037Fu, 0x54000082u, 0x7140237Fu, 0x54000042u,
+            0xD65F03C0u, 0xD65F03C0u }, 7, NEVER,
+          "-> delete; never taken: w27 is in [0x0, 0x7ffe] (known 0x8 "
+          "bytes back)" },
+        // cmp x0, #5 ; b.eq 1f ; bc.eq 1f ; ret ; 1: ret
+        { { 0xF100141Fu, 0x54000060u, 0x54000050u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: the flags here cannot pass eq "
+          "(known 0x4 bytes back)" },
+        // cbz x0, 1f ; 2: cbz x0, 1f ; ret ; b 2b ; 1: ret
+        { { 0xB4000080u, 0xB4000060u, 0xD65F03C0u, 0x17FFFFFEu, 0xD65F03C0u }, 5, NONE, NULL },
+        // tst w0, #1 ; b.lt 1f ; ret ; 1: ret
+        { { 0x7200001Fu, 0x5400004Bu, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
+          "-> delete; never taken: w0 & 0x1 is not negative (known 0x4 "
+          "bytes back)" },
+        // mov w8, wzr ; and x9, x10, #0xff ; cbz x8, 1f ; ret ; 1: ret
+        { { 0x2A1F03E8u, 0x92401D49u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 5, ALWAYS,
+          "-> b 0x10; always taken: x8 is 0x0 (known 0x8 bytes back)" },
+        // Negatives: a write between (a MOV, a post-index base, an LSE
+        // atomic's destination), a call, a MOVK sequence (a JIT patch
+        // site), a branch to the next instruction (check_branch_to_next's),
+        // another compare, a load, a W zero test before an X one, SP,
+        // an ADRP, UDF and MSR ending the region, a rewrite of the
+        // compared register between two compares.
+        // cbz x0, 1f ; mov x0, x1 ; cbz x0, 1f ; ret ; 1: ret
+        { { 0xB4000080u, 0xAA0103E0u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // cbz x0, 1f ; bl 1f ; cbz x0, 1f ; ret ; 1: ret
+        { { 0xB4000080u, 0x94000003u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // mov x2, #5 ; movk x2, #0xfffe, lsl #48 ; cbz w2, 1f ; ret ; 1: ret
+        { { 0xD28000A2u, 0xF2FFFFC2u, 0x34000042u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // mov w8, #1 ; cbz x8, 1f ; 1: ret
+        { { 0x52800028u, 0xB4000028u, 0xD65F03C0u }, 3, NONE, NULL },
+        // cmp x0, #5 ; b.eq 1f ; cmp x1, #5 ; b.eq 1f ; ret ; 1: ret
+        { { 0xF100141Fu, 0x54000080u, 0xF100143Fu, 0x54000040u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, NONE, NULL },
+        // ldr x0, [x1] ; cbz x0, 1f ; ret ; 1: ret
+        { { 0xF9400020u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 4, NONE, NULL },
+        // cbnz w0, 1f ; cbz x0, 1f ; ret ; 1: ret
+        { { 0x35000060u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 4, NONE, NULL },
+        // cmp sp, #16 ; b.eq 1f ; cmp sp, #16 ; b.eq 1f ; ret ; 1: ret
+        { { 0xF10043FFu, 0x54000080u, 0xF10043FFu, 0x54000040u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, NONE, NULL },
+        // adrp x8, 1f ; cbz x8, 1f ; ret ; 1: ret
+        { { 0x90000008u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 4, NONE, NULL },
+        // mov w8, #1 ; udf #0 ; cbz x8, 1f ; ret ; 1: ret
+        { { 0x52800028u, 0x00000000u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // mov w8, #1 ; msr nzcv, x0 ; cbz x8, 1f ; ret ; 1: ret
+        { { 0x52800028u, 0xD51B4200u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // cmp x0, #5 ; b.eq 1f ; adds x0, x0, #0 ; cmp x0, #5 ; b.eq 1f ; ret ; 1: ret
+        { { 0xF100141Fu, 0x540000A0u, 0xB1000000u, 0xF100141Fu, 0x54000040u,
+            0xD65F03C0u, 0xD65F03C0u }, 7, NONE, NULL },
+        // cbz x0, 1f ; ldr x0, [x1], #8 ; cbz x0, 1f ; ret ; 1: ret
+        { { 0xB4000080u, 0xF8408420u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // cbz x0, 1f ; ldadd x1, x0, [x2] ; cbz x0, 1f ; ret ; 1: ret
+        { { 0xB4000080u, 0xF8210040u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char other[ARMLINT_FINDING_DETAIL_LEN];
+        detail[0] = '\0';
+        int never = run_lvn_words(cases[i].words, cases[i].n,
+                                  "conditional branch that is never taken",
+                                  cases[i].expect == NEVER ? detail : other,
+                                  sizeof(detail));
+        int always = run_lvn_words(cases[i].words, cases[i].n,
+                                   "conditional branch that is always taken",
+                                   cases[i].expect == ALWAYS ? detail : other,
+                                   sizeof(detail));
+        if (never != (cases[i].expect == NEVER ? 1 : 0)
+                || always != (cases[i].expect == ALWAYS ? 1 : 0)
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "branch_decided case %zu: %d never, %d always, "
+                    "detail \"%s\"\n", i, never, always, detail);
             assert(0);
         }
     }
@@ -17503,10 +17672,12 @@ static void test_central_side_entry_gate(void)
     movz_x(&code[8], 3, 1, 0);
     cbz_w(&code[12], 0, -8);
     assert(run_buffer_check(code, 16) == 0);
-    assert(run_check(code, 16) == 1);
-    // Branch onto the MOV #0 itself: still flagged.
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_check(code, 16) == 1););
+    // Branch onto the MOV #0 itself: still flagged. (The CBZ is then
+    // always taken -- the loop sets w0 to zero each time round -- and
+    // check_branch_decided says so.)
     cbz_w(&code[12], 0, -12);
-    assert(run_buffer_check(code, 16) == 1);
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_buffer_check(code, 16) == 1););
 
     // ldr x1, [x9] ; ldr x2, [x9, #8] ; cbz w0 onto the second load.
     ldr_x_uimm0(&code[0], 1, 9);
@@ -17803,6 +17974,7 @@ int main(void)
     test_value_recompute();
     test_dead_write();
     test_cmp_cmn_w();
+    test_branch_decided();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

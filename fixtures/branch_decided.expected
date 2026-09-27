@@ -1,0 +1,50 @@
+conditional branch that is never taken at offset: 0x4 <_main+0x4>: -> delete; never taken: x8 is 0x1 (known 0x4 bytes back) (1 instructions)
+  mov w8, #1
+  cbz x8, #0x110
+
+conditional branch that is always taken at offset: 0x18 <_main+0x18>: -> b 0x110; always taken: bit 0 of w8 is 0 (known 0x8 bytes back) (1 instructions)
+  tbnz w8, #0, #0x110
+  tbz w8, #0, #0x110
+
+conditional branch that is always taken at offset: 0x34 <_main+0x34>: -> b 0x110; always taken: x1 is 0x5 (known 0x8 bytes back) (1 instructions)
+  b.le #0x110
+  b.eq #0x110
+
+register already holds the recomputed value at offset: 0x48 <_main+0x48>: -> delete; NZCV already holds these flags (set 0xc bytes back) (1 instructions)
+  cmp x0, #5
+  cmp x0, #5
+
+conditional branch that is never taken at offset: 0x4c <_main+0x4c>: -> delete; never taken: the flags here cannot pass eq (known 0xc bytes back) (1 instructions)
+  b.eq #0x110
+  b.eq #0x110
+
+conditional branch that is never taken at offset: 0x5c <_main+0x5c>: -> delete; never taken: x23 is nonzero (known 0x8 bytes back) (1 instructions)
+  cbz x23, #0x110
+  cbz x23, #0x110
+
+conditional branch that is never taken at offset: 0x6c <_main+0x6c>: -> delete; never taken: bit 2 of w0 is 0 (known 0x4 bytes back) (1 instructions)
+  b.ne #0x110
+  tbnz w0, #2, #0x110
+
+conditional branch that is never taken at offset: 0x78 <_main+0x78>: -> delete; never taken: bit 31 of w7 is 0 (known 0x4 bytes back) (1 instructions)
+  ldrh w7, [x2]
+  tbnz w7, #0x1f, #0x110
+
+conditional branch that is never taken at offset: 0x88 <_main+0x88>: -> delete; never taken: x3 is in [0x0, 0xff] (known 0x8 bytes back) (1 instructions)
+  ldrb w3, [x0]
+  b.hi #0x110
+
+conditional branch that is never taken at offset: 0x94 <_main+0x94>: -> delete; never taken: tst cannot set flags that pass hs (known 0x4 bytes back) (1 instructions)
+  tst w0, #1
+  b.hs #0x110
+
+conditional branch that is never taken at offset: 0xac <_main+0xac>: -> delete; never taken: w27 is in [0x0, 0x7ffe] (known 0x8 bytes back) (1 instructions)
+  b.hs #0x110
+  b.hs #0x110
+
+Optimization opportunities by type:
+       8  conditional branch that is never taken
+       2  conditional branch that is always taken
+       1  register already holds the recomputed value
+
+11 optimization opportunities in 69 instructions

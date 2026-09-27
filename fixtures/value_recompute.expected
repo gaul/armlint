@@ -46,6 +46,10 @@ register write overwritten unread at offset: 0xd0 <_main+0xd0>: -> delete; x21 i
 compare whose flags are overwritten unread at offset: 0xf4 <_main+0xf4>: -> delete; NZCV overwritten unread by cmp x0, #5 (1 instructions)
   cmp x1, #2
 
+conditional branch that is always taken at offset: 0xfc <_main+0xfc>: -> b 0x134; always taken: the flags here cannot fail ne (known 0xc bytes back) (1 instructions)
+  b.eq #0x134
+  b.ne #0x134
+
 MOV #0 + use foldable to ZR at offset: 0x110 <_main+0x110>: -> str xzr, [x0] (2 instructions)
   movz x16, #0x0
   str x16, [x0]
@@ -61,6 +65,7 @@ Optimization opportunities by type:
        1  ADR/ADRP of an address its register already holds
        1  MOV #0 + use foldable to ZR
        1  compare whose flags are overwritten unread
+       1  conditional branch that is always taken
        1  suboptimal MOVZ/MOVK sequence
 
-14 optimization opportunities in 78 instructions
+15 optimization opportunities in 78 instructions

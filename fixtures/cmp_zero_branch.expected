@@ -14,6 +14,10 @@ compare-zero signed-branch foldable into TBZ/TBNZ at offset: 0x18 <_main+0x18>: 
   cmp x3, #0
   b.mi 0x68
 
+conditional branch that is never taken at offset: 0x2c <_main+0x2c>: -> delete; never taken: no value of x5 passes lo against 0x0 (known 0x4 bytes back) (1 instructions)
+  cmp x5, #0
+  b.lo #0x68
+
 compare-zero branch foldable into CBZ/CBNZ at offset: 0x30 <_main+0x30>: -> cbnz x6, 0x68 (2 instructions)
   cmp x6, #0
   b.hi 0x68
@@ -21,6 +25,10 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0x30 <_main+0x30>: -> cbnz
 compare-zero branch foldable into CBZ/CBNZ at offset: 0x38 <_main+0x38>: -> cbz x7, 0x68 (2 instructions)
   cmp x7, #0
   b.ls 0x68
+
+conditional branch that is never taken at offset: 0x44 <_main+0x44>: -> delete; never taken: tst cannot set flags that pass hi (known 0x4 bytes back) (1 instructions)
+  tst x8, x8
+  b.hi #0x68
 
 compare-zero branch foldable into CBZ/CBNZ at offset: 0x48 <_main+0x48>: -> cbz w9, 0x68 (2 instructions)
   cmn w9, wzr
@@ -40,6 +48,7 @@ branch to the next instruction is a no-op at offset: 0x64 <_main+0x64>: -> delet
 Optimization opportunities by type:
        7  compare-zero branch foldable into CBZ/CBNZ
        2  compare-zero signed-branch foldable into TBZ/TBNZ
+       2  conditional branch that is never taken
        1  branch to the next instruction is a no-op
 
-10 optimization opportunities in 27 instructions
+12 optimization opportunities in 27 instructions

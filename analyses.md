@@ -2288,6 +2288,160 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the window and the exclusions above). ASan/UBSan clean; the unit
   tests pass against Capstone 6.0.0-Alpha11.
 
+## Conditional branch decided by known values
+
+* A conditional branch whose outcome the straight-line path to it
+  already fixes is either never taken -- delete it -- or always taken
+  -- make it a `b` to the same target, which also leaves the code after
+  it unreachable from there:
+
+  ```
+  mov  w8, #1           ; librustc_driver: a constant the tail
+  cbz  x8, L            ; duplicator left in front of its test
+                        ->  delete; never taken: x8 is 0x1
+
+  ldr  w8, [sp, #8]     ; clang: llvm::Expected's error flag,
+  tbnz w8, #0, L1       ; tested again by the destructor
+  str  w8, [x19]
+  tbz  w8, #0, L2       ->  b L2; always taken: bit 0 of w8 is 0
+
+  cmp  x1, #6 ; b.hs L  ; clang: a switch lowered to a compare tree
+  cmp  x1, #4 ; b.le L  ; whose last test its own branches decided
+  cmp  x1, #5
+  b.eq L                ->  b L; always taken: x1 is 0x5
+
+  tst  x26, x19         ; JavaScriptCore FTL: a cell check repeated
+  b.ne L1               ; past the branch that read it
+  ldurb w0, [x26, #5]
+  cmp  w0, #0x21 ; b.lo L2
+  tst  x26, x19
+  b.ne L3               ->  delete; never taken: the flags here
+                            cannot pass ne
+  ```
+
+* **Known values.** A forward engine (the `kv_*` functions in
+  armlint.c) keeps, for every GPR, the bits known to be zero and known
+  to be one and the unsigned and signed range of its W and X views.
+  The facts come from constants -- MOVZ/MOVN, a logical immediate from
+  ZR, and any result a decoded instruction computes from known inputs:
+  ADD/SUB in every form, the logical forms, the bitfield moves, EXTR,
+  the multiplies and divides, the variable shifts, the CSSC min/max
+  and the 1-source group; from producers that pin bits but not the
+  value -- an AND, a bitfield extract or shift, a narrow or W-form load
+  (the zeroing-producer table the redundant zero-extension check
+  uses), any W-form write, a CSET (0 or 1), a CSEL (what its two
+  sources agree on); from copies, an X-form MOV carrying all of its
+  source's facts and a W-form one its W view; and from the fall-through
+  edge of every conditional branch: CBZ that its register is not zero,
+  CBNZ that it is, TBZ that the bit is set, TBNZ that it is clear, and
+  a B.cond after a compare with an immediate or with a register whose
+  value is known (CMP/CMN/TST, or SUBS/ADDS/ANDS) a bound on the
+  register compared. For NZCV the engine keeps the set of the sixteen
+  flag states still possible: a flag setter leaves the states its
+  operation can produce -- exactly one when both operands are known;
+  for a subtraction only states with Z clear, or with Z and C set and N
+  and V clear; for ANDS/TST only those with C and V clear -- and every
+  B.cond that falls through removes the states its condition accepts.
+  A flag setter repeating an earlier one, the same word with its
+  registers unwritten since, sets the same flags, so it keeps what the
+  branches after the first one learned.
+* **Deciding.** A CBZ/CBNZ is decided by its register's range in the
+  branch's view, a TBZ/TBNZ by the bit's known value (or a range below
+  it). A B.cond or BC.cond is decided first by what its flag setter's
+  operation alone allows (`tst w0, #1 ; b.hs` never branches: ANDS
+  clears C), then by the compare it reads with what is known of the
+  register compared -- as it stands at the branch when the register is
+  unwritten since the compare, so the branches between have narrowed
+  it -- and last by the flag states left. The finding is the branch
+  alone, with the instruction that established the deciding fact shown
+  first. A branch to the next instruction is check_branch_to_next's,
+  and the AL and NV conditions decide nothing worth reporting.
+* **Integrity.** The facts hold on the straight-line path only. A
+  region ends, every fact gone, at a branch target (a side entry
+  arrives without them), after B/BL/BR/BLR/RET, an exception
+  instruction or UDF, at every system instruction but NOP, BTI, the
+  barriers and MRS, and at a flush -- check_value_recompute's rule. A
+  conditional branch does not end it: the fall-through keeps its
+  registers. Every register an instruction may write loses its fact,
+  exactly the decoded result's or else whatever `insn_gpr_write_mask`
+  over-reports. The engine applies an instruction's effects when the
+  next one arrives, so every check reading it sees the state before
+  the instruction at hand, wherever it sits in the registry. An
+  indirect branch's targets (a jump table's cases) are invisible to the
+  target map, as they are to every check that trusts it.
+* **JIT patch sites.** A value a MOVK builds is never known, nor
+  anything computed from one: a JIT's patchable constant is a
+  fixed-length MOVZ/MOVK sequence, and a snapshot shows the placeholder,
+  not the value the sequence holds once patched (check_value_recompute
+  excludes those sequences for the same reason). That costs the JIT
+  dumps real findings -- SpiderMonkey Baseline boxes its constants as
+  `mov x2, #1 ; movk x2, #0xfff9, lsl #48` and then tests the payload
+  -- but no decision rests on a value that could change. ADR/ADRP
+  values move with the image and are not tracked either.
+* **Selects.** The engine decides a CSEL's condition as readily as a
+  branch's, but only branches are reported. SpiderMonkey's string
+  loads under `spectreStringMitigations` follow a branch with a CSEL on
+  the same condition (`tst w16, #0x40 ; b.ne L ; ldr x16, [x4, #8] ;
+  csel x7, x16, x7, eq`): architecturally decided, and there to stay
+  data-dependent under misspeculation. A census counted 18,028 of those
+  in SpiderMonkey, 17,118 in Ion; see TODO.md for the rest.
+* **Corpus, 2026-09-26** (166.2M instructions): **18,399** findings,
+  12,129 never taken and 6,270 always taken; no other check moved;
+  about 1% more scan time on librustc_driver and 4% on the JSC dump.
+  * LLVM output **8,344**: librustc_driver 4,546, clang 3,187, uutils
+    580, libcrypto 17, bash 7, dyld 4, ssh 3. Decided by an exact value
+    3,787, by known bits 2,052, by a compare against a known operand
+    that no value of the register can pass or fail 1,082 (`mov x11,
+    #0 ; cmp x10, x11 ; b.hs`: a loop's first iteration peeled with its
+    counter at zero), by flags an earlier branch narrowed 612 (a
+    compare repeated past the branch that read it; DenseMap's iterator
+    testing `ptr != end` again), by a nonzero register 438, a range
+    296, a TST mask 77. Most are the residue of tail duplication and
+    block placement: a block that sets a constant, duplicated in front
+    of the block that tests it after the passes that fold such branches
+    have run; clang-24 even has `cbz xzr` and `cbnz xzr`. Machine IR has
+    no jump threading after register allocation, which is where the
+    fix belongs.
+  * Go **400**: 252 decided by a nonzero register, a CBZ repeated with
+    nothing writing its register between; most of the rest other tests
+    repeated, gc's write-barrier flag among them.
+  * JavaScriptCore, JetStream 3: **7,422** -- DFG 3,763, FTL 2,058,
+    WasmOMG 1,023, Baseline 352, YarrJIT 117, WasmBBQ 109. By flags an
+    earlier branch narrowed 3,428 (a cell or type check repeated on an
+    unchanged register: `tst x0, x19 ; b.ne` twice), by an exact value
+    2,588 (checks run on constant operands: `orr w3, wzr, #7 ; adds w3,
+    w3, #0x15 ; b.vs ; ... ; cbnz w3`, a size class computed from a
+    constant size).
+  * SpiderMonkey, JetStream 3: **1,063** -- Ion 594 (dispatching on the
+    type tag of a value it has just boxed with a partly known tag),
+    Baseline 407 (boxing an int32, then comparing the result with 0 or
+    with a double constant it cannot equal), RegExp 62; Octane 398.
+    V8, Octane: **772** -- Maglev 553, TurboFan 200, irregexp 19: the
+    sign bit of a zero-extended load tested (`ldrh w9 ; tbnz w9, #31`),
+    a byte range-checked against 0xff, a constant range-checked against
+    the Smi bounds (`mov x0, #0x13 ; cmp x0, x16 ; b.gt` with x16 =
+    0x3fffffff).
+* **Verification.** `test_branch_decided` (37 word-level cases: each
+  source of a fact, each exclusion), `fixtures/branch_decided.s`, and
+  `tools/rwfuzz branch`, which plants a fact -- a test or compare of a
+  register, a repeated compare, a constant, a producer's bits, a TST and
+  its branch -- in front of a second test, a compare, or a W compare
+  against a negative constant: 100,000 programs, 63,851 rewrites
+  executed (31,958 always taken), 0 mismatches. Its control arm,
+  deleting an unflagged conditional branch or making it a B, changed
+  the result in 100,550 of 281,722 cases, and builds with one proof
+  removed each -- the branch-target reset, the write invalidation, the
+  region end at calls, the view of a CBNZ W, the direction of an
+  unsigned bound, the subtraction's flag states, the repeat table's
+  register versions, the W view's sign -- mismatched within 5,000
+  programs. The fuzzer's register values now include a zero low half
+  under a nonzero top half, which the W/X distinction needs; the other
+  modes stayed at 0 mismatches. ASan/UBSan clean; the unit tests pass
+  against Capstone 6.0.0-Alpha11. Four fixtures of other checks gain
+  the decided branches their fragments contain, and thirteen unit-test
+  fragments ending in a branch their own instructions decide no longer
+  count this check's finding.
+
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when
