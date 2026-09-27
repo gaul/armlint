@@ -352,8 +352,9 @@ bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
 // scan run at the branch target (nzcv_dead_at_target), because
 // compiled code can hand flags across a branch: HotSpot's lock fast
 // paths return their result to the target in them (`cmp x10, xzr ;
-// b.eq L` ... `L: str x11, [x14] ; b.ne slow`). A target outside the
-// scanned buffer, or one the bounded scan cannot resolve, refuses.
+// b.eq L` ... `L: str x11, [x14] ; b.ne slow`). The target scan follows
+// a B and both edges of a CBZ/CBNZ/TBZ/TBNZ; a path leaving the scanned
+// buffer, or one the bounded scan cannot resolve, refuses.
 // A sign-condition B.MI/PL/LT/GE after the same zero tests folds to
 // TBZ/TBNZ on the sign bit when the target is within TBZ's reach
 // ("compare-zero signed-branch foldable into TBZ/TBNZ"), under the

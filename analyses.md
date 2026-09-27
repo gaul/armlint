@@ -218,14 +218,20 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   Renaissance, javac), 14,606 of the 54,692 C2 pairs had a flag reader
   at the target, where `cbz` would leave that reader with the flags
   from before the compare.
-  The target scan refuses rather than chases: a target outside the
-  scanned buffer, a B/BR or a CBZ/CBNZ/TBZ/TBNZ before the flags
-  resolve, or an expired window all refuse. That costs recall where
-  compilers chain branches -- rustc keeps 1,274 of its 2,494 pairs
-  (1,103 of the refusals stop at a CBZ/TBZ), SpiderMonkey Ion none of
-  its 1,358, HotSpot's C1 1,170,141 of 1,454,156 -- with no proven
-  reader among them; chasing both edges of a branch at the target
-  would win them back (TODO.md, target-side liveness).
+  The target scan follows the branches that leave the flags alone --
+  a B to its destination, a CBZ/CBNZ/TBZ/TBNZ down both edges, each
+  straight run under its own 16-instruction window, 64 instructions
+  and 8 pending edges in all -- and refuses on a reader, an indirect
+  jump, a path leaving the scanned buffer, an expired window or an
+  exhausted bound. Against what the fall-through proof alone reported,
+  librustc_driver keeps 2,305 of 2,494 pairs (the rest overrun a
+  window), clang, uutils and dyld all of theirs, and HotSpot's C1
+  1,453,660 of 1,454,156. SpiderMonkey Ion keeps none of its 1,358,
+  whose paths leave the code blob the dump holds, and Baseline 1,434
+  of 2,058, 352 of the others stopping at a `b.al`, which the scan
+  counts as a reader. Outside HotSpot, none of the pairs still refused
+  reaches a real reader in the dump: they overrun a window, leave the
+  blob, or stop at a `b.al`.
 
 ## compare-zero signed-branch foldable into TBZ/TBNZ
 
@@ -2717,10 +2723,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   at its target too, proven before the deferral opens by the scan the
   [CMPBR fold](#compare-and-branch-synthesis-feature-gated--m-cmpbr)
   uses -- the chain's flags are what a compiler might test again on
-  the other side. That scan stops at a conditional branch rather than
-  chase it, which costs librustc_driver 57 findings (682 with the
-  fall-through proof alone, the convention the `CBZ` and `B.VS` folds
-  follow). The finding spans the chain and the reader, so a branch
+  the other side. That scan follows the direct branches at the target
+  (B, and both edges of a CBZ/CBNZ/TBZ/TBNZ); what it still refuses
+  costs librustc_driver 41 findings (682 with the fall-through proof
+  alone, 57 before the scan followed branches). The `CBZ` fold proves
+  its target the same way; the `B.VS` fold proves only the
+  fall-through. The finding spans the chain and the reader, so a branch
   into any of them rejects it at the side-entry gate.
 * Corpus (166.2M instructions, JIT dumps included): 652 findings
   and no other check moved -- librustc_driver 625, clang 23, uutils
@@ -3270,16 +3278,22 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   target* to reach a flag overwrite -- or a call or return, past which
   the PCS makes the flags caller-clobbered -- before any reader, under
   the same bounded window and the same conservative classification as
-  the fall-through scan. Anything short of that proof refuses: no
-  scanned buffer, a target outside it, a reader, a control transfer
-  whose own destination would have to be chased in turn, or a window
-  that expires. On macOS 26's `/bin/ls` it refuses 16 of 52 candidate
-  pairs, leaving 36 findings in 3817 instructions: six are the
-  comparator shape above, where the target genuinely re-reads the
-  deleted flags, and the other ten are conservative -- a `CBZ`/`CBNZ`
-  or an unconditional `B` at the target ends the scan before it can
-  reach a kill. What survives is not a trickle: arm64e `/usr/lib/dyld`
-  reports 2550 pairs in 161738 instructions, spread across all ten
+  the fall-through scan, except that it follows the direct branches
+  that leave the flags alone: a `B` to its destination and a
+  `CBZ`/`CBNZ`/`TBZ`/`TBNZ` down both edges, each straight run under
+  its own window, 64 instructions and 8 pending edges in all.
+  Anything short of that proof refuses: no scanned buffer, a path
+  leaving it, a reader, an indirect jump, or an expired window or
+  bound. On macOS 26's `/bin/ls`, before the scan followed branches,
+  it refused 16 of 52 candidate pairs, leaving 36 findings in 3817
+  instructions: six are the comparator shape above, where the target
+  genuinely re-reads the deleted flags, and the other ten were
+  conservative -- a `CBZ`/`CBNZ` or an unconditional `B` at the target
+  ended the scan before it could reach a kill. Following them, macOS
+  27's `/bin/ls` reports 44 pairs where it reported 36, and
+  `/usr/lib/dyld` 3,747 where it reported 3,082. What survives is not
+  a trickle: arm64e `/usr/lib/dyld` (macOS 26) reported 2550 pairs in
+  161738 instructions, spread across all ten
   conditions (`cbne` 1366, `cbeq` 658, then the unsigned four, with
   the signed `cbgt`/`cble`/`cblt`/`cbge` the tail at 64), and every
   one of them re-assembles as a real `CB<cc>` at its own

@@ -45,6 +45,11 @@
 //   and    check_and_known_noop: delete an AND/UBFX whose input the known
 //          bits confine to its mask, or make it the MOV the finding
 //          renders.
+//   cbz    check_cmp_zero_branch: delete the zero test (CMP/CMN #0 or ZR,
+//          TST r, r) and make its B.cond the CBZ/CBNZ or TBZ/TBNZ the
+//          finding renders. It also plants forward Bs, so that the
+//          proof at the branch target has jumps to follow as well as the
+//          CBZ/TBZ forms the body draws.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -195,6 +200,8 @@ static uint32_t and_clear_low(bool x, unsigned d, unsigned n, unsigned k) { retu
 static uint32_t and_bit(bool x, unsigned d, unsigned n, unsigned b) { return x ? 0x92400000u | ((64u - b) & 63u) << 16 | n << 5 | d : 0x12000000u | ((32u - b) & 31u) << 16 | n << 5 | d; }
 static uint32_t b_cond(unsigned c, int words) { return 0x54000000u | ((unsigned)words & 0x7FFFFu) << 5 | c; }
 static uint32_t bl(int words) { return 0x94000000u | ((unsigned)words & 0x3FFFFFFu); }
+static uint32_t cmn_reg(bool x, unsigned n, unsigned m) { return (x ? 0xAB00001Fu : 0x2B00001Fu) | m << 16 | n << 5; }
+static uint32_t tst_reg(bool x, unsigned n, unsigned m) { return (x ? 0xEA00001Fu : 0x6A00001Fu) | m << 16 | n << 5; }
 
 // === Programs ===
 
@@ -223,17 +230,20 @@ typedef struct {
 
 // A body slot: a finished word, or a control transfer whose word is
 // fixed up once the layout is known.
-enum { SLOT_PLAIN, SLOT_BRANCH, SLOT_READER, SLOT_CALL };
+enum { SLOT_PLAIN, SLOT_BRANCH, SLOT_READER, SLOT_CALL, SLOT_JUMP };
 
 typedef struct {
     int kind;
     uint32_t word;      // SLOT_PLAIN
-    int target;         // SLOT_BRANCH/SLOT_READER: body index, or the end
+    int target;         // SLOT_BRANCH/SLOT_READER/SLOT_JUMP: body index,
+                        // or the end
     unsigned reg;       // SLOT_BRANCH: the CBZ/CBNZ/TBZ/TBNZ register
     unsigned cond;      // SLOT_BRANCH/SLOT_READER: the B.cond condition
     unsigned form;      // SLOT_BRANCH: 0 CBZ X, 1 CBNZ W, 2 B.cond,
                         // 3 CBZ W, 4 CBNZ X, 5 TBZ, 6 TBNZ
     unsigned bit;       // SLOT_BRANCH: the TBZ/TBNZ bit
+    int aim;            // a transfer's target this many slots on, when
+                        // nonzero; otherwise gen_body draws it
 } slot_t;
 
 #define BODY_MAX 40
@@ -731,6 +741,65 @@ static void plant_and(void)
     }
 }
 
+// cbz: a zero test of r -- CMP #0, CMP ZR, CMN #0, CMN ZR or TST r, r
+// -- and a B.cond reading it, mostly under a condition the fold takes;
+// now and then a forward B after them, a jump for some target proof to
+// follow.
+static void push_jump(void)
+{
+    if (nbody < BODY_MAX) {
+        body[nbody++] = (slot_t){ .kind = SLOT_JUMP };
+    }
+}
+
+// A reader of NZCV, a writer, or neither.
+static uint32_t edge_op(void)
+{
+    unsigned d = body_reg(), a = body_reg(), b = body_reg();
+    switch (rr(3)) {
+    case 0: return csel_w(d, a, b, rr(14));
+    case 1: return cmp_x(a, b);
+    default: return filler();
+    }
+}
+
+static void plant_cbz(void)
+{
+    static const unsigned folded[8] = { 0, 1, 8, 9, 4, 5, 10, 11 };
+    unsigned r = body_reg();
+    bool x = rr(2) == 0;
+    switch (rr(5)) {
+    case 0: push(cmp_imm(x, false, r, 0)); break;
+    case 1: push(x ? cmp_x(r, 31) : cmp_w(r, 31)); break;
+    case 2: push(cmp_imm(x, true, r, 0)); break;
+    case 3: push(cmn_reg(x, r, 31)); break;
+    default: push(tst_reg(x, r, r)); break;
+    }
+    unsigned c = rr(4) == 0 ? rr(14) : folded[rr(8)];
+    if (nbody + 5 <= BODY_MAX && rr(2) == 0) {
+        // Aim the B.cond at a CBZ/TBZ or B two slots on, whose edges
+        // meet a reader, a writer or neither: a split for the proof at
+        // the target to walk.
+        push_branch(2, 0, c, 0);
+        body[nbody - 1].aim = 2;
+        push(filler());
+        if (rr(4) == 0) {
+            push_jump();
+        } else {
+            unsigned form = 3u + rr(4);
+            push_branch(form, body_reg(), 0, rr(64));
+        }
+        body[nbody - 1].aim = 2;
+        push(edge_op());
+        push(edge_op());
+        return;
+    }
+    push_branch(2, 0, c, 0);
+    if (rr(3) == 0) {
+        push_jump();
+    }
+}
+
 static void gen_body(void (*plant)(void))
 {
     nbody = 0;
@@ -750,7 +819,9 @@ static void gen_body(void (*plant)(void))
     // Branches go forward only -- to a later body slot or the epilogue
     // -- so every program terminates.
     for (int i = 0; i < nbody; i++) {
-        body[i].target = i + 1 + (int)rr((unsigned)(nbody - i));
+        body[i].target = body[i].aim > 0 && i + body[i].aim <= nbody
+            ? i + body[i].aim
+            : i + 1 + (int)rr((unsigned)(nbody - i));
     }
 }
 
@@ -798,6 +869,9 @@ static void assemble(void)
             break;
         case SLOT_READER:
             prog[at] = b_cond(s->cond, words);
+            break;
+        case SLOT_JUMP:
+            prog[at] = b_(words);
             break;
         default:
             prog[at] = bl(stub_start - at);
@@ -1562,6 +1636,118 @@ static bool and_control(int i, uint32_t *alt)
     return true;
 }
 
+// cbz: "-> cbz|cbnz wN, 0x..." or "-> tbz|tbnz xN, #63, 0x...": NOP the
+// zero test and make the B.cond that branch, to the same target.
+static bool cbz_apply(const hit_t *h, uint32_t *code)
+{
+    size_t test = h->start, br = h->start + 1u;
+    if (h->count != 2u || !in_body(test, br)
+            || (code[br] & 0xFF000010u) != 0x54000000u) {
+        return false;
+    }
+    int32_t words = branch_disp(code[br]);
+    unsigned rn = (code[test] >> 5) & 31u;
+    char mnem[8], wx;
+    unsigned reg, bit;
+    if (sscanf(h->detail, "-> %7s %c%u, #%u,", mnem, &wx, &reg, &bit) == 4
+            && mnem[0] == 't') {
+        if (reg != rn || words < -8192 || words > 8191) {
+            return false;
+        }
+        code[br] = tbz(mnem[2] == 'n', reg, bit, words);
+    } else if (sscanf(h->detail, "-> %7s %c%u,", mnem, &wx, &reg) == 3
+               && mnem[0] == 'c') {
+        if (reg != rn) {
+            return false;
+        }
+        code[br] = cbz(wx == 'x', mnem[2] == 'n', reg, words);
+    } else {
+        return false;
+    }
+    code[test] = NOP;
+    return true;
+}
+
+static size_t cbz_slot(const hit_t *h)
+{
+    return h->start + 1u;
+}
+
+// Special: the straight walk from the branch target meets a B, CBZ/CBNZ
+// or TBZ/TBNZ before anything that touches the flags -- a proof that
+// had to follow it.
+static bool cbz_special(const hit_t *h)
+{
+    int i = (int)h->start + 1 + branch_disp(prog[h->start + 1u]);
+    for (; i >= 0 && i < nprog; i++) {
+        uint32_t w = prog[i];
+        if ((w & 0xFC000000u) == 0x14000000u
+                || (w & 0x7C000000u) == 0x34000000u) {
+            return true;
+        }
+        if (classify_liveness(w) != LIV_UNKNOWN) {
+            return false;
+        }
+    }
+    return false;
+}
+
+// A zero test the fold opens on: CMP/CMN Rn, #0 or Rn, ZR, or TST Rn,
+// Rn. *subs is false for the CMN and TST forms, which leave C clear.
+static bool zero_test(uint32_t w, bool *x, unsigned *rn, bool *subs)
+{
+    unsigned n = (w >> 5) & 31u;
+    if ((w & 31u) != 31u || n >= 8u) {
+        return false;
+    }
+    bool imm0 = ((w >> 10) & 0xFFFu) == 0;
+    bool zr = ((w >> 16) & 31u) == 31u && ((w >> 10) & 63u) == 0;
+    if ((w & 0x7F800000u) == 0x71000000u && imm0) {
+        *subs = true;                   // cmp Rn, #0
+    } else if ((w & 0x7F800000u) == 0x31000000u && imm0) {
+        *subs = false;                  // cmn Rn, #0
+    } else if ((w & 0x7F200000u) == 0x6B000000u && zr) {
+        *subs = true;                   // cmp Rn, zr
+    } else if ((w & 0x7F200000u) == 0x2B000000u && zr) {
+        *subs = false;                  // cmn Rn, zr
+    } else if ((w & 0x7F200000u) == 0x6A000000u
+               && ((w >> 16) & 31u) == n && ((w >> 10) & 63u) == 0) {
+        *subs = false;                  // tst Rn, Rn
+    } else {
+        return false;
+    }
+    *x = (w >> 31) != 0;
+    *rn = n;
+    return true;
+}
+
+// Control: fold an unflagged zero test + B.cond the way the finding
+// would have.
+static bool cbz_control(int i, uint32_t *alt)
+{
+    bool x, subs;
+    unsigned rn;
+    if (i - 1 < body_start || (prog[i] & 0xFF000010u) != 0x54000000u
+            || !zero_test(prog[i - 1], &x, &rn, &subs)) {
+        return false;
+    }
+    int32_t words = branch_disp(prog[i]);
+    unsigned bit = x ? 63u : 31u;
+    switch (prog[i] & 15u) {
+    case 0: alt[i] = cbz(x, false, rn, words); break;               // eq
+    case 1: alt[i] = cbz(x, true, rn, words); break;                // ne
+    case 9: if (!subs) return false;                                 // ls
+            alt[i] = cbz(x, false, rn, words); break;
+    case 8: if (!subs) return false;                                 // hi
+            alt[i] = cbz(x, true, rn, words); break;
+    case 4: case 11: alt[i] = tbz(true, rn, bit, words); break;     // mi, lt
+    case 5: case 10: alt[i] = tbz(false, rn, bit, words); break;    // pl, ge
+    default: return false;
+    }
+    alt[i - 1] = NOP;
+    return true;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -1604,6 +1790,10 @@ static const mode_t_ modes[] = {
       fold_control },
     { "and", { "AND/UBFX that known bits make a no-op", NULL },
       "deleted", plant_and, and_apply, and_slot, and_special, and_control },
+    { "cbz", { "compare-zero branch foldable into CBZ/CBNZ",
+               "compare-zero signed-branch foldable into TBZ/TBNZ" },
+      "through a branch at the target", plant_cbz, cbz_apply, cbz_slot,
+      cbz_special, cbz_control },
 };
 
 static bool wanted(const char *name)
@@ -1619,7 +1809,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz\n");
 }
 
 int main(int argc, char **argv)

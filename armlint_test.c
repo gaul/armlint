@@ -2138,14 +2138,124 @@ static void test_cmp_zero_branch(void)
     b_cond(&code[4], 8 /* HI */, 12);   // b.hi L
     assert(run_zb_check(code, 24) == 0);
 
-    // A target that jumps on before the flags resolve would need the
-    // jump chased in turn: refuse.
+    // -- The target scan follows the branches that leave NZCV alone. --
+
+    // A B at the target: the walk carries on at its destination.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 12);            // b.eq L
     cmp_x_imm(&code[8], 9, 0);
     ret_(&code[12]);
     b_(&code[16], -4);                  // L: b <the RET above>
+    assert(run_zb_check(code, 20) == 1);
+
+    // ... and a destination that reads the flags refuses.
+    b_(&code[16], 8);                   // L: b M
+    ret_(&code[20]);
+    csel_w(&code[24], 1, 2, 3, 0);      // M: csel w1, w2, w3, eq
+    assert(run_zb_check(code, 28) == 0);
+
+    // A B that leaves the scanned buffer refuses.
+    b_(&code[16], 0x1000);
     assert(run_zb_check(code, 20) == 0);
+
+    // The window bounds each straight run, so a run after a followed
+    // jump gets a fresh one: ten instructions, a B, ten more and a RET
+    // prove, while one run of sixteen before its RET still refuses.
+    {
+        uint8_t big[112];
+        cmp_w_imm(&big[0], 0, 0);
+        b_cond(&big[4], 0, 12);         // b.eq L
+        cmp_x_imm(&big[8], 9, 0);
+        ret_(&big[12]);
+        for (unsigned i = 0; i < 10; i++) {     // L: ten MOVZs
+            movz_w(&big[16 + i * 4], 5u + i, (uint16_t)(i + 1));
+        }
+        b_(&big[56], 8);                // b M
+        ret_(&big[60]);
+        for (unsigned i = 0; i < 10; i++) {     // M: ten more
+            movz_w(&big[64 + i * 4], 15u + i, (uint16_t)(i + 1));
+        }
+        ret_(&big[104]);
+        assert(run_zb_check(big, 108) == 1);
+
+        b_(&big[16], 8);                // L: b M
+        ret_(&big[20]);
+        for (unsigned i = 0; i < 16; i++) {     // M: sixteen MOVZs
+            movz_w(&big[24 + i * 4], 5u + i, (uint16_t)(i + 1));
+        }
+        ret_(&big[88]);
+        assert(run_zb_check(big, 92) == 0);
+    }
+
+    // A CBZ at the target splits the walk, and both edges must prove
+    // the flags dead: here each ends at a RET.
+    cbz_w(&code[16], 1, 8);             // L: cbz w1, M
+    ret_(&code[20]);
+    ret_(&code[24]);                    // M: ret
+    assert(run_zb_check(code, 28) == 1);
+
+    // A reader on the taken edge refuses ...
+    csel_w(&code[24], 1, 2, 3, 0);      // M: csel
+    assert(run_zb_check(code, 28) == 0);
+
+    // ... and so does one on the fall-through.
+    csel_w(&code[20], 1, 2, 3, 0);
+    ret_(&code[24]);
+    assert(run_zb_check(code, 28) == 0);
+
+    // TBZ/TBNZ split the same way.
+    tbz_w(&code[16], 1, 3, 8);          // L: tbz w1, #3, M
+    ret_(&code[20]);
+    ret_(&code[24]);
+    assert(run_zb_check(code, 28) == 1);
+    csel_w(&code[24], 1, 2, 3, 0);
+    assert(run_zb_check(code, 28) == 0);
+
+    // A loop at the target is walked once: the taken edge comes back
+    // to an instruction already examined, whose continuation the first
+    // visit proves.
+    cbz_w(&code[16], 1, 0);             // L: cbz w1, L
+    ret_(&code[20]);
+    assert(run_zb_check(code, 24) == 1);
+
+    // At most eight edges wait to be walked at once: eight CBZs in a
+    // row at the target still prove, a ninth refuses.
+    for (unsigned n = 8; n <= 9; n++) {
+        uint8_t big[16 + 9 * 4 + 8 + 4];
+        cmp_w_imm(&big[0], 0, 0);
+        b_cond(&big[4], 0, 12);         // b.eq L
+        cmp_x_imm(&big[8], 9, 0);
+        ret_(&big[12]);
+        size_t end = 16 + n * 4;        // L: n CBZs, then RET ; R: RET
+        for (unsigned k = 0; k < n; k++) {
+            // Each on its own register: a second CBZ of one register
+            // after the first fell through would be a decided branch.
+            cbz_w(&big[16 + k * 4], 1 + k,
+                  (int32_t)(end + 4 - (16 + k * 4)));
+        }
+        ret_(&big[end]);
+        ret_(&big[end + 4]);
+        assert(run_zb_check(big, end + 8) == (n == 8 ? 1 : 0));
+    }
+
+    // A walk into a V8 constant pool refuses under -m v8: the words
+    // after the LDR XZR marker are data. Without the feature the marker
+    // is an ordinary discarded load and the BLR XZR after it ends the
+    // path as a call would.
+    {
+        uint8_t pool[32];
+        cmp_w_imm(&pool[0], 0, 0);
+        b_cond(&pool[4], 0, 12);        // b.eq L
+        cmp_x_imm(&pool[8], 9, 0);
+        ret_(&pool[12]);
+        b_(&pool[16], 8);               // L: b P
+        ret_(&pool[20]);
+        write_le32(&pool[24], 0x5800003Fu);     // P: ldr xzr, #4 (1 word)
+        write_le32(&pool[28], 0xD63F03E0u);     //    blr xzr
+        assert(run_driver_check(pool, sizeof(pool), ARMLINT_FEATURE_V8POOL)
+               == 0);
+        assert(run_driver_check(pool, sizeof(pool), 0) == 1);
+    }
 
     // -- Negative: window expiry --
 

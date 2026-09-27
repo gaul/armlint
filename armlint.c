@@ -3371,8 +3371,9 @@ liveness_t classify_liveness(uint32_t op)
     if ((op & 0xFC000000u) == 0x94000000u) {
         return LIV_TERM_SAFE;
     }
-    // B (unconditional immediate): target may read NZCV; we don't
-    // follow targets in v1.
+    // B (unconditional immediate): its destination may read NZCV, and
+    // the streaming scans cannot follow it there (nzcv_dead_at_target,
+    // which walks the buffer, does).
     if ((op & 0xFC000000u) == 0x14000000u) {
         return LIV_TERM_UNSAFE;
     }
@@ -3382,7 +3383,8 @@ liveness_t classify_liveness(uint32_t op)
     // (the branch does not overwrite them), so treat them as unsafe
     // terminators rather than LIV_UNKNOWN -- otherwise a later overwrite on
     // the fall-through could wrongly prove the flags dead while the taken
-    // target still observes them. (classify_reg_liveness stops here too.)
+    // target still observes them. (classify_reg_liveness stops here too;
+    // nzcv_dead_at_target intercepts them and walks both edges.)
     if ((op & 0x7E000000u) == 0x34000000u) {   // CBZ / CBNZ
         return LIV_TERM_UNSAFE;
     }
@@ -6202,34 +6204,97 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
 // same classify_liveness rules and the same bounded window as the
 // fall-through scan, and demand the flags be overwritten -- or the
 // path reach a call or return, past which the PCS makes them
-// caller-clobbered -- before any reader. Everything short of that
-// proof refuses: no buffer, a target outside it, a reader, a control
-// transfer whose own destination would have to be chased in turn, or
-// a window that expires without resolving.
+// caller-clobbered -- before any reader. Unlike the streaming scans,
+// the walk does not end at a direct branch that leaves NZCV alone: a B
+// carries it on at its destination, and a CBZ/CBNZ/TBZ/TBNZ splits it,
+// both edges having to prove the flags dead. The window bounds each
+// straight run, so a run starting after a followed branch gets a fresh
+// one. A path that reaches an instruction already examined stops
+// there, since the path that got there first proves that continuation
+// (which also ends loops), and the whole proof is bounded by
+// NZCV_TARGET_PATHS edges waiting at once and NZCV_TARGET_BUDGET
+// instructions examined. Everything short of the proof refuses: no
+// buffer, a path leaving it or running into a V8 constant pool, a
+// reader, an indirect jump, an expired window or an exhausted bound.
+#define NZCV_TARGET_PATHS 8u
+#define NZCV_TARGET_BUDGET (4u * LIVENESS_WINDOW)
+
 static bool nzcv_dead_at_target(const armlint_state *state,
                                 int64_t target)
 {
-    if (state->buf == NULL || target < 0) {
+    if (state->buf == NULL) {
         return false;
     }
-    size_t off = (size_t)target;
-    for (unsigned i = 0; i < LIVENESS_WINDOW; i++) {
-        if (off > state->buf_len || state->buf_len - off < 4u) {
-            return false;
+    // Edges waiting to be walked, and every offset examined so far,
+    // whichever path got there first.
+    int64_t path_at[NZCV_TARGET_PATHS];
+    size_t seen[NZCV_TARGET_BUDGET];
+    unsigned paths = 0;
+    unsigned nseen = 0;
+    path_at[paths++] = target;
+    while (paths > 0) {
+        int64_t at = path_at[--paths];
+        unsigned window = LIVENESS_WINDOW;
+        for (;;) {
+            if (at < 0 || (uint64_t)at > state->buf_len
+                    || state->buf_len - (size_t)at < 4u) {
+                return false;
+            }
+            size_t off = (size_t)at;
+            bool examined = false;
+            for (unsigned k = 0; k < nseen && !examined; k++) {
+                examined = seen[k] == off;
+            }
+            if (examined) {
+                break;
+            }
+            if (window == 0 || nseen == NZCV_TARGET_BUDGET
+                    || v8pool_skip_bytes(state->features, state->buf + off,
+                                         state->buf_len - off) != 0) {
+                return false;
+            }
+            seen[nseen++] = off;
+            window--;
+            uint32_t op = buf_word_at(state->buf, off);
+            int32_t words;
+            if ((op & 0xFC000000u) == 0x14000000u) {
+                // B: the walk carries on at its destination.
+                words = (int32_t)(op & 0x3FFFFFFu);
+                words = (words ^ 0x2000000) - 0x2000000;
+                at = (int64_t)off + (int64_t)words * 4;
+                window = LIVENESS_WINDOW;
+                continue;
+            }
+            if ((op & 0x7E000000u) == 0x34000000u) {
+                // CBZ/CBNZ: imm19.
+                words = (int32_t)((op >> 5) & 0x7FFFFu);
+                words = (words ^ 0x40000) - 0x40000;
+            } else if ((op & 0x7E000000u) == 0x36000000u) {
+                // TBZ/TBNZ: imm14.
+                words = (int32_t)((op >> 5) & 0x3FFFu);
+                words = (words ^ 0x2000) - 0x2000;
+            } else {
+                liveness_t c = classify_liveness(op);
+                if (c == LIV_OVERWRITE || c == LIV_TERM_SAFE) {
+                    break;          // this path is proven
+                }
+                if (c != LIV_UNKNOWN) {
+                    return false;   // a reader, or a jump not followed
+                }
+                at += 4;
+                continue;
+            }
+            // The taken edge waits its turn while the walk carries on
+            // down the fall-through.
+            if (paths == NZCV_TARGET_PATHS) {
+                return false;
+            }
+            path_at[paths++] = (int64_t)off + (int64_t)words * 4;
+            at += 4;
+            window = LIVENESS_WINDOW;
         }
-        switch (classify_liveness(buf_word_at(state->buf, off))) {
-        case LIV_OVERWRITE:
-        case LIV_TERM_SAFE:
-            return true;
-        case LIV_READ:
-        case LIV_TERM_UNSAFE:
-            return false;
-        case LIV_UNKNOWN:
-            break;
-        }
-        off += 4u;
     }
-    return false;
+    return true;
 }
 
 // CB<cc> spells its condition into the mnemonic, so "cb" plus the

@@ -93,7 +93,9 @@ the argument against each.
   really does read again at the branch target; the `CCMP` chain and
   `CMP`-to-`CMN` folds; and the zero-compare `CBZ`/`CBNZ` and sign-bit
   `TBZ`/`TBNZ` folds, since HotSpot's lock fast paths return their
-  result to the branch target in the flags.
+  result to the branch target in the flags. Unlike the fall-through
+  scan, the one at the target follows a `B` to its destination and a
+  `CBZ`/`CBNZ`/`TBZ`/`TBNZ` down both edges, within fixed bounds.
 
 Findings are *opportunities*, not guaranteed speedups: some -- the pre-
 and post-indexed addressing folds -- are code-size and front-end wins
