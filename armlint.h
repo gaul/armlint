@@ -812,6 +812,35 @@ bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
 bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect an AND (immediate) or UBFX #0 (UXTB/UXTH among them) whose
+// input the known-value engine behind check_branch_decided already
+// confines to the mask, so the operation clears nothing:
+//     tst  x9, #3           ; librustc_driver: a tagged pointer's tag
+//     b.ne L                ; tested
+//     and  x9, x9, #~3      -> delete (the tag bits are already 0)
+//     and  w7, w7, #4       ; JavaScriptCore: a mask re-applied
+//     adds w6, w6, #1       ; across unrelated work
+//     b.vs L
+//     and  w7, w7, #4       -> delete
+// The input's possible bits are those its known-zero bits and its range
+// leave open -- from a zeroing producer (an AND, a bitfield extract, a
+// narrow or W-form load, a CSET), from the fall-through of a TST +
+// B.NE, TBNZ or compare, from copies. In place the instruction deletes
+// (a W form only when the register's top half is already zero, since it
+// clears that too); out of place it becomes `mov Rd, Rn` at its width,
+// which moves the same bits.
+//
+// A known value is check_const_fold's, an X-form keep-the-low-half mask
+// out of place check_and_lo32_mov's, and a mask or extract right after
+// the instruction that bounded its input is the pair folds' (the
+// AND/extend chain, the shift + AND extraction). An in-place
+// zero-extension check_redundant_zext reports is that check's; this one
+// runs just before it, so its per-register zeroing facts still describe
+// the input. Reported as "AND/UBFX that known bits make a no-op", with
+// the instruction that established the input's bits first.
+bool check_and_known_noop(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect a sign-extending producer (LDRSB / LDRSH / LDRSW, or any
 // SBFM: the SXTB / SXTH / SXTW aliases, ASR immediate, and the
 // general SBFX / SBFIZ shapes, whose sign threshold follows from the

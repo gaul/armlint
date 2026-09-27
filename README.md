@@ -129,6 +129,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [register write overwritten before any read, across a gap](analyses.md#register-write-overwritten-unread) | delete the write |
 | [conditional branch the path to it already decides](analyses.md#conditional-branch-decided-by-known-values) | delete it (never taken) or `b` (always taken) |
 | [ALU operation whose inputs are all known values](analyses.md#operation-on-known-values-foldable-to-mov-imm) | `mov Rd, #result`, or delete when Rd already holds it |
+| [`and #mask`/`ubfx #0` of a value its known bits already keep inside the mask](analyses.md#andubfx-that-known-bits-make-a-no-op) | delete in place, `mov Rd, Rn` out of place |
 | [sign-extending producer + `sxtb`/`sxth`/`sxtw`](analyses.md#redundant-sign-extension-after-a-producer-that-already-replicated-the-sign) | drop the sign-extension |
 | [`and`/`uxt*`/`sxt*`/`mov Wd, Wm` + a narrower `and`/`ands`/`tst`/`uxt*`/`sxt*`](analyses.md#andextend-chain-foldable-to-one) | the second reading the first's source, or one `and` of the intersected masks |
 | [`and`/`orr`/`eor`/`sub`/`bic`/`orn`/`eon` with `Rs, Rs`](analyses.md#self-op-identities-andorreorsubbicorneon-rd-rs-rs) | `mov` / zero / all-ones |

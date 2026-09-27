@@ -9304,8 +9304,8 @@ static void test_cmp_cmn_w(void)
 
 // The expectations of the known-value checks' word tables: nothing, a
 // branch never or always taken, a fold, an operation that changes
-// nothing.
-enum { NONE, NEVER, ALWAYS, FOLD, SAME };
+// nothing, a mask that clears nothing.
+enum { NONE, NEVER, ALWAYS, FOLD, SAME, NOOP };
 
 // check_branch_decided over instruction words with the buffer set, for
 // both of its finding names: never taken, always taken, or neither.
@@ -9554,6 +9554,84 @@ static void test_const_fold(void)
                     && strcmp(detail, cases[i].detail) != 0)) {
             fprintf(stderr, "const_fold case %zu: %d folds, %d unchanged, "
                     "detail \"%s\"\n", i, folds, sames, detail);
+            assert(0);
+        }
+    }
+}
+
+// check_and_known_noop over instruction words with the buffer set.
+static void test_and_known_noop(void)
+{
+    const char *name = "AND/UBFX that known bits make a no-op";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // tst x9, #3 ; b.ne 1f ; and x9, x9, #0xfffffffffffffffc ; 1: ret
+        { { 0xF240053Fu, 0x54000041u, 0x927EF529u, 0xD65F03C0u }, 4, NOOP,
+          "-> delete; x9 has no bits outside 0xfffffffffffffffc (known "
+          "0x4 bytes back)" },
+        // and w7, w7, #4 ; adds w6, w6, #1 ; b.vs 1f ; and w7, w7, #4 ; 1: ret
+        { { 0x121E00E7u, 0x310004C6u, 0x54000046u, 0x121E00E7u, 0xD65F03C0u }, 5, NOOP,
+          "-> delete; w7 has no bits outside 0x4 (known 0xc bytes back)" },
+        // ldrb w9, [x0] ; add x1, x1, #1 ; and w10, w9, #0x1ff ; ret
+        { { 0x39400009u, 0x91000421u, 0x1200212Au, 0xD65F03C0u }, 4, NOOP,
+          "-> mov w10, w9; w9 has no bits outside 0x1ff (known 0x8 "
+          "bytes back)" },
+        // ldrh w9, [x0] ; add x1, x1, #1 ; ubfx x10, x9, #0, #20 ; ret
+        { { 0x79400009u, 0x91000421u, 0xD3404D2Au, 0xD65F03C0u }, 4, NOOP,
+          "-> mov x10, x9; x9 has no bits outside 0xfffff (known 0x8 "
+          "bytes back)" },
+        // cmp x0, #100 ; b.hs 1f ; and x1, x0, #0x7f ; 1: ret
+        { { 0xF101901Fu, 0x54000042u, 0x92401801u, 0xD65F03C0u }, 4, NOOP,
+          "-> mov x1, x0; x0 has no bits outside 0x7f (known 0x4 bytes back)" },
+        // tbnz x0, #3, 1f ; and x0, x0, #0xfffffffffffffff7 ; 1: ret
+        { { 0x37180040u, 0x927CF800u, 0xD65F03C0u }, 3, NOOP,
+          "-> delete; x0 has no bits outside 0xfffffffffffffff7 (known "
+          "0x4 bytes back)" },
+        // ldr w9, [x0] ; tbnz w9, #31, 1f ; and w9, w9, #0x7fffffff ; 1: ret
+        { { 0xB9400009u, 0x37F80049u, 0x12007929u, 0xD65F03C0u }, 4, NOOP,
+          "-> delete; w9 has no bits outside 0x7fffffff (known 0x4 "
+          "bytes back)" },
+        // cmp x0, #100 ; b.hs 1f ; and w0, w0, #0x7f ; 1: ret
+        { { 0xF101901Fu, 0x54000042u, 0x12001800u, 0xD65F03C0u }, 4, NOOP,
+          "-> delete; w0 has no bits outside 0x7f (known 0x4 bytes back)" },
+        // Negatives: unknown bits, a known value (check_const_fold's), a
+        // mask right after its producer (the pair folds'), a W form in
+        // place over an unknown top half, the zero-extension
+        // check_redundant_zext reports, a write between, a side entry,
+        // an SP destination.
+        // and x1, x0, #0x7f ; ret
+        { { 0x92401801u, 0xD65F03C0u }, 2, NONE, NULL },
+        // mov x0, #5 ; and x1, x0, #0x7f ; ret
+        { { 0xD28000A0u, 0x92401801u, 0xD65F03C0u }, 3, NONE, NULL },
+        // and w8, w9, #0x3f ; and w10, w8, #0xff ; ret
+        { { 0x12001528u, 0x12001D0Au, 0xD65F03C0u }, 3, NONE, NULL },
+        // tst w0, #0x80 ; b.ne 1f ; and w0, w0, #0xffffff7f ; 1: ret
+        { { 0x7219001Fu, 0x54000041u, 0x12187800u, 0xD65F03C0u }, 4, NONE, NULL },
+        // ldrb w9, [x0] ; add x1, x1, #1 ; and w9, w9, #0xff ; ret
+        { { 0x39400009u, 0x91000421u, 0x12001D29u, 0xD65F03C0u }, 4, NONE, NULL },
+        // tst x9, #3 ; b.ne 1f ; mov x9, x1 ; and x9, x9, #0xfffffffffffffffc
+        // ; 1: ret
+        { { 0xF240053Fu, 0x54000061u, 0xAA0103E9u, 0x927EF529u, 0xD65F03C0u }, 5, NONE, NULL },
+        // tst x9, #3 ; b.ne 1f ; 2: and x9, x9, #0xfffffffffffffffc ; cbz x0,
+        // 2b ; 1: ret
+        { { 0xF240053Fu, 0x54000061u, 0x927EF529u, 0xB4FFFFE0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // tst x9, #15 ; b.ne 1f ; and sp, x9, #0xfffffffffffffff0 ; 1: ret
+        { { 0xF2400D3Fu, 0x54000041u, 0x927CED3Fu, 0xD65F03C0u }, 4, NONE, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, name, detail,
+                                sizeof(detail));
+        if (got != (cases[i].expect == NOOP ? 1 : 0)
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "and_known_noop case %zu: %d findings, detail "
+                    "\"%s\"\n", i, got, detail);
             assert(0);
         }
     }
@@ -18093,6 +18171,7 @@ int main(void)
     test_cmp_cmn_w();
     test_branch_decided();
     test_const_fold();
+    test_and_known_noop();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

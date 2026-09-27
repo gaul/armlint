@@ -2525,6 +2525,81 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Not covered: a result the known bits fix although an input is not
   exact (`lsr w9, w4, #24` with w4 below 16); see TODO.md.
 
+## AND/UBFX that known bits make a no-op
+
+* An AND with an immediate, or a UBFX from bit 0 (UXTB and UXTH among
+  them), whose input the known bits already confine to the mask clears
+  nothing. In place it deletes; out of place it becomes a copy:
+
+  ```
+  tst  x9, #3           ; librustc_driver: a tagged pointer's tag
+  b.ne L                ; tested, then cleared
+  and  x9, x9, #~3      ->  delete (x9 has no bits outside the mask)
+
+  ldrb w1, [x0, x2]     ; SpiderMonkey irregexp: a character
+  cmp  w1, #0x7a        ; checked against 'z', then masked to index
+  b.gt L                ; a 128-entry table
+  and  w5, w1, #0x7f    ->  mov w5, w1
+
+  and  w4, w4, #4       ; JavaScriptCore DFG: a flag bit masked
+  ...                   ; again after unrelated work
+  and  w4, w4, #4       ->  delete
+
+  ldrb w2, [x2]         ; go: a byte ANDed with a bit, then
+  and  x1, x2, x1       ; truncated to eight bits
+  ubfx x1, x1, #0, #8   ->  delete
+  ```
+
+* **The bits.** The input's possible bits are those neither its
+  known-zero bits nor its range exclude, from the engine behind [the
+  decided-branch check](#conditional-branch-decided-by-known-values):
+  a zeroing producer (an AND, a bitfield extract, a narrow or W-form
+  load, any W-form write, a CSET, a CSEL of two bounded values), the
+  fall-through of a TST + B.NE, a TBNZ or a compare, a copy. When all
+  of them lie inside the mask the operation passes its input through.
+  A W form in place deletes only when the register's top half is
+  already zero (known bits, or an X range below 2^32), because the
+  instruction clears that half too; out of place `mov Wd, Wn` moves the
+  same 32 bits.
+* **Left to other checks:** a known value (check_const_fold folds it
+  to a MOV of the result), an X-form keep-the-low-half mask out of
+  place (check_and_lo32_mov's `mov Wd, Wn`), a mask or extract directly
+  after the instruction that bounded its input (the AND/extend chain
+  and the shift + AND extraction fold those pairs whole), and an
+  in-place zero-extension the redundant zero-extension check reports.
+  This check runs just before that one, whose per-register facts at
+  that point still describe the input, and defers exactly when it
+  would fire -- so the facts that only this engine has, from branches
+  and from sources further back, still report.
+* **Corpus, 2026-09-26** (166.2M instructions): **7,947** findings, no
+  other check moved; 3,690 delete and 4,257 become copies.
+  * LLVM output **5,046**: librustc_driver 3,070 (facts from a branch
+    2,089 -- a tag or range test before the mask; a load 400; a CSET
+    332, the `cset w8, lt ; and w0, w8, #1` of a bool returned from
+    another block), clang 1,894 (branches 927, CSET 429, loads 340),
+    uutils 73, bash 4, libcrypto 3, dyld 2.
+  * JavaScriptCore **2,230**, nearly all a mask re-applied to a value
+    an earlier AND already masked (1,910 deletions). SpiderMonkey
+    **527**, 487 of them irregexp's character-table index masked after
+    its range check; V8 62; Go 82 (a bitmap byte test truncated to
+    eight bits).
+* **Verification.** `test_and_known_noop` (16 word-level cases),
+  `fixtures/and_known_noop.s`, and `tools/rwfuzz and`, which bounds a
+  register -- by a producer, a TST + B.NE, a TBNZ or a CMP + B.HS, now
+  and then a producer and a branch together -- then masks it in place
+  or not, with a low mask, a clear-low mask, a single bit or a UBFX,
+  sometimes stopping at the bit the TBNZ found clear: 100,000 programs,
+  26,849 rewrites executed (7,475 deletions), 0 mismatches. Its control
+  arm, making an unflagged AND/UBFX the copy (or deleting it in place),
+  changed the result in 83,766 of 202,193 cases, and builds with one
+  proof removed each -- the W form's top half, the mask test, a TBNZ's
+  fact over-reported, the branch-target reset, write invalidation --
+  mismatched within 5,000 programs. ASan/UBSan clean; the unit tests
+  pass against Capstone 6.0.0-Alpha11; no other fixture changed.
+* Not covered: an out-of-place copy whose producer could write the
+  destination itself (`cset w0, lt` rather than `cset w8, lt ; mov w0,
+  w8`) -- a retargeting that needs the source register dead.
+
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when

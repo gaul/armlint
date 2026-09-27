@@ -451,7 +451,7 @@ struct armlint_state {
 
     // Known register values (the kv_* engine; see kv_sync). Per GPR,
     // the fact (kv_known marks the registers with one) and the
-    // instruction that last narrowed it; per GPR and SP, the writes this
+    // instruction that last narrowed it, with its word; per GPR, the writes this
     // region (the repeat table's key). For NZCV, the flag states still
     // possible and the instruction that last narrowed them; the flag
     // setter, and the states its operation alone allows; the compare
@@ -467,6 +467,7 @@ struct armlint_state {
     uint32_t kv_known;
     kv_fact kv_facts[31];
     size_t kv_src_offset[31];
+    uint32_t kv_src_op[31];
     char kv_src_text[31][ARMLINT_FINDING_LINE_LEN];
     uint32_t kv_ver[32];
     uint32_t kv_nzcv_ver;
@@ -13159,7 +13160,7 @@ static void kv_refine_cmp(kv_fact *f, const kv_cmp *k, unsigned cond)
 // its source -- unless it says nothing new, which leaves the source that
 // established what it does say.
 static void kv_narrowed(armlint_state *state, unsigned r, const kv_fact *f,
-                        size_t offset, const char *text)
+                        size_t offset, uint32_t op, const char *text)
 {
     kv_fact before;
     kv_get(state, r, &before);
@@ -13169,6 +13170,7 @@ static void kv_narrowed(armlint_state *state, unsigned r, const kv_fact *f,
     state->kv_facts[r] = *f;
     state->kv_known |= 1u << r;
     state->kv_src_offset[r] = offset;
+    state->kv_src_op[r] = op;
     memcpy(state->kv_src_text[r], text, ARMLINT_FINDING_LINE_LEN);
 }
 
@@ -13193,6 +13195,7 @@ static void kv_commit(armlint_state *state)
         state->kv_facts[r] = pd->fact[i];
         state->kv_known |= 1u << r;
         state->kv_src_offset[r] = pd->offset;
+        state->kv_src_op[r] = pd->op;
         memcpy(state->kv_src_text[r], pd->text, ARMLINT_FINDING_LINE_LEN);
     }
 
@@ -13260,7 +13263,7 @@ static void kv_commit(armlint_state *state)
             kv_fact f;
             kv_get(state, k->rn, &f);
             kv_refine_cmp(&f, k, cond);
-            kv_narrowed(state, k->rn, &f, pd->offset, pd->text);
+            kv_narrowed(state, k->rn, &f, pd->offset, pd->op, pd->text);
         }
         break;
     }
@@ -13284,7 +13287,7 @@ static void kv_commit(armlint_state *state)
                 f.slo[view] = 0;
                 f.shi[view] = 0;
             }
-            kv_narrowed(state, r, &f, pd->offset, pd->text);
+            kv_narrowed(state, r, &f, pd->offset, pd->op, pd->text);
         }
         break;
     case KV_BR_TBZ:
@@ -13298,7 +13301,7 @@ static void kv_commit(armlint_state *state)
             } else {
                 f.k0 |= bit;        // not taken: the bit is clear
             }
-            kv_narrowed(state, r, &f, pd->offset, pd->text);
+            kv_narrowed(state, r, &f, pd->offset, pd->op, pd->text);
         }
         break;
     default:
@@ -13764,6 +13767,116 @@ bool check_const_fold(armlint_state *state, const cs_insn *insn,
                  state->kv_src_text[src[i]]);
     }
     insn_text(out->lines[line], sizeof(out->lines[line]), insn);
+    return true;
+}
+
+// Detect an AND or UBFX #0 whose input the known bits already confine to
+// its mask; see armlint.h.
+bool check_and_known_noop(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->kv_valid = false;
+        return false;
+    }
+    kv_sync(state, insn, offset);
+    uint32_t op = insn_word(insn);
+    bool sf = (op >> 31) != 0;
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned width = sf ? 64u : 32u;
+    uint64_t wmask = kv_mask(sf);
+    uint64_t mask;
+    if ((op & 0x7F800000u) == 0x12000000u) {
+        // AND (immediate).
+        if ((!sf && ((op >> 22) & 1u) != 0)
+                || !decode_bitmask_imm_value((op >> 22) & 1u,
+                                             (op >> 16) & 0x3Fu,
+                                             (op >> 10) & 0x3Fu, width,
+                                             &mask)) {
+            return false;
+        }
+    } else if ((op & 0x7F800000u) == 0x53000000u
+            && ((op >> 22) & 1u) == (sf ? 1u : 0u)
+            && ((op >> 16) & 0x3Fu) == 0 && ((op >> 10) & 0x3Fu) + 1u < width) {
+        // UBFX #0, #w (UXTB, UXTH among them).
+        mask = kv_ones(((op >> 10) & 0x3Fu) + 1u);
+    } else {
+        return false;
+    }
+    // Rd = 31 is SP for AND; Rn = 31 is ZR, a constant.
+    if (rd == 31u || rn == 31u || ((state->kv_known >> rn) & 1u) == 0) {
+        return false;
+    }
+    const kv_fact *f = &state->kv_facts[rn];
+    uint64_t v, lo, hi;
+    int64_t slo, shi;
+    if (kv_fact_exact(f, &v)) {
+        return false;   // a known value: check_const_fold's
+    }
+    kv_range(f, sf ? 1u : 0u, &lo, &hi, &slo, &shi);
+    if (lo > hi || (f->k0 & f->k1) != 0) {
+        return false;
+    }
+    uint64_t may = ~f->k0 & wmask & kv_ones(bits_used64(hi));
+    if ((may & ~mask & wmask) != 0) {
+        return false;
+    }
+    // In place, a W-form AND also clears the top half: it deletes only
+    // when that is already zero.
+    bool in_place = rd == rn;
+    if (sf && !in_place && mask == 0xFFFFFFFFu) {
+        return false;   // check_and_lo32_mov's MOV Wd, Wn
+    }
+    if (in_place && !sf) {
+        uint64_t xlo, xhi;
+        int64_t xslo, xshi;
+        kv_range(f, 1, &xlo, &xhi, &xslo, &xshi);
+        if (xhi > 0xFFFFFFFFu) {
+            return false;
+        }
+    }
+    // A mask or extract directly after the instruction that bounded its
+    // input is the pair folds' -- the AND/extend chain, the shift + AND
+    // extraction -- and an in-place zero-extension the redundant
+    // zero-extension check reports is its (that check runs next and has
+    // not yet seen this instruction).
+    uint32_t src = state->kv_src_op[rn];
+    if (state->kv_src_offset[rn] + 4u == offset
+            && ((src & 0x1F800000u) == 0x12000000u
+                || (src & 0x1F800000u) == 0x13000000u
+                || (src & 0x7FE0FFE0u) == 0x2A0003E0u)) {
+        return false;
+    }
+    unsigned c, c_rd, c_rn;
+    if (in_place && ((decode_ubfm_zext(op, &c, &c_rd, &c_rn)
+                      || decode_and_imm_lowmask(op, &c, &c_rd, &c_rn))
+                     && (state->wzx_valid & (1u << rn)) != 0
+                     && state->wzx_zero_from[rn] <= c)) {
+        return false;
+    }
+
+    char reg[8], dst[8];
+    kv_reg_name(reg, sizeof(reg), rn, sf);
+    kv_reg_name(dst, sizeof(dst), rd, sf);
+    out->name = "AND/UBFX that known bits make a no-op";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    if (in_place) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> delete; %s has no bits outside 0x%" PRIx64 " (known 0x%zx "
+            "bytes back)", reg, mask & wmask,
+            offset - state->kv_src_offset[rn]);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> mov %s, %s; %s has no bits outside 0x%" PRIx64 " (known "
+            "0x%zx bytes back)", dst, reg, reg, mask & wmask,
+            offset - state->kv_src_offset[rn]);
+    }
+    snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+             state->kv_src_text[rn]);
+    insn_text(out->lines[1], sizeof(out->lines[1]), insn);
     return true;
 }
 
@@ -21790,6 +21903,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_pac_raw_indirect,
     check_pac_zero_disc_indirect,
     check_and_lo32_mov,
+    check_and_known_noop, // reads wzx_*: must precede its owner
     check_redundant_zext,
     check_redundant_sext,
     check_and_ext_chain,

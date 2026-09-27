@@ -42,6 +42,9 @@
 //          taken, or make an always-taken one a B to its target.
 //   fold   check_const_fold: turn an operation on known values into the MOV
 //          the finding renders, or delete one that changes nothing.
+//   and    check_and_known_noop: delete an AND/UBFX whose input the known
+//          bits confine to its mask, or make it the MOV the finding
+//          renders.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -187,6 +190,9 @@ static uint32_t and_w(unsigned d, unsigned n, unsigned m) { return 0x0A000000u |
 static uint32_t mul_x(unsigned d, unsigned n, unsigned m) { return 0x9B007C00u | m << 16 | n << 5 | d; }
 static uint32_t udiv_w(unsigned d, unsigned n, unsigned m) { return 0x1AC00800u | m << 16 | n << 5 | d; }
 static uint32_t lslv_x(unsigned d, unsigned n, unsigned m) { return 0x9AC02000u | m << 16 | n << 5 | d; }
+// AND immediate clearing the low k bits, and keeping the one bit b.
+static uint32_t and_clear_low(bool x, unsigned d, unsigned n, unsigned k) { return x ? 0x92400000u | ((64u - k) & 63u) << 16 | (63u - k) << 10 | n << 5 | d : 0x12000000u | ((32u - k) & 31u) << 16 | (31u - k) << 10 | n << 5 | d; }
+static uint32_t and_bit(bool x, unsigned d, unsigned n, unsigned b) { return x ? 0x92400000u | ((64u - b) & 63u) << 16 | n << 5 | d : 0x12000000u | ((32u - b) & 31u) << 16 | n << 5 | d; }
 static uint32_t b_cond(unsigned c, int words) { return 0x54000000u | ((unsigned)words & 0x7FFFFu) << 5 | c; }
 static uint32_t bl(int words) { return 0x94000000u | ((unsigned)words & 0x3FFFFFFu); }
 
@@ -673,6 +679,56 @@ static void plant_fold(void)
     }
     plant_gap();
     push(fold_op(d, a, rr(3) == 0 ? d : b));
+}
+
+// and: bits of r bounded -- by a producer, a TST + B.NE, a TBNZ, or a
+// CMP + B.HS -- a gap, and an AND/UBFX of r, in place or not, whose mask
+// may or may not cover them.
+static void plant_and(void)
+{
+    unsigned r = body_reg();
+    bool x = rr(2) == 0;
+    unsigned width = x ? 64u : 32u;
+    unsigned how = rr(4);
+    unsigned bit = 0;
+    if (how != 0 && rr(2) == 0) {
+        push(producer(r));      // a branch then narrows what it bounded
+    }
+    switch (how) {
+    case 0:
+        push(producer(r));
+        break;
+    case 1:
+        push(tst_w_low(r, lowmask_width(false)));
+        push_branch(2, 0, 1, 0);                    // b.ne
+        break;
+    case 2:
+        bit = rr(3) == 0 ? rr(64) : 1u + rr(8);
+        push_branch(6, r, 0, bit);                  // tbnz
+        break;
+    default:
+        push(cmp_imm(true, false, r, small_imm()));
+        push_branch(2, 0, 2, 0);                    // b.hs
+        break;
+    }
+    plant_gap();
+    unsigned d = rr(2) == 0 ? r : body_reg();
+    if (bit != 0 && bit < 32u && rr(2) == 0) {
+        // The mask stopping at the bit the TBNZ found clear.
+        push(x ? and_x_low(d, r, bit) : and_w_low(d, r, bit));
+        return;
+    }
+    switch (rr(4)) {
+    case 0: push(x ? and_x_low(d, r, lowmask_width(true))
+                   : and_w_low(d, r, lowmask_width(false))); break;
+    case 1: push(and_clear_low(x, d, r, 1u + rr(width - 1u))); break;
+    case 2: push(and_bit(x, d, r, rr(width))); break;
+    default: {
+        unsigned w = 1u + rr(width - 1u);
+        push(x ? ubfm_x(d, r, 0, w - 1u) : ubfm_w(d, r, 0, w - 1u));
+        break;
+    }
+    }
 }
 
 static void gen_body(void (*plant)(void))
@@ -1459,6 +1515,53 @@ static bool fold_control(int i, uint32_t *alt)
     return true;
 }
 
+// and: "-> delete; ..." deletes, "-> mov Rd, Rn; ..." copies.
+static bool and_apply(const hit_t *h, uint32_t *code)
+{
+    if (h->count != 1u || !in_body(h->start, h->start)) {
+        return false;
+    }
+    if (strncmp(h->detail, "-> delete;", 10) == 0) {
+        code[h->start] = NOP;
+        return true;
+    }
+    char a, b;
+    unsigned d, n;
+    uint32_t w = code[h->start];
+    if (sscanf(h->detail, "-> mov %c%u, %c%u;", &a, &d, &b, &n) != 4
+            || a != b || d != (w & 31u) || n != ((w >> 5) & 31u)) {
+        return false;
+    }
+    code[h->start] = a == 'x' ? mov_x(d, n) : mov_w(d, n);
+    return true;
+}
+
+static size_t and_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+static bool and_special(const hit_t *h)
+{
+    return strncmp(h->detail, "-> delete;", 10) == 0;
+}
+
+// Control: make an unflagged AND/UBFX #0 of a body register the copy (or,
+// in place, delete it).
+static bool and_control(int i, uint32_t *alt)
+{
+    uint32_t w = prog[i];
+    bool x = (w >> 31) != 0;
+    bool ubfx = (w & 0x7F800000u) == 0x53000000u && ((w >> 16) & 63u) == 0;
+    if (((w & 0x7F800000u) != 0x12000000u && !ubfx) || (w & 31u) >= 8u
+            || ((w >> 5) & 31u) >= 8u || rr(2) != 0) {
+        return false;
+    }
+    unsigned d = w & 31u, n = (w >> 5) & 31u;
+    alt[i] = d == n ? NOP : x ? mov_x(d, n) : mov_w(d, n);
+    return true;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -1499,6 +1602,8 @@ static const mode_t_ modes[] = {
                 "operation on known values leaves its register unchanged" },
       "deleted", plant_fold, fold_apply, fold_slot, fold_special,
       fold_control },
+    { "and", { "AND/UBFX that known bits make a no-op", NULL },
+      "deleted", plant_and, and_apply, and_slot, and_special, and_control },
 };
 
 static bool wanted(const char *name)
@@ -1514,7 +1619,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and\n");
 }
 
 int main(int argc, char **argv)
