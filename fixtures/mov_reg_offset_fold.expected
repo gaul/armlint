@@ -22,7 +22,12 @@ MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x2c <_mai
   movz x17, #0x4
   str wzr, [x1, x17]
 
+operation on known values foldable to MOV #imm at offset: 0x58 <_main+0x58>: -> mov x2, #0x11 (x16 is 0x10) (1 instructions)
+  mov x16, #0x10
+  add x2, x16, #1
+
 Optimization opportunities by type:
        6  MOV + register-offset LDR/STR foldable to immediate offset
+       1  operation on known values foldable to MOV #imm
 
-6 optimization opportunities in 24 instructions
+7 optimization opportunities in 24 instructions

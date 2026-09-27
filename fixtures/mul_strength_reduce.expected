@@ -99,10 +99,15 @@ register write overwritten unread at offset: 0x64 <_main+0x64>: -> delete; x3 is
   ... 1 instruction ...
   mul x3, x0, x0
 
+operation on known values foldable to MOV #imm at offset: 0x6c <_main+0x6c>: -> mov x3, #0x40 (x0 is 0x8) (1 instructions)
+  mov x0, #8
+  mul x3, x0, x0
+
 Optimization opportunities by type:
       12  register write overwritten unread
        6  MUL by constant foldable to shift/add
        3  register already holds the recomputed value
        1  MOV + MADD/MSUB foldable to shifted ADD/SUB
+       1  operation on known values foldable to MOV #imm
 
-22 optimization opportunities in 29 instructions
+23 optimization opportunities in 29 instructions

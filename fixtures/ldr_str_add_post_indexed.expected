@@ -106,6 +106,10 @@ ADD + LDR foldable to pre-indexed LDR at offset: 0xa4 <_main+0xa4>: -> ldr x3, [
   add x1, x1, #0x10
   ldr x3, [x1]
 
+operation on known values foldable to MOV #imm at offset: 0xb8 <_main+0xb8>: -> mov x9, #0xd (x9 is 0x5) (1 instructions)
+  mov x9, #5
+  add x9, x9, #8
+
 LDR + ADD foldable to post-indexed LDR at offset: 0xb4 <_main+0xb4>: -> ldr d2, [x9], #0x8 (2 instructions)
   ldr d2, [x9]
   add x9, x9, #0x8
@@ -113,6 +117,10 @@ LDR + ADD foldable to post-indexed LDR at offset: 0xb4 <_main+0xb4>: -> ldr d2, 
 ADD + STR foldable to pre-indexed STR at offset: 0xb8 <_main+0xb8>: -> str q0, [x9, #0x8]! (2 instructions)
   add x9, x9, #0x8
   str q0, [x9]
+
+operation on known values foldable to MOV #imm at offset: 0xc0 <_main+0xc0>: -> mov x9, #0xfffffffffffffffd (x9 is 0xd) (1 instructions)
+  add x9, x9, #8
+  sub x9, x9, #0x10
 
 STR + SUB foldable to post-indexed STR at offset: 0xbc <_main+0xbc>: -> str q0, [x9], #-0x10 (2 instructions)
   str q0, [x9]
@@ -166,9 +174,10 @@ Optimization opportunities by type:
        4  LDP + ADD foldable to post-indexed LDP
        3  LDR + SUB foldable to post-indexed LDR
        2  SUB + LDR foldable to pre-indexed LDR
+       2  operation on known values foldable to MOV #imm
        1  LDP + SUB foldable to post-indexed LDP
        1  STP + ADD foldable to post-indexed STP
        1  STP + SUB foldable to post-indexed STP
        1  STR + SUB foldable to post-indexed STR
 
-40 optimization opportunities in 78 instructions
+42 optimization opportunities in 78 instructions

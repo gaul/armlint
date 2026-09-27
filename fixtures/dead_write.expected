@@ -25,12 +25,17 @@ register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; x3 is
   ... 1 instruction ...
   mov x3, #8
 
+operation on known values foldable to MOV #imm at offset: 0x68 <_main+0x68>: -> mov x4, #0x8 (x3 is 0x7) (1 instructions)
+  mov x3, #7
+  add x4, x3, #1
+
 register already holds the recomputed value at offset: 0xa8 <_main+0xa8>: -> delete; x4 already holds this value (set 0x8 bytes back) (1 instructions)
   add x4, x25, #0xc8
   add x4, x25, #0xc8
 
 Optimization opportunities by type:
        6  register write overwritten unread
+       1  operation on known values foldable to MOV #imm
        1  register already holds the recomputed value
 
-7 optimization opportunities in 52 instructions
+8 optimization opportunities in 52 instructions

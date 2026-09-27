@@ -90,9 +90,14 @@ register write overwritten unread at offset: 0x60 <_main+0x60>: -> delete; x3 is
   ... 1 instruction ...
   udiv x3, x0, x0
 
+operation on known values foldable to MOV #imm at offset: 0x68 <_main+0x68>: -> mov x3, #0x1 (x0 is 0x8) (1 instructions)
+  mov x0, #8
+  udiv x3, x0, x0
+
 Optimization opportunities by type:
       12  register write overwritten unread
        5  UDIV by constant foldable to shift
        3  register already holds the recomputed value
+       1  operation on known values foldable to MOV #imm
 
-20 optimization opportunities in 28 instructions
+21 optimization opportunities in 28 instructions

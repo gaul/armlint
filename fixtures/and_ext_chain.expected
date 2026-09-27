@@ -47,6 +47,10 @@ AND/extend chain foldable to one at offset: 0x40 <_main+0x40>: -> and x19, x2, #
   mov w0, w2
   and x19, x0, #0x7fffffff
 
+operation on known values foldable to MOV #imm at offset: 0x4c <_main+0x4c>: -> mov w16, #0x0 (w12 is 0x0) (1 instructions)
+  and w12, w12, #0xf
+  and w16, w12, #0x7f
+
 AND/extend chain foldable to one at offset: 0x4c <_main+0x4c>: -> tst w12, #0x60 (2 instructions)
   and w16, w12, #0x7f
   tst w16, #0x60
@@ -77,8 +81,9 @@ Optimization opportunities by type:
        3  register write overwritten unread
        1  dead sign-extension masked by zero-extension
        1  low-32 zero-extension foldable to MOV Wd, Wn
+       1  operation on known values foldable to MOV #imm
        1  redundant sign-extension after sign-extending op
        1  redundant zero-extension after zeroing op
        1  register already holds the recomputed value
 
-18 optimization opportunities in 40 instructions
+19 optimization opportunities in 40 instructions

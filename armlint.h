@@ -1509,6 +1509,43 @@ bool check_value_recompute(armlint_state *state, const cs_insn *insn,
 bool check_dead_write(armlint_state *state, const cs_insn *insn,
                       size_t offset, armlint_finding *out);
 
+// Detect an ALU instruction every input of which is a known value
+// (from the known-value engine behind check_branch_decided), so its
+// result is a constant too:
+//     mov  w8, #0           ; librustc_driver: a constant tail
+//     and  w0, w8, #1       ; duplication put in front of the
+//                           ; bool's zero-extension -> mov w0, #0x0
+//     mov  w1, #0
+//     lsl  w4, w1, #3       -> mov w4, #0x0
+// When the constant is one instruction -- a MOVZ, a MOVN or a logical
+// immediate at the instruction's width -- the instruction becomes that
+// MOV: one for one, with no input to wait on, and often the last read
+// of the register holding the constant, whose producer then dies (the
+// dead-write check sees that once the rewrite is applied). When the
+// register already holds the result, whatever its width, the
+// instruction deletes. The classes folded are those the engine
+// evaluates: ADD/SUB in every form, the logical forms, the bitfield
+// moves (BFM with its destination known too), EXTR, the multiplies,
+// divides and variable shifts, the CSSC min/max and the 1-source group;
+// not flag setters or readers, ADR/ADRP, or move-wide instructions. A
+// value known only from a MOVK sequence is never an input (a JIT's
+// patch site), nor is SP.
+//
+// Left to the checks that own them: a recompute of the value the
+// register holds (check_value_recompute), a copy (check_cheap_const_copy
+// for a copy of a constant), ADD/SUB #0 (check_add_sub_zero), a Rs, Rs
+// operation (check_self_op), Rm = ZR (check_zr_operand_alu), an
+// in-place zero-extension (check_redundant_zext), and a logical
+// immediate from ZR, which is how a constant is spelled. The folds of a
+// MOV'd constant into one operand (MOV + ADD/SUB immediate, MOV + logic
+// bitmask, MOV + shift, MUL strength reduction) can see the same
+// instruction when all its inputs are known; each rewrite is sound
+// alone. Reported as "operation on known values foldable to MOV #imm"
+// and "operation on known values leaves its register unchanged", with
+// the instructions that established the inputs' values first.
+bool check_const_fold(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out);
+
 // Detect a CSET whose 0/1 result is re-compared against zero for a
 // conditional select while the original comparison is still in the
 // flags -- the zero-test's flags are then a pure function of the

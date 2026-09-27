@@ -13623,6 +13623,150 @@ bool check_branch_decided(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// The inputs of a decoded pure instruction whose values the engine
+// knows, as "x9 is 0x3, x8 is 0x5" -- each at the width the instruction
+// reads it (the widening multiplies read W registers) -- with the
+// sources of those values, most recent last, deduplicated.
+static void kv_describe_inputs(const armlint_state *state, uint32_t op,
+                               const lvn_op *p, char *buf, size_t size,
+                               unsigned *nsrc, unsigned src[3])
+{
+    size_t n = 0;
+    buf[0] = '\0';
+    *nsrc = 0;
+    bool widening = (op & 0x1F000000u) == 0x1B000000u
+        && (((op >> 21) & 7u) == 1u || ((op >> 21) & 7u) == 5u);
+    for (unsigned i = 0; i < p->nin && n < size; i++) {
+        unsigned r = p->in[i];
+        bool listed = false;
+        for (unsigned j = 0; j < i; j++) {
+            listed = listed || p->in[j] == r;
+        }
+        if (r >= 31u || listed) {
+            continue;           // ZR (SP is never an input with a value)
+        }
+        bool sf = p->sf && !(widening && i < 2u);
+        uint64_t v = 0;
+        kv_value(state, r, false, &v);
+        char reg[8];
+        kv_reg_name(reg, sizeof(reg), r, sf);
+        n += (size_t)snprintf(buf + n, size - n, "%s%s is 0x%" PRIx64,
+                              n > 0 ? ", " : "", reg, v & kv_mask(sf));
+        bool seen = false;
+        for (unsigned j = 0; j < *nsrc; j++) {
+            seen = seen || state->kv_src_offset[src[j]]
+                           == state->kv_src_offset[r];
+        }
+        if (!seen && *nsrc < 3u) {
+            src[(*nsrc)++] = r;
+        }
+    }
+    // Oldest source first.
+    for (unsigned i = 1; i < *nsrc; i++) {
+        for (unsigned j = i; j > 0 && state->kv_src_offset[src[j]]
+                                      < state->kv_src_offset[src[j - 1]];
+                j--) {
+            unsigned t = src[j];
+            src[j] = src[j - 1];
+            src[j - 1] = t;
+        }
+    }
+}
+
+// Detect an ALU instruction whose inputs are all known values; see
+// armlint.h.
+bool check_const_fold(armlint_state *state, const cs_insn *insn,
+                      size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->kv_valid = false;
+        return false;
+    }
+    kv_sync(state, insn, offset);
+    uint32_t op = insn_word(insn);
+    lvn_op p;
+    if (!decode_lvn_op(op, &p) || p.out >= 31u || p.sets_flags
+            || p.reads_flags || p.pcrel || p.move_wide || p.copy) {
+        return false;
+    }
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned c, c_rd, c_rn;
+    bool shifted = (op & 0x1F000000u) == 0x0A000000u
+        || (op & 0x1F200000u) == 0x0B000000u;
+    if (((op & 0x1F800000u) == 0x12000000u && rn == 31u)
+            || (op & 0x7FE0FFE0u) == 0x2A0003E0u) {
+        return false;   // a constant, or a copy (check_cheap_const_copy's)
+    }
+    if ((op & 0x1F800000u) == 0x11000000u && ((op >> 10) & 0xFFFu) == 0) {
+        return false;   // ADD/SUB #0 (check_add_sub_zero's)
+    }
+    if (shifted && rn == rm && ((op >> 10) & 0x3Fu) == 0) {
+        return false;   // Rs, Rs (check_self_op's)
+    }
+    if ((shifted || (op & 0x1F000000u) == 0x1B000000u) && rm == 31u
+            && rn != 31u) {
+        return false;   // Rm = ZR (check_zr_operand_alu's)
+    }
+    if ((decode_and_imm_lowmask(op, &c, &c_rd, &c_rn) && c_rd == c_rn)
+            || (decode_ubfm_zext(op, &c, &c_rd, &c_rn) && c_rd == c_rn)
+            || decode_mov_w_self(op, &c, &c_rd)) {
+        return false;   // in-place zero-extensions (check_redundant_zext's)
+    }
+    // At least one input is a register, not only ZR: `sxtw x8, wzr` is
+    // an odd spelling of a constant, not a value the engine knew.
+    bool reg_input = false;
+    for (unsigned i = 0; i < p.nin; i++) {
+        reg_input = reg_input || p.in[i] < 31u;
+    }
+    uint64_t v;
+    if (!reg_input || !kv_op_value(state, op, &p, &v)) {
+        return false;
+    }
+    // A recompute of the value the register holds is
+    // check_value_recompute's, which has just read this instruction.
+    if (state->lvn_cur_valid && state->lvn_cur_offset == offset
+            && state->lvn_cur_same) {
+        return false;
+    }
+    unsigned width = p.sf ? 64u : 32u;
+    uint64_t cur;
+    bool unchanged = kv_value(state, p.out, false, &cur) && cur == v;
+    if (!unchanged && !is_one_instruction_constant(v, width)) {
+        return false;
+    }
+
+    char inputs[96];
+    unsigned nsrc, src[3];
+    kv_describe_inputs(state, op, &p, inputs, sizeof(inputs), &nsrc, src);
+    char reg[8];
+    kv_reg_name(reg, sizeof(reg), p.out, p.sf);
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    if (unchanged) {
+        out->name = "operation on known values leaves its register "
+                    "unchanged";
+        snprintf(out->detail, sizeof(out->detail),
+            "-> delete; %s already holds 0x%" PRIx64 "%s%s%s", reg, v,
+            inputs[0] != '\0' ? " (" : "", inputs,
+            inputs[0] != '\0' ? ")" : "");
+    } else {
+        out->name = "operation on known values foldable to MOV #imm";
+        snprintf(out->detail, sizeof(out->detail),
+            "-> mov %s, #0x%" PRIx64 "%s%s%s", reg, v,
+            inputs[0] != '\0' ? " (" : "", inputs,
+            inputs[0] != '\0' ? ")" : "");
+    }
+    unsigned line = 0;
+    for (unsigned i = 0; i < nsrc; i++) {
+        snprintf(out->lines[line++], sizeof(out->lines[0]), "%s",
+                 state->kv_src_text[src[i]]);
+    }
+    insn_text(out->lines[line], sizeof(out->lines[line]), insn);
+    return true;
+}
+
 // === CMP of a 32-bit value against 2^32 - k (check_cmp_cmn_w) ===
 
 // The target of a direct branch at `offset`, and whether it is
@@ -21603,6 +21747,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_sp_mov_overwritten,
     check_value_recompute,
     check_dead_write,
+    check_const_fold,   // reads lvn_cur_*: after check_value_recompute
     check_cset_recompare,
     check_mov_ccmp_imm_fold,
     check_mov_csel_fold,

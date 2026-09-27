@@ -80,6 +80,10 @@ register write overwritten unread at offset: 0x48 <_main+0x48>: -> delete; x0 is
   ... 2 instructions ...
   lsl x0, x8, x8
 
+operation on known values foldable to MOV #imm at offset: 0x54 <_main+0x54>: -> mov x0, #0xa0 (x8 is 0x5) (1 instructions)
+  mov x8, #5
+  lsl x0, x8, x8
+
 register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x0 is overwritten before any read (1 instructions)
   lsl x0, x8, x8
   ... 2 instructions ...
@@ -88,5 +92,6 @@ register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x0 is
 Optimization opportunities by type:
       14  register write overwritten unread
        6  MOV + variable shift foldable to immediate shift
+       1  operation on known values foldable to MOV #imm
 
-20 optimization opportunities in 26 instructions
+21 optimization opportunities in 26 instructions

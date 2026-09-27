@@ -82,6 +82,10 @@ register write overwritten unread at offset: 0xb4 <_main+0xb4>: -> delete; x8 is
   mov x8, #0xe
   add x8, x1, #0x10
 
+operation on known values foldable to MOV #imm at offset: 0xb8 <_main+0xb8>: -> mov x8, #0x19 (x1 is 0x9) (1 instructions)
+  mov x1, #9
+  add x8, x1, #0x10
+
 ADD + STR foldable to immediate-offset STR at offset: 0xb8 <_main+0xb8>: -> str q0, [x1, #0x10] (2 instructions)
   add x8, x1, #0x10
   str q0, [x8]
@@ -90,28 +94,60 @@ register write overwritten unread at offset: 0xc0 <_main+0xc0>: -> delete; x8 is
   mov x8, #0xf
   add x8, x1, #0x10
 
+operation on known values foldable to MOV #imm at offset: 0xc4 <_main+0xc4>: -> mov x8, #0x19 (x1 is 0x9) (1 instructions)
+  mov x1, #9
+  add x8, x1, #0x10
+
 register write overwritten unread at offset: 0xd0 <_main+0xd0>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #0x10
+  add x8, x1, #0x10
+
+operation on known values foldable to MOV #imm at offset: 0xd4 <_main+0xd4>: -> mov x8, #0x17 (x1 is 0x7) (1 instructions)
+  mov x1, #7
   add x8, x1, #0x10
 
 register write overwritten unread at offset: 0xe0 <_main+0xe0>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #5
   add x8, x1, #0x10
 
+operation on known values foldable to MOV #imm at offset: 0xe4 <_main+0xe4>: -> mov x8, #0x17 (x1 is 0x7) (1 instructions)
+  mov x1, #7
+  add x8, x1, #0x10
+
+operation on known values foldable to MOV #imm at offset: 0xf0 <_main+0xf0>: -> mov x9, #0x18 (x8 is 0x17) (1 instructions)
+  add x8, x1, #0x10
+  add x9, x8, #1
+
 register write overwritten unread at offset: 0xf4 <_main+0xf4>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #6
+  add x8, x1, #0x10
+
+operation on known values foldable to MOV #imm at offset: 0xf8 <_main+0xf8>: -> mov x8, #0x17 (x1 is 0x7) (1 instructions)
+  mov x1, #7
   add x8, x1, #0x10
 
 register write overwritten unread at offset: 0x104 <_main+0x104>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #7
   add x8, x1, #0x10
 
+operation on known values foldable to MOV #imm at offset: 0x108 <_main+0x108>: -> mov x8, #0x17 (x1 is 0x7) (1 instructions)
+  mov x1, #7
+  add x8, x1, #0x10
+
 register write overwritten unread at offset: 0x114 <_main+0x114>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #8
   add x8, x0, #0x10
 
+operation on known values foldable to MOV #imm at offset: 0x118 <_main+0x118>: -> mov x8, #0x17 (x0 is 0x7) (1 instructions)
+  mov x0, #7
+  add x8, x0, #0x10
+
 register write overwritten unread at offset: 0x128 <_main+0x128>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #9
+  add x8, x0, #0x10
+
+operation on known values foldable to MOV #imm at offset: 0x12c <_main+0x12c>: -> mov x8, #0x15 (x0 is 0x5) (1 instructions)
+  mov x0, #5
   add x8, x0, #0x10
 
 register already holds the recomputed value at offset: 0x138 <_main+0x138>: -> delete; x0 already holds this value (set 0x18 bytes back) (1 instructions)
@@ -140,10 +176,15 @@ register write overwritten unread at offset: 0x164 <_main+0x164>: -> delete; x8 
   mov x8, #0xb
   add x8, x1, #0x10
 
+operation on known values foldable to MOV #imm at offset: 0x168 <_main+0x168>: -> mov x8, #0x17 (x1 is 0x7) (1 instructions)
+  mov x1, #7
+  add x8, x1, #0x10
+
 Optimization opportunities by type:
       16  register write overwritten unread
       13  ADD foldable into every access it feeds
+      10  operation on known values foldable to MOV #imm
        1  ADD + STR foldable to immediate-offset STR
        1  register already holds the recomputed value
 
-31 optimization opportunities in 94 instructions
+41 optimization opportunities in 94 instructions

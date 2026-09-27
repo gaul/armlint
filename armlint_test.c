@@ -45,10 +45,20 @@ static const char *const kDeadWrite = "register write overwritten unread";
 // an AND just set -- and those tests are about the other check.
 static bool g_branches_uncounted;
 
+// And check_const_fold's, while set: a fragment computing from a
+// constant it just materialized (`mov x0, #8 ; mul x3, x0, x0`) is a
+// constant fold in its own right, which several strength-reduction
+// negatives hold up as the better rewrite.
+static bool g_folds_uncounted;
+
 static bool counted(const armlint_finding *f)
 {
     if (g_branches_uncounted
             && strncmp(f->name, "conditional branch that is ", 27) == 0) {
+        return false;
+    }
+    if (g_folds_uncounted
+            && strncmp(f->name, "operation on known values ", 26) == 0) {
         return false;
     }
     return g_uncounted == NULL || strcmp(f->name, g_uncounted) != 0;
@@ -59,6 +69,10 @@ static bool counted(const armlint_finding *f)
 
 #define DECIDED_BRANCHES_UNCOUNTED(stmt) \
     do { g_branches_uncounted = true; stmt; g_branches_uncounted = false; } \
+    while (0)
+
+#define CONST_FOLDS_UNCOUNTED(stmt) \
+    do { g_folds_uncounted = true; stmt; g_folds_uncounted = false; } \
     while (0)
 
 static int run_check(const uint8_t *code, size_t code_size)
@@ -4589,7 +4603,7 @@ static void test_and_lsr_lsl_fold(void)
     // MOV with a WZR source (mov w0, wzr) is a zeroing idiom, not a zext.
     mov_w_reg(&code[0], 0, 31);
     lsl_x(&code[4], 0, 0, 2);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Zero-extension writing the zero register (Rd=31) does not open.
     uxtb_w(&code[0], 31, 1);
@@ -7664,7 +7678,7 @@ static void test_mul_strength_reduce(void)
     // materializing the folded value. Suppressed.
     movz_x(&code[0], 0, 8, 0);
     mul_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Negative: 2^N - 1 case (7) is intentionally not folded.
     movz_x(&code[0], 0, 7, 0);
@@ -7726,12 +7740,12 @@ static void test_mul_strength_reduce(void)
     // the MOV could never be deleted.
     movz_x(&code[0], 0, 4, 0);
     mul_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Same for the 2^N + 1 path (rewrite reads the operand twice).
     movz_x(&code[0], 0, 5, 0);
     mul_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 }
 
 // MNEG Xd, Xn, Xm encoding (MSUB with Ra=11111). Base 0x9B00FC00.
@@ -7945,7 +7959,7 @@ static void test_mneg_strength_reduce(void)
     // rewrite would still read x0, so the MOV could never be deleted.
     movz_x(&code[0], 0, 8, 0);
     mneg_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 }
 
 // UDIV Xd, Xn, Xm encoding. Base 0x9AC00800.
@@ -8029,7 +8043,7 @@ static void test_udiv_strength_reduce(void)
     // and the real rewrite for C / C is mov x3, #1. Suppressed.
     movz_x(&code[0], 0, 8, 0);
     udiv_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Negative: non-power-of-2 (C = 3).
     movz_x(&code[0], 0, 3, 0);
@@ -8092,14 +8106,14 @@ static void test_udiv_strength_reduce(void)
     // Negative: Rn = XZR makes the dividend always zero.
     movz_x(&code[0], 0, 8, 0);
     udiv_x(&code[4], 3, 31, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Negative: dividend is the MOV destination itself (the constant
     // divided by itself). The LSR rewrite would still read x0, so
     // the MOV could never be deleted.
     movz_x(&code[0], 0, 8, 0);
     udiv_x(&code[4], 3, 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Negative: SDIV by 2^N is NOT equivalent to ASR (wrong rounding
     // on negative dividends). Same encoding block, opcode2 = 000011.
@@ -9288,9 +9302,13 @@ static void test_cmp_cmn_w(void)
     }
 }
 
+// The expectations of the known-value checks' word tables: nothing, a
+// branch never or always taken, a fold, an operation that changes
+// nothing.
+enum { NONE, NEVER, ALWAYS, FOLD, SAME };
+
 // check_branch_decided over instruction words with the buffer set, for
 // both of its finding names: never taken, always taken, or neither.
-enum { NONE, NEVER, ALWAYS };
 
 static void test_branch_decided(void)
 {
@@ -9437,6 +9455,105 @@ static void test_branch_decided(void)
                     && strcmp(detail, cases[i].detail) != 0)) {
             fprintf(stderr, "branch_decided case %zu: %d never, %d always, "
                     "detail \"%s\"\n", i, never, always, detail);
+            assert(0);
+        }
+    }
+}
+
+// check_const_fold over instruction words with the buffer set, for both
+// of its finding names.
+static void test_const_fold(void)
+{
+    const char *fold = "operation on known values foldable to MOV #imm";
+    const char *same = "operation on known values leaves its register "
+                       "unchanged";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // mov w8, #0 ; and w0, w8, #1 ; ret
+        { { 0x52800008u, 0x12000100u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov w0, #0x0 (w8 is 0x0)" },
+        // mov w1, #0 ; lsl w4, w1, #3 ; ret
+        { { 0x52800001u, 0x531D7024u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov w4, #0x0 (w1 is 0x0)" },
+        // mov x9, #3 ; mov x8, #5 ; add x10, x9, x8 ; ret
+        { { 0xD2800069u, 0xD28000A8u, 0x8B08012Au, 0xD65F03C0u }, 4, FOLD,
+          "-> mov x10, #0x8 (x9 is 0x3, x8 is 0x5)" },
+        // mov w8, #5 ; neg w9, w8 ; ret
+        { { 0x528000A8u, 0x4B0803E9u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov w9, #0xfffffffb (w8 is 0x5)" },
+        // mov x8, #0x10 ; lsr x9, x8, #4 ; ret
+        { { 0xD2800208u, 0xD344FD09u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov x9, #0x1 (x8 is 0x10)" },
+        // mov x9, #0 ; mov x20, #0 ; sub x9, x9, x20 ; ret
+        { { 0xD2800009u, 0xD2800014u, 0xCB140129u, 0xD65F03C0u }, 4, SAME,
+          "-> delete; x9 already holds 0x0 (x9 is 0x0, x20 is 0x0)" },
+        // cbnz x0, 1f ; add x1, x0, #5 ; 1: ret
+        { { 0xB5000040u, 0x91001401u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov x1, #0x5 (x0 is 0x0)" },
+        // cmp x0, #7 ; b.ne 1f ; add x1, x0, #1 ; 1: ret
+        { { 0xF1001C1Fu, 0x54000041u, 0x91000401u, 0xD65F03C0u }, 4, FOLD,
+          "-> mov x1, #0x8 (x0 is 0x7)" },
+        // mov w8, #0xff ; ubfx w9, w8, #4, #4 ; ret
+        { { 0x52801FE8u, 0x53041D09u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov w9, #0xf (w8 is 0xff)" },
+        // mov x1, #3 ; mov x2, #4 ; mul x3, x1, x2 ; ret
+        { { 0xD2800061u, 0xD2800082u, 0x9B027C23u, 0xD65F03C0u }, 4, FOLD,
+          "-> mov x3, #0xc (x1 is 0x3, x2 is 0x4)" },
+        // Negatives: a result no one instruction materializes, an
+        // unknown input, a MOVK-built one (a patch site), a recompute
+        // (the second ADD is check_value_recompute's), Rs, Rs, Rm = ZR,
+        // a copy, ADD #0, a flag setter, an in-place zero-extension, SP,
+        // a write between, ZR alone, and a side entry.
+        // mov x9, #0x1234 ; lsl x10, x9, #20 ; ret
+        { { 0xD2824689u, 0xD36CAD2Au, 0xD65F03C0u }, 3, NONE, NULL },
+        // add x10, x9, #1 ; ret
+        { { 0x9100052Au, 0xD65F03C0u }, 2, NONE, NULL },
+        // mov x9, #1 ; movk x9, #1, lsl #16 ; add x10, x9, #1 ; ret
+        { { 0xD2800029u, 0xF2A00029u, 0x9100052Au, 0xD65F03C0u }, 4, NONE, NULL },
+        // mov x9, #5 ; add x10, x9, #1 ; add x10, x9, #1 ; ret
+        { { 0xD28000A9u, 0x9100052Au, 0x9100052Au, 0xD65F03C0u }, 4, FOLD,
+          "-> mov x10, #0x6 (x9 is 0x5)" },
+        // mov x9, #5 ; eor x10, x9, x9 ; ret
+        { { 0xD28000A9u, 0xCA09012Au, 0xD65F03C0u }, 3, NONE, NULL },
+        // mov x9, #5 ; orr x10, x9, xzr ; ret
+        { { 0xD28000A9u, 0xAA1F012Au, 0xD65F03C0u }, 3, NONE, NULL },
+        // mov x9, #5 ; mov x10, x9 ; ret
+        { { 0xD28000A9u, 0xAA0903EAu, 0xD65F03C0u }, 3, NONE, NULL },
+        // mov x9, #5 ; add x10, x9, #0 ; ret
+        { { 0xD28000A9u, 0x9100012Au, 0xD65F03C0u }, 3, NONE, NULL },
+        // mov x9, #5 ; adds x10, x9, #1 ; ret
+        { { 0xD28000A9u, 0xB100052Au, 0xD65F03C0u }, 3, NONE, NULL },
+        // mov w9, #5 ; and w9, w9, #0xff ; ret
+        { { 0x528000A9u, 0x12001D29u, 0xD65F03C0u }, 3, NONE, NULL },
+        // add x10, sp, #16 ; ret
+        { { 0x910043EAu, 0xD65F03C0u }, 2, NONE, NULL },
+        // mov x9, #5 ; ldr x9, [x1] ; add x10, x9, #1 ; ret
+        { { 0xD28000A9u, 0xF9400029u, 0x9100052Au, 0xD65F03C0u }, 4, NONE, NULL },
+        // sxtw x8, wzr ; ret
+        { { 0x93407FE8u, 0xD65F03C0u }, 2, NONE, NULL },
+        // mov x9, #5 ; 2: add x10, x9, #1 ; cbz x0, 2b ; ret
+        { { 0xD28000A9u, 0x9100052Au, 0xB4FFFFE0u, 0xD65F03C0u }, 4, NONE, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char other[ARMLINT_FINDING_DETAIL_LEN];
+        detail[0] = '\0';
+        int folds = run_lvn_words(cases[i].words, cases[i].n, fold,
+                                  cases[i].expect == FOLD ? detail : other,
+                                  sizeof(detail));
+        int sames = run_lvn_words(cases[i].words, cases[i].n, same,
+                                  cases[i].expect == SAME ? detail : other,
+                                  sizeof(detail));
+        if (folds != (cases[i].expect == FOLD ? 1 : 0)
+                || sames != (cases[i].expect == SAME ? 1 : 0)
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "const_fold case %zu: %d folds, %d unchanged, "
+                    "detail \"%s\"\n", i, folds, sames, detail);
             assert(0);
         }
     }
@@ -10430,13 +10547,13 @@ static void test_mov_shift_fold(void)
     // would still read it.
     movz_x(&code[0], 8, 5, 0);
     vshift(&code[4], 1, 0, 0, 8, 8);
-    assert(run_reg_dead(code, 8, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_reg_dead(code, 8, 8) == 0););
 
     // ZR shifted operand (a constant) and ZR destination (a dead
     // shift) are degenerate.
     movz_x(&code[0], 8, 5, 0);
     vshift(&code[4], 1, 0, 0, 31, 8);
-    assert(run_reg_dead(code, 8, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_reg_dead(code, 8, 8) == 0););
     movz_x(&code[0], 8, 5, 0);
     vshift(&code[4], 1, 0, 31, 1, 8);
     assert(run_reg_dead(code, 8, 8) == 0);
@@ -17975,6 +18092,7 @@ int main(void)
     test_dead_write();
     test_cmp_cmn_w();
     test_branch_decided();
+    test_const_fold();
     test_mov_zero_to_xzr();
     test_mov_ccmp_imm_fold();
     test_mov_csel_fold();

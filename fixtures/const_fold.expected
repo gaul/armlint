@@ -1,0 +1,61 @@
+operation on known values foldable to MOV #imm at offset: 0x4 <_main+0x4>: -> mov w0, #0x0 (w8 is 0x0) (1 instructions)
+  mov w8, #0
+  and w0, w8, #1
+
+operation on known values foldable to MOV #imm at offset: 0x14 <_main+0x14>: -> mov x10, #0x8 (x9 is 0x3, x8 is 0x5) (1 instructions)
+  mov x9, #3
+  mov x8, #5
+  add x10, x9, x8
+
+operation on known values foldable to MOV #imm at offset: 0x20 <_main+0x20>: -> mov w4, #0x30 (w1 is 0x6) (1 instructions)
+  mov w1, #6
+  lsl w4, w1, #3
+
+operation on known values foldable to MOV #imm at offset: 0x24 <_main+0x24>: -> mov w5, #0xfffffffa (w1 is 0x6) (1 instructions)
+  mov w1, #6
+  neg w5, w1
+
+operation on known values foldable to MOV #imm at offset: 0x30 <_main+0x30>: -> mov x1, #0x5 (x0 is 0x0) (1 instructions)
+  cbnz x0, #0xc8
+  add x1, x0, #5
+
+operation on known values foldable to MOV #imm at offset: 0x40 <_main+0x40>: -> mov x1, #0x8 (x0 is 0x7) (1 instructions)
+  b.ne #0xc8
+  add x1, x0, #1
+
+operation on known values foldable to MOV #imm at offset: 0x50 <_main+0x50>: -> mov x3, #0xc (x1 is 0x3, x2 is 0x4) (1 instructions)
+  mov x1, #3
+  mov x2, #4
+  mul x3, x1, x2
+
+operation on known values foldable to MOV #imm at offset: 0x58 <_main+0x58>: -> mov w7, #0xf (w6 is 0xff) (1 instructions)
+  mov w6, #0xff
+  ubfx w7, w6, #4, #4
+
+operation on known values leaves its register unchanged at offset: 0x68 <_main+0x68>: -> delete; x9 already holds 0x0 (x9 is 0x0, x20 is 0x0) (1 instructions)
+  mov x9, #0
+  mov x20, #0
+  sub x9, x9, x20
+
+self-op identity at offset: 0x90 <_main+0x90>: eor x10, x9, x9 -> mov x10, xzr (1 instructions)
+  eor x10, x9, x9
+
+ZR-operand ALU spelling at offset: 0x94 <_main+0x94>: -> mov x11, x9 (1 instructions)
+  orr x11, x9, xzr
+
+ADD/SUB #0 is redundant at offset: 0x9c <_main+0x9c>: add x13, x9, #0 -> mov x13, x9 (1 instructions)
+  add x13, x9, #0
+
+redundant zero-extension after zeroing op at offset: 0xa0 <_main+0xa0>: and w14, w14, #0xff is a no-op (bits >= 3 already zero) (2 instructions)
+  mov w14, #5
+  and w14, w14, #0xff
+
+Optimization opportunities by type:
+       8  operation on known values foldable to MOV #imm
+       1  ADD/SUB #0 is redundant
+       1  ZR-operand ALU spelling
+       1  operation on known values leaves its register unchanged
+       1  redundant zero-extension after zeroing op
+       1  self-op identity
+
+13 optimization opportunities in 51 instructions

@@ -10,6 +10,10 @@ MOV + CCMP/CCMN foldable to immediate form at offset: 0x18 <_main+0x18>: -> ccmn
   movz x10, #0xc
   ccmn x2, x10, #0x8, lt
 
+operation on known values foldable to MOV #imm at offset: 0x44 <_main+0x44>: -> mov x6, #0x6 (x13 is 0x5) (1 instructions)
+  mov x13, #5
+  add x6, x13, #1
+
 register write overwritten unread at offset: 0x8 <_main+0x8>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #1
   ... 15 instructions ...
@@ -35,5 +39,6 @@ Optimization opportunities by type:
        3  MOV + CCMP/CCMN foldable to immediate form
        3  register write overwritten unread
        2  MOV + CCMP/CCMN foldable to sign-crossed immediate form
+       1  operation on known values foldable to MOV #imm
 
-8 optimization opportunities in 28 instructions
+9 optimization opportunities in 28 instructions

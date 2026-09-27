@@ -61,6 +61,10 @@ register write overwritten unread at offset: 0x54 <_main+0x54>: -> delete; x2 is
   orr x2, x2, x3, asr #8
   lsr x2, x1, #0x38
 
+operation on known values leaves its register unchanged at offset: 0x5c <_main+0x5c>: -> delete; x2 already holds 0x0 (x2 is 0x0) (1 instructions)
+  lsr x2, x1, #0x38
+  orr x2, x2, x2, lsl #8
+
 register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x2 is overwritten before any read (1 instructions)
   orr x2, x2, x2, lsl #8
   lsl x2, x1, #8
@@ -76,6 +80,7 @@ shift + shifted OR/EOR/ADD foldable into EXTR at offset: 0x7c <_main+0x7c>: -> e
 Optimization opportunities by type:
       10  register write overwritten unread
        7  shift + shifted OR/EOR/ADD foldable into EXTR
+       1  operation on known values leaves its register unchanged
        1  shift + shifted OR/EOR/ADD foldable into ROR
 
-18 optimization opportunities in 35 instructions
+19 optimization opportunities in 35 instructions

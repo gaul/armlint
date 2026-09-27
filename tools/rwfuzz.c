@@ -40,6 +40,8 @@
 //          CMP into the W-form CMN the finding renders.
 //   branch check_branch_decided: delete a conditional branch that is never
 //          taken, or make an always-taken one a B to its target.
+//   fold   check_const_fold: turn an operation on known values into the MOV
+//          the finding renders, or delete one that changes nothing.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -180,6 +182,11 @@ static uint32_t ldadd_x(unsigned s, unsigned t) { return 0xF8200000u | s << 16 |
 static uint32_t cbz(bool x, bool nonzero, unsigned t, int words) { return (x ? 0x80000000u : 0) | (nonzero ? 0x35000000u : 0x34000000u) | ((unsigned)words & 0x7FFFFu) << 5 | t; }
 static uint32_t tbz(bool nonzero, unsigned t, unsigned bit, int words) { return (bit >> 5) << 31 | (nonzero ? 0x37000000u : 0x36000000u) | (bit & 31u) << 19 | ((unsigned)words & 0x3FFFu) << 5 | t; }
 static uint32_t b_(int words) { return 0x14000000u | ((unsigned)words & 0x3FFFFFFu); }
+static uint32_t sub_x(unsigned d, unsigned n, unsigned m) { return 0xCB000000u | m << 16 | n << 5 | d; }
+static uint32_t and_w(unsigned d, unsigned n, unsigned m) { return 0x0A000000u | m << 16 | n << 5 | d; }
+static uint32_t mul_x(unsigned d, unsigned n, unsigned m) { return 0x9B007C00u | m << 16 | n << 5 | d; }
+static uint32_t udiv_w(unsigned d, unsigned n, unsigned m) { return 0x1AC00800u | m << 16 | n << 5 | d; }
+static uint32_t lslv_x(unsigned d, unsigned n, unsigned m) { return 0x9AC02000u | m << 16 | n << 5 | d; }
 static uint32_t b_cond(unsigned c, int words) { return 0x54000000u | ((unsigned)words & 0x7FFFFu) << 5 | c; }
 static uint32_t bl(int words) { return 0x94000000u | ((unsigned)words & 0x3FFFFFFu); }
 
@@ -621,6 +628,51 @@ static void plant_decided(void)
     } else {
         push_test(r);
     }
+}
+
+// fold: known values -- one or two constants, or a register a branch
+// fell through to pin -- a gap, and an operation on them.
+static uint32_t fold_op(unsigned d, unsigned a, unsigned b)
+{
+    switch (rr(14)) {
+    case 0: return add_x(d, a, b);
+    case 1: return add_w(d, a, b);
+    case 2: return sub_x(d, a, b);
+    case 3: return eor_w(d, a, b);
+    case 4: return and_w(d, a, b);
+    case 5: return addi_x(d, a, rr(4096));
+    case 6: return subi_w(d, a, rr(4096));
+    case 7: return and_x_low(d, a, lowmask_width(true));
+    case 8: return ubfm_x(d, a, rr(64), 63);        // lsr x
+    case 9: return sbfm_w(d, a, rr(32), 31);        // asr w
+    case 10: return ubfm_w(d, a, 1u + rr(31), 31u - rr(31)); // lsl-ish
+    case 11: return mul_x(d, a, b);
+    case 12: return udiv_w(d, a, b);
+    default: return lslv_x(d, a, b);
+    }
+}
+
+static void plant_fold(void)
+{
+    unsigned a = body_reg(), b = body_reg(), d = body_reg();
+    switch (rr(4)) {
+    case 0:
+        push_branch(4, a, 0, 0);                // cbnz x_a
+        break;
+    case 1:
+        push(cmp_imm(true, false, a, small_imm()));
+        push_branch(2, 0, 1, 0);                // b.ne
+        break;
+    default:
+        push(rr(2) == 0 ? movz_x(a, rr(4) == 0 ? rr(0x10000) : rr(48), 0)
+                        : movn_w(a, rr(48)));
+        if (rr(2) == 0) {
+            push(movz_w(b, rr(48), 0));
+        }
+        break;
+    }
+    plant_gap();
+    push(fold_op(d, a, rr(3) == 0 ? d : b));
 }
 
 static void gen_body(void (*plant)(void))
@@ -1294,6 +1346,119 @@ static bool branch_control(int i, uint32_t *alt)
     return true;
 }
 
+// fold: "-> mov wN|xN, #0x..." re-materializes the value -- MOVZ, MOVN or
+// ORR from ZR, whichever encodes it -- and "-> delete; ..." deletes.
+static bool bitmask_value(unsigned n, unsigned immr, unsigned imms,
+                          unsigned width, uint64_t *out)
+{
+    unsigned x = (n << 6) | (~imms & 0x3Fu);
+    int len = -1;
+    for (int i = 6; i >= 0; i--) {
+        if ((x >> i) & 1u) {
+            len = i;
+            break;
+        }
+    }
+    if (len < 1 || (1u << len) > width) {
+        return false;
+    }
+    unsigned esize = 1u << len, s = imms & (esize - 1u), r = immr & (esize - 1u);
+    if (s == esize - 1u) {
+        return false;
+    }
+    uint64_t welem = (1ull << (s + 1u)) - 1u;
+    uint64_t emask = esize == 64u ? ~0ull : (1ull << esize) - 1u;
+    uint64_t rot = r == 0 ? welem : ((welem >> r) | (welem << (esize - r))) & emask;
+    uint64_t v = 0;
+    for (unsigned i = 0; i < width; i += esize) {
+        v |= rot << i;
+    }
+    *out = width == 64u ? v : v & 0xFFFFFFFFu;
+    return true;
+}
+
+static bool mov_imm(bool x, unsigned d, uint64_t v, uint32_t *out)
+{
+    unsigned width = x ? 64u : 32u;
+    uint64_t mask = x ? ~0ull : 0xFFFFFFFFull;
+    v &= mask;
+    for (unsigned hw = 0; hw < width / 16u; hw++) {
+        uint64_t half = 0xFFFFull << (16u * hw);
+        if ((v & ~half) == 0) {
+            *out = (x ? 0xD2800000u : 0x52800000u) | hw << 21
+                | (unsigned)((v >> (16u * hw)) & 0xFFFFu) << 5 | d;
+            return true;
+        }
+        if ((~v & mask & ~half) == 0) {
+            *out = (x ? 0x92800000u : 0x12800000u) | hw << 21
+                | (unsigned)((~v >> (16u * hw)) & 0xFFFFu) << 5 | d;
+            return true;
+        }
+    }
+    for (unsigned n = 0; n <= (x ? 1u : 0u); n++) {
+        for (unsigned immr = 0; immr < width; immr++) {
+            for (unsigned imms = 0; imms < 64u; imms++) {
+                uint64_t m;
+                if (bitmask_value(n, immr, imms, width, &m) && m == v) {
+                    *out = (x ? 0xB2000000u : 0x32000000u) | n << 22
+                        | immr << 16 | imms << 10 | 31u << 5 | d;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static bool fold_apply(const hit_t *h, uint32_t *code)
+{
+    if (h->count != 1u || !in_body(h->start, h->start)) {
+        return false;
+    }
+    if (strncmp(h->detail, "-> delete;", 10) == 0) {
+        code[h->start] = NOP;
+        return true;
+    }
+    char r;
+    unsigned d;
+    unsigned long long v;
+    uint32_t w;
+    if (sscanf(h->detail, "-> mov %c%u, #0x%llx", &r, &d, &v) != 3
+            || (r != 'w' && r != 'x') || d != (code[h->start] & 31u)
+            || !mov_imm(r == 'x', d, v, &w)) {
+        return false;
+    }
+    code[h->start] = w;
+    return true;
+}
+
+static size_t fold_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+static bool fold_special(const hit_t *h)
+{
+    return strncmp(h->detail, "-> delete;", 10) == 0;
+}
+
+// Control: replace an unflagged ALU write by a MOV of a small constant.
+static bool fold_control(int i, uint32_t *alt)
+{
+    uint32_t w = prog[i];
+    bool alu = ((w & 0x1F000000u) == 0x0B000000u
+                || (w & 0x1F000000u) == 0x0A000000u
+                || (w & 0x1F800000u) == 0x11000000u
+                || (w & 0x1F800000u) == 0x13000000u
+                || (w & 0x1F000000u) == 0x1B000000u)
+        && ((w >> 29) & 1u) == 0 && (w & 31u) < 8u;
+    if (!alu || rr(2) != 0) {
+        return false;
+    }
+    alt[i] = movz_x(w & 31u, rr(48), 0);
+    return true;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -1330,6 +1495,10 @@ static const mode_t_ modes[] = {
                   "conditional branch that is always taken" },
       "always taken", plant_decided, branch_apply, branch_slot,
       branch_special, branch_control },
+    { "fold", { "operation on known values foldable to MOV #imm",
+                "operation on known values leaves its register unchanged" },
+      "deleted", plant_fold, fold_apply, fold_slot, fold_special,
+      fold_control },
 };
 
 static bool wanted(const char *name)
@@ -1345,7 +1514,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn|branch\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold\n");
 }
 
 int main(int argc, char **argv)

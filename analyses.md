@@ -2442,6 +2442,89 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   fragments ending in a branch their own instructions decide no longer
   count this check's finding.
 
+## Operation on known values foldable to MOV #imm
+
+* An ALU instruction every input of which is a known value computes a
+  constant; when one instruction materializes it, the instruction
+  becomes that MOV, and when the destination already holds it the
+  instruction deletes:
+
+  ```
+  mov  w8, #1           ; librustc_driver: a bool returned from a
+  and  w0, w8, #1       ; block tail duplication gave its constant
+                        ->  mov w0, #0x1 (w8 is 0x1)
+
+  mov  w1, #0xe         ; JavaScriptCore Baseline: arithmetic on a
+  add  x1, x1, #1       ; constant it materialized a line earlier
+                        ->  mov x1, #0xf (x1 is 0xe)
+
+  cbnz x0, L            ; x0 is zero on the fall-through
+  add  x1, x0, #5       ->  mov x1, #0x5 (x0 is 0x0)
+
+  mov  x9, #0
+  mov  x20, #0
+  sub  x9, x9, x20      ->  delete; x9 already holds 0x0
+  ```
+
+* **Known inputs** come from the engine behind [the decided-branch
+  check](#conditional-branch-decided-by-known-values): constants, what
+  constants compute, and values a branch pinned (CBNZ's zero, the
+  immediate a B.NE compared against). The operations folded are the
+  ones it evaluates: ADD/SUB in every form, the logical forms, the
+  bitfield moves (BFM with its destination known too), EXTR, the
+  multiplies, divides and variable shifts, the CSSC min/max and the
+  1-source group -- never a flag setter or reader, ADR/ADRP or a
+  move-wide instruction, and never with an input that is SP or known
+  only from a MOVK sequence (a JIT's patch site). At least one input
+  must be a register: `sxtw x8, wzr` is an odd spelling of zero, not a
+  value anything knew.
+* **The rewrite.** One for one, and never worse: MOVZ, MOVN or an ORR
+  immediate issues with no input to wait for. What it usually buys is
+  the constant's own MOV, which the fold often leaves unread (the
+  dead-write check sees that once the rewrite is applied). When the
+  value needs two instructions nothing is reported.
+* **Left to other checks**, so no instruction is reported twice: a
+  recompute of the value the register holds (check_value_recompute,
+  which reads the instruction first), a copy (check_cheap_const_copy
+  folds a copy of a constant), ADD/SUB #0, `Rs, Rs` operations (the
+  self-op check), Rm = ZR, an in-place zero-extension (the redundant
+  zero-extension check), and a logical immediate from ZR, which is how
+  a constant is spelled. The folds of a MOV'd constant into one operand
+  -- MOV + ADD/SUB immediate, MOV + logic bitmask, MOV + shift, the MUL
+  and UDIV strength reductions -- see the same instruction when every
+  input is known, and several of their negatives hold up `mov x0, #8 ;
+  mul x3, x0, x0` as the case a constant fold should take; each rewrite
+  is sound alone.
+* **Corpus, 2026-09-26** (166.2M instructions): **21,553** findings,
+  20,530 folds and 1,023 deletions; no other check moved.
+  * LLVM output **11,638**: librustc_driver 7,911 (4,781 of them an
+    `and wN, wM, #1` zero-extending a bool constant a duplicated block
+    set; ADD 974, ORR 893, LSL 474), clang 3,369 (AND 1,422, ADD 618,
+    ORR 583), uutils 345,
+    libcrypto 12, dyld 1. Tail duplication and block placement run after
+    the passes that fold constants, which is why the pair survives.
+  * JavaScriptCore **8,566** (JetStream 3): ADD 4,143, SUB 1,225, AND
+    899, SXTW 769, LSR 657, LSL 652 -- arithmetic on constants the
+    Baseline and DFG tiers materialized, and on values a B.NE pinned.
+    SpiderMonkey 1,035 (Ion 932), V8 287 (178 of them deletions), Go 27.
+* **Verification.** `test_const_fold` (24 word-level cases),
+  `fixtures/const_fold.s`, and `tools/rwfuzz fold`, which plants one or
+  two constants or a value a CBNZ or a CMP + B.NE pinned, a random gap,
+  and an operation on them, and applies each rendered MOV by encoding
+  it as MOVZ, MOVN or an ORR immediate: 100,000 programs, 167,631
+  rewrites executed (7,528 deletions), 0 mismatches. Its control arm,
+  replacing an unflagged ALU write by a MOV of a small constant, changed
+  the result in 133,914 of 315,969 cases, and builds with one proof
+  removed each -- the W-form mask, SUB taken for ADD, SBFM's sign bit,
+  UDIV by zero, write invalidation, the branch-target reset, CBNZ W's
+  view -- mismatched within 5,000 programs. ASan/UBSan clean; the unit
+  tests pass against Capstone 6.0.0-Alpha11. Twelve fixtures of other
+  checks gain the folds their scaffolding contains (`mov x1, #7 ; add
+  x8, x1, #0x10`), and ten unit-test fragments no longer count this
+  check's finding.
+* Not covered: a result the known bits fix although an input is not
+  exact (`lsr w9, w4, #24` with w4 below 16); see TODO.md.
+
 ## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to bitmask immediate
 
 * `mov xc, #C ; and xd, xn, xc` instead of `and xd, xn, #C` when
