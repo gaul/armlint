@@ -82,15 +82,18 @@ the argument against each.
   unconditional `B`, or a conditional `CBZ`/`CBNZ`/`TBZ`/`TBNZ` (which do
   not themselves touch NZCV but whose taken target may still observe it)
   -- ends it conservatively. The scan does not follow the folded
-  branch's own taken edge, so these folds assume N/C/V is dead at every
-  branch target. That holds for compiled code, where the flags are
-  defined within a basic block, but not for hand-written assembly that
-  deliberately keeps a flag live into a branch target. The
-  compare-and-branch fold (`-m cmpbr`) is the one check that does not
-  make the assumption: its producer is a general two-register compare,
-  which clang's three-way comparator really does read again at the
-  branch target, so it proves the taken edge with a second scan
-  starting there.
+  branch's own taken edge, so most of these folds assume N/C/V is dead
+  at every branch target. That holds for most compiled code, where the
+  flags are defined within a basic block, but not for hand-written
+  assembly that deliberately keeps a flag live into a branch target --
+  including the stubs a JIT inlines into its output. The folds that
+  meet such code prove the taken edge with a second scan starting at
+  the target: the compare-and-branch fold (`-m cmpbr`), whose producer
+  is a general two-register compare that clang's three-way comparator
+  really does read again at the branch target; the `CCMP` chain and
+  `CMP`-to-`CMN` folds; and the zero-compare `CBZ`/`CBNZ` and sign-bit
+  `TBZ`/`TBNZ` folds, since HotSpot's lock fast paths return their
+  result to the branch target in the flags.
 
 Findings are *opportunities*, not guaranteed speedups: some -- the pre-
 and post-indexed addressing folds -- are code-size and front-end wins

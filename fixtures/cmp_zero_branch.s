@@ -68,3 +68,17 @@ _main:
     b.hi    1f
 
 1:  ret
+
+    // Negative: the taken edge reads the flags. HotSpot's lock fast
+    // paths hand their result to the branch target in NZCV (`cmp x10,
+    // xzr ; b.eq L` ... `L: str x11, [x14] ; b.ne slow`), so CBZ would
+    // leave L's B.NE reading the flags from before the compare, however
+    // cleanly they die on the fall-through.
+    cmp     x10, xzr
+    b.eq    2f
+    cmp     x9, #0
+    ret
+2:  str     x11, [x14]
+    b.ne    3f
+    ret
+3:  ret

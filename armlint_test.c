@@ -1922,6 +1922,44 @@ static inline void sxtb_x(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbf
 static inline void sxth_x(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbfm_zero_immr(out, 0x93403C00u, rd, rn); }
 static inline void sxtw_x(uint8_t out[4], unsigned rd, unsigned rn) { encode_sbfm_zero_immr(out, 0x93407C00u, rd, rn); }
 
+// check_cmp_zero_branch proves NZCV dead on the taken edge too, by
+// scanning the branch target (nzcv_dead_at_target), and that needs the
+// scanned buffer -- so its cases run through run_buffer_check. Most
+// fragments branch to the word just past their end: plant a RET there,
+// so the taken edge is provably dead and each case tests what it says.
+// The array needs four spare bytes.
+static int run_zb_check(uint8_t *code, size_t code_size)
+{
+    ret_(&code[code_size]);
+    return run_buffer_check(code, code_size + 4);
+}
+
+// run_zb_check restricted to one finding name.
+static int run_named_zb_check(uint8_t *code, size_t code_size,
+                              const char *name)
+{
+    ret_(&code[code_size]);
+    return run_named_buffer_check(code, code_size + 4, name, NULL, 0);
+}
+
+// A TBZ range case wants its target far from the pair, so it gets its
+// own frame, as the CMPBR ones do: NOPs everywhere, the pair parked
+// mid-buffer, a compare killing the flags on the fall-through, and a
+// RET planted at the branch target.
+static int zb_range_case(int32_t byte_disp)
+{
+    static uint8_t code[80 * 1024];
+    const size_t mid = 40 * 1024;
+    for (size_t i = 0; i < sizeof(code); i += 4) {
+        write_le32(&code[i], 0xD503201Fu);  // nop
+    }
+    cmp_w_imm(&code[mid], 0, 0);
+    b_cond(&code[mid + 4], 11 /* LT */, byte_disp);
+    cmp_x_imm(&code[mid + 8], 9, 0);        // fall-through kill
+    ret_(&code[(size_t)((int64_t)mid + 4 + byte_disp)]);
+    return run_buffer_check(code, sizeof(code));
+}
+
 static void test_cmp_zero_branch(void)
 {
     uint8_t code[32];
@@ -1932,44 +1970,45 @@ static void test_cmp_zero_branch(void)
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
-    // cmp x5,#0 ; b.ne -16 ; ret (X register, NE).
-    cmp_x_imm(&code[0], 5, 0);
-    b_cond(&code[4], 1, -16);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    // L: ret ; cmp x5,#0 ; b.ne L ; ret (X register, NE, backward).
+    ret_(&code[0]);
+    cmp_x_imm(&code[4], 5, 0);
+    b_cond(&code[8], 1, -8);
+    ret_(&code[12]);
+    assert(run_buffer_check(code, 16) == 1);
 
-    // cmp w7,#0 ; b.eq +1MB ; ret (near-maximum forward branch).
+    // cmp w7,#0 ; b.eq +1MB ; ret -- the target lies outside the
+    // scanned buffer, so the taken edge cannot be proven: refuse.
     cmp_w_imm(&code[0], 7, 0);
     b_cond(&code[4], 0, 0x40000);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmp w0,#0 ; b.eq L ; bl func (BL = LIV_TERM_SAFE).
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     bl_(&code[8], 0x100);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
-    // cmp w0,#0 ; b.eq L ; cmp w1,#0 (next CMP overwrites NZCV; safe).
-    // Two findings: the first is fully verified by the second's
-    // overwrite; the second is itself a new pending that gets
-    // discarded at flush (no stopper after it).
+    // cmp w0,#0 ; b.eq L ; cmp w1,#0 ; b.eq M ; L: ret ; M: ret --
+    // two findings. The next CMP overwrites NZCV on the first's
+    // fall-through, and each branch lands on a RET. (Had the first
+    // branched onto the second B.EQ, it would have handed its own flags
+    // to that reader and could not fold.)
     cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8);
+    b_cond(&code[4], 0, 12);
     cmp_w_imm(&code[8], 1, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 2);
+    assert(run_zb_check(code, 20) == 2);
 
     // Window: 14 UNKNOWN insns (LDR-shaped slots represented by MOV
     // immediates) then RET -- still within the 16-instruction window.
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8);
     // 14 MOVZ instructions (no flag effect, no terminator):
     {
-        uint8_t big[4 + 4 + 14 * 4 + 4];
+        uint8_t big[4 + 4 + 14 * 4 + 4 + 4];
         cmp_w_imm(&big[0], 0, 0);
         b_cond(&big[4], 0, 8);
         for (int i = 0; i < 14; i++) {
@@ -1978,7 +2017,7 @@ static void test_cmp_zero_branch(void)
             movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 1));
         }
         ret_(&big[8 + 14 * 4]);
-        assert(run_helper_check(big, sizeof(big)) == 1);
+        assert(run_zb_check(big, sizeof(big) - 4) == 1);
     }
 
     // -- Negative: flag readers immediately after the branch --
@@ -1988,21 +2027,21 @@ static void test_cmp_zero_branch(void)
     b_cond(&code[4], 0, 8);
     b_cond(&code[8], 11 /* LT */, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // cmp w0,#0 ; b.eq L ; adcs w1,w2,w3 (reads C; suppress).
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     adcs_w(&code[8], 1, 2, 3);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // cmp w0,#0 ; b.eq L ; csel w1,w2,w3,eq (reads NZCV; suppress).
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     csel_w(&code[8], 1, 2, 3, 0);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // cmp w0,#0 ; b.eq L ; mrs x1,nzcv ; adds w2,w3,w4 ; ret -- MRS reads
     // the flags the CMP set, so the fold must be suppressed even though
@@ -2014,7 +2053,7 @@ static void test_cmp_zero_branch(void)
     mrs_nzcv(&code[8], 1);
     adds_w(&code[12], 2, 3, 4);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    assert(run_zb_check(code, 20) == 0);
 
     // cmp w0,#0 ; b.eq L ; bc.lt M ; adds w2,w3,w4 ; ret -- BC.cond (the
     // Armv8.8 consistent conditional branch) reads NZCV; suppress like a
@@ -2025,7 +2064,7 @@ static void test_cmp_zero_branch(void)
     bc_cond(&code[8], 11 /* LT */, 8);
     adds_w(&code[12], 2, 3, 4);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    assert(run_zb_check(code, 20) == 0);
 
     // -- Negative: unsafe terminator --
 
@@ -2033,7 +2072,7 @@ static void test_cmp_zero_branch(void)
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     b_(&code[8], 0x100);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmp w0,#0 ; b.eq L ; cbz w1,M ; adds w2,w3,w4 ; ret -- an intervening
     // CONDITIONAL branch is an unsafe terminator: its taken target may
@@ -2045,7 +2084,7 @@ static void test_cmp_zero_branch(void)
     cbz_w(&code[8], 1, 8);
     adds_w(&code[12], 2, 3, 4);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    assert(run_zb_check(code, 20) == 0);
 
     // Same with TBZ (also a conditional branch / unsafe terminator).
     cmp_w_imm(&code[0], 0, 0);
@@ -2053,7 +2092,7 @@ static void test_cmp_zero_branch(void)
     tbz_w(&code[8], 1, 3, 8);
     adds_w(&code[12], 2, 3, 4);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    assert(run_zb_check(code, 20) == 0);
 
     // Positive control: with a non-branch UNKNOWN instruction in place of
     // the conditional branch, the trailing ADDS does prove the flags dead
@@ -2064,7 +2103,49 @@ static void test_cmp_zero_branch(void)
     movz_w(&code[8], 1, 5);
     adds_w(&code[12], 2, 3, 4);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 1);
+    assert(run_zb_check(code, 20) == 1);
+
+    // -- Negative: the taken edge reads the flags. HotSpot's lock fast
+    //    paths hand their result to the branch target in NZCV:
+    //      cmp x10, xzr ; b.eq L ; ... ; L: str x11, [x14] ; b.ne slow
+    //    CBZ would leave L reading whatever the flags held before the
+    //    compare, however cleanly they die on the fall-through. --
+    cmp_x_reg(&code[0], 10, 31);
+    b_cond(&code[4], 0, 12);            // b.eq L
+    cmp_x_imm(&code[8], 9, 0);          // fall-through kill
+    ret_(&code[12]);
+    str_x(&code[16], 11, 14, 0);        // L: str x11, [x14]
+    b_cond(&code[20], 1, 8);            // b.ne
+    ret_(&code[24]);
+    assert(run_zb_check(code, 28) == 0);
+
+    // Positive control: a compare at the reader's slot proves the taken
+    // edge dead.
+    cmp_x_imm(&code[20], 12, 0);
+    assert(run_zb_check(code, 28) == 1);
+
+    // The sign-bit and HI forms delete the compare too, so a reader at
+    // the target refuses them alike.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 11 /* LT */, 12);  // b.lt L
+    cmp_x_imm(&code[8], 9, 0);
+    ret_(&code[12]);
+    csel_w(&code[16], 1, 2, 3, 0);      // L: csel w1, w2, w3, eq
+    ret_(&code[20]);
+    assert(run_zb_check(code, 24) == 0);
+
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 8 /* HI */, 12);   // b.hi L
+    assert(run_zb_check(code, 24) == 0);
+
+    // A target that jumps on before the flags resolve would need the
+    // jump chased in turn: refuse.
+    cmp_w_imm(&code[0], 0, 0);
+    b_cond(&code[4], 0, 12);            // b.eq L
+    cmp_x_imm(&code[8], 9, 0);
+    ret_(&code[12]);
+    b_(&code[16], -4);                  // L: b <the RET above>
+    assert(run_zb_check(code, 20) == 0);
 
     // -- Negative: window expiry --
 
@@ -2072,7 +2153,7 @@ static void test_cmp_zero_branch(void)
     // the window (must see a stopper within LIVENESS_WINDOW=16);
     // pending is discarded.
     {
-        uint8_t big[4 + 4 + 16 * 4 + 4];
+        uint8_t big[4 + 4 + 16 * 4 + 4 + 4];
         cmp_w_imm(&big[0], 0, 0);
         b_cond(&big[4], 0, 8);
         for (int i = 0; i < 16; i++) {
@@ -2080,7 +2161,7 @@ static void test_cmp_zero_branch(void)
             movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 1));
         }
         ret_(&big[8 + 16 * 4]);
-        assert(run_helper_check(big, sizeof(big)) == 0);
+        assert(run_zb_check(big, sizeof(big) - 4) == 0);
     }
 
     // -- Pre-existing negatives, with a trailing RET so the positive
@@ -2090,13 +2171,13 @@ static void test_cmp_zero_branch(void)
     cmp_w_imm(&code[0], 0, 1);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmp w0,#0 ; b.gt (not EQ/NE).
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 12 /* GT */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmp w0,#0 ; movz w5,#1 ; b.eq -- intervening instruction
     // expires CMP state before the B.EQ is seen.
@@ -2104,35 +2185,37 @@ static void test_cmp_zero_branch(void)
     movz_w(&code[4], 5, 1);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // cmp wzr,#0 ; b.eq -- Rn=31 excluded.
     cmp_w_imm(&code[0], 31, 0);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // subs w1,w0,#0 (real Rd); not a CMP alias.
     subs_w_imm(&code[0], 1, 0, 0);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // b.eq with no preceding cmp.
     b_cond(&code[0], 0, 8);
     ret_(&code[4]);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_zb_check(code, 8) == 0);
 
     // Lone cmp without consumer.
     cmp_w_imm(&code[0], 0, 0);
     ret_(&code[4]);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_zb_check(code, 8) == 0);
 
-    // CMP+B.EQ at end of region with no stopper at all -- pending
-    // discarded on flush.
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8);
-    assert(run_helper_check(code, 8) == 0);
+    // L: ret ; cmp w0,#0 ; b.eq L -- the taken edge lands on a RET,
+    // but the fall-through runs off the end of the region with no
+    // stopper at all: pending discarded on flush.
+    ret_(&code[0]);
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, -8);
+    assert(run_buffer_check(code, 12) == 0);
 
     // -- New zero-test idioms: CMP Rn, XZR / TST Rn, Rn. --
 
@@ -2140,49 +2223,49 @@ static void test_cmp_zero_branch(void)
     cmp_w_reg(&code[0], 0, 31);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmp x5, xzr ; b.ne ; ret
     cmp_x_reg(&code[0], 5, 31);
     b_cond(&code[4], 1, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst w0, w0 ; b.eq ; ret -- ANDS XZR, w0, w0 form.
     tst_w_reg(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst x5, x5 ; b.ne ; ret
     tst_x_reg(&code[0], 5, 5);
     b_cond(&code[4], 1, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst w0, w1 ; b.eq -- not a self-AND, no fold.
     tst_w_reg(&code[0], 0, 1);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmp w0, w1 ; b.eq -- Rm != XZR, no fold (it's a register compare).
     cmp_w_reg(&code[0], 0, 1);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // tst wzr, wzr ; b.eq -- Rn=31 excluded.
     tst_w_reg(&code[0], 31, 31);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_zb_check(code, 12) == 0););
 
     // cmp wzr, wzr ; b.eq -- Rn=31 excluded.
     cmp_w_reg(&code[0], 31, 31);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_zb_check(code, 12) == 0););
 
     // -- Positive: sign-bit branch idioms. CMP/TST + B.LT/GE/MI/PL
     //    folds to TBZ/TBNZ on the sign bit (datasize - 1). --
@@ -2191,44 +2274,44 @@ static void test_cmp_zero_branch(void)
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 11 /* LT */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmp w0, #0 ; b.ge +8 ; ret.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 10 /* GE */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmp w0, #0 ; b.mi +8 ; ret -- B.MI directly tests N.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 4 /* MI */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmp w0, #0 ; b.pl +8 ; ret.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 5 /* PL */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmp x5, #0 (X-form) ; b.lt +8 ; ret -> tbnz x5, #63.
     cmp_x_imm(&code[0], 5, 0);
     b_cond(&code[4], 11 /* LT */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst w0, w0 ; b.lt +8 ; ret -- TST-self also sets N = sign(Rn),
     // V = 0, so the same sign-bit fold applies.
     tst_w_reg(&code[0], 0, 0);
     b_cond(&code[4], 11 /* LT */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmp w0, wzr ; b.ge +8 ; ret.
     cmp_w_reg(&code[0], 0, 31);
     b_cond(&code[4], 10 /* GE */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // -- Negative: B.GT / B.LE -- read Z in addition to N, V; the
     //    sign-bit-only fold doesn't apply. --
@@ -2237,47 +2320,33 @@ static void test_cmp_zero_branch(void)
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 12 /* GT */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmp w0, #0 ; b.le +8 ; ret.
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 13 /* LE */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // -- Negative: TBZ range. B.LT at +32 KB (imm19 = 8192) is one
-    //    past TBZ's reach. --
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 11 /* LT */, 8192 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    //    past TBZ's reach. Each case plants its RET target inside a
+    //    buffer, so only the range decides. --
+    assert(zb_range_case(8192 * 4) == 0);
 
     // Just in range (imm19 = 8190 -> tbz disp 8191).
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 11 /* LT */, 8190 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(zb_range_case(8190 * 4) == 1);
 
     // Exact-boundary negative: imm19 = 8191 -> tbz disp 8192,
     // one past the top of TBZ's signed 14-bit range.
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 11 /* LT */, 8191 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(zb_range_case(8191 * 4) == 0);
 
     // Bottom-of-range positive: imm19 = -8193 -> tbz disp -8192,
     // exactly at the bottom of TBZ's range.
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 11 /* LT */, -8193 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(zb_range_case(-8193 * 4) == 1);
 
     // Exact-boundary negative below the bottom: imm19 = -8194 ->
     // tbz disp -8193.
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 11 /* LT */, -8194 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(zb_range_case(-8194 * 4) == 0);
 
     // -- Negative: downstream reads N/C/V -- both CBZ and sign-bit
     //    folds suppressed by the same liveness scan. --
@@ -2287,7 +2356,7 @@ static void test_cmp_zero_branch(void)
     b_cond(&code[4], 11 /* LT */, 8);
     adcs_w(&code[8], 1, 2, 3);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // -- HI/LS after a SUBS-based zero test: subtracting zero never
     //    borrows, so C is known set and HI reduces to NE, LS to EQ. --
@@ -2296,34 +2365,35 @@ static void test_cmp_zero_branch(void)
     cmp_w_imm(&code[0], 0, 0);
     b_cond(&code[4], 8 /* HI */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
-    // cmp x5,#0 ; b.ls -16 ; ret -> cbz x5 (flag).
-    cmp_x_imm(&code[0], 5, 0);
-    b_cond(&code[4], 9 /* LS */, -16);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    // L: ret ; cmp x5,#0 ; b.ls L ; ret -> cbz x5 (flag).
+    ret_(&code[0]);
+    cmp_x_imm(&code[4], 5, 0);
+    b_cond(&code[8], 9 /* LS */, -8);
+    ret_(&code[12]);
+    assert(run_buffer_check(code, 16) == 1);
 
     // cmp w3, wzr ; b.hi +8 ; ret -- the register-form zero test is
     // also SUBS-based (flag).
     subs_w(&code[0], 31, 3, 31);
     b_cond(&code[4], 8 /* HI */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst w0, w0 ; b.hi ; ret -- ANDS clears C, so HI here means
     // "never taken", not "Rn != 0"; the fold must not fire.
     ands_w(&code[0], 31, 0, 0);
     b_cond(&code[4], 8 /* HI */, 8);
     ret_(&code[8]);
-    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_zb_check(code, 12) == 0););
 
     // tst w0, w0 ; b.eq ; ret -- the eq/ne fold still applies to the
     // TST form (flag; Z is form-independent).
     ands_w(&code[0], 31, 0, 0);
     b_cond(&code[4], 0 /* EQ */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmp w0,#0 ; b.hi L ; adcs (reads C downstream) -- the same
     // liveness scan suppresses the hi/ls fold.
@@ -2331,7 +2401,7 @@ static void test_cmp_zero_branch(void)
     b_cond(&code[4], 8 /* HI */, 8);
     adcs_w(&code[8], 1, 2, 3);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // -- CMN-based zero tests: ADDS XZR, Rn, ZR / #0. Adding zero
     //    leaves the same N and Z as CMP #0 (and V = 0), so the eq/ne
@@ -2341,63 +2411,63 @@ static void test_cmp_zero_branch(void)
     cmn_w_reg(&code[0], 4, 31);
     b_cond(&code[4], 0 /* EQ */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmn x5, xzr ; b.ne ; ret -> cbnz x5 (flag).
     cmn_x_reg(&code[0], 5, 31);
     b_cond(&code[4], 1 /* NE */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmn w4, #0 ; b.eq ; ret -- the immediate spelling (flag).
     cmn_w_imm(&code[0], 4, 0);
     b_cond(&code[4], 0 /* EQ */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmn w4, wzr ; b.lt ; ret -- the sign-bit fold applies
     // (N = sign(Rn), V = 0) -> tbnz w4, #31 (flag).
     cmn_w_reg(&code[0], 4, 31);
     b_cond(&code[4], 11 /* LT */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // cmn w4, wzr ; b.hi ; ret -- ADDS clears C, so HI here means
     // "never taken", not "Rn != 0"; the fold must not fire.
     cmn_w_reg(&code[0], 4, 31);
     b_cond(&code[4], 8 /* HI */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmn w4, wzr ; b.ls ; ret -- LS is always taken; no fold.
     cmn_w_reg(&code[0], 4, 31);
     b_cond(&code[4], 9 /* LS */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmn w4, w5 ; b.eq -- Rm != ZR is a register compare, not a
     // zero test.
     cmn_w_reg(&code[0], 4, 5);
     b_cond(&code[4], 0 /* EQ */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmn w4, #1 ; b.eq -- non-zero immediate.
     cmn_w_imm(&code[0], 4, 1);
     b_cond(&code[4], 0 /* EQ */, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 
     // cmn wzr, wzr ; b.eq -- Rn=31 excluded.
     cmn_w_reg(&code[0], 31, 31);
     b_cond(&code[4], 0 /* EQ */, 8);
     ret_(&code[8]);
-    DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
+    DECIDED_BRANCHES_UNCOUNTED(assert(run_zb_check(code, 12) == 0););
 }
 
 static void test_tst_branch(void)
 {
-    uint8_t code[16];
+    uint8_t code[20];
 
     // -- Positive: single-bit TST + B.EQ/NE, in range, with stopper. --
 
@@ -2530,13 +2600,14 @@ static void test_tst_branch(void)
 
     // -- Interaction: CMP+B.EQ then TST+B.EQ both flag if stopped. --
 
-    cmp_w_imm(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8);
-    tst_w_bit(&code[8], 1, 3);   // overwrites NZCV (ANDS), emits CMP finding
-    b_cond(&code[12], 0, 8);     // closes tst, sets new pending
+    ret_(&code[0]);              // the CMP branch's target: flags dead
+    cmp_w_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, -8);
+    tst_w_bit(&code[12], 1, 3);  // overwrites NZCV (ANDS), emits CMP finding
+    b_cond(&code[16], 0, 8);     // closes tst, sets new pending
     // (No stopper after this in the buffer; tst finding will be
     // discarded on flush.)
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_buffer_check(code, 20) == 1);
 }
 
 // CBZ (is_cbnz=0) / CBNZ (is_cbnz=1): sf 011010 op imm19 Rt.
@@ -5380,49 +5451,49 @@ static void test_redundant_cmp_after_s_variant(void)
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // subs w0, w1, w2 ; cmp w0, #0 ; b.ne +8 ; ret.
     subs_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 1, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // ands w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
     ands_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // bics w0, w1, w2 ; cmp w0, #0 ; b.eq +8 ; ret.
     bics_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // X-form: subs x5, x1, x2 ; cmp x5, #0 ; b.eq +8 ; ret.
     subs_x(&code[0], 5, 1, 2);
     cmp_x_imm(&code[4], 5, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // TST form: adds w0, w1, w2 ; tst w0, w0 ; b.eq +8 ; ret.
     adds_w(&code[0], 0, 1, 2);
     tst_w_reg(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // CMP-with-XZR form: adds w0, w1, w2 ; cmp w0, wzr ; b.eq +8 ; ret.
     adds_w(&code[0], 0, 1, 2);
     cmp_w_reg(&code[4], 0, 31);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // CMN-with-XZR form: adds w0, w1, w2 ; cmn w0, wzr ; b.eq +8 ; ret.
     // Inherited from decode_zero_test: the CMN spelling recomputes the
@@ -5431,7 +5502,7 @@ static void test_redundant_cmp_after_s_variant(void)
     cmn_w_reg(&code[4], 0, 31);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // -- Negative for THIS check: non-S-variant ADD. The redundant-CMP
     //    finding needs an S-variant producer, but the pattern is now
@@ -5443,7 +5514,7 @@ static void test_redundant_cmp_after_s_variant(void)
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // -- Negative: CMP of a different register. --
 
@@ -5453,7 +5524,7 @@ static void test_redundant_cmp_after_s_variant(void)
     cmp_w_imm(&code[4], 5, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // -- Negative: intervening instruction expires sv_active. --
 
@@ -5465,7 +5536,7 @@ static void test_redundant_cmp_after_s_variant(void)
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 1);
+    assert(run_zb_check(code, 20) == 1);
 
     // -- Negative for redundant-CMP, but positive for sign-bit fold:
     //    adds w0, w1, w2 ; cmp w0, #0 ; b.lt ; ret. The redundant-CMP
@@ -5477,7 +5548,7 @@ static void test_redundant_cmp_after_s_variant(void)
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 11 /* LT */, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // -- Negative: downstream reads NZCV (adcs after B.eq) -- both
     //    pendings suppressed by liveness scan. --
@@ -5488,7 +5559,7 @@ static void test_redundant_cmp_after_s_variant(void)
     b_cond(&code[8], 0, 8);
     adcs_w(&code[12], 5, 6, 7);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    assert(run_zb_check(code, 20) == 0);
 
     // -- Negative: S-variant writes to XZR (CMN/CMP/TST alias);
     //    sv_active not opened. --
@@ -5502,7 +5573,7 @@ static void test_redundant_cmp_after_s_variant(void)
     // The Rd = 31 head is a compare whose flags the next compare
     // discards, so check_dead_compare reports it too; name the check
     // under test.
-    assert(run_named_check(code, 16,
+    assert(run_named_zb_check(code, 16,
         "compare-zero branch foldable into CBZ/CBNZ") == 1);
 
     // -- Negative: width mismatch (W S-variant, X CMP). --
@@ -5514,21 +5585,21 @@ static void test_redundant_cmp_after_s_variant(void)
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // -- Negative: lone S-variant; CMP without B.cond; etc. --
 
     // adds w0, w1, w2 ; ret -- nothing follows. No finding from either.
     adds_w(&code[0], 0, 1, 2);
     ret_(&code[4]);
-    assert(run_helper_check(code, 8) == 0);
+    assert(run_zb_check(code, 8) == 0);
 
     // adds w0, w1, w2 ; cmp w0, #0 ; ret -- CMP not followed by
     // B.EQ/B.NE; sv_cmp_active expires; neither check fires.
     adds_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_zb_check(code, 12) == 0);
 }
 
 static void test_zero_cmp_to_s_variant(void)
@@ -5544,7 +5615,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 1, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // Immediate form: add x0, x1, #16 ; cmp x0, #0 ; b.eq ; ret
     //   -> adds x0, x1, #16.
@@ -5552,7 +5623,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // Extended-register form: add x0, x1, w2, uxtw ; cmp x0, #0 ;
     // b.eq ; ret -> adds x0, x1, w2, uxtw.
@@ -5561,7 +5632,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // AND + TST consumer: and w0, w1, w2 ; tst w0, w0 ; b.eq ; ret
     //   -> ands w0, w1, w2 (flag-exact: both TST and ANDS pin
@@ -5570,14 +5641,14 @@ static void test_zero_cmp_to_s_variant(void)
     write_le32(&code[4], 0x6A00001Fu | (0u << 16) | (0u << 5));
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // BIC: bic w0, w1, w2 ; cmp w0, #0 ; b.ne ; ret -> bics w0, w1, w2.
     bic_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 1, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // NEG alias: sub x0, xzr, x1 ; cmp x0, #0 ; b.eq ; ret
     //   -> negs x0, x1 (the flag-setting NEG spelling).
@@ -5585,7 +5656,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // -- Negatives: only the CBZ fold (or nothing) fires. --
 
@@ -5594,14 +5665,14 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_x_imm(&code[4], 5, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // Width mismatch (W ALU, X CMP).
     add_w(&code[0], 0, 1, 2);
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // ADD #0 is check_add_sub_zero's shape, not a fold candidate; the
     // 2 here are its finding plus the CBZ fold.
@@ -5609,7 +5680,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 0, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // B.LT consumer: mine needs B.EQ/B.NE (the 1 is the sign-bit
     // TBZ/TBNZ fold's).
@@ -5617,7 +5688,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_x_imm(&code[4], 0, 0);
     b_cond(&code[8], 11, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // Downstream NZCV reader (adcs after the branch): both scans
     // suppress; nothing fires.
@@ -5626,7 +5697,7 @@ static void test_zero_cmp_to_s_variant(void)
     b_cond(&code[8], 0, 8);
     adcs_w(&code[12], 5, 6, 7);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 0);
+    assert(run_zb_check(code, 20) == 0);
 
     // A flag-neutral instruction between the ALU and the CMP rides
     // in the gap; the fold fires alongside the CBZ one.
@@ -5635,14 +5706,14 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 2);
+    assert(run_zb_check(code, 20) == 2);
 
     // CMP with no branch: RET is a PCS boundary, so the flags die
     // and the fold fires on its own.
     add_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // CSEL.EQ consumer (reads Z only; a logical producer's CMP
     // rewrite alters just C): the scan passes it and the RET emits.
@@ -5650,21 +5721,21 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[4], 0, 0);
     csel_w(&code[8], 3, 4, 5, 0);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // CSEL.HI reads C, which the CMP-to-ANDS rewrite flips: discard.
     and_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     csel_w(&code[8], 3, 4, 5, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // CSEL.GE reads V, real for an arithmetic S-variant: discard.
     add_w(&code[0], 0, 1, 2);
     cmp_w_imm(&code[4], 0, 0);
     csel_w(&code[8], 3, 4, 5, 10);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 0);
+    assert(run_zb_check(code, 16) == 0);
 
     // B.GE after a logical producer passes (ANDS pins V = 0 exactly
     // like the CMP); the sign-branch TBZ fold fires too.
@@ -5672,7 +5743,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[4], 0, 0);
     b_cond(&code[8], 10, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 2);
+    assert(run_zb_check(code, 16) == 2);
 
     // CCMP.EQ: a safe conditional read that then rewrites all of
     // NZCV -- the proof completes at the CCMP itself.
@@ -5680,7 +5751,7 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[4], 0, 0);
     ccmp_reg(&code[8], 0, 1, 3, 4, 0, 0);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 
     // A flags writer in the gap kills the pending ALU (the relocated
     // flag-setting would be observed): only the CBZ fold fires.
@@ -5691,7 +5762,7 @@ static void test_zero_cmp_to_s_variant(void)
     ret_(&code[16]);
     // The gap's compare is dead in its own right (check_dead_compare
     // reports it), so name the check under test.
-    assert(run_named_check(code, 20,
+    assert(run_named_zb_check(code, 20,
         "compare-zero branch foldable into CBZ/CBNZ") == 1);
 
     // A gap instruction overwriting Rd breaks the pattern (the zero
@@ -5702,7 +5773,7 @@ static void test_zero_cmp_to_s_variant(void)
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
     DECIDED_BRANCHES_UNCOUNTED(DEAD_WRITES_UNCOUNTED(
-        assert(run_helper_check(code, 20) == 1);););
+        assert(run_zb_check(code, 20) == 1);););
 
     // A read-modify-write of Rd in the gap breaks it just the same
     // (EOR is not itself a producer, so nothing reopens the slot):
@@ -5713,11 +5784,11 @@ static void test_zero_cmp_to_s_variant(void)
     cmp_w_imm(&code[8], 0, 0);
     b_cond(&code[12], 0, 8);
     ret_(&code[16]);
-    assert(run_helper_check(code, 20) == 1);
+    assert(run_zb_check(code, 20) == 1);
 
     // Three gap instructions exceed ZS_GAP_MAX: only the CBZ fold.
     {
-        uint8_t long_code[28];
+        uint8_t long_code[32];
         add_w(&long_code[0], 0, 1, 2);
         movz_w(&long_code[4], 5, 1);
         movz_w(&long_code[8], 6, 1);
@@ -5725,7 +5796,7 @@ static void test_zero_cmp_to_s_variant(void)
         cmp_w_imm(&long_code[16], 0, 0);
         b_cond(&long_code[20], 0, 8);
         ret_(&long_code[24]);
-        assert(run_helper_check(long_code, 28) == 1);
+        assert(run_zb_check(long_code, 28) == 1);
     }
 
     // Flag-exact spelling (AND + TST pins C = V = 0 on both sides)
@@ -5734,7 +5805,7 @@ static void test_zero_cmp_to_s_variant(void)
     write_le32(&code[4], 0x6A00001Fu | (0u << 16) | (0u << 5));
     csel_w(&code[8], 3, 4, 5, 8);
     ret_(&code[12]);
-    assert(run_helper_check(code, 16) == 1);
+    assert(run_zb_check(code, 16) == 1);
 }
 
 // CMP Rn, Rm, LSL #amt (X-form): SUBS ZR with a non-zero inline

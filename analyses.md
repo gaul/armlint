@@ -208,8 +208,24 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   state their prologue left in NZCV), an unsafe
   terminator (B unconditional, BR, or a conditional CBZ/CBNZ/TBZ/TBNZ
   whose taken target may still observe the flags), or after a
-  16-instruction window with no decision. The branch-target path is
-  not scanned; full soundness would require basic-block analysis.
+  16-instruction window with no decision.
+* The taken edge gets the same scan, run from the branch target before
+  the finding is even deferred (`nzcv_dead_at_target`, shared with the
+  CMPBR fold), because compiled code does not always retire the flags
+  with the block. HotSpot's lock fast paths return their result to the
+  branch target in NZCV (`casa ; cmp x10, xzr ; b.eq L` ... `L: str
+  x11, [x14] ; b.ne slow`): in a 45-workload JDK 27 corpus (DaCapo,
+  Renaissance, javac), 14,606 of the 54,692 C2 pairs had a flag reader
+  at the target, where `cbz` would leave that reader with the flags
+  from before the compare.
+  The target scan refuses rather than chases: a target outside the
+  scanned buffer, a B/BR or a CBZ/CBNZ/TBZ/TBNZ before the flags
+  resolve, or an expired window all refuse. That costs recall where
+  compilers chain branches -- rustc keeps 1,274 of its 2,494 pairs
+  (1,103 of the refusals stop at a CBZ/TBZ), SpiderMonkey Ion none of
+  its 1,358, HotSpot's C1 1,170,141 of 1,454,156 -- with no proven
+  reader among them; chasing both edges of a branch at the target
+  would win them back (TODO.md, target-side liveness).
 
 ## compare-zero signed-branch foldable into TBZ/TBNZ
 
@@ -222,10 +238,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Range: `TBZ`/`TBNZ` use a 14-bit signed offset (~32 KB reach),
   vs. `B.cond`'s 19-bit (~1 MB). The fold is suggested only when
   the target fits in the TBZ encoding.
-* Soundness: same NZCV-liveness scan as the CMP-branch check
-  above. The rewrite drops the CMP/TST, so downstream code that
-  observes N/C/V before they're overwritten would see different
-  values; the scan suppresses on any flag-reader. Shares the
+* Soundness: same NZCV-liveness scans as the CMP-branch check
+  above, on the fall-through and at the branch target. The rewrite
+  drops the CMP/TST, so downstream code that observes N/C/V before
+  they're overwritten would see different values; the scans suppress
+  on any flag-reader. Shares the
   existing CMP/TST pending slot, which is sufficient because the
   sign-only and EQ/NE conditions are mutually exclusive at the
   same B.cond.

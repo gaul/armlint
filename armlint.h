@@ -347,7 +347,17 @@ bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
 // and LS always taken for those spellings. Emission is deferred via
 // the pending-finding mechanism so the rewrite is only suggested when
 // downstream code provably does not observe the dropped NZCV state --
-// see armlint_advance_pending.
+// see armlint_advance_pending. That scan walks the fall-through only;
+// the taken edge is proven before the deferral opens, by the same
+// scan run at the branch target (nzcv_dead_at_target), because
+// compiled code can hand flags across a branch: HotSpot's lock fast
+// paths return their result to the target in them (`cmp x10, xzr ;
+// b.eq L` ... `L: str x11, [x14] ; b.ne slow`). A target outside the
+// scanned buffer, or one the bounded scan cannot resolve, refuses.
+// A sign-condition B.MI/PL/LT/GE after the same zero tests folds to
+// TBZ/TBNZ on the sign bit when the target is within TBZ's reach
+// ("compare-zero signed-branch foldable into TBZ/TBNZ"), under the
+// same two proofs.
 bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 

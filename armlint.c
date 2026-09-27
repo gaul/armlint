@@ -614,9 +614,10 @@ struct armlint_state {
     char aec_producer_disasm[ARMLINT_FINDING_LINE_LEN];
 
     // Deferred CMP/TST + B.EQ/NE finding awaiting forward NZCV-liveness
-    // verification. Only one of CMP or TST can be pending at a time
-    // (a CMP would overwrite or be overwritten by a TST), so the
-    // storage is shared.
+    // verification on the fall-through (the zero-compare folds prove
+    // the taken edge before opening it). Only one of CMP or TST can be
+    // pending at a time (a CMP would overwrite or be overwritten by a
+    // TST), so the storage is shared.
     bool pending_active;
     unsigned pending_window;
     armlint_finding pending_finding;
@@ -2040,6 +2041,8 @@ static bool decode_fp_ldr_str_uimm(uint32_t op, bool *out_is_load,
                                    unsigned *out_lg2size,
                                    unsigned *out_imm12,
                                    unsigned *out_rn, unsigned *out_rt);
+static bool nzcv_dead_at_target(const armlint_state *state,
+                                int64_t target);
 
 // Shift-type names indexed by the shifted-register encoding's
 // shift-type field (bits 23..22).
@@ -4487,7 +4490,16 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
             to_cbz = is_ls;
             bcond_mnem = is_ls ? "b.ls" : "b.hi";
         }
-        if (bcond_mnem != NULL) {
+        // Every form deletes the compare, so its flags must die unread
+        // on the taken edge as well as on the fall-through the deferred
+        // scan walks. Compiled code does not always end their life with
+        // the block: HotSpot's lock fast paths hand their result to the
+        // branch target in the flags (`cmp x10, xzr ; b.eq L` ... `L:
+        // str x11, [x14] ; b.ne slow`). So the target is proven here,
+        // before the deferral opens, as for check_cmpbr_fold.
+        if (bcond_mnem != NULL
+                && nzcv_dead_at_target(state,
+                                       (int64_t)offset + (int64_t)imm19 * 4)) {
             uint64_t target = insn->address
                 + (uint64_t)((int64_t)imm19 * 4);
             char w_or_x = state->cmp_is_64bit ? 'x' : 'w';
@@ -4509,16 +4521,19 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                 "%s 0x%" PRIx64, bcond_mnem, target);
 
             // Defer emission until a forward-liveness stopper confirms
-            // no downstream code observes the dropped N/C/V (and Z
-            // beyond the branch itself).
+            // no downstream code on the fall-through observes the
+            // dropped N/C/V (and Z beyond the branch itself).
             state->pending_active = true;
             state->pending_window = LIVENESS_WINDOW;
-        } else if (decode_b_sign_cond(op, &is_neg, &cond, &imm19)) {
+        } else if (bcond_mnem == NULL
+                   && decode_b_sign_cond(op, &is_neg, &cond, &imm19)) {
             // CMP/TST-zero followed by a sign-only B.cond (MI/PL/LT/GE).
             // The TBZ replaces the CMP at the CMP's address (4 bytes
             // before the B.cond), so its required imm14 is imm19 + 1.
             int64_t tbz_disp = (int64_t)imm19 + 1;
-            if (tbz_disp >= -8192 && tbz_disp <= 8191) {
+            if (tbz_disp >= -8192 && tbz_disp <= 8191
+                    && nzcv_dead_at_target(state, (int64_t)offset
+                                                  + (int64_t)imm19 * 4)) {
                 uint64_t target = insn->address
                     + (uint64_t)((int64_t)imm19 * 4);
                 char w_or_x = state->cmp_is_64bit ? 'x' : 'w';
@@ -6175,11 +6190,13 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
 }
 
 // Prove NZCV dead at a branch target the fall-through scan never
-// visits. Every other branch fold here simply assumes it -- the flags
-// are defined within a basic block in compiled code -- but a fold
-// whose producer is a general two-register compare cannot: reusing
-// one compare across a branch is exactly what a compiler does for a
-// three-way comparison, and clang emits it (see check_cmpbr_fold).
+// visits. Some branch folds here simply assume it -- the flags are
+// defined within a basic block in compiled code -- but not every
+// producer allows that. Reusing one register compare across a branch
+// is exactly what a compiler does for a three-way comparison, and
+// clang emits it (see check_cmpbr_fold); HotSpot's lock fast paths
+// hand their result to the branch target in the flags even after a
+// zero compare (see check_cmp_zero_branch).
 //
 // So walk forward from the target in the scanned buffer under the
 // same classify_liveness rules and the same bounded window as the
