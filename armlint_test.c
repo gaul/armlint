@@ -18288,6 +18288,234 @@ static void test_symbol_annotation(void)
     assert(strcmp(ann + strlen(ann) - 5, "+0x8>") == 0);
 }
 
+// A fresh duplicate-code tally over one range.
+static armlint_dedup *dedup_of(const uint8_t *code, size_t len,
+                               uint64_t base, unsigned features,
+                               const armlint_symbol *syms, size_t nsyms)
+{
+    armlint_dedup *d = armlint_dedup_create();
+    assert(d != NULL);
+    assert(armlint_dedup_scan(d, code, len, base, features, syms, nsyms));
+    return d;
+}
+
+static void test_dedup(void)
+{
+    static uint8_t code[0x3010];
+
+    // A call keys by where it lands: _f1 and _f2 call 0x9000 from
+    // different addresses (different imm26), _f3 calls 0xa000 and is a
+    // copy only up to its callee. The NOP and zero padding after each
+    // is trimmed.
+    memset(code, 0, sizeof(code));
+    write_le32(&code[0x00], 0x94002000u);   // 0x1000: bl 0x9000
+    ret_(&code[0x04]);
+    nop_insn(&code[0x08]);
+    nop_insn(&code[0x0c]);
+    write_le32(&code[0x10], 0x94001FFCu);   // 0x1010: bl 0x9000
+    ret_(&code[0x14]);
+    write_le32(&code[0x20], 0x940023F8u);   // 0x1020: bl 0xa000
+    ret_(&code[0x24]);
+    const armlint_symbol calls[] = {
+        { 0x1000, "_f1", 0 }, { 0x1010, "_f2", 0 }, { 0x1020, "_f3", 0 },
+    };
+    armlint_dedup *d = dedup_of(code, 0x30, 0x1000, 0, calls, 3);
+    assert(armlint_dedup_functions(d) == 3);
+    assert(armlint_dedup_bytes(d) == 24);
+    assert(armlint_dedup_copies(d, false) == 1);
+    assert(armlint_dedup_copy_bytes(d, false) == 8);
+    assert(armlint_dedup_copies(d, true) == 2);
+    assert(armlint_dedup_copy_bytes(d, true) == 16);
+    armlint_dedup_destroy(d);
+
+    // A branch inside the function keeps its relative encoding: _g1 and
+    // _g2 are one function at two addresses, while _g3 branches to
+    // another instruction of its own and is neither kind of copy.
+    memset(code, 0, sizeof(code));
+    for (size_t o = 0; o < 0x30; o += 0x10) {
+        write_le32(&code[o], 0xB4000040u);          // cbz x0, .+8
+        write_le32(&code[o + 4], 0x52800020u);      // mov w0, #1
+        ret_(&code[o + 8]);
+    }
+    write_le32(&code[0x20], 0xB4000020u);           // cbz x0, .+4
+    const armlint_symbol branches[] = {
+        { 0x2000, "_g1", 0 }, { 0x2010, "_g2", 0 }, { 0x2020, "_g3", 0 },
+    };
+    d = dedup_of(code, 0x30, 0x2000, 0, branches, 3);
+    assert(armlint_dedup_copies(d, false) == 1);
+    assert(armlint_dedup_copies(d, true) == 1);
+    armlint_dedup_destroy(d);
+
+    // ADRP keys by its page: _h1 and _h2 load one global off page
+    // 0x5000 from different pages (different immediates). _h3 loads
+    // another global off page 0x6000 with the ADRP word _h2 has, and is
+    // a copy up to the page and the low 12 bits added to it.
+    memset(code, 0, sizeof(code));
+    write_le32(&code[0x0000], 0x90000028u);   // 0x1000: adrp x8, 0x5000
+    write_le32(&code[0x0004], 0xF9400900u);   // ldr x0, [x8, #0x10]
+    ret_(&code[0x0008]);
+    write_le32(&code[0x1000], 0xF0000008u);   // 0x2000: adrp x8, 0x5000
+    write_le32(&code[0x1004], 0xF9400900u);
+    ret_(&code[0x1008]);
+    write_le32(&code[0x2000], 0xF0000008u);   // 0x3000: adrp x8, 0x6000
+    write_le32(&code[0x2004], 0xF9400D00u);   // ldr x0, [x8, #0x18]
+    ret_(&code[0x2008]);
+    const armlint_symbol pages[] = {
+        { 0x1000, "_h1", 0 }, { 0x2000, "_h2", 0 }, { 0x3000, "_h3", 0 },
+    };
+    d = dedup_of(code, 0x3010, 0x1000, 0, pages, 3);
+    assert(armlint_dedup_functions(d) == 3);
+    assert(armlint_dedup_bytes(d) == 36);
+    assert(armlint_dedup_copies(d, false) == 1);
+    assert(armlint_dedup_copies(d, true) == 2);
+    armlint_dedup_destroy(d);
+
+    // Once the page register is overwritten, the offset off it is a
+    // field offset again and stays in the key: _h4 and _h5 differ.
+    memset(code, 0, sizeof(code));
+    for (size_t o = 0; o < 0x20; o += 0x10) {
+        write_le32(&code[o], 0x90000028u);          // adrp x8, 0x5000
+        write_le32(&code[o + 4], 0xAA0103E8u);      // mov x8, x1
+        write_le32(&code[o + 8], 0xF9400900u);      // ldr x0, [x8, #0x10]
+        ret_(&code[o + 12]);
+    }
+    write_le32(&code[0x18], 0xF9400D00u);           // ldr x0, [x8, #0x18]
+    const armlint_symbol clobbered[] = {
+        { 0x1000, "_h4", 0 }, { 0x1010, "_h5", 0 },
+    };
+    d = dedup_of(code, 0x20, 0x1000, 0, clobbered, 2);
+    assert(armlint_dedup_copies(d, true) == 0);
+    armlint_dedup_destroy(d);
+
+    // What a function's own literal loads read is data: _k3 is _k1, and
+    // _k2 differs from it only in the constant. _k4's literal is zero
+    // and stays part of the function rather than trimmed as padding.
+    memset(code, 0, sizeof(code));
+    for (size_t o = 0; o < 0x40; o += 0x10) {
+        write_le32(&code[o], 0x58000040u);          // ldr x0, .+8
+        ret_(&code[o + 4]);
+    }
+    write_le32(&code[0x08], 0x55667788u);
+    write_le32(&code[0x0c], 0x11223344u);
+    write_le32(&code[0x18], 0x99999999u);
+    write_le32(&code[0x1c], 0x11223344u);
+    write_le32(&code[0x28], 0x55667788u);
+    write_le32(&code[0x2c], 0x11223344u);
+    const armlint_symbol literals[] = {
+        { 0x1000, "_k1", 0 }, { 0x1010, "_k2", 0 },
+        { 0x1020, "_k3", 0 }, { 0x1030, "_k4", 0 },
+    };
+    d = dedup_of(code, 0x40, 0x1000, 0, literals, 4);
+    assert(armlint_dedup_functions(d) == 4);
+    assert(armlint_dedup_bytes(d) == 64);
+    assert(armlint_dedup_copies(d, false) == 1);
+    assert(armlint_dedup_copies(d, true) == 3);
+    armlint_dedup_destroy(d);
+
+    // Move-wide immediates are constants: _m1 and _m2 differ in one.
+    memset(code, 0, sizeof(code));
+    write_le32(&code[0x00], 0x52800020u);   // mov w0, #1
+    ret_(&code[0x04]);
+    write_le32(&code[0x08], 0x52800040u);   // mov w0, #2
+    ret_(&code[0x0c]);
+    const armlint_symbol moves[] = { { 0x1000, "_m1", 0 }, { 0x1008, "_m2", 0 } };
+    d = dedup_of(code, 0x10, 0x1000, 0, moves, 2);
+    assert(armlint_dedup_copies(d, false) == 0);
+    assert(armlint_dedup_copies(d, true) == 1);
+    armlint_dedup_destroy(d);
+
+    // A V8 constant pool's data is data under V8POOL: _p1 and _p2
+    // differ only in theirs. Without the feature the marker is an
+    // ordinary literal load and the pool words decode as code.
+    memset(code, 0, sizeof(code));
+    for (size_t o = 0; o < 0x20; o += 0x10) {
+        ret_(&code[o]);
+        write_le32(&code[o + 4], 0x5800005Fu);      // ldr xzr: 2-word pool
+    }
+    write_le32(&code[0x08], 0x11111111u);
+    write_le32(&code[0x0c], 0x22222222u);
+    write_le32(&code[0x18], 0x33333333u);
+    write_le32(&code[0x1c], 0x44444444u);
+    const armlint_symbol pools[] = { { 0x1000, "_p1", 0 }, { 0x1010, "_p2", 0 } };
+    d = dedup_of(code, 0x20, 0x1000, ARMLINT_FEATURE_V8POOL, pools, 2);
+    assert(armlint_dedup_copies(d, false) == 0);
+    assert(armlint_dedup_copies(d, true) == 1);
+    armlint_dedup_destroy(d);
+    d = dedup_of(code, 0x20, 0x1000, 0, pools, 2);
+    assert(armlint_dedup_copies(d, true) == 0);
+    armlint_dedup_destroy(d);
+
+    // With no anchor inside it the range is one function, and copies
+    // are found across ranges: a JIT dump's blob per section. Anchors
+    // below the range are ignored, and a sized one ends at its size.
+    memset(code, 0, sizeof(code));
+    for (size_t o = 0; o < 0x10; o += 4) {
+        ret_(&code[o]);
+    }
+    d = dedup_of(code, 0x10, 0x5000, 0, NULL, 0);
+    assert(armlint_dedup_scan(d, code, 0x10, 0x6000, 0, NULL, 0));
+    assert(armlint_dedup_functions(d) == 2);
+    assert(armlint_dedup_bytes(d) == 32);
+    assert(armlint_dedup_copies(d, false) == 1);
+    const armlint_symbol sized[] = {
+        { 0x6ff0, "_before", 0 }, { 0x7000, "_a", 4 }, { 0x7008, "_b", 0 },
+    };
+    assert(armlint_dedup_scan(d, code, 0x10, 0x7000, 0, sized, 3));
+    assert(armlint_dedup_functions(d) == 4);
+    assert(armlint_dedup_bytes(d) == 44);
+    assert(armlint_dedup_copies(d, false) == 1);
+    armlint_dedup_destroy(d);
+
+    // Findings through a summary. The MOVZ/MOVK finding sits at offset
+    // 0 of three functions: the second is a copy of the first, the
+    // third is one up to its constant (0x55555555 is a bitmask
+    // immediate too). Each counts toward the scan's total; the second
+    // and third repeat the first.
+    memset(code, 0, sizeof(code));
+    for (size_t o = 0; o < 0x30; o += 0x10) {
+        write_le32(&code[o], 0x528CCCC0u);          // movz w0, #0x6666
+        write_le32(&code[o + 4], 0x72ACCCC0u);      // movk w0, #0x6666, lsl #16
+        ret_(&code[o + 8]);
+    }
+    write_le32(&code[0x20], 0x528AAAA0u);           // movz w0, #0x5555
+    write_le32(&code[0x24], 0x72AAAAA0u);           // movk w0, #0x5555, lsl #16
+    const armlint_symbol consts[] = {
+        { 0x1000, "_c1", 0 }, { 0x1010, "_c2", 0 }, { 0x1020, "_c3", 0 },
+    };
+    d = armlint_dedup_create();
+    assert(d != NULL);
+    armlint_summary *summary = armlint_summary_create();
+    assert(summary != NULL);
+    armlint_summary_set_dedup(summary, d);
+    assert(armlint_dedup_scan(d, code, 0x30, 0x1000, 0, consts, 3));
+    assert(check_instructions(g_handle, code, 0x30, 0x1000, false, summary,
+                              0, consts, 3) == 3);
+    assert(armlint_dedup_findings(d) == 3);
+    assert(armlint_dedup_repeats(d) == 2);
+    assert(armlint_dedup_copies(d, false) == 1);
+    assert(armlint_dedup_copies(d, true) == 2);
+    // A run over a range the dedup did not key is tallied but never
+    // attributed.
+    assert(check_instructions(g_handle, code, 0x30, 0x8000, false, summary,
+                              0, NULL, 0) == 3);
+    assert(armlint_dedup_findings(d) == 6);
+    assert(armlint_dedup_repeats(d) == 2);
+    armlint_summary_destroy(summary);
+    armlint_dedup_destroy(d);
+
+    // NULL is accepted everywhere.
+    assert(armlint_dedup_scan(NULL, code, 4, 0, 0, NULL, 0));
+    assert(armlint_dedup_functions(NULL) == 0);
+    assert(armlint_dedup_bytes(NULL) == 0);
+    assert(armlint_dedup_copies(NULL, true) == 0);
+    assert(armlint_dedup_copy_bytes(NULL, false) == 0);
+    assert(armlint_dedup_findings(NULL) == 0);
+    assert(armlint_dedup_repeats(NULL) == 0);
+    armlint_dedup_print(NULL, true);
+    armlint_summary_set_dedup(NULL, NULL);
+    armlint_dedup_destroy(NULL);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -18409,6 +18637,7 @@ int main(void)
     test_census();
     test_census_coverage();
     test_symbol_annotation();
+    test_dedup();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

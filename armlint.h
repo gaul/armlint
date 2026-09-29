@@ -3380,6 +3380,88 @@ size_t armlint_census_feature_count(const armlint_census *census,
 // or hint-space features were seen.
 int armlint_census_highest_mandatory(const armlint_census *census);
 
+// Duplicate code (-d): which functions of the scanned code are copies
+// of one another. A function is a span the armlint_symbol boundaries
+// delimit, as armlint_census_scan reads them (a sized anchor ends at
+// its size, code before a range's first anchor belongs to none), or
+// the whole range when no boundary lies inside it -- a JIT dump's
+// blob per section. Trailing NOP and zero padding is trimmed. Each
+// function is keyed twice:
+//
+//   identical: the words as they execute. A PC-relative field that
+//     reaches outside the function (B/BL, B.cond/BC.cond, CBZ/CBNZ,
+//     TBZ/TBNZ, ADR, a literal load) is keyed by the absolute address
+//     it resolves to, and ADRP by its page; one inside keeps its raw,
+//     position-independent encoding. Functions with one identical key
+//     compute the same thing wherever they load, so a linker's
+//     identical-code folding could keep one of them.
+//   up to constants: the identical key with the fields that tell
+//     instances of one piece of code apart masked: MOVZ/MOVN/MOVK
+//     immediates, the words the function's own literal loads read
+//     (and, under ARMLINT_FEATURE_V8POOL, V8 constant-pool data),
+//     every target outside the function, and the low 12 bits an ADD
+//     or unsigned-offset load/store adds to an ADRP page. This merges
+//     a JIT's copies of one stub that differ only in the runtime
+//     pointers they embed and a generic's instances that differ only
+//     in what they call or address -- and, equally, two stubs that
+//     differ only in a constant they guard.
+//
+// In scan order, the first function with a key is the original and
+// later ones are its copies. Keys are 64-bit hashes plus the byte
+// length, so a false merge is possible but improbable. In an unlinked
+// object file every relocated field reads as zero, so functions that
+// differ only in a relocated target key alike. Opaque; NULL is
+// accepted everywhere.
+typedef struct armlint_dedup armlint_dedup;
+
+armlint_dedup *armlint_dedup_create(void);
+void armlint_dedup_destroy(armlint_dedup *dedup);
+
+// Key the functions of inst[0..len) at base_addr, delimited by
+// symbols/nsymbols (sorted by ascending vaddr with no duplicates, as
+// check_instructions takes them; NULL/0 for none). features is the
+// ARMLINT_FEATURE_* mask (V8POOL marks constant pools as data). Call
+// it once per code range, in scan order, before check_instructions
+// runs over the same range: the range's functions stay current until
+// the next call, and a summary with this dedup installed attributes
+// that run's findings to them. Returns false when an allocation
+// failed; the tallies of earlier ranges survive.
+bool armlint_dedup_scan(armlint_dedup *dedup, const uint8_t *inst,
+                        size_t len, uint64_t base_addr, unsigned features,
+                        const armlint_symbol *symbols, size_t nsymbols);
+
+// Print the report: the functions and their bytes, how many are copies
+// under each key, how many distinct functions appear how often, and --
+// once a summary has fed it findings -- how many findings repeat one
+// an earlier copy already has, overall and by type. Verbose adds the
+// most duplicated functions.
+void armlint_dedup_print(const armlint_dedup *dedup, bool verbose);
+
+size_t armlint_dedup_functions(const armlint_dedup *dedup);
+uint64_t armlint_dedup_bytes(const armlint_dedup *dedup);
+
+// Functions that copy an earlier one, and their bytes: under the
+// identical key when parametric is false, up to constants when true.
+size_t armlint_dedup_copies(const armlint_dedup *dedup, bool parametric);
+uint64_t armlint_dedup_copy_bytes(const armlint_dedup *dedup,
+                                  bool parametric);
+
+// Findings a summary attributed to the dedup, and how many of them
+// repeat an earlier copy's finding (see armlint_summary_set_dedup).
+size_t armlint_dedup_findings(const armlint_dedup *dedup);
+size_t armlint_dedup_repeats(const armlint_dedup *dedup);
+
+// Install a dedup on a summary. Every finding check_instructions
+// tallies into the summary is then also attributed to the function
+// containing it, and it repeats when an earlier copy of that function,
+// up to constants, had a finding of the same type at the same offset:
+// the same advice, as the emitter sees it, counted once per shape of
+// code rather than once per copy. Verbose findings that repeat end in
+// " [repeat]". The by-type counts, the total and the exit status still
+// count every finding. NULL uninstalls.
+void armlint_summary_set_dedup(armlint_summary *summary,
+                               armlint_dedup *dedup);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -5,6 +5,9 @@ Input is armlint -v output for an ELF built by jscdump2elf.py, whose
 symbols are named "<LinkBuffer::Profile>_<code block name>".  Outputs:
 
   * finding-type x JIT tier (Baseline/DFG/FTL/InlineCache/YarrJIT/...)
+    -- with armlint -v -d output, also the findings per tier that repeat
+    an earlier copy's (marked "[repeat]"), so each tier reads both as
+    emitted and once per distinct code block
   * top offender code blocks
   * sample finding blocks per type
 
@@ -18,7 +21,8 @@ import sys
 # JSC code-block names contain angle brackets ("<global>"), so the symbol
 # field is matched greedily and the "+0x<offset>" suffix split off after.
 FINDING_RE = re.compile(
-    r'^(.+?) at offset: 0x([0-9a-f]+) <(.+)>: (.*) \((\d+) instructions?\)$')
+    r'^(.+?) at offset: 0x([0-9a-f]+) <(.+)>: (.*) \((\d+) instructions?\)'
+    r'( \[repeat\])?$')
 SYMOFF_RE = re.compile(r'^(.*)\+0x([0-9a-f]+)$')
 
 
@@ -38,6 +42,7 @@ def main():
     chunk_map = load_map(map_path)
 
     by_type_tier = collections.defaultdict(collections.Counter)
+    repeats_by_tier = collections.Counter()
     by_func = collections.Counter()
     samples = collections.defaultdict(list)
 
@@ -47,9 +52,11 @@ def main():
     def flush():
         if cur is None:
             return
-        ftype, absaddr, sym, header = cur
+        ftype, absaddr, sym, header, repeat = cur
         tier = sym.split('_', 1)[0]
         by_type_tier[ftype][tier] += 1
+        if repeat:
+            repeats_by_tier[tier] += 1
         by_func[re.sub(r'\.\d+$', '', sym)] += 1
         if len(samples[ftype]) < 8:
             samples[ftype].append(
@@ -66,7 +73,8 @@ def main():
             if mo:
                 sym, symoff = mo.group(1), int(mo.group(2), 16)
             base = chunk_map.get(sym, (0, 0))[0]
-            cur = (m.group(1), base + symoff, sym, line)
+            cur = (m.group(1), base + symoff, sym, line,
+                   m.group(6) is not None)
             cur_lines = []
         elif cur is not None and line.startswith('  '):
             cur_lines.append(line)
@@ -91,6 +99,11 @@ def main():
           % ('TOTAL', sum(sum(c.values()) for c in by_type_tier.values()),
              ' '.join('%12d' % sum(c.get(t, 0) for c in by_type_tier.values())
                       for t in tiers)))
+    if repeats_by_tier:
+        print('%-58s %8d %s'
+              % ('of which repeat an earlier copy (armlint -d)',
+                 sum(repeats_by_tier.values()),
+                 ' '.join('%12d' % repeats_by_tier.get(t, 0) for t in tiers)))
 
     print('\n== top code blocks ==')
     for func, n in by_func.most_common(25):

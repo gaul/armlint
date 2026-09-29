@@ -344,6 +344,7 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -m cssc /bin/ls   # also suggest CSSC instructions
 ./armlint -m v8 jit.elf     # a V8 JIT dump from tools/v8dump2elf.py
 ./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
+./armlint -d /bin/ls        # also report functions that copy one another
 ```
 
 A universal binary can carry more than one ARM64 slice. macOS 27's
@@ -630,6 +631,125 @@ JIT output (`-m v8 -a imm` on a `tools/v8dump2elf.py` dump), where
 the table opened with a 16 MiB reservation bound one step past
 `0xfff000` at 92,109 sites, since fixed in V8 by comparing against the
 largest encodable bound.
+
+## Duplicate code (`-d`)
+
+`armlint -d` adds a report on which functions are copies of one
+another, and on which findings are the same advice counted again in
+each copy. A function is a span between the boundaries `-v` uses to
+name functions: Mach-O `nlist` and `LC_FUNCTION_STARTS`, or the ELF
+`.symtab` (`.dynsym` as a fallback), where a sized symbol ends at its
+size. An executable section with no boundary inside it counts as one
+function, which is how a JIT dump's code blobs arrive. Trailing NOP
+and zero padding is not part of a function.
+
+Each function is keyed twice:
+
+* The **identical** key is the code as it executes. A branch, `adr`,
+  `adrp` or literal load that reaches outside the function counts by
+  the absolute address it resolves to. One that stays inside keeps its
+  encoding, which is relative to the function. Two functions with the
+  same identical key behave the same wherever they are loaded, so a
+  linker's identical-code folding could keep just one.
+* The **up to constants** key also masks the fields that tell
+  instances of one piece of code apart:
+  * `movz`/`movn`/`movk` immediates;
+  * the words the function's own literal loads read (and V8 constant
+    pools, under `-m v8`);
+  * every target outside the function;
+  * the low 12 bits an `add` or a load/store adds to an `adrp` page.
+
+  This merges a template's or a generic's instances that differ only
+  in what they call and address, and a JIT's copies of one stub that
+  differ only in the pointers they embed. It also merges two stubs that
+  differ only in a constant they guard. That is the intended reading
+  of "duplicate code", but keep it in mind when reading the numbers.
+
+```console
+$ ./armlint -d librustc_driver.dylib
+Optimization opportunities by type:
+   ...
+
+Duplicate code (-d): 174219 functions, 103924556 bytes
+  identical: 36353 copies of 5900 functions, 4591292 bytes (4.4%)
+  up to constants: 86331 copies of 11651 functions, 24890780 bytes (24.0%)
+  how often each distinct function appears, up to constants: once 76237, 2-10 times 10101, 11-100 times 1484, more 66
+  findings: 18673 of 96161 (19.4%) repeat an earlier copy's at the same offset
+      7510 of  27595  ADD/SUB immediate chain foldable to one
+      3086 of  16891  register already holds the recomputed value
+      2028 of   6156  branch to the next instruction is a no-op
+   ...
+
+96161 optimization opportunities in 25974168 instructions
+```
+
+In scan order, the first function with a given key is the original
+and the later ones are its copies. Percentages are of the bytes in
+functions. The rustc above keeps 4.4% of its code in identical copies
+that the linker did not fold; one example is 350 copies of a single
+168-byte LLVM `DenseMap` lookup. A further fifth of its code is
+generic and template instances that differ only in what they call and
+address.
+
+A finding **repeats** when an earlier copy of its function (up to
+constants) has a finding of the same type at the same offset: the same
+advice to whatever emitted the code, counted again. The by-type table,
+the total and the exit status still count every finding. The
+`findings` lines say how much of that count is repetition, overall and
+by type. `-v` marks each repeated finding by appending ` [repeat]` to
+its header line. `tools/v8_analyze_findings.py` and
+`tools/jsc_analyze_findings.py` read that marker and add a repeats row
+under their per-tier tables. `-v` also lists the most duplicated
+functions. Here it is on SpiderMonkey's Octane code (a
+`tools/smdump2elf.py` dump):
+
+```console
+$ ./armlint -d -v sm-octane.elf
+...
+  most duplicated up to constants, by bytes past the original:
+      copies variants    bytes findings distinct  original
+          86       86     3568     1118       13  <BL_f1e37185c0>
+          86       86     3424     1290       15  <BL_f1e371c3b0>
+         118      118      240      472        4  <ION_f1e3379700>
+...
+```
+
+The columns:
+
+* `variants`: how many distinct identical keys the copies have. 1 means
+  every copy is the same function byte for byte.
+* `findings`: the findings in all the copies together.
+* `distinct`: how many of those findings are not repeats.
+
+The first row above is 86 Baseline blocks of 3,568 bytes each. They
+are the same code up to constants, and no two are byte-identical. Their
+1,118 findings are 13 pieces of advice.
+
+| corpus | functions | identical | up to constants | findings repeated |
+| --- | ---: | ---: | ---: | ---: |
+| librustc_driver | 174,219 | 4.4% | 24.0% | 19.4% |
+| HotSpot, javac (every tier) | 24,739 | 4.6% | 10.9% | 24.9% |
+| SpiderMonkey, Octane | 5,579 | 0.7% | 9.1% | 14.6% |
+| V8, Octane | 2,534 | 0.9% | 1.7% | 0.6% |
+
+Most of HotSpot's repeats (51,417 of 66,222) are in C1's per-method
+stubs, every one of whose 86,790 findings is a "suboptimal MOVZ/MOVK
+sequence". C2's own code is barely repeated: 382 of its 21,371
+findings.
+
+Limitations:
+
+* Keys are 64-bit hashes plus the function's length, so a false merge
+  is possible but improbable.
+* In an unlinked object file every relocated field reads as zero, so
+  functions that differ only in a relocated target key alike.
+* A stripped ELF with only `.dynsym` has boundaries for its exports
+  alone, so `-d` sees only those functions.
+* With `-s all`, every slice feeds one table. A function that both
+  compilations contain counts as a copy, and its findings as repeats.
+* The `adrp` page tracking is linear, not flow-sensitive.
+* Pointers stored as data inside a blob, such as a JIT's absolute
+  dispatch table, are not masked.
 
 ## Mining tools
 

@@ -21579,6 +21579,9 @@ struct armlint_summary {
     size_t misfit_cap;     // a power of two; 0 until the first misfit
     size_t misfit_count;
     size_t misfit_dropped;
+    // Duplicate-code attribution (-d), installed by
+    // armlint_summary_set_dedup; not owned.
+    armlint_dedup *dedup;
 };
 
 armlint_summary *armlint_summary_create(void)
@@ -21597,6 +21600,17 @@ void armlint_summary_destroy(armlint_summary *summary)
 size_t armlint_summary_instructions(const armlint_summary *summary)
 {
     return summary == NULL ? 0 : summary->instructions;
+}
+
+static void dedup_attach(armlint_dedup *dedup);
+
+void armlint_summary_set_dedup(armlint_summary *summary,
+                               armlint_dedup *dedup)
+{
+    if (summary != NULL) {
+        summary->dedup = dedup;
+        dedup_attach(dedup);
+    }
 }
 
 static size_t misfit_hash(uint64_t value, unsigned kind, unsigned width)
@@ -21876,7 +21890,7 @@ const char *armlint_symbol_annotation(char *buf, size_t cap,
 
 static void report_finding(const armlint_finding *finding, bool verbose,
                            const armlint_symbol *symbols, size_t nsymbols,
-                           uint64_t base_addr)
+                           uint64_t base_addr, bool repeat)
 {
     // The default output is the by-type summary only -- a large binary
     // can have tens of thousands of opportunities, so listing each one
@@ -21891,14 +21905,17 @@ static void report_finding(const armlint_finding *finding, bool verbose,
     armlint_symbol_annotation(ann, sizeof(ann), symbols, nsymbols,
         base_addr + finding->start_offset);
     const char *sep = ann[0] != '\0' ? " " : "";
+    // -d marks the finding an earlier copy of its function already had
+    // (armlint_summary_set_dedup), after the fields a script parses.
+    const char *mark = repeat ? " [repeat]" : "";
     if (finding->detail[0] != '\0') {
-        printf("%s at offset: 0x%zx%s%s: %s (%u instructions)\n",
+        printf("%s at offset: 0x%zx%s%s: %s (%u instructions)%s\n",
             finding->name, finding->start_offset, sep, ann,
-            finding->detail, finding->insn_count);
+            finding->detail, finding->insn_count, mark);
     } else {
-        printf("%s at offset: 0x%zx%s%s (%u instructions)\n",
+        printf("%s at offset: 0x%zx%s%s (%u instructions)%s\n",
             finding->name, finding->start_offset, sep, ann,
-            finding->insn_count);
+            finding->insn_count, mark);
     }
     for (unsigned i = 0; i < ARMLINT_FINDING_LINES; i++) {
         if (finding->lines[i][0] != '\0') {
@@ -21906,6 +21923,25 @@ static void report_finding(const armlint_finding *finding, bool verbose,
         }
     }
     printf("\n");
+}
+
+static bool dedup_note_finding(armlint_dedup *dedup,
+                               const armlint_finding *finding,
+                               uint64_t base_addr);
+
+// Everything the driver does with a finding that survived the
+// side-entry gate: attribute it to its function when the summary
+// carries a dedup (which decides the repeat mark), print it under -v,
+// and tally it.
+static void emit_finding(const armlint_finding *finding, bool verbose,
+                         armlint_summary *summary,
+                         const armlint_symbol *symbols, size_t nsymbols,
+                         uint64_t base_addr)
+{
+    bool repeat = summary != NULL
+        && dedup_note_finding(summary->dedup, finding, base_addr);
+    report_finding(finding, verbose, symbols, nsymbols, base_addr, repeat);
+    summary_add(summary, finding);
 }
 
 // Single ordered list of every per-instruction action the driver
@@ -22070,9 +22106,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             armlint_finding finding;
             if (armlint_flush(state, &finding)
                     && !armlint_finding_has_side_entry(state, &finding)) {
-                report_finding(&finding, verbose, symbols,
+                emit_finding(&finding, verbose, summary, symbols,
                     nsymbols, base_addr);
-                summary_add(summary, &finding);
                 errors++;
             }
             code += pool;
@@ -22092,9 +22127,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                                               &finding)
                         && !armlint_finding_has_side_entry(state,
                                                            &finding)) {
-                    report_finding(&finding, verbose, symbols,
+                    emit_finding(&finding, verbose, summary, symbols,
                         nsymbols, base_addr);
-                    summary_add(summary, &finding);
                     errors++;
                 }
             }
@@ -22105,9 +22139,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             armlint_finding finding;
             if (armlint_flush(state, &finding)
                     && !armlint_finding_has_side_entry(state, &finding)) {
-                report_finding(&finding, verbose, symbols,
+                emit_finding(&finding, verbose, summary, symbols,
                     nsymbols, base_addr);
-                summary_add(summary, &finding);
                 errors++;
             }
             code += 4;
@@ -22119,9 +22152,8 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     armlint_finding finding;
     if (armlint_flush(state, &finding)
             && !armlint_finding_has_side_entry(state, &finding)) {
-        report_finding(&finding, verbose, symbols,
-            nsymbols, base_addr);
-        summary_add(summary, &finding);
+        emit_finding(&finding, verbose, summary, symbols, nsymbols,
+            base_addr);
         errors++;
     }
 
@@ -22613,4 +22645,847 @@ void armlint_census_print(const armlint_census *census, bool verbose)
         }
         printf("\n");
     }
+}
+
+// === Duplicate code ===
+//
+// Every function is keyed twice (see armlint.h): the identical key
+// hashes the words as they execute, the parametric one masks what
+// tells instances of one piece of code apart. Groups under the
+// parametric key live in a dense array, so a function can name its
+// group by index while the hash table over them grows; identical keys
+// are only counted, in a table of their own.
+
+// Groups a verbose report lists, most duplicated first.
+#define DEDUP_TOP 20
+// Symbol names are kept for the verbose report, cut where the finding
+// annotations cut them.
+#define DEDUP_NAME_MAX 120
+
+// Stand-ins for the fields the parametric key masks.
+#define DEDUP_TAG_LITERAL  0x6c69746572616cull     // "literal"
+#define DEDUP_TAG_EXTERNAL 0x65787465726e616cull   // "external"
+
+typedef struct {
+    uint64_t hash;
+    uint64_t size;      // bytes of each member
+    uint64_t vaddr;     // the original's address
+    char *name;         // the original's symbol; NULL when nameless
+    size_t copies;      // members, the original included
+    size_t variants;    // distinct identical keys among them
+    size_t findings;    // findings in every member
+    size_t distinct;    // those first at their offset and type
+} dedup_group;
+
+typedef struct {
+    uint64_t hash;
+    uint64_t size;      // 0 marks a free slot: functions are never empty
+    size_t copies;
+} dedup_ident;
+
+typedef struct {
+    uint64_t start;     // vaddr, inclusive
+    uint64_t end;       // vaddr, exclusive
+    size_t group;
+} dedup_unit;
+
+struct armlint_dedup {
+    size_t functions;
+    uint64_t bytes;
+    // Index 0 under the identical key, 1 up to constants: keys that two
+    // or more functions share, the functions past each key's first,
+    // and those functions' bytes.
+    size_t shared[2];
+    size_t copies[2];
+    uint64_t copy_bytes[2];
+
+    dedup_group *groups;
+    size_t ngroups;
+    size_t groups_cap;
+    size_t *group_slots;        // group index + 1; 0 marks a free slot
+    size_t group_slots_cap;     // a power of two
+    dedup_ident *idents;
+    size_t nidents;
+    size_t idents_cap;          // a power of two
+
+    // The functions of the range the last armlint_dedup_scan keyed,
+    // sorted by start, which check_instructions' findings resolve to.
+    dedup_unit *units;
+    size_t nunits;
+    size_t units_cap;
+    uint64_t range_base;
+    size_t range_len;
+
+    // Scratch: one bit per word of the function being keyed, set on
+    // the data its own literal loads read.
+    uint8_t *literal;
+    size_t literal_cap;
+
+    // Findings, once a summary feeds them: every (group, offset, type)
+    // seen so far, as a set of hashes, and the tallies it decides.
+    bool attached;
+    uint64_t *seen;
+    size_t nseen;
+    size_t seen_cap;            // a power of two
+    size_t findings;
+    size_t repeats;
+    size_t untracked;           // not recorded: the set could not grow
+    struct {
+        const char *name;
+        size_t count;
+        size_t repeats;
+    } types[ARMLINT_SUMMARY_MAX];
+    size_t ntypes;
+};
+
+armlint_dedup *armlint_dedup_create(void)
+{
+    return calloc(1, sizeof(struct armlint_dedup));
+}
+
+void armlint_dedup_destroy(armlint_dedup *dedup)
+{
+    if (dedup == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < dedup->ngroups; i++) {
+        free(dedup->groups[i].name);
+    }
+    free(dedup->groups);
+    free(dedup->group_slots);
+    free(dedup->idents);
+    free(dedup->units);
+    free(dedup->literal);
+    free(dedup->seen);
+    free(dedup);
+}
+
+static void dedup_attach(armlint_dedup *dedup)
+{
+    if (dedup != NULL) {
+        dedup->attached = true;
+    }
+}
+
+size_t armlint_dedup_functions(const armlint_dedup *dedup)
+{
+    return dedup == NULL ? 0 : dedup->functions;
+}
+
+uint64_t armlint_dedup_bytes(const armlint_dedup *dedup)
+{
+    return dedup == NULL ? 0 : dedup->bytes;
+}
+
+size_t armlint_dedup_copies(const armlint_dedup *dedup, bool parametric)
+{
+    return dedup == NULL ? 0 : dedup->copies[parametric];
+}
+
+uint64_t armlint_dedup_copy_bytes(const armlint_dedup *dedup,
+                                  bool parametric)
+{
+    return dedup == NULL ? 0 : dedup->copy_bytes[parametric];
+}
+
+size_t armlint_dedup_findings(const armlint_dedup *dedup)
+{
+    return dedup == NULL ? 0 : dedup->findings;
+}
+
+size_t armlint_dedup_repeats(const armlint_dedup *dedup)
+{
+    return dedup == NULL ? 0 : dedup->repeats;
+}
+
+// murmur3's 64-bit finalizer: a bijection that spreads every input bit
+// across the word.
+static uint64_t dedup_fmix(uint64_t h)
+{
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdull;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53ull;
+    h ^= h >> 33;
+    return h;
+}
+
+// Fold the next value into a running key.
+static uint64_t dedup_mix(uint64_t h, uint64_t v)
+{
+    return dedup_fmix((h ^ v) + 0x9e3779b97f4a7c15ull);
+}
+
+// FNV-1a over a finding's name, which checks spell as literals: equal
+// names need not share a pointer.
+static uint64_t dedup_name_hash(const char *s)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (; *s != '\0'; s++) {
+        h ^= (unsigned char)*s;
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+// The slot for (hash, size) in the group table: the one holding it, or
+// the first free one along its probe sequence. The caller keeps the
+// table under half full.
+static size_t *dedup_group_slot(const armlint_dedup *dedup, uint64_t hash,
+                                uint64_t size)
+{
+    size_t mask = dedup->group_slots_cap - 1;
+    size_t j = (size_t)(hash ^ dedup_fmix(size)) & mask;
+    for (;;) {
+        size_t *slot = &dedup->group_slots[j];
+        if (*slot == 0) {
+            return slot;
+        }
+        const dedup_group *g = &dedup->groups[*slot - 1];
+        if (g->hash == hash && g->size == size) {
+            return slot;
+        }
+        j = (j + 1) & mask;
+    }
+}
+
+static bool dedup_group_grow(armlint_dedup *dedup)
+{
+    size_t cap = dedup->group_slots_cap == 0
+        ? 1024 : dedup->group_slots_cap * 2;
+    size_t *slots = calloc(cap, sizeof(*slots));
+    if (slots == NULL) {
+        return false;
+    }
+    free(dedup->group_slots);
+    dedup->group_slots = slots;
+    dedup->group_slots_cap = cap;
+    for (size_t i = 0; i < dedup->ngroups; i++) {
+        *dedup_group_slot(dedup, dedup->groups[i].hash,
+                          dedup->groups[i].size) = i + 1;
+    }
+    return true;
+}
+
+static dedup_ident *dedup_ident_slot(dedup_ident *table, size_t cap,
+                                     uint64_t hash, uint64_t size)
+{
+    size_t j = (size_t)(hash ^ dedup_fmix(size)) & (cap - 1);
+    for (;;) {
+        dedup_ident *e = &table[j];
+        if (e->size == 0 || (e->hash == hash && e->size == size)) {
+            return e;
+        }
+        j = (j + 1) & (cap - 1);
+    }
+}
+
+static bool dedup_ident_grow(armlint_dedup *dedup)
+{
+    size_t cap = dedup->idents_cap == 0 ? 1024 : dedup->idents_cap * 2;
+    dedup_ident *table = calloc(cap, sizeof(*table));
+    if (table == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < dedup->idents_cap; i++) {
+        const dedup_ident *e = &dedup->idents[i];
+        if (e->size != 0) {
+            *dedup_ident_slot(table, cap, e->hash, e->size) = *e;
+        }
+    }
+    free(dedup->idents);
+    dedup->idents = table;
+    dedup->idents_cap = cap;
+    return true;
+}
+
+// Record a finding's key; true when it was not already there. Grows at
+// half load; a key the set can no longer hold counts as new and as
+// untracked.
+static bool dedup_seen_add(armlint_dedup *dedup, uint64_t key)
+{
+    if (key == 0) {
+        key = 1;                // 0 marks a free slot
+    }
+    if (dedup->nseen * 2 >= dedup->seen_cap) {
+        size_t cap = dedup->seen_cap == 0 ? 1024 : dedup->seen_cap * 2;
+        uint64_t *table = calloc(cap, sizeof(*table));
+        if (table != NULL) {
+            for (size_t i = 0; i < dedup->seen_cap; i++) {
+                uint64_t k = dedup->seen[i];
+                if (k != 0) {
+                    size_t j = (size_t)k & (cap - 1);
+                    while (table[j] != 0) {
+                        j = (j + 1) & (cap - 1);
+                    }
+                    table[j] = k;
+                }
+            }
+            free(dedup->seen);
+            dedup->seen = table;
+            dedup->seen_cap = cap;
+        } else if (dedup->nseen + 1 >= dedup->seen_cap) {
+            dedup->untracked++;
+            return true;
+        }
+    }
+    size_t j = (size_t)key & (dedup->seen_cap - 1);
+    while (dedup->seen[j] != 0) {
+        if (dedup->seen[j] == key) {
+            return false;
+        }
+        j = (j + 1) & (dedup->seen_cap - 1);
+    }
+    dedup->seen[j] = key;
+    dedup->nseen++;
+    return true;
+}
+
+// Bytes an LDR (literal) of this encoding reads: its opc and V bits
+// choose W, X or LDRSW's word, or S, D or Q; PRFM (and V=1 opc=11,
+// unallocated) reads nothing.
+static size_t dedup_literal_bytes(uint32_t op)
+{
+    unsigned opc = op >> 30;
+    if (opc == 3) {
+        return 0;
+    }
+    if (op & (1u << 26)) {
+        return (size_t)4 << opc;
+    }
+    return opc == 1 ? 8 : 4;
+}
+
+static bool dedup_is_literal(const armlint_dedup *dedup, size_t word)
+{
+    return (dedup->literal[word >> 3] >> (word & 7)) & 1u;
+}
+
+// Mark the words of inst[start..end) its own literal loads read -- and,
+// under ARMLINT_FEATURE_V8POOL, the data of each V8 constant pool --
+// as data: the identical key hashes them as they are, the parametric
+// one masks them, and neither decodes them as instructions.
+static void dedup_mark_literals(armlint_dedup *dedup, const uint8_t *inst,
+                                size_t start, size_t end, unsigned features)
+{
+    for (size_t o = start; o + 4 <= end; o += 4) {
+        size_t pool = v8pool_skip_bytes(features, inst + o, end - o);
+        if (pool != 0) {
+            for (size_t p = o + 4; p < o + pool; p += 4) {
+                size_t word = (p - start) / 4;
+                dedup->literal[word >> 3] |= (uint8_t)(1u << (word & 7));
+            }
+            o += pool - 4;      // the loop increment adds the last word
+            continue;
+        }
+        uint32_t op = buf_word_at(inst, o);
+        if ((op & 0x3B000000u) != 0x18000000u) {
+            continue;
+        }
+        size_t bytes = dedup_literal_bytes(op);
+        int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+        imm19 = (imm19 ^ 0x40000) - 0x40000;
+        int64_t target = (int64_t)o + (int64_t)imm19 * 4;
+        if (bytes == 0 || target < (int64_t)start
+                || (uint64_t)target + bytes > end) {
+            continue;
+        }
+        for (size_t p = (size_t)target; p < (size_t)target + bytes; p += 4) {
+            size_t word = (p - start) / 4;
+            dedup->literal[word >> 3] |= (uint8_t)(1u << (word & 7));
+        }
+    }
+}
+
+// Key inst[start..end), one function, as both keys. The literal marks
+// must already cover it.
+static void dedup_key(const armlint_dedup *dedup, const uint8_t *inst,
+                      size_t start, size_t end, uint64_t base_addr,
+                      unsigned features, uint64_t *ident, uint64_t *param)
+{
+    uint64_t h1 = dedup_fmix(end - start);
+    uint64_t h2 = h1;
+    // Registers holding an ADRP page, whose low-12 consumers the
+    // parametric key masks. Any other write to one, and any branch --
+    // past which the register may hold something else -- drops it.
+    uint32_t pages = 0;
+    for (size_t o = start; o < end; o += 4) {
+        uint32_t op = buf_word_at(inst, o);
+        if (dedup_is_literal(dedup, (o - start) / 4)) {
+            h1 = dedup_mix(h1, op);
+            h2 = dedup_mix(h2, DEDUP_TAG_LITERAL);
+            continue;
+        }
+        if (v8pool_skip_bytes(features, inst + o, end - o) != 0) {
+            // The marker; its data words follow, marked as literals.
+            h1 = dedup_mix(h1, op);
+            h2 = dedup_mix(h2, op);
+            continue;
+        }
+
+        // PC-relative forms: keep is the word with its target field
+        // cleared, disp the byte displacement.
+        uint32_t keep = 0;
+        int64_t disp = 0;
+        unsigned rd = op & 31u;
+        unsigned rn = (op >> 5) & 31u;
+        if ((op & 0x7C000000u) == 0x14000000u) {
+            // B / BL: imm26.
+            int32_t imm = (int32_t)(op & 0x3FFFFFFu);
+            disp = (int64_t)((imm ^ 0x2000000) - 0x2000000) * 4;
+            keep = op & 0xFC000000u;
+            pages = 0;
+        } else if ((op & 0xFF000000u) == 0x54000000u
+                || (op & 0x7E000000u) == 0x34000000u
+                || (op & 0x3B000000u) == 0x18000000u) {
+            // B.cond/BC.cond, CBZ/CBNZ and the literal loads: imm19.
+            int32_t imm = (int32_t)((op >> 5) & 0x7FFFFu);
+            disp = (int64_t)((imm ^ 0x40000) - 0x40000) * 4;
+            keep = op & 0xFF00001Fu;
+            if ((op & 0x3B000000u) == 0x18000000u) {
+                pages &= ~(1u << rd);
+            } else {
+                pages = 0;
+            }
+        } else if ((op & 0x7E000000u) == 0x36000000u) {
+            // TBZ/TBNZ: imm14.
+            int32_t imm = (int32_t)((op >> 5) & 0x3FFFu);
+            disp = (int64_t)((imm ^ 0x2000) - 0x2000) * 4;
+            keep = op & 0xFFF8001Fu;
+            pages = 0;
+        } else if ((op & 0x1F000000u) == 0x10000000u) {
+            // ADR / ADRP: immhi:immlo.
+            int32_t imm = (int32_t)((((op >> 5) & 0x7FFFFu) << 2)
+                | ((op >> 29) & 3u));
+            imm = (imm ^ 0x100000) - 0x100000;
+            keep = op & 0x9F00001Fu;
+            if (op & 0x80000000u) {
+                // ADRP always keys by the page it names: a page inside
+                // the function is no less position-dependent.
+                uint64_t page = ((base_addr + o) & ~(uint64_t)0xFFF)
+                    + (uint64_t)((int64_t)imm * 4096);
+                h1 = dedup_mix(dedup_mix(h1, keep), page);
+                h2 = dedup_mix(dedup_mix(h2, keep), DEDUP_TAG_EXTERNAL);
+                if (rd != 31) {
+                    pages |= 1u << rd;
+                }
+                continue;
+            }
+            disp = imm;
+            pages &= ~(1u << rd);
+        } else {
+            // Not PC-relative. The parametric key masks move-wide
+            // immediates, and the low 12 bits an ADD or an
+            // unsigned-offset load/store adds to a tracked page.
+            uint32_t masked = op;
+            if ((op & 0x1F800000u) == 0x12800000u
+                    && ((op >> 29) & 3u) != 1) {
+                masked = op & ~(0xFFFFu << 5);      // MOVN/MOVZ/MOVK
+            } else if (((op & 0xFFC00000u) == 0x91000000u
+                        || (op & 0x3B000000u) == 0x39000000u)
+                    && ((pages >> rn) & 1u)) {
+                masked = op & ~(0xFFFu << 10);
+            }
+            if ((op & 0xFE000000u) == 0xD6000000u) {
+                pages = 0;                  // BR/BLR/RET and kin
+            } else if ((op & 0x3B000000u) == 0x39000000u) {
+                pages &= ~(1u << rd);       // unsigned offset: no writeback
+            } else if ((op & 0x0A000000u) == 0x08000000u) {
+                // Other loads and stores: a writeback base, a pair's
+                // second register.
+                pages &= ~((1u << rd) | (1u << rn)
+                    | (1u << ((op >> 10) & 31u)));
+            } else {
+                pages &= ~(1u << rd);
+            }
+            h1 = dedup_mix(h1, op);
+            h2 = dedup_mix(h2, masked);
+            continue;
+        }
+
+        // A target inside the function keeps the raw, relative word; one
+        // outside is keyed by the address it resolves to, and masked.
+        int64_t target = (int64_t)o + disp;
+        if (target >= (int64_t)start && target < (int64_t)end) {
+            h1 = dedup_mix(h1, op);
+            h2 = dedup_mix(h2, op);
+        } else {
+            h1 = dedup_mix(dedup_mix(h1, keep),
+                base_addr + (uint64_t)target);
+            h2 = dedup_mix(dedup_mix(h2, keep), DEDUP_TAG_EXTERNAL);
+        }
+    }
+    *ident = h1;
+    *param = h2;
+}
+
+// A NUL-terminated copy of at most DEDUP_NAME_MAX bytes of name, or
+// NULL (the report then names the function by address).
+static char *dedup_copy_name(const char *name)
+{
+    if (name == NULL) {
+        return NULL;
+    }
+    size_t n = strlen(name);
+    if (n > DEDUP_NAME_MAX) {
+        n = DEDUP_NAME_MAX;
+    }
+    char *copy = malloc(n + 1);
+    if (copy != NULL) {
+        memcpy(copy, name, n);
+        copy[n] = '\0';
+    }
+    return copy;
+}
+
+// Key the function inst[start..end) of the current range, tally it
+// under both keys and append it to the range's functions. False on
+// allocation failure.
+static bool dedup_add_function(armlint_dedup *dedup, const uint8_t *inst,
+                               size_t start, size_t end, uint64_t base_addr,
+                               unsigned features, const char *name)
+{
+    start = (start + 3) & ~(size_t)3;
+    if (end <= start) {
+        return true;
+    }
+    end = start + ((end - start) & ~(size_t)3);
+    size_t words = (end - start) / 4;
+    size_t need = (words + 7) / 8;
+    if (need > dedup->literal_cap) {
+        uint8_t *grown = realloc(dedup->literal, need);
+        if (grown == NULL) {
+            return false;
+        }
+        dedup->literal = grown;
+        dedup->literal_cap = need;
+    }
+    memset(dedup->literal, 0, need);
+    dedup_mark_literals(dedup, inst, start, end, features);
+
+    // Trailing NOP and zero words are alignment padding, not the
+    // function, unless its own literal loads read them.
+    while (end > start) {
+        uint32_t op = buf_word_at(inst, end - 4);
+        if ((op != 0 && op != 0xD503201Fu)
+                || dedup_is_literal(dedup, (end - 4 - start) / 4)) {
+            break;
+        }
+        end -= 4;
+    }
+    if (end == start) {
+        return true;
+    }
+    uint64_t size = end - start;
+    uint64_t ident, param;
+    dedup_key(dedup, inst, start, end, base_addr, features, &ident, &param);
+
+    if (dedup->ngroups * 2 >= dedup->group_slots_cap
+            && !dedup_group_grow(dedup)) {
+        return false;
+    }
+    if (dedup->nidents * 2 >= dedup->idents_cap
+            && !dedup_ident_grow(dedup)) {
+        return false;
+    }
+    if (dedup->nunits == dedup->units_cap) {
+        size_t cap = dedup->units_cap == 0 ? 256 : dedup->units_cap * 2;
+        dedup_unit *grown = realloc(dedup->units, cap * sizeof(*grown));
+        if (grown == NULL) {
+            return false;
+        }
+        dedup->units = grown;
+        dedup->units_cap = cap;
+    }
+
+    size_t *slot = dedup_group_slot(dedup, param, size);
+    size_t g;
+    if (*slot == 0) {
+        if (dedup->ngroups == dedup->groups_cap) {
+            size_t cap = dedup->groups_cap == 0 ? 256 : dedup->groups_cap * 2;
+            dedup_group *grown = realloc(dedup->groups, cap * sizeof(*grown));
+            if (grown == NULL) {
+                return false;
+            }
+            dedup->groups = grown;
+            dedup->groups_cap = cap;
+        }
+        g = dedup->ngroups++;
+        dedup_group *group = &dedup->groups[g];
+        memset(group, 0, sizeof(*group));
+        group->hash = param;
+        group->size = size;
+        group->vaddr = base_addr + start;
+        group->name = dedup_copy_name(name);
+        group->copies = 1;
+        *slot = g + 1;
+    } else {
+        g = *slot - 1;
+        if (++dedup->groups[g].copies == 2) {
+            dedup->shared[1]++;
+        }
+        dedup->copies[1]++;
+        dedup->copy_bytes[1] += size;
+    }
+
+    dedup_ident *e = dedup_ident_slot(dedup->idents, dedup->idents_cap,
+                                      ident, size);
+    if (e->size == 0) {
+        e->hash = ident;
+        e->size = size;
+        e->copies = 1;
+        dedup->nidents++;
+        dedup->groups[g].variants++;
+    } else {
+        if (++e->copies == 2) {
+            dedup->shared[0]++;
+        }
+        dedup->copies[0]++;
+        dedup->copy_bytes[0] += size;
+    }
+
+    dedup->functions++;
+    dedup->bytes += size;
+    dedup->units[dedup->nunits].start = base_addr + start;
+    dedup->units[dedup->nunits].end = base_addr + end;
+    dedup->units[dedup->nunits].group = g;
+    dedup->nunits++;
+    return true;
+}
+
+bool armlint_dedup_scan(armlint_dedup *dedup, const uint8_t *inst,
+                        size_t len, uint64_t base_addr, unsigned features,
+                        const armlint_symbol *symbols, size_t nsymbols)
+{
+    if (dedup == NULL) {
+        return true;
+    }
+    dedup->nunits = 0;
+    dedup->range_base = base_addr;
+    dedup->range_len = len;
+
+    // The anchors inside the range delimit its functions, as the
+    // census's pac-ret coverage reads them; with none, the range is
+    // one function.
+    size_t first = 0;
+    while (first < nsymbols && symbols[first].vaddr < base_addr) {
+        first++;
+    }
+    size_t last = first;
+    while (last < nsymbols && symbols[last].vaddr - base_addr < len) {
+        last++;
+    }
+    if (first == last) {
+        return dedup_add_function(dedup, inst, 0, len, base_addr, features,
+                                  NULL);
+    }
+    for (size_t si = first; si < last; si++) {
+        size_t start = (size_t)(symbols[si].vaddr - base_addr);
+        size_t end = si + 1 < last
+            ? (size_t)(symbols[si + 1].vaddr - base_addr) : len;
+        if (symbols[si].size != 0 && symbols[si].size < end - start) {
+            end = start + (size_t)symbols[si].size;
+        }
+        if (!dedup_add_function(dedup, inst, start, end, base_addr,
+                                features, symbols[si].name)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Attribute one finding of the range the last armlint_dedup_scan keyed
+// (check_instructions passes that range's base_addr) to the function
+// containing it. True when an earlier function of its group, up to
+// constants, already had a finding of the same type at the same offset.
+static bool dedup_note_finding(armlint_dedup *dedup,
+                               const armlint_finding *finding,
+                               uint64_t base_addr)
+{
+    if (dedup == NULL || finding->name == NULL) {
+        return false;
+    }
+    dedup->findings++;
+    size_t t = 0;
+    while (t < dedup->ntypes
+           && strcmp(dedup->types[t].name, finding->name) != 0) {
+        t++;
+    }
+    if (t == dedup->ntypes && t < ARMLINT_SUMMARY_MAX) {
+        dedup->types[t].name = finding->name;
+        dedup->types[t].count = 0;
+        dedup->types[t].repeats = 0;
+        dedup->ntypes++;
+    }
+    if (t < dedup->ntypes) {
+        dedup->types[t].count++;
+    }
+    if (base_addr != dedup->range_base
+            || finding->start_offset >= dedup->range_len) {
+        return false;
+    }
+    // The last function starting at or below the finding.
+    uint64_t vaddr = base_addr + finding->start_offset;
+    size_t lo = 0, hi = dedup->nunits;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (dedup->units[mid].start <= vaddr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0 || vaddr >= dedup->units[lo - 1].end) {
+        return false;               // padding, or no function's code
+    }
+    const dedup_unit *u = &dedup->units[lo - 1];
+    dedup_group *g = &dedup->groups[u->group];
+    g->findings++;
+    uint64_t key = dedup_mix(dedup_mix(dedup_mix(0, u->group),
+        vaddr - u->start), dedup_name_hash(finding->name));
+    if (dedup_seen_add(dedup, key)) {
+        g->distinct++;
+        return false;
+    }
+    dedup->repeats++;
+    if (t < dedup->ntypes) {
+        dedup->types[t].repeats++;
+    }
+    return true;
+}
+
+static double dedup_percent(uint64_t part, uint64_t whole)
+{
+    return whole == 0 ? 0.0 : 100.0 * (double)part / (double)whole;
+}
+
+// Bytes in a group's copies past its original: the verbose ranking.
+static uint64_t dedup_group_excess(const dedup_group *g)
+{
+    return (g->copies - 1) * g->size;
+}
+
+void armlint_dedup_print(const armlint_dedup *dedup, bool verbose)
+{
+    if (dedup == NULL) {
+        return;
+    }
+    printf("Duplicate code (-d): %zu functions, %" PRIu64 " bytes\n",
+        dedup->functions, dedup->bytes);
+    static const char *const keys[2] = { "identical", "up to constants" };
+    for (int k = 0; k < 2; k++) {
+        printf("  %s: %zu copies of %zu functions, %" PRIu64
+            " bytes (%.1f%%)\n", keys[k], dedup->copies[k],
+            dedup->shared[k], dedup->copy_bytes[k],
+            dedup_percent(dedup->copy_bytes[k], dedup->bytes));
+    }
+    // How often each distinct function, up to constants, appears.
+    size_t once = 0, few = 0, many = 0, more = 0;
+    for (size_t i = 0; i < dedup->ngroups; i++) {
+        size_t c = dedup->groups[i].copies;
+        if (c == 1) {
+            once++;
+        } else if (c <= 10) {
+            few++;
+        } else if (c <= 100) {
+            many++;
+        } else {
+            more++;
+        }
+    }
+    printf("  how often each distinct function appears, up to constants: "
+        "once %zu, 2-10 times %zu, 11-100 times %zu, more %zu\n",
+        once, few, many, more);
+
+    if (dedup->attached) {
+        printf("  findings: %zu of %zu (%.1f%%) repeat an earlier copy's "
+            "at the same offset\n", dedup->repeats, dedup->findings,
+            dedup_percent(dedup->repeats, dedup->findings));
+        // By type, most repeated first (ties by name).
+        size_t order[ARMLINT_SUMMARY_MAX];
+        size_t n = 0;
+        for (size_t i = 0; i < dedup->ntypes; i++) {
+            if (dedup->types[i].repeats != 0) {
+                order[n++] = i;
+            }
+        }
+        for (size_t i = 0; i < n; i++) {
+            size_t best = i;
+            for (size_t j = i + 1; j < n; j++) {
+                size_t rj = dedup->types[order[j]].repeats;
+                size_t rb = dedup->types[order[best]].repeats;
+                if (rj > rb || (rj == rb
+                        && strcmp(dedup->types[order[j]].name,
+                                  dedup->types[order[best]].name) < 0)) {
+                    best = j;
+                }
+            }
+            size_t tmp = order[i];
+            order[i] = order[best];
+            order[best] = tmp;
+            printf("    %6zu of %6zu  %s\n", dedup->types[order[i]].repeats,
+                dedup->types[order[i]].count, dedup->types[order[i]].name);
+        }
+        if (dedup->untracked != 0) {
+            printf("  (%zu findings not tracked: the table could not "
+                "grow)\n", dedup->untracked);
+        }
+    }
+
+    if (verbose) {
+        // The most duplicated groups by bytes past the original; ties
+        // go to the lower address.
+        size_t top[DEDUP_TOP];
+        size_t ntop = 0;
+        for (size_t i = 0; i < dedup->ngroups; i++) {
+            const dedup_group *g = &dedup->groups[i];
+            if (g->copies < 2) {
+                continue;
+            }
+            size_t at = ntop;
+            while (at > 0) {
+                const dedup_group *h = &dedup->groups[top[at - 1]];
+                if (dedup_group_excess(h) > dedup_group_excess(g)
+                        || (dedup_group_excess(h) == dedup_group_excess(g)
+                            && h->vaddr <= g->vaddr)) {
+                    break;
+                }
+                at--;
+            }
+            if (at == DEDUP_TOP) {
+                continue;
+            }
+            if (ntop < DEDUP_TOP) {
+                ntop++;
+            }
+            memmove(&top[at + 1], &top[at], (ntop - 1 - at) * sizeof(top[0]));
+            top[at] = i;
+        }
+        if (ntop > 0) {
+            // The findings columns only once a summary fed findings: a
+            // census run has none to count, which is not zero.
+            printf("  most duplicated up to constants, by bytes past the "
+                "original:\n");
+            printf("    %8s %8s %8s ", "copies", "variants", "bytes");
+            if (dedup->attached) {
+                printf("%8s %8s ", "findings", "distinct");
+            }
+            printf(" original\n");
+            for (size_t i = 0; i < ntop; i++) {
+                const dedup_group *g = &dedup->groups[top[i]];
+                printf("    %8zu %8zu %8" PRIu64 " ",
+                    g->copies, g->variants, g->size);
+                if (dedup->attached) {
+                    printf("%8zu %8zu ", g->findings, g->distinct);
+                }
+                printf(" ");
+                if (g->name != NULL) {
+                    printf("<%s>\n", g->name);
+                } else {
+                    printf("<0x%" PRIx64 ">\n", g->vaddr);
+                }
+            }
+        }
+    }
+    printf("\n");
 }

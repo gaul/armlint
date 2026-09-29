@@ -2,7 +2,9 @@
 """Cross-reference armlint -v findings with a V8 dump's RelocInfo.
 
 Outputs:
-  * finding-type x compiler-tier cross-tab
+  * finding-type x compiler-tier cross-tab -- with armlint -v -d
+    output, also the findings per tier that repeat an earlier copy's
+    (marked "[repeat]")
   * per finding type: how many findings contain a relocated (patchable)
     instruction, broken down by reloc mode -- those are toolchain-forced
   * top offender functions
@@ -15,7 +17,7 @@ import sys
 
 FINDING_RE = re.compile(
     r'^(.+?) at offset: 0x([0-9a-f]+) <([^+>]+?)(?:\+0x([0-9a-f]+))?>: '
-    r'(.*) \((\d+) instructions?\)$')
+    r'(.*) \((\d+) instructions?\)( \[repeat\])?$')
 RELOC_RE = re.compile(r'^0x([0-9a-f]+)\s\s+([a-z][a-zA-Z0-9 _-]*)')
 RELOC_HDR_RE = re.compile(r'^RelocInfo \(size')
 
@@ -58,19 +60,22 @@ def main():
     relocs = load_relocs(dump_path)
 
     by_type_tier = collections.defaultdict(collections.Counter)
+    repeats_by_tier = collections.Counter()
     by_type_reloc = collections.defaultdict(collections.Counter)
     by_func = collections.Counter()
     samples = collections.defaultdict(list)
 
-    cur = None          # (type, absaddr, sym, ninsn, headerline)
+    cur = None          # (type, absaddr, sym, ninsn, headerline, repeat)
     cur_lines = []
 
     def flush():
         if cur is None:
             return
-        ftype, absaddr, sym, ninsn, header = cur
+        ftype, absaddr, sym, ninsn, header, repeat = cur
         tier = sym.split('_', 1)[0]
         by_type_tier[ftype][tier] += 1
+        if repeat:
+            repeats_by_tier[tier] += 1
         func = re.sub(r'\.\d+$', '', sym)
         by_func[func] += 1
         modes = set()
@@ -98,7 +103,8 @@ def main():
             sym = m.group(3)
             symoff = int(m.group(4) or '0', 16)
             base = chunk_map.get(sym, (0, 0))[0]
-            cur = (ftype, base + symoff, sym, int(m.group(6)), line)
+            cur = (ftype, base + symoff, sym, int(m.group(6)), line,
+                   m.group(7) is not None)
             cur_lines = []
         elif cur is not None and line.startswith('  '):
             cur_lines.append(line)
@@ -115,6 +121,10 @@ def main():
                                  key=lambda kv: -sum(kv[1].values())):
         print('%-58s %s' % (ftype[:58],
                             ' '.join('%8d' % counter.get(t, 0)
+                                     for t in tiers)))
+    if repeats_by_tier:
+        print('%-58s %s' % ('of which repeat an earlier copy (armlint -d)',
+                            ' '.join('%8d' % repeats_by_tier.get(t, 0)
                                      for t in tiers)))
 
     print('\n== reloc-forced analysis (findings containing a reloc site) ==')

@@ -1,0 +1,27 @@
+suboptimal MOVZ/MOVK sequence at offset: 0x0 <_twin_a>: w0 = 0x66666666 (2 instructions)
+  movz w0, #0x6666
+  movk w0, #0x6666, lsl #16
+
+suboptimal MOVZ/MOVK sequence at offset: 0x10 <_twin_b>: w0 = 0x66666666 (2 instructions) [repeat]
+  movz w0, #0x6666
+  movk w0, #0x6666, lsl #16
+
+suboptimal MOVZ/MOVK sequence at offset: 0x20 <_cousin>: w0 = 0x55555555 (2 instructions) [repeat]
+  movz w0, #0x5555
+  movk w0, #0x5555, lsl #16
+
+Optimization opportunities by type:
+       3  suboptimal MOVZ/MOVK sequence
+
+Duplicate code (-d): 6 functions, 68 bytes
+  identical: 2 copies of 2 functions, 24 bytes (35.3%)
+  up to constants: 3 copies of 2 functions, 36 bytes (52.9%)
+  how often each distinct function appears, up to constants: once 1, 2-10 times 2, 11-100 times 0, more 0
+  findings: 2 of 3 (66.7%) repeat an earlier copy's at the same offset
+         2 of      3  suboptimal MOVZ/MOVK sequence
+  most duplicated up to constants, by bytes past the original:
+      copies variants    bytes findings distinct  original
+           3        2       12        3        1  <_twin_a>
+           2        1       12        0        0  <_branchy_a>
+
+3 optimization opportunities in 23 instructions
