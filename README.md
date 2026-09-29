@@ -345,6 +345,7 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -m v8 jit.elf     # a V8 JIT dump from tools/v8dump2elf.py
 ./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
 ./armlint -d /bin/ls        # also report functions that copy one another
+./armlint -c /bin/ls        # also report the constants MOVZ/MOVK chains build
 ```
 
 A universal binary can carry more than one ARM64 slice. macOS 27's
@@ -750,6 +751,128 @@ Limitations:
 * The `adrp` page tracking is linear, not flow-sensitive.
 * Pointers stored as data inside a blob, such as a JIT's absolute
   dispatch table, are not masked.
+
+## Constant chains (`-c`)
+
+`armlint -c` adds a report on the constants the code builds with
+`movz`/`movn` + `movk` chains. A chain is a run of two or more of them
+into one register at one width: the runs the "suboptimal MOVZ/MOVK
+sequence" check judges. The [`-a imm` audit](#immediate-misfit-audit--a-imm)
+reports a constant that just misses its consumer's immediate form.
+This report is its complement: it counts what every constant too wide
+for one instruction costs. Constants are tallied by width and value,
+so `w #0x1deb8` and `x #0x1deb8` are two values, and ranked by the
+instructions spent on them.
+
+Within a function, a chain that builds a value an earlier chain of the
+same function already built is a **rebuild**. The functions are the
+ones `-d` uses. A rebuild spends the instructions again instead of
+keeping the value in a register. The usual causes are a call that
+clobbered the register and a loop invariant that was not hoisted. Not
+every rebuild is a miss: the two arms of an if/else both need their
+build, and a rebuild after a call can be cheaper than a spill. The
+rebuild counts bound what keeping the values could save; they do not
+measure it.
+
+```console
+$ ./armlint -c librustc_driver.dylib
+Optimization opportunities by type:
+   ...
+
+Constant chains (-c): 25981139 words, 174219 functions
+  every chain: 73533 building 17385 distinct values, 208685 instructions (0.80%)
+  rebuilds within a function: 22192 in 4922 functions, 59481 instructions (0.23%; 28.5% of chain instructions)
+  how often a function builds a value it rebuilds: twice 5825, 3 times 1381, 4 times 676, 5 or more times 1220
+  most instructions spent building one value:
+    instructions   chains  value
+           19792     4948  x #0xf1357aea2e62a9c5
+            6180     1545  x #0xbf58476d1ce4e5b9
+            3774     1887  w #0x7a3e8
+            3302     1651  w #0x1deb8
+   ...
+    (17365 more distinct values)
+  most instructions spent rebuilding one value within a function:
+    instructions rebuilds functions  value
+            6616     1654       826  x #0xf1357aea2e62a9c5
+            1952      976       246  w #0x1deb8
+   ...
+    (3323 more distinct values)
+
+96161 optimization opportunities in 25974168 instructions
+```
+
+Every word of the executable sections is scanned, except V8 constant
+pools under `-m v8`, and the percentages are of those words. Each
+ranking lists its top 20 values. Here `x #0xf1357aea2e62a9c5` is the
+multiplier of rustc-hash's `FxHasher`, built with four instructions at
+every inlined hash, and `w #0x1deb8` is a field offset into rustc's
+global context. `-v` adds where to look. It gives the addresses of a
+value's first three chains; for a rebuilt value, it gives the function
+that builds it most often and its first builds there:
+
+```console
+    instructions rebuilds functions  value
+            6616     1654       826  x #0xf1357aea2e62a9c5  built 120 times in <__RNvNtCshPlmC27tfnj_16rustc_query_impl9execution25collect_active_query_jobs>: 0x2603918, 0x2603f44, 0x260452c (+117 more)
+```
+
+| corpus | chain instructions | distinct values | rebuilt |
+| --- | ---: | ---: | ---: |
+| librustc_driver | 0.80% | 17,385 | 28.5% |
+| clang-24 | 1.10% | 22,502 | 33.6% |
+| Firefox libxul.so | 0.61% | 11,753 | not counted |
+| HotSpot, javac (every tier) | 17.8% | 44,350 | 63.9% |
+| SpiderMonkey, Octane | 10.2% | 7,465 | 58.2% |
+| V8, Octane (`-m v8`) | 3.9% | 485 | 73.6% |
+
+The chain instructions are a share of the words scanned, and the
+rebuilt ones a share of the chain instructions.
+
+* clang's costliest value is `x #0xbf58476d1ce4e5b9`, splitmix64's
+  multiplier. LLVM's `DenseMap` hashes every pointer key by
+  multiplying it by that constant (`densemap::detail::mix`). The value
+  takes 45,804 instructions in 11,451 chains, 19% of clang's chain
+  instructions.
+* libxul.so is stripped. Its `.dynsym` bounds 5 functions in the text,
+  so its rebuilds go uncounted. Its totals are led by SpiderMonkey's
+  `UndefinedValue()` (`x #0xfff9800000000000`, 7,661 chains) and by
+  nsresult codes: `NS_ERROR_ILLEGAL_VALUE` (`w #0x80070057`, 3,616)
+  and `NS_ERROR_FAILURE` (`w #0x80004005`, 3,337).
+* HotSpot's costliest value is `x #0x0`: 112,251 three-instruction
+  chains, 26% of its chain instructions, all but 8 of them in the stubs
+  C1 and C2 append to each method. The stub
+  `isb ; mov x12, #0 ; movk ; movk ; mov x8, #0 ; movk ; movk ; br x8`
+  calls the interpreter, and its method and entry address are
+  placeholders, patched when the call is resolved. A method's stubs are
+  one function, so the same placeholders also lead the rebuilds.
+* SpiderMonkey's costliest value is the `JS::Value` Int32 tag,
+  `x #0xfff8800000000000` (12,865 chains). `UndefinedValue()` (8,901),
+  `Int32Value(2)` and `Int32Value(1)` join it in the top six, between
+  runtime pointers. One Baseline blob rebuilds the Int32 tag 2,773
+  times.
+* V8's costliest value, `x #0x17cb0007c000`, is the address of a typed
+  array's backing store. Maglev and TurboFan embed it in the code of
+  Octane's Mandreel benchmark, the Bullet physics engine compiled to
+  JavaScript: 3,992 chains in 146 functions, most of them followed
+  directly by an indexed access such as `str w1, [x3, x0, lsl #2]`.
+  One Maglev function rebuilds it 222 times.
+
+Limitations:
+
+* Only move-wide chains count. A constant loaded from a literal pool,
+  built by an `orr` + `movk` hybrid, or encoded in one instruction is
+  not counted.
+* A W chain zero-extends into its X register, so `w #0x1deb8` and
+  `x #0x1deb8` leave the same register contents. They still count as
+  two values, and a build of one does not make the other a rebuild.
+* A rebuild is a build of the same value earlier in the function, in
+  address order. Neither dominance nor liveness is checked.
+* A JIT patches many of its constants at runtime. The census cannot
+  tell a patch site's placeholder from a constant.
+* The functions are `-d`'s. A stripped ELF with only `.dynsym` has
+  functions for its exports alone. A binary with no boundaries at all
+  is one function per section, which makes every repeated value in a
+  section a rebuild.
+* With `-s all`, every slice feeds one table.
 
 ## Mining tools
 

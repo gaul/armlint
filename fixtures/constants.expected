@@ -1,0 +1,15 @@
+Constant chains (-c): 36 words, 5 functions
+  every chain: 7 building 3 distinct values, 18 instructions (50.00%)
+  rebuilds within a function: 3 in 2 functions, 8 instructions (22.22%; 44.4% of chain instructions)
+  how often a function builds a value it rebuilds: twice 1, 3 times 1, 4 times 0, 5 or more times 0
+  most instructions spent building one value:
+    instructions   chains  value
+               8        4  w #0x1deb8             at 0x34, 0x44, 0x54 (+1 more)
+               8        2  x #0xf1357aea2e62a9c5  at 0x0, 0x1c
+               2        1  x #0x1deb8             at 0x78
+  most instructions spent rebuilding one value within a function:
+    instructions rebuilds functions  value
+               4        2         1  w #0x1deb8             built 3 times in <_field>: 0x34, 0x44, 0x54
+               4        1         1  x #0xf1357aea2e62a9c5  built 2 times in <_hash>: 0x0, 0x1c
+
+0 optimization opportunities in 36 instructions

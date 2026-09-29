@@ -1895,51 +1895,66 @@ static void mov_record_entry(armlint_state *state, unsigned opc,
     state->mov_entries[slot].shift_div_16 = (uint8_t)hw;
 }
 
-// Decode the move-wide-immediate fields directly from the 4-byte
-// little-endian encoding. Going through the raw bits avoids ambiguity
-// from Capstone's alias selection (MOVZ/MOVN/ORR-bitmask-imm all share
-// the MOV mnemonic).
+// A move-wide immediate's fields: the one definition of a MOV chain's
+// links, which check_movz_movk_bitmask and the -c census share.
+typedef struct {
+    unsigned opc;       // 0 MOVN, 2 MOVZ, 3 MOVK
+    bool is_64bit;
+    unsigned hw;        // the halfword written: a shift of hw * 16
+    unsigned imm16;
+    unsigned rd;
+} mov_wide_insn;
+
+// Decode a move-wide immediate directly from its word. Going through
+// the raw bits avoids ambiguity from Capstone's alias selection
+// (MOVZ/MOVN/ORR-bitmask-imm all share the MOV mnemonic). False for
+// any other word; for opc=01 and a W form writing halfword 2 or 3,
+// which are unallocated (Capstone refuses them); and for rd=31, XZR
+// (not SP for these aliases), which discards the constant -- so each
+// of them breaks a chain.
+static bool decode_mov_wide(uint32_t op, mov_wide_insn *out)
+{
+    if ((op & 0x1f800000u) != 0x12800000u) {
+        return false;
+    }
+    out->opc = (op >> 29) & 0x3u;
+    out->is_64bit = (op >> 31) != 0;
+    out->hw = (op >> 21) & 0x3u;
+    out->imm16 = (op >> 5) & 0xffffu;
+    out->rd = op & 0x1fu;
+    return out->opc != 1 && (out->is_64bit || out->hw < 2)
+        && out->rd != 31;
+}
+
+// The register's value after the instruction: MOVZ and MOVN set all of
+// it, a MOVK replaces one halfword of prev.
+static uint64_t mov_wide_value(const mov_wide_insn *mw, uint64_t prev)
+{
+    unsigned shift = mw->hw * 16;
+    uint64_t v = (uint64_t)mw->imm16 << shift;
+    if (mw->opc == 3) {
+        v |= prev & ~((uint64_t)0xffffu << shift);
+    } else if (mw->opc == 0) {
+        v = ~v;
+    }
+    return v & width_mask(mw->is_64bit ? 64 : 32);
+}
+
 bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
                              size_t offset, armlint_finding *out)
 {
-    if (insn->size != 4) {
+    mov_wide_insn mw;
+    if (insn->size != 4 || !decode_mov_wide(insn_word(insn), &mw)) {
         return mov_close(state, out);
     }
 
-    uint32_t op = insn_word(insn);
-
-    bool is_move_wide = (op & 0x1f800000u) == 0x12800000u;
-    if (!is_move_wide) {
-        return mov_close(state, out);
-    }
-
-    unsigned opc = (op >> 29) & 0x3u;
-    unsigned sf = (op >> 31) & 0x1u;
-    unsigned hw = (op >> 21) & 0x3u;
-    unsigned imm16 = (op >> 5) & 0xffffu;
-    unsigned rd = op & 0x1fu;
-
-    // opc=01 is unallocated in this encoding class; rd=31 is XZR (not
-    // SP for these aliases) and discards the constant. Treat both as
-    // sequence-breakers.
-    if (opc == 1 || rd == 31) {
-        return mov_close(state, out);
-    }
-
-    unsigned reg_width = sf ? 64 : 32;
-    unsigned shift = hw * 16;
-    uint64_t mask_w = width_mask(reg_width);
-
-    if (opc == 3) {
+    if (mw.opc == 3) {
         // MOVK extends an active sequence only if rd and width match.
-        if (state->mov_active && state->mov_rd == rd
-                && state->mov_is_64bit == (reg_width == 64)) {
-            uint64_t clear = ~((uint64_t)0xffffu << shift);
-            state->mov_value = (state->mov_value & clear)
-                | ((uint64_t)imm16 << shift);
-            state->mov_value &= mask_w;
+        if (state->mov_active && state->mov_rd == mw.rd
+                && state->mov_is_64bit == mw.is_64bit) {
+            state->mov_value = mov_wide_value(&mw, state->mov_value);
             state->mov_insn_count++;
-            mov_record_entry(state, opc, imm16, hw);
+            mov_record_entry(state, mw.opc, mw.imm16, mw.hw);
             return false;
         }
         return mov_close(state, out);
@@ -1950,16 +1965,12 @@ bool check_movz_movk_bitmask(armlint_state *state, const cs_insn *insn,
     bool produced = mov_close(state, out);
 
     state->mov_active = true;
-    state->mov_rd = rd;
-    state->mov_is_64bit = (reg_width == 64);
+    state->mov_rd = mw.rd;
+    state->mov_is_64bit = mw.is_64bit;
     state->mov_start_offset = offset;
     state->mov_insn_count = 1;
-    if (opc == 2) {
-        state->mov_value = ((uint64_t)imm16 << shift) & mask_w;
-    } else {
-        state->mov_value = (~((uint64_t)imm16 << shift)) & mask_w;
-    }
-    mov_record_entry(state, opc, imm16, hw);
+    state->mov_value = mov_wide_value(&mw, 0);
+    mov_record_entry(state, mw.opc, mw.imm16, mw.hw);
 
     return produced;
 }
@@ -22658,9 +22669,9 @@ void armlint_census_print(const armlint_census *census, bool verbose)
 
 // Groups a verbose report lists, most duplicated first.
 #define DEDUP_TOP 20
-// Symbol names are kept for the verbose report, cut where the finding
-// annotations cut them.
-#define DEDUP_NAME_MAX 120
+// Symbol names are kept for the verbose reports of -d and -c, cut
+// where the finding annotations cut them.
+#define SYMBOL_NAME_MAX 120
 
 // Stand-ins for the fields the parametric key masks.
 #define DEDUP_TAG_LITERAL  0x6c69746572616cull     // "literal"
@@ -22800,7 +22811,7 @@ size_t armlint_dedup_repeats(const armlint_dedup *dedup)
 
 // murmur3's 64-bit finalizer: a bijection that spreads every input bit
 // across the word.
-static uint64_t dedup_fmix(uint64_t h)
+static uint64_t fmix64(uint64_t h)
 {
     h ^= h >> 33;
     h *= 0xff51afd7ed558ccdull;
@@ -22813,7 +22824,7 @@ static uint64_t dedup_fmix(uint64_t h)
 // Fold the next value into a running key.
 static uint64_t dedup_mix(uint64_t h, uint64_t v)
 {
-    return dedup_fmix((h ^ v) + 0x9e3779b97f4a7c15ull);
+    return fmix64((h ^ v) + 0x9e3779b97f4a7c15ull);
 }
 
 // FNV-1a over a finding's name, which checks spell as literals: equal
@@ -22835,7 +22846,7 @@ static size_t *dedup_group_slot(const armlint_dedup *dedup, uint64_t hash,
                                 uint64_t size)
 {
     size_t mask = dedup->group_slots_cap - 1;
-    size_t j = (size_t)(hash ^ dedup_fmix(size)) & mask;
+    size_t j = (size_t)(hash ^ fmix64(size)) & mask;
     for (;;) {
         size_t *slot = &dedup->group_slots[j];
         if (*slot == 0) {
@@ -22870,7 +22881,7 @@ static bool dedup_group_grow(armlint_dedup *dedup)
 static dedup_ident *dedup_ident_slot(dedup_ident *table, size_t cap,
                                      uint64_t hash, uint64_t size)
 {
-    size_t j = (size_t)(hash ^ dedup_fmix(size)) & (cap - 1);
+    size_t j = (size_t)(hash ^ fmix64(size)) & (cap - 1);
     for (;;) {
         dedup_ident *e = &table[j];
         if (e->size == 0 || (e->hash == hash && e->size == size)) {
@@ -23003,7 +23014,7 @@ static void dedup_key(const armlint_dedup *dedup, const uint8_t *inst,
                       size_t start, size_t end, uint64_t base_addr,
                       unsigned features, uint64_t *ident, uint64_t *param)
 {
-    uint64_t h1 = dedup_fmix(end - start);
+    uint64_t h1 = fmix64(end - start);
     uint64_t h2 = h1;
     // Registers holding an ADRP page, whose low-12 consumers the
     // parametric key masks. Any other write to one, and any branch --
@@ -23119,16 +23130,16 @@ static void dedup_key(const armlint_dedup *dedup, const uint8_t *inst,
     *param = h2;
 }
 
-// A NUL-terminated copy of at most DEDUP_NAME_MAX bytes of name, or
+// A NUL-terminated copy of at most SYMBOL_NAME_MAX bytes of name, or
 // NULL (the report then names the function by address).
-static char *dedup_copy_name(const char *name)
+static char *copy_symbol_name(const char *name)
 {
     if (name == NULL) {
         return NULL;
     }
     size_t n = strlen(name);
-    if (n > DEDUP_NAME_MAX) {
-        n = DEDUP_NAME_MAX;
+    if (n > SYMBOL_NAME_MAX) {
+        n = SYMBOL_NAME_MAX;
     }
     char *copy = malloc(n + 1);
     if (copy != NULL) {
@@ -23138,6 +23149,71 @@ static char *dedup_copy_name(const char *name)
     return copy;
 }
 
+// Walks the functions of one code range, as -d and -c read them: each
+// anchor inside the range opens one, reaching to the next anchor or
+// the range end -- or to its size, when that is shorter -- and a range
+// with no anchor inside it is one function. Code before the range's
+// first anchor, or past a sized anchor's end, belongs to none.
+typedef struct {
+    const armlint_symbol *symbols;
+    size_t next;        // the next anchor to visit
+    size_t last;        // one past the range's last anchor
+    uint64_t base_addr;
+    size_t len;
+    bool whole;         // no anchor inside, and the range not yet visited
+} span_iter;
+
+static void span_iter_init(span_iter *it, const armlint_symbol *symbols,
+                           size_t nsymbols, uint64_t base_addr, size_t len)
+{
+    size_t first = 0;
+    while (first < nsymbols && symbols[first].vaddr < base_addr) {
+        first++;
+    }
+    size_t last = first;
+    while (last < nsymbols && symbols[last].vaddr - base_addr < len) {
+        last++;
+    }
+    it->symbols = symbols;
+    it->next = first;
+    it->last = last;
+    it->base_addr = base_addr;
+    it->len = len;
+    it->whole = first == last;
+}
+
+// The next function, as offsets into the range: [*start, *end), the
+// start aligned up to a word and the end cut to whole words, so it may
+// be empty. *name is its anchor's, NULL for a nameless anchor or a
+// range without one. False when no function is left.
+static bool span_iter_next(span_iter *it, size_t *start, size_t *end,
+                           const char **name)
+{
+    size_t s, e;
+    if (it->whole) {
+        it->whole = false;
+        s = 0;
+        e = it->len;
+        *name = NULL;
+    } else if (it->next < it->last) {
+        const armlint_symbol *sym = &it->symbols[it->next++];
+        s = (size_t)(sym->vaddr - it->base_addr);
+        e = it->next < it->last
+            ? (size_t)(it->symbols[it->next].vaddr - it->base_addr)
+            : it->len;
+        if (sym->size != 0 && sym->size < e - s) {
+            e = s + (size_t)sym->size;
+        }
+        *name = sym->name;
+    } else {
+        return false;
+    }
+    s = (s + 3) & ~(size_t)3;
+    *start = s;
+    *end = e <= s ? s : s + ((e - s) & ~(size_t)3);
+    return true;
+}
+
 // Key the function inst[start..end) of the current range, tally it
 // under both keys and append it to the range's functions. False on
 // allocation failure.
@@ -23145,11 +23221,9 @@ static bool dedup_add_function(armlint_dedup *dedup, const uint8_t *inst,
                                size_t start, size_t end, uint64_t base_addr,
                                unsigned features, const char *name)
 {
-    start = (start + 3) & ~(size_t)3;
-    if (end <= start) {
+    if (end == start) {
         return true;
     }
-    end = start + ((end - start) & ~(size_t)3);
     size_t words = (end - start) / 4;
     size_t need = (words + 7) / 8;
     if (need > dedup->literal_cap) {
@@ -23216,7 +23290,7 @@ static bool dedup_add_function(armlint_dedup *dedup, const uint8_t *inst,
         group->hash = param;
         group->size = size;
         group->vaddr = base_addr + start;
-        group->name = dedup_copy_name(name);
+        group->name = copy_symbol_name(name);
         group->copies = 1;
         *slot = g + 1;
     } else {
@@ -23264,30 +23338,13 @@ bool armlint_dedup_scan(armlint_dedup *dedup, const uint8_t *inst,
     dedup->range_base = base_addr;
     dedup->range_len = len;
 
-    // The anchors inside the range delimit its functions, as the
-    // census's pac-ret coverage reads them; with none, the range is
-    // one function.
-    size_t first = 0;
-    while (first < nsymbols && symbols[first].vaddr < base_addr) {
-        first++;
-    }
-    size_t last = first;
-    while (last < nsymbols && symbols[last].vaddr - base_addr < len) {
-        last++;
-    }
-    if (first == last) {
-        return dedup_add_function(dedup, inst, 0, len, base_addr, features,
-                                  NULL);
-    }
-    for (size_t si = first; si < last; si++) {
-        size_t start = (size_t)(symbols[si].vaddr - base_addr);
-        size_t end = si + 1 < last
-            ? (size_t)(symbols[si + 1].vaddr - base_addr) : len;
-        if (symbols[si].size != 0 && symbols[si].size < end - start) {
-            end = start + (size_t)symbols[si].size;
-        }
+    span_iter it;
+    span_iter_init(&it, symbols, nsymbols, base_addr, len);
+    size_t start, end;
+    const char *name;
+    while (span_iter_next(&it, &start, &end, &name)) {
         if (!dedup_add_function(dedup, inst, start, end, base_addr,
-                                features, symbols[si].name)) {
+                                features, name)) {
             return false;
         }
     }
@@ -23354,7 +23411,7 @@ static bool dedup_note_finding(armlint_dedup *dedup,
     return true;
 }
 
-static double dedup_percent(uint64_t part, uint64_t whole)
+static double percent_of(uint64_t part, uint64_t whole)
 {
     return whole == 0 ? 0.0 : 100.0 * (double)part / (double)whole;
 }
@@ -23377,7 +23434,7 @@ void armlint_dedup_print(const armlint_dedup *dedup, bool verbose)
         printf("  %s: %zu copies of %zu functions, %" PRIu64
             " bytes (%.1f%%)\n", keys[k], dedup->copies[k],
             dedup->shared[k], dedup->copy_bytes[k],
-            dedup_percent(dedup->copy_bytes[k], dedup->bytes));
+            percent_of(dedup->copy_bytes[k], dedup->bytes));
     }
     // How often each distinct function, up to constants, appears.
     size_t once = 0, few = 0, many = 0, more = 0;
@@ -23400,7 +23457,7 @@ void armlint_dedup_print(const armlint_dedup *dedup, bool verbose)
     if (dedup->attached) {
         printf("  findings: %zu of %zu (%.1f%%) repeat an earlier copy's "
             "at the same offset\n", dedup->repeats, dedup->findings,
-            dedup_percent(dedup->repeats, dedup->findings));
+            percent_of(dedup->repeats, dedup->findings));
         // By type, most repeated first (ties by name).
         size_t order[ARMLINT_SUMMARY_MAX];
         size_t n = 0;
@@ -23487,5 +23544,512 @@ void armlint_dedup_print(const armlint_dedup *dedup, bool verbose)
             }
         }
     }
+    printf("\n");
+}
+
+// === Constant chains ===
+//
+// A range's chains are collected in address order as the scan closes
+// them. Each is tallied under its (width, value) in an open-addressed
+// table; then the range's functions are walked, and within each the
+// chains are sorted by value, so that every build of a value past the
+// function's first counts as a rebuild.
+
+// Rows each ranking prints, and the sample addresses of each under -v.
+#define CONST_TOP 20
+#define CONST_SAMPLES 3
+
+typedef struct {
+    size_t offset;              // of its first instruction, in the range
+    uint64_t value;
+    unsigned length;            // instructions
+    bool is_64bit;
+} const_chain;
+
+typedef struct {
+    uint64_t value;
+    bool is_64bit;
+    size_t chains;              // 0 marks a free slot
+    uint64_t instructions;
+    size_t rebuilds;
+    uint64_t rebuild_instructions;
+    size_t functions;           // functions that rebuild it
+    // Samples: the value's first chains, and the function that built
+    // it most often (the first of those tied) with its first builds
+    // there.
+    uint64_t sites[CONST_SAMPLES];
+    size_t fn_builds;           // that function's builds of it
+    uint64_t fn_vaddr;
+    char *fn_name;              // NULL when nameless
+    uint64_t fn_sites[CONST_SAMPLES];
+} const_value;
+
+struct armlint_constants {
+    uint64_t words;
+    size_t functions;
+    // Index 0 counts every chain, 1 the rebuilds.
+    size_t chains[2];
+    uint64_t instructions[2];
+    size_t rebuilding_functions;
+    // (function, value) pairs built twice, 3 times, 4, and 5 or more.
+    size_t builds[4];
+
+    const_value *values;
+    size_t nvalues;
+    size_t values_cap;          // a power of two
+
+    // Scratch: the chains of the range being scanned, in address
+    // order, and a copy of one function's, sorted by value.
+    const_chain *range_chains;
+    size_t nrange_chains;
+    size_t range_chains_cap;
+    const_chain *sorted;
+    size_t sorted_cap;
+};
+
+armlint_constants *armlint_constants_create(void)
+{
+    return calloc(1, sizeof(struct armlint_constants));
+}
+
+void armlint_constants_destroy(armlint_constants *constants)
+{
+    if (constants == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < constants->values_cap; i++) {
+        free(constants->values[i].fn_name);
+    }
+    free(constants->values);
+    free(constants->range_chains);
+    free(constants->sorted);
+    free(constants);
+}
+
+uint64_t armlint_constants_words(const armlint_constants *constants)
+{
+    return constants == NULL ? 0 : constants->words;
+}
+
+size_t armlint_constants_functions(const armlint_constants *constants)
+{
+    return constants == NULL ? 0 : constants->functions;
+}
+
+size_t armlint_constants_chains(const armlint_constants *constants,
+                                bool rebuilds)
+{
+    return constants == NULL ? 0 : constants->chains[rebuilds];
+}
+
+uint64_t armlint_constants_instructions(const armlint_constants *constants,
+                                        bool rebuilds)
+{
+    return constants == NULL ? 0 : constants->instructions[rebuilds];
+}
+
+size_t armlint_constants_values(const armlint_constants *constants)
+{
+    return constants == NULL ? 0 : constants->nvalues;
+}
+
+size_t armlint_constants_rebuilding_functions(
+    const armlint_constants *constants)
+{
+    return constants == NULL ? 0 : constants->rebuilding_functions;
+}
+
+// The slot for (is_64bit, value) in a table of cap slots: the one
+// holding it, or the first free one along its probe sequence. The
+// caller keeps the table under half full.
+static const_value *const_value_slot(const_value *table, size_t cap,
+                                     bool is_64bit, uint64_t value)
+{
+    size_t j = (size_t)fmix64(is_64bit ? value + 0x9e3779b97f4a7c15ull
+                                       : value) & (cap - 1);
+    for (;;) {
+        const_value *e = &table[j];
+        if (e->chains == 0
+                || (e->value == value && e->is_64bit == is_64bit)) {
+            return e;
+        }
+        j = (j + 1) & (cap - 1);
+    }
+}
+
+static bool const_values_grow(armlint_constants *constants)
+{
+    size_t cap = constants->values_cap == 0
+        ? 1024 : constants->values_cap * 2;
+    const_value *table = calloc(cap, sizeof(*table));
+    if (table == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < constants->values_cap; i++) {
+        const const_value *e = &constants->values[i];
+        if (e->chains != 0) {
+            *const_value_slot(table, cap, e->is_64bit, e->value) = *e;
+        }
+    }
+    free(constants->values);
+    constants->values = table;
+    constants->values_cap = cap;
+    return true;
+}
+
+bool armlint_constants_lookup(const armlint_constants *constants,
+                              unsigned width, uint64_t value,
+                              armlint_constant_tally *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (constants == NULL || constants->values_cap == 0
+            || (width != 32 && width != 64)) {
+        return false;
+    }
+    const const_value *e = const_value_slot(constants->values,
+        constants->values_cap, width == 64, value);
+    if (e->chains == 0) {
+        return false;
+    }
+    out->chains = e->chains;
+    out->instructions = e->instructions;
+    out->rebuilds = e->rebuilds;
+    out->rebuild_instructions = e->rebuild_instructions;
+    out->functions = e->functions;
+    return true;
+}
+
+// Record the chain *open, when it is one -- two instructions or more
+// -- and close it. False on allocation failure.
+static bool const_close(armlint_constants *constants, const_chain *open)
+{
+    if (open->length >= 2) {
+        if (constants->nrange_chains == constants->range_chains_cap) {
+            size_t cap = constants->range_chains_cap == 0
+                ? 256 : constants->range_chains_cap * 2;
+            const_chain *grown = realloc(constants->range_chains,
+                                         cap * sizeof(*grown));
+            if (grown == NULL) {
+                return false;
+            }
+            constants->range_chains = grown;
+            constants->range_chains_cap = cap;
+        }
+        constants->range_chains[constants->nrange_chains++] = *open;
+    }
+    open->length = 0;
+    return true;
+}
+
+// Width, then value, then address: a function's builds of each value
+// become a run, first build first.
+static int const_chain_cmp(const void *a, const void *b)
+{
+    const const_chain *x = a;
+    const const_chain *y = b;
+    if (x->is_64bit != y->is_64bit) {
+        return x->is_64bit ? 1 : -1;
+    }
+    if (x->value != y->value) {
+        return x->value < y->value ? -1 : 1;
+    }
+    return x->offset < y->offset ? -1 : x->offset > y->offset;
+}
+
+// Count the rebuilds among range_chains[from..to), the chains of one
+// function, which starts at vaddr. False on allocation failure.
+static bool const_add_function(armlint_constants *constants, size_t from,
+                               size_t to, uint64_t base_addr,
+                               uint64_t vaddr, const char *name)
+{
+    size_t n = to - from;
+    if (n < 2) {
+        return true;
+    }
+    if (n > constants->sorted_cap) {
+        const_chain *grown = realloc(constants->sorted,
+                                     n * sizeof(*grown));
+        if (grown == NULL) {
+            return false;
+        }
+        constants->sorted = grown;
+        constants->sorted_cap = n;
+    }
+    const_chain *sorted = constants->sorted;
+    memcpy(sorted, &constants->range_chains[from], n * sizeof(*sorted));
+    qsort(sorted, n, sizeof(*sorted), const_chain_cmp);
+
+    bool rebuilt = false;
+    for (size_t i = 0; i < n; ) {
+        size_t j = i + 1;
+        while (j < n && sorted[j].is_64bit == sorted[i].is_64bit
+               && sorted[j].value == sorted[i].value) {
+            j++;
+        }
+        size_t k = j - i;
+        if (k >= 2) {
+            rebuilt = true;
+            const_value *e = const_value_slot(constants->values,
+                constants->values_cap, sorted[i].is_64bit, sorted[i].value);
+            uint64_t extra = 0;
+            for (size_t m = i + 1; m < j; m++) {
+                extra += sorted[m].length;
+            }
+            e->rebuilds += k - 1;
+            e->rebuild_instructions += extra;
+            e->functions++;
+            constants->chains[1] += k - 1;
+            constants->instructions[1] += extra;
+            constants->builds[k < 5 ? k - 2 : 3]++;
+            if (k > e->fn_builds) {
+                free(e->fn_name);
+                e->fn_name = copy_symbol_name(name);
+                e->fn_builds = k;
+                e->fn_vaddr = vaddr;
+                for (size_t m = 0; m < CONST_SAMPLES && m < k; m++) {
+                    e->fn_sites[m] = base_addr + sorted[i + m].offset;
+                }
+            }
+        }
+        i = j;
+    }
+    if (rebuilt) {
+        constants->rebuilding_functions++;
+    }
+    return true;
+}
+
+bool armlint_constants_scan(armlint_constants *constants,
+                            const uint8_t *inst, size_t len,
+                            uint64_t base_addr, unsigned features,
+                            const armlint_symbol *symbols,
+                            size_t nsymbols)
+{
+    if (constants == NULL) {
+        return true;
+    }
+    constants->nrange_chains = 0;
+
+    // The chains as check_movz_movk_bitmask walks them: a MOVZ or MOVN
+    // opens one, a MOVK into its register at its width extends it,
+    // and any other word, or a V8 constant pool, closes it.
+    const_chain open = { 0, 0, 0, false };
+    unsigned open_rd = 0;
+    for (size_t o = 0; o + 4 <= len; ) {
+        size_t pool = v8pool_skip_bytes(features, inst + o, len - o);
+        if (pool != 0) {
+            if (!const_close(constants, &open)) {
+                return false;
+            }
+            o += pool;
+            continue;
+        }
+        constants->words++;
+        mov_wide_insn mw;
+        bool is_mw = decode_mov_wide(buf_word_at(inst, o), &mw);
+        if (is_mw && mw.opc == 3 && open.length != 0
+                && mw.rd == open_rd && mw.is_64bit == open.is_64bit) {
+            open.value = mov_wide_value(&mw, open.value);
+            open.length++;
+        } else {
+            if (!const_close(constants, &open)) {
+                return false;
+            }
+            if (is_mw && mw.opc != 3) {
+                open.offset = o;
+                open.value = mov_wide_value(&mw, 0);
+                open.length = 1;
+                open.is_64bit = mw.is_64bit;
+                open_rd = mw.rd;
+            }
+        }
+        o += 4;
+    }
+    if (!const_close(constants, &open)) {
+        return false;
+    }
+
+    for (size_t i = 0; i < constants->nrange_chains; i++) {
+        const const_chain *ch = &constants->range_chains[i];
+        if (constants->nvalues * 2 >= constants->values_cap
+                && !const_values_grow(constants)) {
+            return false;
+        }
+        const_value *e = const_value_slot(constants->values,
+            constants->values_cap, ch->is_64bit, ch->value);
+        if (e->chains == 0) {
+            e->value = ch->value;
+            e->is_64bit = ch->is_64bit;
+            constants->nvalues++;
+        }
+        if (e->chains < CONST_SAMPLES) {
+            e->sites[e->chains] = base_addr + ch->offset;
+        }
+        e->chains++;
+        e->instructions += ch->length;
+        constants->chains[0]++;
+        constants->instructions[0] += ch->length;
+    }
+
+    // The rebuilds, function by function. The chains are in address
+    // order and the functions do not overlap, so each function's
+    // chains are the next run of them.
+    span_iter it;
+    span_iter_init(&it, symbols, nsymbols, base_addr, len);
+    size_t start, end;
+    const char *name;
+    size_t next = 0;
+    while (span_iter_next(&it, &start, &end, &name)) {
+        // A span of nothing but NOP and zero padding is no function,
+        // as -d counts them.
+        size_t o = start;
+        while (o < end && (buf_word_at(inst, o) == 0
+                           || buf_word_at(inst, o) == 0xD503201Fu)) {
+            o += 4;
+        }
+        if (o == end) {
+            continue;
+        }
+        constants->functions++;
+        while (next < constants->nrange_chains
+               && constants->range_chains[next].offset < start) {
+            next++;
+        }
+        size_t to = next;
+        while (to < constants->nrange_chains
+               && constants->range_chains[to].offset < end) {
+            to++;
+        }
+        if (!const_add_function(constants, next, to, base_addr,
+                                base_addr + start, name)) {
+            return false;
+        }
+        next = to;
+    }
+    return true;
+}
+
+// Whether a ranks above b: by instructions -- spent rebuilding it, or
+// building it at all -- then by value, W before X.
+static bool const_ranks_above(const const_value *a, const const_value *b,
+                              bool rebuilds)
+{
+    uint64_t ka = rebuilds ? a->rebuild_instructions : a->instructions;
+    uint64_t kb = rebuilds ? b->rebuild_instructions : b->instructions;
+    if (ka != kb) {
+        return ka > kb;
+    }
+    if (a->value != b->value) {
+        return a->value < b->value;
+    }
+    return !a->is_64bit && b->is_64bit;
+}
+
+// Print one ranking: its top CONST_TOP values and a count of the rest.
+// Silent when no value qualifies (the rebuild ranking of code that
+// rebuilds nothing).
+static void const_print_ranking(const armlint_constants *constants,
+                                bool rebuilds, bool verbose)
+{
+    size_t top[CONST_TOP];
+    size_t ntop = 0;
+    size_t n = 0;
+    for (size_t i = 0; i < constants->values_cap; i++) {
+        const const_value *e = &constants->values[i];
+        if (e->chains == 0 || (rebuilds && e->rebuilds == 0)) {
+            continue;
+        }
+        n++;
+        size_t at = ntop;
+        while (at > 0 && const_ranks_above(e,
+                   &constants->values[top[at - 1]], rebuilds)) {
+            at--;
+        }
+        if (at == CONST_TOP) {
+            continue;
+        }
+        if (ntop < CONST_TOP) {
+            ntop++;
+        }
+        memmove(&top[at + 1], &top[at], (ntop - 1 - at) * sizeof(top[0]));
+        top[at] = i;
+    }
+    if (n == 0) {
+        return;
+    }
+    if (rebuilds) {
+        printf("  most instructions spent rebuilding one value within a "
+            "function:\n");
+        printf("    %12s %8s %9s  %s\n", "instructions", "rebuilds",
+            "functions", "value");
+    } else {
+        printf("  most instructions spent building one value:\n");
+        printf("    %12s %8s  %s\n", "instructions", "chains", "value");
+    }
+    for (size_t i = 0; i < ntop; i++) {
+        const const_value *e = &constants->values[top[i]];
+        char w_or_x = e->is_64bit ? 'x' : 'w';
+        if (rebuilds) {
+            printf("    %12" PRIu64 " %8zu %9zu  ", e->rebuild_instructions,
+                e->rebuilds, e->functions);
+        } else {
+            printf("    %12" PRIu64 " %8zu  ", e->instructions, e->chains);
+        }
+        if (!verbose) {
+            printf("%c #0x%" PRIx64 "\n", w_or_x, e->value);
+            continue;
+        }
+        // The samples: where to look in a disassembler.
+        printf("%c #0x%-16" PRIx64 "  ", w_or_x, e->value);
+        size_t count = rebuilds ? e->fn_builds : e->chains;
+        const uint64_t *sites = rebuilds ? e->fn_sites : e->sites;
+        size_t shown = count < CONST_SAMPLES ? count : CONST_SAMPLES;
+        if (rebuilds) {
+            printf("built %zu times in ", e->fn_builds);
+            if (e->fn_name != NULL) {
+                printf("<%s>:", e->fn_name);
+            } else {
+                printf("<0x%" PRIx64 ">:", e->fn_vaddr);
+            }
+        } else {
+            printf("at");
+        }
+        for (size_t k = 0; k < shown; k++) {
+            printf("%s 0x%" PRIx64, k == 0 ? "" : ",", sites[k]);
+        }
+        if (count > shown) {
+            printf(" (+%zu more)", count - shown);
+        }
+        printf("\n");
+    }
+    if (n > ntop) {
+        printf("    (%zu more distinct values)\n", n - ntop);
+    }
+}
+
+void armlint_constants_print(const armlint_constants *constants,
+                             bool verbose)
+{
+    if (constants == NULL) {
+        return;
+    }
+    printf("Constant chains (-c): %" PRIu64 " words, %zu functions\n",
+        constants->words, constants->functions);
+    printf("  every chain: %zu building %zu distinct values, %" PRIu64
+        " instructions (%.2f%%)\n", constants->chains[0],
+        constants->nvalues, constants->instructions[0],
+        percent_of(constants->instructions[0], constants->words));
+    printf("  rebuilds within a function: %zu in %zu functions, %" PRIu64
+        " instructions (%.2f%%; %.1f%% of chain instructions)\n",
+        constants->chains[1], constants->rebuilding_functions,
+        constants->instructions[1],
+        percent_of(constants->instructions[1], constants->words),
+        percent_of(constants->instructions[1], constants->instructions[0]));
+    printf("  how often a function builds a value it rebuilds: twice %zu, "
+        "3 times %zu, 4 times %zu, 5 or more times %zu\n",
+        constants->builds[0], constants->builds[1], constants->builds[2],
+        constants->builds[3]);
+    const_print_ranking(constants, false, verbose);
+    const_print_ranking(constants, true, verbose);
     printf("\n");
 }

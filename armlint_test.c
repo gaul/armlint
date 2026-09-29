@@ -18516,6 +18516,173 @@ static void test_dedup(void)
     armlint_dedup_destroy(NULL);
 }
 
+static armlint_constants *constants_of(const uint8_t *code, size_t len,
+                                       uint64_t base, unsigned features,
+                                       const armlint_symbol *syms,
+                                       size_t nsyms)
+{
+    armlint_constants *c = armlint_constants_create();
+    assert(c != NULL);
+    assert(armlint_constants_scan(c, code, len, base, features, syms,
+                                  nsyms));
+    return c;
+}
+
+static void write_words(uint8_t *out, const uint32_t *words, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        write_le32(&out[4 * i], words[i]);
+    }
+}
+
+static void test_constants(void)
+{
+    static uint8_t code[0x2600];
+    armlint_constant_tally t;
+
+    // _f1 builds x #0x56781234 three times, the third with a redundant
+    // MOVK, and w #0x1deb8 once. _f2 builds the X value once -- its own
+    // first build -- and the W value twice. w #0x56781234 is not the X
+    // value: the width is part of it. A lone MOVZ is no chain, and a
+    // MOVK into another register or at another width, or a chain into
+    // XZR, is not part of one.
+    static const uint32_t f1[] = {
+        0xD2824680u,    // 0x1000: movz x0, #0x1234
+        0xF2AACF00u,    //         movk x0, #0x5678, lsl #16
+        0x8B000021u,    //         add x1, x1, x0
+        0x529BD702u,    // 0x100c: movz w2, #0xdeb8
+        0x72A00022u,    //         movk w2, #0x1, lsl #16
+        0xD2824680u,    // 0x1014: movz x0, #0x1234
+        0xF2AACF00u,    //         movk x0, #0x5678, lsl #16
+        0x52824687u,    // 0x101c: movz w7, #0x1234
+        0x72AACF07u,    //         movk w7, #0x5678, lsl #16
+        0x92800005u,    // 0x1024: movn x5, #0
+        0xF2E00005u,    //         movk x5, #0, lsl #48
+        0x52800023u,    // 0x102c: movz w3, #1
+        0x72A00044u,    //         movk w4, #2, lsl #16
+        0x528000A6u,    // 0x1034: movz w6, #5
+        0xF2A00026u,    //         movk x6, #1, lsl #16
+        0xD280003Fu,    // 0x103c: movz xzr, #1
+        0xF2A0005Fu,    //         movk xzr, #2, lsl #16
+        0xD2824680u,    // 0x1044: movz x0, #0x1234
+        0xF2AACF00u,    //         movk x0, #0x5678, lsl #16
+        0xF2C00000u,    //         movk x0, #0, lsl #32
+        0xD65F03C0u,    // 0x1050: ret
+    };
+    static const uint32_t f2[] = {
+        0xD2824680u,    // 0x1060: movz x0, #0x1234
+        0xF2AACF00u,    //         movk x0, #0x5678, lsl #16
+        0x529BD702u,    // 0x1068: movz w2, #0xdeb8
+        0x72A00022u,    //         movk w2, #0x1, lsl #16
+        0x529BD702u,    // 0x1070: movz w2, #0xdeb8
+        0x72A00022u,    //         movk w2, #0x1, lsl #16
+        0xD65F03C0u,    // 0x1078: ret
+    };
+    memset(code, 0, sizeof(code));
+    write_words(&code[0x00], f1, sizeof(f1) / sizeof(f1[0]));
+    write_words(&code[0x60], f2, sizeof(f2) / sizeof(f2[0]));
+    const armlint_symbol two[] = {
+        { 0x1000, "_f1", 0 }, { 0x1060, "_f2", 0 },
+    };
+    armlint_constants *c = constants_of(code, 0x80, 0x1000, 0, two, 2);
+    assert(armlint_constants_words(c) == 32);
+    assert(armlint_constants_functions(c) == 2);
+    assert(armlint_constants_chains(c, false) == 9);
+    assert(armlint_constants_instructions(c, false) == 19);
+    assert(armlint_constants_values(c) == 4);
+    assert(armlint_constants_chains(c, true) == 3);
+    assert(armlint_constants_instructions(c, true) == 7);
+    assert(armlint_constants_rebuilding_functions(c) == 2);
+    assert(armlint_constants_lookup(c, 64, 0x56781234u, &t));
+    assert(t.chains == 4 && t.instructions == 9);
+    assert(t.rebuilds == 2 && t.rebuild_instructions == 5);
+    assert(t.functions == 1);
+    assert(armlint_constants_lookup(c, 32, 0x1deb8u, &t));
+    assert(t.chains == 3 && t.instructions == 6);
+    assert(t.rebuilds == 1 && t.rebuild_instructions == 2);
+    assert(t.functions == 1);
+    assert(armlint_constants_lookup(c, 32, 0x56781234u, &t));
+    assert(t.chains == 1 && t.instructions == 2 && t.rebuilds == 0);
+    assert(armlint_constants_lookup(c, 64, 0xFFFFFFFFFFFFull, &t));
+    assert(t.chains == 1 && t.instructions == 2);
+    assert(!armlint_constants_lookup(c, 32, 0x1u, &t));
+    assert(t.chains == 0 && t.instructions == 0);
+    assert(!armlint_constants_lookup(c, 64, 0x20001u, &t));
+    assert(!armlint_constants_lookup(c, 64, 0x10000u, &t));
+    assert(!armlint_constants_lookup(c, 16, 0x1deb8u, &t));
+    armlint_constants_destroy(c);
+
+    // A chain before the range's first anchor, or past a sized
+    // anchor's end, counts in the totals but in no function: the three
+    // builds below rebuild nothing.
+    static const uint32_t chain[] = { 0xD2824680u, 0xF2AACF00u };
+    memset(code, 0, sizeof(code));
+    for (size_t o = 0; o < 0x18; o += 8) {
+        write_words(&code[o], chain, 2);
+    }
+    ret_(&code[0x18]);
+    const armlint_symbol sized[] = { { 0x2008, "_s", 8 } };
+    c = constants_of(code, 0x20, 0x2000, 0, sized, 1);
+    assert(armlint_constants_chains(c, false) == 3);
+    assert(armlint_constants_chains(c, true) == 0);
+    assert(armlint_constants_functions(c) == 1);
+    // With no anchor inside it the range is one function, and a build
+    // in another range is another function's.
+    assert(armlint_constants_scan(c, code, 0x20, 0x3000, 0, NULL, 0));
+    assert(armlint_constants_chains(c, false) == 6);
+    assert(armlint_constants_chains(c, true) == 2);
+    assert(armlint_constants_instructions(c, true) == 4);
+    assert(armlint_constants_functions(c) == 2);
+    assert(armlint_constants_rebuilding_functions(c) == 1);
+    assert(armlint_constants_scan(c, code, 0x10, 0x4000, 0, NULL, 0));
+    assert(armlint_constants_chains(c, true) == 3);
+    assert(armlint_constants_rebuilding_functions(c) == 2);
+    assert(armlint_constants_lookup(c, 64, 0x56781234u, &t));
+    assert(t.chains == 8 && t.rebuilds == 3 && t.functions == 2);
+    armlint_constants_destroy(c);
+
+    // A V8 constant pool is data: under the feature its words are
+    // neither scanned nor chained.
+    memset(code, 0, sizeof(code));
+    write_le32(&code[0x00], 0x5800005Fu);   // ldr xzr, .+8: 2 data words
+    write_words(&code[0x04], chain, 2);
+    ret_(&code[0x0c]);
+    c = constants_of(code, 0x10, 0x1000, ARMLINT_FEATURE_V8POOL, NULL, 0);
+    assert(armlint_constants_words(c) == 1);
+    assert(armlint_constants_chains(c, false) == 0);
+    armlint_constants_destroy(c);
+    c = constants_of(code, 0x10, 0x1000, 0, NULL, 0);
+    assert(armlint_constants_words(c) == 4);
+    assert(armlint_constants_chains(c, false) == 1);
+    armlint_constants_destroy(c);
+
+    // Enough distinct values, in one function, to grow every table.
+    memset(code, 0, sizeof(code));
+    for (unsigned i = 0; i < 1200; i++) {
+        write_le32(&code[8 * i], 0xD2800000u | (i << 5));      // movz x0, #i
+        write_le32(&code[8 * i + 4], 0xF2A00020u);  // movk x0, #1, lsl #16
+    }
+    c = constants_of(code, 8 * 1200, 0x1000, 0, NULL, 0);
+    assert(armlint_constants_values(c) == 1200);
+    assert(armlint_constants_chains(c, false) == 1200);
+    assert(armlint_constants_chains(c, true) == 0);
+    assert(armlint_constants_lookup(c, 64, 0x10000u + 1199, &t));
+    assert(t.chains == 1 && t.instructions == 2);
+    armlint_constants_destroy(c);
+
+    // NULL is accepted everywhere.
+    assert(armlint_constants_scan(NULL, code, 4, 0, 0, NULL, 0));
+    assert(armlint_constants_words(NULL) == 0);
+    assert(armlint_constants_functions(NULL) == 0);
+    assert(armlint_constants_chains(NULL, false) == 0);
+    assert(armlint_constants_instructions(NULL, true) == 0);
+    assert(armlint_constants_values(NULL) == 0);
+    assert(armlint_constants_rebuilding_functions(NULL) == 0);
+    assert(!armlint_constants_lookup(NULL, 64, 0, &t));
+    armlint_constants_print(NULL, true);
+    armlint_constants_destroy(NULL);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -18638,6 +18805,7 @@ int main(void)
     test_census_coverage();
     test_symbol_annotation();
     test_dedup();
+    test_constants();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

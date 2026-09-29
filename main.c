@@ -320,6 +320,9 @@ static armlint_census *g_census = NULL;
 // scanning it, and main prints the duplicate-code report after the
 // findings report (or the census).
 static armlint_dedup *g_dedup = NULL;
+// Non-NULL under -c: scan_code tallies every range's constant chains,
+// and main prints the constant report last.
+static armlint_constants *g_constants = NULL;
 
 // Read `size` bytes at `base_offset` and run all checks with the
 // given feature/audit set. vmaddr is the section's runtime base,
@@ -354,6 +357,14 @@ static int scan_code(FILE *f, const char *path, long base_offset,
             && !armlint_dedup_scan(g_dedup, buf, aligned, vmaddr, features,
                                    symbols, nsymbols)) {
         fprintf(stderr, "%s: failed to allocate the duplicate-code tables\n",
+            path);
+        free(buf);
+        return -1;
+    }
+    if (g_constants != NULL
+            && !armlint_constants_scan(g_constants, buf, aligned, vmaddr,
+                                       features, symbols, nsymbols)) {
+        fprintf(stderr, "%s: failed to allocate the constant tables\n",
             path);
         free(buf);
         return -1;
@@ -419,15 +430,16 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
 
     // Load the symbol table whole, preferring the full .symtab over
     // .dynsym (a stripped binary's exports still name the functions
-    // that matter most). Three consumers want the boundaries -- -v
-    // finding annotations, the census's per-function pac-ret coverage
-    // and -d's functions -- so only the default summary mode skips the
-    // IO.
+    // that matter most). Four consumers want the boundaries -- -v
+    // finding annotations, the census's per-function pac-ret coverage,
+    // -d's functions and -c's -- so only the default summary mode
+    // skips the IO.
     Elf64_Sym *syms = NULL;
     size_t nsyms = 0;
     char *strtab = NULL;
     uint64_t strsize = 0;
-    if (g_verbose || g_census != NULL || g_dedup != NULL) {
+    if (g_verbose || g_census != NULL || g_dedup != NULL
+            || g_constants != NULL) {
         uint16_t symidx = 0;    // section 0 is the null section: "none"
         for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
             if (shdrs[i].sh_type == SHT_SYMTAB) {
@@ -781,11 +793,12 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
     // decoded function-start addresses. Best-effort throughout --
     // absence (a stripped binary; Go's linker emits neither) or
     // malformed metadata degrades to unannotated findings. All
-    // linkedit offsets are slice-relative. Three consumers want the
+    // linkedit offsets are slice-relative. Four consumers want the
     // boundaries -- -v finding annotations, the census's per-function
-    // pac-ret coverage and -d's functions -- so only the default
+    // pac-ret coverage, -d's functions and -c's -- so only the default
     // summary mode skips the IO.
-    bool want_symbols = g_verbose || g_census != NULL || g_dedup != NULL;
+    bool want_symbols = g_verbose || g_census != NULL || g_dedup != NULL
+        || g_constants != NULL;
     nlist_64 *nl = NULL;
     size_t nsyms = 0;
     char *strtab = NULL;
@@ -1124,6 +1137,7 @@ int main(int argc, char **argv)
     const char *path = NULL;
     bool census = false;
     bool dedup = false;
+    bool constants = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) {
             g_verbose = true;
@@ -1133,6 +1147,10 @@ int main(int argc, char **argv)
             // Report duplicate code: which functions are copies of
             // one another, and which findings repeat across copies.
             dedup = true;
+        } else if (strcmp(argv[i], "-c") == 0) {
+            // Report the constants built by MOVZ/MOVN + MOVK chains,
+            // and those a function builds more than once.
+            constants = true;
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             // Enable ISA-extension-gated checks; suggestions may then
             // use instructions the target must support. pauth also
@@ -1194,13 +1212,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-i] [-d] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-i] [-d] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 1;
     }
@@ -1271,6 +1289,16 @@ int main(int argc, char **argv)
         }
     }
 
+    // And the constant report.
+    if (constants) {
+        g_constants = armlint_constants_create();
+        if (g_constants == NULL) {
+            fprintf(stderr, "%s: failed to allocate the constant tables\n",
+                path);
+            goto out;
+        }
+    }
+
     int errors = -1;
     if (memcmp(magic, ELFMAG, SELFMAG) == 0) {
         errors = scan_elf(f, path, file_size, handle);
@@ -1300,14 +1328,16 @@ int main(int argc, char **argv)
     }
     if (census) {
         armlint_census_print(g_census, g_verbose);
-        if (g_dedup != NULL) {
+        if (g_dedup != NULL || g_constants != NULL) {
             printf("\n");
-            armlint_dedup_print(g_dedup, g_verbose);
         }
+        armlint_dedup_print(g_dedup, g_verbose);
+        armlint_constants_print(g_constants, g_verbose);
         rc = 0;
     } else {
         armlint_summary_print(g_summary);
         armlint_dedup_print(g_dedup, g_verbose);
+        armlint_constants_print(g_constants, g_verbose);
         printf("%d optimization opportunities in %zu instructions\n",
             errors, armlint_summary_instructions(g_summary));
         rc = errors != 0;
@@ -1317,6 +1347,7 @@ out:
     armlint_census_destroy(g_census);
     armlint_summary_destroy(g_summary);
     armlint_dedup_destroy(g_dedup);
+    armlint_constants_destroy(g_constants);
     if (capstone_open) {
         cs_close(&handle);
     }

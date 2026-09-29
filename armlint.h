@@ -3462,6 +3462,87 @@ size_t armlint_dedup_repeats(const armlint_dedup *dedup);
 void armlint_summary_set_dedup(armlint_summary *summary,
                                armlint_dedup *dedup);
 
+// Constant chains (-c): the constants the scanned code builds with a
+// move-wide chain of two or more instructions -- a MOVZ or MOVN and the
+// MOVKs after it into the same register at the same width, the runs
+// check_movz_movk_bitmask judges -- tallied by width and value and
+// ranked by the instructions spent on them. The -a imm audit reports
+// a constant whose consumer's immediate form it misses; this census
+// counts what every constant too wide for one instruction costs.
+//
+// Within a function, a chain that builds a value an earlier chain of
+// the same function already built is a rebuild: the code spent the
+// instructions again rather than keep the value in a register. Not
+// every rebuild is a miss -- builds on disjoint paths are both needed,
+// and one after a call may be a spill traded away -- so the rebuild
+// tallies bound what keeping or hoisting the values could save.
+//
+// Every word of a range is scanned, as check_instructions decodes
+// them (V8 constant pools are stepped over under
+// ARMLINT_FEATURE_V8POOL). The functions are the spans
+// armlint_dedup_scan keys: a chain before a range's first anchor, or
+// past a sized anchor's end, counts in the totals but in no function.
+// A range with no anchor inside it is one function. Opaque; NULL is
+// accepted everywhere.
+typedef struct armlint_constants armlint_constants;
+
+armlint_constants *armlint_constants_create(void);
+void armlint_constants_destroy(armlint_constants *constants);
+
+// Tally the chains of inst[0..len) at base_addr, and the rebuilds
+// within each function symbols/nsymbols delimit (sorted by ascending
+// vaddr with no duplicates, as armlint_dedup_scan takes them; NULL/0
+// for none). features is the ARMLINT_FEATURE_* mask. Returns false
+// when an allocation failed: the tallies of earlier ranges survive,
+// this range's may be incomplete.
+bool armlint_constants_scan(armlint_constants *constants,
+                            const uint8_t *inst, size_t len,
+                            uint64_t base_addr, unsigned features,
+                            const armlint_symbol *symbols,
+                            size_t nsymbols);
+
+// Print the report: the words scanned, the chains and what they cost,
+// the same for the rebuilds, and the values that cost the most
+// instructions to build and to rebuild. Verbose adds sample addresses
+// to each row: the value's first chains, and the function that built
+// it most often, with its first builds there.
+void armlint_constants_print(const armlint_constants *constants,
+                             bool verbose);
+
+// Words scanned (V8 constant pools excluded), and the functions among
+// them: spans holding a word that is neither zero nor NOP, which is
+// how armlint_dedup_functions counts them.
+uint64_t armlint_constants_words(const armlint_constants *constants);
+size_t armlint_constants_functions(const armlint_constants *constants);
+
+// Chains and the instructions in them: every chain when rebuilds is
+// false, only the rebuilds when true.
+size_t armlint_constants_chains(const armlint_constants *constants,
+                                bool rebuilds);
+uint64_t armlint_constants_instructions(const armlint_constants *constants,
+                                        bool rebuilds);
+
+// Distinct (width, value) pairs built, and the functions that rebuild
+// at least one of them.
+size_t armlint_constants_values(const armlint_constants *constants);
+size_t armlint_constants_rebuilding_functions(
+    const armlint_constants *constants);
+
+// What one value cost, as armlint_constants_lookup reports it.
+typedef struct {
+    size_t chains;
+    uint64_t instructions;
+    size_t rebuilds;                // chains that rebuilt it
+    uint64_t rebuild_instructions;
+    size_t functions;               // functions that rebuilt it
+} armlint_constant_tally;
+
+// The tally of value built at width 32 or 64. False, with *out
+// zeroed, when no chain built it at that width.
+bool armlint_constants_lookup(const armlint_constants *constants,
+                              unsigned width, uint64_t value,
+                              armlint_constant_tally *out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
