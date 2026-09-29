@@ -160,6 +160,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #2^N` + `udiv`](analyses.md#udiv-by-constant-foldable-to-shift) | `lsr` |
 | [`mov #2^N` + `udiv` + `msub` (remainder)](analyses.md#remainder-by-power-of-two-foldable-to-and) | `and Rd, Rn, #(2^N-1)` |
 | [`mov #C` + `add`/`sub`](analyses.md#mov--addsub-foldable-to-immediate-form) | `add`/`sub Rd, Rn, #C` (sign-crossed `add`↔`sub`, `cmp`↔`cmn` for `#-C`) |
+| [`movz`/`movn` + `movk` of a constant below 2^24 + `add`/`sub`](analyses.md#mov--addsub-foldable-to-two-immediate-addsubs) | `add`/`sub Rd, Rn, #hi, lsl #12` + `add`/`sub Rd, Rd, #lo` (`add`↔`sub` for a negative constant) |
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
 | [`mov #INT_MIN` or `#INT_MAX` + `cmp` + `b.eq`/`b.ne`](analyses.md#mov--cmp--beqne-against-int_minint_max-foldable-to-bvsbvc) | `cmp xzr, Xn` or `cmn Xn, #1` + `b.vs`/`b.vc` |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` (sign-crossed for `#-C`) |
@@ -545,10 +546,15 @@ half of an X chain, a W chain zero-extends into an X consumer).
 
 Nothing at the site can be rewritten -- the chain is already the
 cheapest spelling of that value -- so the finding is informational,
-like the PAC audit's, and the review item is the constant itself. A
-value the code's author chose (an object-size limit, a sentinel, the
-bit assignment of a flags field) that lands one step outside the
-encoding costs a materialization and a register operand at every use,
+like the PAC audit's, and the review item is the constant itself.
+The exception is a plain `add` or `sub` of a constant below 2^24,
+which needs no register at all: when the constant's register dies,
+the [two-immediate fold](analyses.md#mov--addsub-foldable-to-two-immediate-addsubs)
+reports the site too, and the audit still lists the value, since
+renumbering it saves one more instruction. A value the code's author
+chose (an object-size limit, a sentinel, the bit assignment of a
+flags field) that lands one step outside the encoding costs a
+materialization and a register operand at every use,
 and choosing it one step differently turns every site into the
 immediate form. The audit therefore needs no liveness proof -- a
 constant hoisted into a live register amortizes its materialization,

@@ -1280,6 +1280,34 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
 bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out);
 
+// Detect ADD/SUB (shifted-register, LSL #0, not the flag-setting
+// forms) where one operand is set by an immediately preceding MOV
+// chain of two or more instructions to a constant C below 2^24 that
+// no single ADD/SUB immediate encodes. The chain and the ADD fold to
+// two immediate ADDs, the high 12 bits with LSL #12 and then the low
+// 12 bits:
+//   mov w9, #0xdeb8 ; movk w9, #0x1, lsl #16 ; add x21, x0, x9
+//     -> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8
+// The constant is the one the ADD/SUB reads: a W chain zero-extends
+// into an X consumer, and a W consumer reads an X chain's low half.
+// A negative constant whose magnitude is below 2^24 splits into the
+// opposite operation (add <-> sub), exactly modulo 2^width. Only the
+// non-flag-setting forms split: each of two instructions would set
+// the flags of its own partial sum. The operand rules are
+// check_mov_add_sub_imm_fold's (SUB takes the constant in Rm only;
+// the other operand is neither ZR nor the constant register). A chain
+// check_movz_movk_bitmask reports -- a bitmask immediate, or longer
+// than its value needs -- is left to it, a bitmask ORR and the ADD
+// being two instructions as well.
+//
+// The rewrite deletes the chain, so the finding emits at once when
+// the ADD/SUB overwrites the constant register and otherwise waits
+// for the forward scan of defer_dead_mov to prove that register dead.
+// Runs before check_movz_movk_bitmask so the MOV chain state is still
+// active.
+bool check_mov_add_sub_split(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 // Detect a logical shifted-register op (LSL #0) where one operand is
 // set by an immediately preceding MOV chain to a constant C, and the
 // constant the immediate form needs is a valid AArch64 bitmask

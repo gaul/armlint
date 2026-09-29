@@ -8851,6 +8851,91 @@ static void test_mov_add_sub_imm_fold(void)
     assert(run_reg_dead(code, 8, 8) == 0);
 }
 
+static void test_mov_add_sub_split(void)
+{
+    const char *name = "MOV + ADD/SUB foldable to two immediate ADD/SUBs";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    // mov w9, #0xdeb8 ; movk w9, #0x1, lsl #16: w9 = 0x1deb8, the
+    // rustc field offset the fold was found on. KILL overwrites x9.
+    enum {
+        MOVZ_W = 0x529BD709u, MOVK_W = 0x72A00029u, KILL = 0xD29A3DA9u,
+    };
+    static const struct {
+        uint32_t words[5];
+        size_t n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // The ADD overwrites the constant register: emitted at once.
+        { { MOVZ_W, MOVK_W, 0x8B090009u }, 3, 1,
+          "-> add x9, x0, #0x1d, lsl #12 ; add x9, x9, #0xeb8" },
+        // Into another register, once x9 is overwritten unread; not
+        // when it is read again, nor when nothing proves it dead.
+        { { MOVZ_W, MOVK_W, 0x8B090015u, KILL }, 4, 1,
+          "-> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8" },
+        { { MOVZ_W, MOVK_W, 0x8B090015u, 0x8B090036u }, 4, 0, NULL },
+        { { MOVZ_W, MOVK_W, 0x8B090015u }, 3, 0, NULL },
+        // ADD takes the constant in either operand, SUB only in Rm.
+        { { MOVZ_W, MOVK_W, 0x8B000135u, KILL }, 4, 1,
+          "-> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8" },
+        { { MOVZ_W, MOVK_W, 0xCB090015u, KILL }, 4, 1,
+          "-> sub x21, x0, #0x1d, lsl #12 ; sub x21, x21, #0xeb8" },
+        { { MOVZ_W, MOVK_W, 0xCB000135u, KILL }, 4, 0, NULL },
+        // mov x9, #-0x1deb8: a negative constant splits into the
+        // opposite operation.
+        { { 0x929BD6E9u, 0xF2BFFFC9u, 0x8B090015u, KILL }, 4, 1,
+          "-> sub x21, x0, #0x1d, lsl #12 ; sub x21, x21, #0xeb8" },
+        { { 0x929BD6E9u, 0xF2BFFFC9u, 0xCB090015u, KILL }, 4, 1,
+          "-> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8" },
+        // mov w9, #-0x1deb8 is negative to a W ADD, but an X ADD reads
+        // it zero-extended: 0xfffe2148, which no two immediates reach.
+        { { 0x129BD6E9u, 0x72BFFFC9u, 0x0B090015u, KILL }, 4, 1,
+          "-> sub w21, w0, #0x1d, lsl #12 ; sub w21, w21, #0xeb8" },
+        { { 0x129BD6E9u, 0x72BFFFC9u, 0x8B090015u, KILL }, 4, 0, NULL },
+        // A W ADD reads an X chain's low half: all three MOVs go.
+        { { 0xD29BD709u, 0xF2A00029u, 0xF2C24689u, 0x0B090015u, KILL }, 5,
+          1, "-> add w21, w0, #0x1d, lsl #12 ; add w21, w21, #0xeb8" },
+        // mov w9, #0x125678, into a W ADD in place and a W SUB.
+        { { 0x528ACF09u, 0x72A00249u, 0x0B090000u, KILL }, 4, 1,
+          "-> add w0, w0, #0x125, lsl #12 ; add w0, w0, #0x678" },
+        { { 0x528ACF09u, 0x72A00249u, 0x4B090015u, KILL }, 4, 1,
+          "-> sub w21, w0, #0x125, lsl #12 ; sub w21, w21, #0x678" },
+        // The flag-setting forms set the flags of the whole sum.
+        { { MOVZ_W, MOVK_W, 0xAB090015u, KILL }, 4, 0, NULL },
+        // mov w9, #0x1234 is one instruction: two ADDs save nothing.
+        { { 0x52824689u, 0x8B090015u, KILL }, 3, 0, NULL },
+        // 0x1235678 is past 2^24.
+        { { 0x528ACF09u, 0x72A02469u, 0x8B090015u, KILL }, 4, 0, NULL },
+        // 0x1ffff is a bitmask immediate: check_movz_movk_bitmask's.
+        { { 0x529FFFE9u, MOVK_W, 0x8B090015u, KILL }, 4, 0, NULL },
+        // 0x12000 is one immediate (0x12, lsl #12).
+        { { 0x52840009u, MOVK_W, 0x8B090015u, KILL }, 4, 0, NULL },
+        // A shifted constant, the constant twice, a gap, a write to
+        // ZR, and ZR as the other operand.
+        { { MOVZ_W, MOVK_W, 0x8B090815u, KILL }, 4, 0, NULL },
+        { { MOVZ_W, MOVK_W, 0x8B090135u, KILL }, 4, 0, NULL },
+        { { MOVZ_W, MOVK_W, 0xCA040063u, 0x8B090015u, KILL }, 5, 0, NULL },
+        { { MOVZ_W, MOVK_W, 0x8B09001Fu, KILL }, 4, 0, NULL },
+        { { MOVZ_W, MOVK_W, 0x8B0903F5u, KILL }, 4, 0, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint8_t code[20];
+        for (size_t k = 0; k < cases[i].n; k++) {
+            write_le32(&code[4 * k], cases[i].words[k]);
+        }
+        detail[0] = '\0';
+        int got = run_named_buffer_check(code, cases[i].n * 4u, name,
+                                         detail, sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "mov_add_sub_split case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
 
 static void test_cheap_const_copy(void)
 {
@@ -18735,6 +18820,7 @@ int main(void)
     test_mneg_strength_reduce();
     test_udiv_strength_reduce();
     test_mov_add_sub_imm_fold();
+    test_mov_add_sub_split();
     test_mov_cmp_branch_bvs();
     test_mov_logic_imm_fold();
     test_mov_cage_orr_add();

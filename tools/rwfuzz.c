@@ -50,6 +50,9 @@
 //          finding renders. It also plants forward Bs, so that the
 //          proof at the branch target has jumps to follow as well as the
 //          CBZ/TBZ forms the body draws.
+//   split  check_mov_add_sub_split: replace a MOV chain and the ADD/SUB
+//          that reads it by the two immediate ADDs or SUBs the finding
+//          renders.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -201,6 +204,11 @@ static uint32_t and_bit(bool x, unsigned d, unsigned n, unsigned b) { return x ?
 static uint32_t b_cond(unsigned c, int words) { return 0x54000000u | ((unsigned)words & 0x7FFFFu) << 5 | c; }
 static uint32_t bl(int words) { return 0x94000000u | ((unsigned)words & 0x3FFFFFFu); }
 static uint32_t cmn_reg(bool x, unsigned n, unsigned m) { return (x ? 0xAB00001Fu : 0x2B00001Fu) | m << 16 | n << 5; }
+static uint32_t movn_x(unsigned d, unsigned i, unsigned hw) { return 0x92800000u | hw << 21 | (i & 0xFFFFu) << 5 | d; }
+// ADD/SUB (and ADDS/SUBS) shifted register, Rm shifted left by lsl.
+static uint32_t addsub_reg(bool x, bool sub, bool s, unsigned d, unsigned n, unsigned m, unsigned lsl) { return (x ? 0x80000000u : 0) | (sub ? 0x40000000u : 0) | (s ? 0x20000000u : 0) | 0x0B000000u | m << 16 | (lsl & 63u) << 10 | n << 5 | d; }
+// ADD/SUB immediate, the imm12 optionally shifted left by 12.
+static uint32_t addsub_imm(bool x, bool sub, unsigned d, unsigned n, unsigned i, bool lsl12) { return (x ? 0x80000000u : 0) | (sub ? 0x51000000u : 0x11000000u) | (lsl12 ? 1u << 22 : 0) | (i & 0xFFFu) << 10 | n << 5 | d; }
 static uint32_t tst_reg(bool x, unsigned n, unsigned m) { return (x ? 0xEA00001Fu : 0x6A00001Fu) | m << 16 | n << 5; }
 
 // === Programs ===
@@ -797,6 +805,63 @@ static void plant_cbz(void)
     push_branch(2, 0, c, 0);
     if (rr(3) == 0) {
         push_jump();
+    }
+}
+
+// split: a W or X MOV chain of c and an ADD/SUB that reads it, then c
+// overwritten, read, or left alone. The value is a magnitude of two
+// 12-bit halves leaning on their ends (1, 0xfff), negated now and
+// then, and now and then one the fold must refuse: a single
+// immediate, one past 2^24, a bitmask. So are some consumers: SUB
+// with the constant in Rn, the flag-setting forms, a shifted operand.
+static void plant_split(void)
+{
+    unsigned c = body_reg(), o = body_reg(), d;
+    if (o == c) {
+        o = (c + 1u) % 8u;
+    }
+    switch (rr(4)) {
+    case 0: d = c; break;
+    case 1: d = o; break;
+    default: d = body_reg(); break;
+    }
+    bool xc = rr(2) == 0;                       // the chain's width
+    bool xa = rr(4) == 0 ? !xc : xc;            // the ADD's, mostly the same
+    unsigned hi = rr(3) == 0 ? (rr(2) == 0 ? 1u : 0xFFFu) : 1u + rr(0xFFFu);
+    unsigned lo = rr(3) == 0 ? (rr(2) == 0 ? 1u : 0xFFFu) : 1u + rr(0xFFFu);
+    uint64_t m = (uint64_t)hi << 12 | lo;
+    switch (rr(8)) {
+    case 0: m &= ~0xFFFull; break;              // one immediate
+    case 1: m += 1ull << 24; break;             // past 2^24
+    case 2: m = 0x1FFFFu; break;                // a bitmask
+    default: break;
+    }
+    bool neg = rr(3) == 0;
+    uint64_t v = neg ? 0 - m : m;
+    unsigned h0 = (unsigned)(v & 0xFFFFu), h1 = (unsigned)(v >> 16) & 0xFFFFu;
+    if (neg) {
+        push(xc ? movn_x(c, ~h0 & 0xFFFFu, 0) : movn_w(c, ~h0 & 0xFFFFu));
+    } else {
+        push(xc ? movz_x(c, h0, 0) : movz_w(c, h0, 0));
+    }
+    push(xc ? movk_x(c, h1, 1) : movk_w(c, h1, 1));
+    if (xc && !neg && rr(4) == 0) {
+        push(movk_x(c, 1u + rr(0xFFFFu), 2));   // a W ADD reads the low half
+    }
+    switch (rr(10)) {
+    case 0: push(addsub_reg(xa, false, false, d, c, o, 0)); break;
+    case 1:
+    case 2: push(addsub_reg(xa, true, false, d, o, c, 0)); break;
+    case 3: push(addsub_reg(xa, true, false, d, c, o, 0)); break;
+    case 4: push(addsub_reg(xa, rr(2) == 0, true, d, o, c, 0)); break;
+    case 5: push(addsub_reg(xa, false, false, d, o, c, 1u + rr(3))); break;
+    default: push(addsub_reg(xa, false, false, d, o, c, 0)); break;
+    }
+    switch (rr(4)) {
+    case 0:
+    case 1: push(movz_x(c, rr(0x10000), 0)); break;
+    case 2: push(add_x(body_reg(), c, body_reg())); break;
+    default: break;
     }
 }
 
@@ -1748,6 +1813,117 @@ static bool cbz_control(int i, uint32_t *alt)
     return true;
 }
 
+// split: "-> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8"
+// replaces the chain and its ADD/SUB, the two immediates taking the
+// span's last two words and the chain's other words deleted.
+static bool split_apply(const hit_t *h, uint32_t *code)
+{
+    char op1[4], op2[4], w1, w2, w3, w4;
+    unsigned d1, n1, hi, d2, n2, lo;
+    if (sscanf(h->detail, "-> %3s %c%u, %c%u, #0x%x, lsl #12 ; "
+               "%3s %c%u, %c%u, #0x%x", op1, &w1, &d1, &w2, &n1, &hi, op2,
+               &w3, &d2, &w4, &n2, &lo) != 12) {
+        return false;
+    }
+    size_t first = h->start, last = h->start + h->count - 1u;
+    if (h->count < 3u || !in_body(first, last) || strcmp(op1, op2) != 0
+            || (strcmp(op1, "add") != 0 && strcmp(op1, "sub") != 0)
+            || w1 != w2 || w1 != w3 || w1 != w4 || d2 != d1 || n2 != d1
+            || hi > 0xFFFu || lo > 0xFFFu || (code[last] & 31u) != d1) {
+        return false;
+    }
+    bool x = w1 == 'x', sub = strcmp(op1, "sub") == 0;
+    for (size_t k = first; k + 2u <= last; k++) {
+        code[k] = NOP;
+    }
+    code[last - 1u] = addsub_imm(x, sub, d1, n1, hi, true);
+    code[last] = addsub_imm(x, sub, d1, d1, lo, false);
+    return true;
+}
+
+static size_t split_slot(const hit_t *h)
+{
+    return h->start + h->count - 1u;
+}
+
+// Sign-crossed: an ADD split into SUBs or a SUB into ADDs.
+static bool split_special(const hit_t *h)
+{
+    bool sub = (prog[h->start + h->count - 1u] >> 30) & 1u;
+    return sub != (strncmp(h->detail, "-> sub", 6) == 0);
+}
+
+// Control: split an unflagged chain + ADD/SUB anyway -- its constant
+// register read later or never proven dead, an ADDS or SUBS, a shifted
+// operand -- whenever the value it reads is within reach.
+static bool split_control(int i, uint32_t *alt)
+{
+    uint32_t cons = prog[i];
+    if ((cons & 0x1F200000u) != 0x0B000000u || i < body_start + 2) {
+        return false;
+    }
+    bool x = (cons >> 31) != 0, sub = ((cons >> 30) & 1u) != 0;
+    unsigned d = cons & 31u, n = (cons >> 5) & 31u, m = (cons >> 16) & 31u;
+    // The chain before it: MOVKs back to a MOVZ or MOVN, one register
+    // and width.
+    int first = i - 1;
+    uint32_t w = prog[first];
+    unsigned c = w & 31u;
+    bool xc = (w >> 31) != 0;
+    while (first > body_start && (prog[first] & 0x7F800000u) == 0x72800000u
+           && (prog[first] & 31u) == c && ((prog[first] >> 31) != 0) == xc) {
+        first--;
+    }
+    w = prog[first];
+    unsigned opc = (w >> 29) & 3u;
+    if ((w & 0x1F800000u) != 0x12800000u || (w & 31u) != c
+            || ((w >> 31) != 0) != xc || (opc != 0u && opc != 2u)
+            || first == i - 1) {
+        return false;
+    }
+    uint64_t v = (uint64_t)((w >> 5) & 0xFFFFu) << (16u * ((w >> 21) & 3u));
+    if (opc == 0u) {
+        v = ~v;
+    }
+    for (int k = first + 1; k < i; k++) {
+        unsigned sh = 16u * ((prog[k] >> 21) & 3u);
+        v = (v & ~(0xFFFFull << sh)) | (uint64_t)((prog[k] >> 5) & 0xFFFFu) << sh;
+    }
+    unsigned other;
+    if (m == c && n != c) {
+        other = n;
+    } else if (!sub && n == c && m != c) {
+        other = m;
+    } else {
+        return false;
+    }
+    if (other == 31u || d == 31u) {
+        return false;
+    }
+    uint64_t mask = x ? ~0ull : 0xFFFFFFFFull;
+    v &= xc ? ~0ull : 0xFFFFFFFFull;
+    v &= mask;
+    uint64_t mag = v;
+    bool crossed = false;
+    if (v >= 1ull << 24) {
+        mag = (0 - v) & mask;
+        if (mag >= 1ull << 24) {
+            return false;
+        }
+        crossed = true;
+    }
+    unsigned hi = (unsigned)(mag >> 12), lo = (unsigned)(mag & 0xFFFu);
+    if (hi == 0 || lo == 0) {
+        return false;
+    }
+    for (int k = first; k < i - 1; k++) {
+        alt[k] = NOP;
+    }
+    alt[i - 1] = addsub_imm(x, sub != crossed, d, other, hi, true);
+    alt[i] = addsub_imm(x, sub != crossed, d, d, lo, false);
+    return true;
+}
+
 struct mode {
     const char *name;
     const char *findings[2];        // the finding names the mode tests
@@ -1794,6 +1970,9 @@ static const mode_t_ modes[] = {
                "compare-zero signed-branch foldable into TBZ/TBNZ" },
       "through a branch at the target", plant_cbz, cbz_apply, cbz_slot,
       cbz_special, cbz_control },
+    { "split", { "MOV + ADD/SUB foldable to two immediate ADD/SUBs", NULL },
+      "sign-crossed", plant_split, split_apply, split_slot, split_special,
+      split_control },
 };
 
 static bool wanted(const char *name)
@@ -1809,7 +1988,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz|split\n");
 }
 
 int main(int argc, char **argv)

@@ -1900,6 +1900,91 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   `check_add_sub_zero`); `ZR` as the non-MOV operand is excluded
   (degenerate MOV/NEG).
 
+## MOV + ADD/SUB foldable to two immediate ADD/SUBs
+
+* `mov w9, #0xdeb8 ; movk w9, #0x1, lsl #16 ; add x21, x0, x9` instead
+  of `add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8`. A constant
+  below 2^24 that no single ADD/SUB immediate encodes is still two of
+  them: its high 12 bits with `LSL #12`, then its low 12 bits. Built by
+  a MOV chain of two or more instructions, it costs three instructions
+  and a register where two instructions do. The example is
+  [issue #10](https://github.com/gaul/armlint/issues/10)'s, a field
+  offset into rustc's global context.
+* **The constant is the one the ADD/SUB reads.** A W chain zero-extends
+  into an X consumer, which is the example's shape and most of the
+  corpus's, and a W consumer reads an X chain's low half, so the X
+  chain's other MOVKs go too. A negative constant whose magnitude is
+  below 2^24 splits into the opposite operation: `mov x8, #-3 ; movk
+  x8, #0xfffd, lsl #16 ; add x19, x22, x8` becomes `sub x19, x22,
+  #0x20, lsl #12 ; sub x19, x19, #0x3`, exact modulo 2^width. At W
+  width that reaches the constants within 2^24 of 2^32, but a W chain
+  read at X width is the positive 32-bit value, never negative.
+* **The shape.** ADD and SUB only: an ADDS, SUBS, CMP or CMN split in
+  two would set the flags of its second partial sum, not of the whole
+  one. The operand rules are the one-immediate fold's: SUB takes the
+  constant in Rm only, the other operand is neither ZR nor the
+  constant register, and the consumer follows the chain directly.
+  With either 12-bit half zero, one immediate does, and that is the
+  one-immediate fold's. A chain the
+  [suboptimal MOVZ/MOVK sequence](#suboptimal-movzmovk-sequence) check
+  reports -- a bitmask immediate, or one longer than its value needs --
+  is left to that check: a bitmask ORR and the ADD are two
+  instructions as well.
+* **The proof.** The rewrite deletes the chain, so the constant's
+  register must die: the finding emits at once when the ADD/SUB
+  overwrites it (`add x8, x0, x8`), and otherwise when a later write
+  meets it before any read or control transfer -- the forward scan
+  every MOV fold shares.
+* **Corpus, 2026-09-29:** librustc_driver 696, Firefox libxul.so 109,
+  go 70, uutils 28, clang 4, HotSpot's javac run 2, SpiderMonkey's
+  Octane run 1; V8's Octane run, bash, dyld, ssh and libcrypto none.
+  No other check moved.
+  * rustc's are led by the offsets `0x1dec0` (181), `0x1b470` (163)
+    and the issue's `0x1deb8` (114), and 666 of the 696 are the W
+    chain into an X ADD. The issue guessed that LLVM's
+    `AArch64MIPeepholeOpt`, which splits these constants into two
+    immediates, cannot see through the zero-extension. It can: it
+    looks through the `SUBREG_TO_REG`. It refuses a MOV with more
+    than one use, and an ADD in a loop that is not loop-invariant,
+    and it runs before register allocation, which may then
+    rematerialize a constant at each of its uses. 497 of the 696
+    sites are in functions that build the same constant again, which
+    fits a constant that had several uses when the peephole ran.
+  * go's are the gc toolchain's own: runtime constants such as
+    10,000,000 in `runtime.sysmon`. clang's `llvm::MD5::body` and a
+    HotSpot stub fold MD5's round constants within 2^24 of 2^32
+    (`0xfffa3942`, that is `-0x5c6be`) into two SUBs.
+  * **The proof is what limits it.** An independent model of the
+    shape finds 3,425 candidates in rustc. Every one of armlint's 696
+    findings is among them, rendered identically, as are all of
+    clang's, libxul's, go's and uutils'. 383 of the 3,425 overwrite
+    the constant's register themselves and are reported. Of the other
+    3,042, 313 prove, and the rest stop at a call (2,138) or a
+    conditional branch (580) before the register dies. Eleven stop
+    elsewhere: at a read (5), a jump (3) or the window's end (2), and
+    once where another fold's deferral took the single slot the proof
+    waits in (see TODO's multi-slot deferral row). At a call the
+    register is `x8` in 1,393 of them, the indirect-result register a
+    callee may read, and `x9` in 654, dead there by the calling
+    convention only; armlint assumes neither. clang's 402 candidates
+    are almost all the call case (394).
+* **Verified by execution** (`tools/rwfuzz split`): 200,000 random
+  programs with planted chains -- W or X, MOVZ- or MOVN-based, now and
+  then a third MOVK a W consumer ignores -- of values made of two
+  12-bit halves leaning on their ends, some negated, some the fold
+  must refuse (one immediate, past 2^24, a bitmask), each feeding an
+  ADD or SUB of either width in either operand order, flag-setting or
+  shifted now and then, with the constant's register overwritten,
+  read or left alone afterwards. Each of the 142,284 rewrites armlint
+  reported (44,716 sign-crossed), applied as rendered, ran natively
+  against the original on six random states with identical `x0..x7`
+  and NZCV. Applying the split to the 293,140 chains armlint refused
+  changed the result 142,207 times, and builds that split the
+  flag-setting forms, skip the dead-register proof, forget the sign
+  crossing, take SUB's constant in Rn, or sign-extend a W chain into
+  an X ADD each mismatch within 5,000 programs (298, 1,110, 595, 245,
+  87).
+
 ## MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
 
 * `mov x8, #0x8000000000000000 ; cmp x0, x8 ; b.eq target` instead
@@ -3549,7 +3634,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   register-offset `LDR/STR` indexed by the constant.
 * Nothing in the code can be rewritten -- the chain is already the
   cheapest spelling of that value -- so like `-a pac` the audit is
-  informational, and its review item is the constant itself. When the
+  informational, and its review item is the constant itself. (A plain
+  `ADD`/`SUB` of a constant below 2^24 is the exception: when the
+  constant's register dies,
+  [the two-immediate fold](#mov--addsub-foldable-to-two-immediate-addsubs)
+  reports the site too, and the audit still lists the value.) When the
   value is one the code's author chose (an object-size limit, a
   sentinel's address, the bit assignment of a flags field), choosing
   it one step differently turns every site into the immediate form.

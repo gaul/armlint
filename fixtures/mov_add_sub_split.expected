@@ -1,0 +1,24 @@
+MOV + ADD/SUB foldable to two immediate ADD/SUBs at offset: 0x0 <_field>: -> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8 (3 instructions)
+  movz w9, #0xdeb8
+  movk w9, #0x1, lsl #16
+  add x21, x0, x9
+
+MOV + ADD/SUB foldable to two immediate ADD/SUBs at offset: 0x18 <_in_place>: -> add x8, x0, #0x1b, lsl #12 ; add x8, x8, #0x1f0 (3 instructions)
+  movz w8, #0xb1f0
+  movk w8, #0x1, lsl #16
+  add x8, x0, x8
+
+MOV + ADD/SUB foldable to two immediate ADD/SUBs at offset: 0x2c <_negative>: -> sub x19, x22, #0x20, lsl #12 ; sub x19, x19, #0x3 (3 instructions)
+  movn x8, #0x2
+  movk x8, #0xfffd, lsl #16
+  add x19, x22, x8
+
+MOV + ADD/SUB foldable to two immediate ADD/SUBs at offset: 0x40 <_md5>: -> sub w0, w0, #0x5c, lsl #12 ; sub w0, w0, #0x6be (3 instructions)
+  movz w9, #0x3942
+  movk w9, #0xfffa, lsl #16
+  add w0, w0, w9
+
+Optimization opportunities by type:
+       4  MOV + ADD/SUB foldable to two immediate ADD/SUBs
+
+4 optimization opportunities in 47 instructions

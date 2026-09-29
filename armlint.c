@@ -10653,6 +10653,128 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+bool check_mov_add_sub_split(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4 || !state->mov_active
+            || state->mov_insn_count < 2) {
+        return false;
+    }
+
+    uint32_t op = insn_word(insn);
+    unsigned sf, rd, rn, rm;
+    bool is_sub, is_s;
+    if (!decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s,
+                                     &rd, &rn, &rm)) {
+        return false;
+    }
+    // Two instructions set the flags of their own partial sums, not of
+    // the whole one, so only the plain forms split. A write to ZR is
+    // dead code.
+    if (is_s || rd == 31) {
+        return false;
+    }
+
+    // check_mov_add_sub_imm_fold's operand rules: SUB takes the
+    // constant only in Rm, and the surviving operand is neither ZR
+    // (a MOV of the constant) nor the constant register itself (whose
+    // chain could then never be deleted).
+    unsigned other;
+    if (is_sub) {
+        if (rm != state->mov_rd) {
+            return false;
+        }
+        other = rn;
+    } else if (rm == state->mov_rd) {
+        other = rn;
+    } else if (rn == state->mov_rd) {
+        other = rm;
+    } else {
+        return false;
+    }
+    if (other == 31 || other == state->mov_rd) {
+        return false;
+    }
+
+    // A chain check_movz_movk_bitmask reports -- a bitmask immediate,
+    // or longer than its value needs -- is left to that check: a
+    // bitmask ORR and the ADD are two instructions as well.
+    unsigned chain_width = state->mov_is_64bit ? 64u : 32u;
+    if (is_bitmask_immediate(state->mov_value, chain_width)
+            || state->mov_insn_count
+                > minimal_mov_wide_count(state->mov_value, chain_width)) {
+        return false;
+    }
+
+    // The constant as the ADD/SUB reads it: a W chain zero-extends
+    // into an X consumer, and a W consumer reads an X chain's low half.
+    // A negative constant whose magnitude is below 2^24 splits into
+    // the opposite operation, which is exact modulo 2^width. (Such a
+    // magnitude leaves the sign bit set, so no separate test.)
+    uint64_t mask = width_mask(sf ? 64u : 32u);
+    uint64_t v = state->mov_value & mask;
+    uint64_t mag = v;
+    bool crossed = false;
+    if (v >= 0x1000000u) {
+        mag = (~v + 1u) & mask;
+        if (mag >= 0x1000000u) {
+            return false;
+        }
+        crossed = true;
+    }
+    // With either half zero one immediate would do: that is
+    // check_mov_add_sub_imm_fold's fold (or the MOV #0 fold's).
+    unsigned hi = (unsigned)(mag >> 12);
+    unsigned lo = (unsigned)(mag & 0xFFFu);
+    if (hi == 0 || lo == 0) {
+        return false;
+    }
+
+    char w_or_x = sf ? 'x' : 'w';
+    const char *mnem = is_sub != crossed ? "sub" : "add";
+    out->name = "MOV + ADD/SUB foldable to two immediate ADD/SUBs";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+    snprintf(out->detail, sizeof(out->detail),
+        "-> %s %c%u, %c%u, #0x%x, lsl #12 ; %s %c%u, %c%u, #0x%x",
+        mnem, w_or_x, rd, w_or_x, other, hi,
+        mnem, w_or_x, rd, w_or_x, rd, lo);
+
+    char chain_w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x",
+                mov_mnem, chain_w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, chain_w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // The rewrite deletes the chain: as for the one-immediate fold, it
+    // emits now when the ADD/SUB overwrites the constant register, and
+    // otherwise once a later instruction proves that register dead.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 // Logical shifted-register (AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS) with
 // LSL #0. Fixed-bit mask 0x1F000000, value 0x0A000000; shift_type at
 // bits 23..22 must be 00 (LSL); imm6 at bits 15..10 must be 0. opc at
@@ -21980,6 +22102,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mneg_strength_reduce,
     check_udiv_strength_reduce,
     check_mov_add_sub_imm_fold,
+    check_mov_add_sub_split,
     check_mov_logic_imm_fold,
     check_mov_cmp_branch_bvs,
     check_mov_cage_orr_add,
