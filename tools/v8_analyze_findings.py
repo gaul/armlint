@@ -15,8 +15,12 @@ import collections
 import re
 import sys
 
+# The symbol is v8dump2elf.py's sanitized name, which keeps '<' and '>'
+# (a regexp's source: RE__<>_) but never a space or a '+'. Matched
+# lazily up to the first '>: ', behind an optional '+0x<offset>', it
+# cannot run into the detail, which follows that space.
 FINDING_RE = re.compile(
-    r'^(.+?) at offset: 0x([0-9a-f]+) <([^+>]+?)(?:\+0x([0-9a-f]+))?>: '
+    r'^(.+?) at offset: 0x([0-9a-f]+) <([^ +]+?)(?:\+0x([0-9a-f]+))?>: '
     r'(.*) \((\d+) instructions?\)( \[repeat\])?$')
 RELOC_RE = re.compile(r'^0x([0-9a-f]+)\s\s+([a-z][a-zA-Z0-9 _-]*)')
 RELOC_HDR_RE = re.compile(r'^RelocInfo \(size')
@@ -94,9 +98,14 @@ def main():
                 '%s%s\n  @0x%x\n%s' % (header, tag, absaddr,
                                        '\n'.join(cur_lines)))
 
+    unparsed = 0
     for line in open(findings_path, errors='replace'):
         line = line.rstrip('\n')
         m = FINDING_RE.match(line)
+        if not m and not line.startswith(' ') and ' at offset: 0x' in line:
+            # A finding header this parser cannot read would otherwise
+            # vanish from every table below without a trace.
+            unparsed += 1
         if m:
             flush()
             ftype = m.group(1)
@@ -113,6 +122,9 @@ def main():
             cur = None
             cur_lines = []
     flush()
+    if unparsed:
+        print('v8_analyze_findings: %d finding headers not parsed and left '
+              'out of every table' % unparsed, file=sys.stderr)
 
     tiers = sorted({t for c in by_type_tier.values() for t in c})
     print('== finding type x tier ==')
