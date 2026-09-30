@@ -1,0 +1,17 @@
+conditional branch that is never taken at offset: 0x2c <_main+0x2c>: -> delete; never taken: fjcvtzs cannot set flags that pass mi (known 0x4 bytes back) (1 instructions)
+  fjcvtzs w0, d0
+  b.mi #0x58
+
+conditional branch that is never taken at offset: 0x3c <_main+0x3c>: -> delete; never taken: the flags here cannot pass ne (known 0x4 bytes back) (1 instructions)
+  b.ne #0x58
+  b.ne #0x58
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0x44 <_main+0x44>: -> cbnz w1, 0x58 (2 instructions)
+  cmp w1, #0
+  b.ne 0x58
+
+Optimization opportunities by type:
+       2  conditional branch that is never taken
+       1  compare-zero branch foldable into CBZ/CBNZ
+
+3 optimization opportunities in 23 instructions

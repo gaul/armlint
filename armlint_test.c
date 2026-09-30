@@ -9648,6 +9648,16 @@ static void test_branch_decided(void)
         { { 0x1E612000u, 0x54000066u, 0x54000046u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
           "-> delete; never taken: the flags here cannot pass vs "
           "(known 0x4 bytes back)" },
+        // FJCVTZS leaves Z alone (exact) or all four flags clear, so
+        // N is never set, and a second B.NE reads what the first decided.
+        // fjcvtzs w0, d0 ; b.mi 1f ; ret ; 1: ret
+        { { 0x1E7E0000u, 0x54000044u, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
+          "-> delete; never taken: fjcvtzs cannot set flags that pass mi "
+          "(known 0x4 bytes back)" },
+        // fjcvtzs w0, d0 ; b.ne 1f ; b.ne 1f ; ret ; 1: ret
+        { { 0x1E7E0000u, 0x54000061u, 0x54000041u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: the flags here cannot pass ne "
+          "(known 0x4 bytes back)" },
         // mov w9, #0x7fff ; cmp w27, w9 ; b.hs 1f ; cmp w27, #8, lsl #12 ; b.hs 1f ; ret ; 1: ret
         { { 0x528FFFE9u, 0x6B09037Fu, 0x54000082u, 0x7140237Fu, 0x54000042u,
             0xD65F03C0u, 0xD65F03C0u }, 7, NEVER,
@@ -9682,6 +9692,11 @@ static void test_branch_decided(void)
         { { 0x52800028u, 0xB4000028u, 0xD65F03C0u }, 3, NONE, NULL },
         // cmp x0, #5 ; b.eq 1f ; cmp x1, #5 ; b.eq 1f ; ret ; 1: ret
         { { 0xF100141Fu, 0x54000080u, 0xF100143Fu, 0x54000040u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, NONE, NULL },
+        // V8's Float64ToInt32 deoptimization test: the FJCVTZS between
+        // the two B.NEs rewrites the flags the first one decided.
+        // cmp w1, #3 ; b.ne 1f ; fjcvtzs w0, d0 ; b.ne 1f ; ret ; 1: ret
+        { { 0x71000C3Fu, 0x54000081u, 0x1E7E0000u, 0x54000041u, 0xD65F03C0u,
             0xD65F03C0u }, 6, NONE, NULL },
         // ldr x0, [x1] ; cbz x0, 1f ; ret ; 1: ret
         { { 0xF9400020u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 4, NONE, NULL },
@@ -17830,6 +17845,10 @@ static void test_liveness_matches_capstone(void)
         { 0xEA01001Fu, LIV_OVERWRITE, "tst" },
         { 0x1E212000u, LIV_OVERWRITE, "fcmp" },
         { 0x1E212010u, LIV_OVERWRITE, "fcmpe" },
+        // FJCVTZS (FEAT_JSCVT) writes NZCV: Z for an exact conversion,
+        // all four clear otherwise. Capstone 5 models no flag write for
+        // it, so only the direct assertion has teeth.
+        { 0x1E7E0000u, LIV_OVERWRITE, "fjcvtzs" },
         // FEAT_MOPS memcpy/memset triples pass algorithm state through
         // the flags: the prologue overwrites NZCV, the main/epilogue
         // stages read it back. Capstone 5 decodes the well-formed forms

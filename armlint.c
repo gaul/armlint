@@ -3377,6 +3377,15 @@ liveness_t classify_liveness(uint32_t op)
     if ((op & 0xFF20FC07u) == 0x1E202000u) {
         return LIV_OVERWRITE;
     }
+    // FJCVTZS (FEAT_JSCVT, Armv8.3): converts a double to the JavaScript
+    // int32 and writes all of NZCV -- Z set when the conversion was
+    // exact, every flag clear otherwise -- so JavaScript engines branch
+    // on it (V8's Float64ToInt32 deoptimizes on b.ne). Bits 31..10 =
+    // 0001 1110 0111 1110 0000 00 (sf = 0, S = 0, type = 01 (double),
+    // rmode = 11, opcode = 110); Rn and Rd free.
+    if ((op & 0xFFFFFC00u) == 0x1E7E0000u) {
+        return LIV_OVERWRITE;
+    }
 
     // BL (function call): callee may clobber NZCV per the AArch64 PCS.
     if ((op & 0xFC000000u) == 0x94000000u) {
@@ -12377,6 +12386,8 @@ bool check_dead_write(armlint_state *state, const cs_insn *insn,
 #define KV_STATES_ADD  (0x0F0Fu | (1u << 4) | (1u << 6) | (1u << 7))
 #define KV_STATES_AND  ((1u << 0) | (1u << 4) | (1u << 8))
 #define KV_STATES_FCMP ((1u << 2) | (1u << 3) | (1u << 6) | (1u << 8))
+// FJCVTZS leaves Z alone set (exact) or all four clear (inexact).
+#define KV_STATES_JSCVT ((1u << 0) | (1u << 4))
 
 static uint64_t kv_ones(unsigned n)
 {
@@ -13258,6 +13269,11 @@ static void kv_record(armlint_state *state, const cs_insn *insn,
         if ((op & 0xFF20FC07u) == 0x1E202000u) {
             pd->nzcv_states = KV_STATES_FCMP;   // FCMP/FCMPE
             pd->nzcv_kind = KV_STATES_FCMP;
+            source = true;
+        }
+        if ((op & 0xFFFFFC00u) == 0x1E7E0000u) {
+            pd->nzcv_states = KV_STATES_JSCVT;  // FJCVTZS
+            pd->nzcv_kind = KV_STATES_JSCVT;
             source = true;
         }
         if ((op & 0xFF000000u) == 0x54000000u && (op & 0xFu) < 14u) {
