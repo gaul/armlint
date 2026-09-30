@@ -9698,6 +9698,18 @@ static void test_branch_decided(void)
         // cmp w1, #3 ; b.ne 1f ; fjcvtzs w0, d0 ; b.ne 1f ; ret ; 1: ret
         { { 0x71000C3Fu, 0x54000081u, 0x1E7E0000u, 0x54000041u, 0xD65F03C0u,
             0xD65F03C0u }, 6, NONE, NULL },
+        // cmp w1, #3 ; b.ne 1f ; subps x1, x2, x3 ; b.ne 1f ; ret ; 1: ret
+        { { 0x71000C3Fu, 0x54000081u, 0xBAC30041u, 0x54000041u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, NONE, NULL },
+        // cmp w1, #3 ; b.ne 1f ; whilelo p1.s, w2, w3 ; b.ne 1f ; ret ; 1: ret
+        { { 0x71000C3Fu, 0x54000081u, 0x25A30C41u, 0x54000041u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, NONE, NULL },
+        // A MOPS stage advances its source pointer, LD64B fills eight
+        // registers; Capstone 5 lists neither write.
+        // mov x4, #1 ; cpyfp [x1]!, [x4]!, x2! ; cbz x4, 1f ; ret ; 1: ret
+        { { 0xD2800024u, 0x19040441u, 0xB4000044u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // mov x8, #1 ; ld64b x6, [x2] ; cbz x8, 1f ; ret ; 1: ret
+        { { 0xD2800028u, 0xF83FD046u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
         // ldr x0, [x1] ; cbz x0, 1f ; ret ; 1: ret
         { { 0xF9400020u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 4, NONE, NULL },
         // cbnz w0, 1f ; cbz x0, 1f ; ret ; 1: ret
@@ -17849,6 +17861,14 @@ static void test_liveness_matches_capstone(void)
         // all four clear otherwise. Capstone 5 models no flag write for
         // it, so only the direct assertion has teeth.
         { 0x1E7E0000u, LIV_OVERWRITE, "fjcvtzs" },
+        // The other flag writers Capstone 5 models no write for: the
+        // MTE pointer difference and the SVE predicate producers.
+        { 0xBAC30041u, LIV_OVERWRITE, "subps" },
+        { 0x2483B041u, LIV_OVERWRITE, "cmpeq (sve)" },
+        { 0x25A30C41u, LIV_OVERWRITE, "whilelo (sve)" },
+        { 0x2550C020u, LIV_OVERWRITE, "ptest" },
+        { 0x25424041u, LIV_OVERWRITE, "ands (sve predicate)" },
+        { 0x25024041u, LIV_UNKNOWN, "and (sve predicate)" },
         // FEAT_MOPS memcpy/memset triples pass algorithm state through
         // the flags: the prologue overwrites NZCV, the main/epilogue
         // stages read it back. Capstone 5 decodes the well-formed forms

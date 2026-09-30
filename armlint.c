@@ -3386,6 +3386,43 @@ liveness_t classify_liveness(uint32_t op)
     if ((op & 0xFFFFFC00u) == 0x1E7E0000u) {
         return LIV_OVERWRITE;
     }
+    // SUBPS (FEAT_MTE): the flag-setting pointer difference. Bits
+    // 31..21 = 1011 1010 110, bits 15..10 = 0; Xm, Xn, Xd free. Capstone
+    // 5 reports no flag write for it either.
+    if ((op & 0xFFE0FC00u) == 0xBAC00000u) {
+        return LIV_OVERWRITE;
+    }
+    // The SVE and SVE2 instructions that set NZCV from a predicate
+    // result: the compares, the WHILE loops, PTEST, PTRUES, PFIRST and
+    // PNEXT, RDFFRS, the BRK*S breaks, the flag-setting predicate
+    // logicals, CTERMEQ/CTERMNE and MATCH/NMATCH. Capstone 5 models no
+    // flag write for any of them. Each pair is the fixed bits an
+    // instruction family shares (LLVM's tablegen classes); no other
+    // A64 encoding matches any of them.
+    static const struct { uint32_t mask, value; } sve_flag_setters[] = {
+        { 0xFF200000u, 0x24000000u },   // CMP<cc> (vectors)
+        { 0xFF200000u, 0x24200000u },   // CMPHI/HS/LO/LS (immediate)
+        { 0xFF204000u, 0x25000000u },   // CMPEQ/GE/GT/LE/LT/NE (immediate)
+        { 0xFF20E000u, 0x25200000u },   // WHILE<cc> (predicate)
+        { 0xFF20FC00u, 0x25203000u },   // WHILERW/WHILEWR
+        { 0xFF20D010u, 0x25204010u },   // WHILE<cc> (predicate-as-counter)
+        { 0xFF20F010u, 0x25205010u },   // WHILE<cc> (predicate pair)
+        { 0xFF70C000u, 0x25404000u },   // ANDS/BICS/EORS/ORRS/ORNS/NORS/NANDS
+        { 0xFF7FC210u, 0x25504000u },   // BRKAS/BRKBS
+        { 0xFFFFC210u, 0x25584000u },   // BRKNS
+        { 0xFFF0C200u, 0x2540C000u },   // BRKPAS/BRKPBS
+        { 0xFFFFC21Fu, 0x2550C000u },   // PTEST
+        { 0xFF3FFC10u, 0x2519E000u },   // PTRUES
+        { 0xFF3EFA10u, 0x2518C000u },   // PFIRST/PNEXT
+        { 0xFFFFFE10u, 0x2558F000u },   // RDFFRS
+        { 0xFFA0FC0Fu, 0x25A02000u },   // CTERMEQ/CTERMNE
+        { 0xFFA0E000u, 0x45208000u },   // MATCH/NMATCH
+    };
+    for (size_t i = 0; i < sizeof(sve_flag_setters) / sizeof(sve_flag_setters[0]); i++) {
+        if ((op & sve_flag_setters[i].mask) == sve_flag_setters[i].value) {
+            return LIV_OVERWRITE;
+        }
+    }
 
     // BL (function call): callee may clobber NZCV per the AArch64 PCS.
     if ((op & 0xFC000000u) == 0x94000000u) {
@@ -3953,6 +3990,28 @@ static uint32_t insn_gpr_write_mask(const cs_insn *insn)
         if (rm != 31u && rm != ((op >> 5) & 0x1Fu)) {
             mask &= ~(1u << rm);
         }
+    }
+    // FEAT_MOPS stages advance their pointers and count in place: CPY*
+    // writes Xd, Xs and Xn, SET* (bits 23..22 = 11) writes Xd and Xn.
+    // Capstone 5 reports the writeback of the destination and count
+    // operands but not of the source pointer.
+    if ((op & 0xFB200C00u) == 0x19000400u) {
+        mask |= 1u << (op & 0x1Fu) | 1u << ((op >> 5) & 0x1Fu);
+        if (((op >> 22) & 3u) != 3u) {
+            mask |= 1u << ((op >> 16) & 0x1Fu);
+        }
+        mask &= 0x7FFFFFFFu;
+    }
+    // FEAT_LS64: LD64B loads Xt..Xt+7, ST64BV/ST64BV0 write their
+    // status Xs. Capstone 5 reports neither.
+    if ((op & 0xFFFFFC00u) == 0xF83FD000u) {
+        unsigned rt = op & 0x1Fu;
+        for (unsigned i = 0; i < 8u && rt + i < 31u; i++) {
+            mask |= 1u << (rt + i);
+        }
+    }
+    if ((op & 0xFFE0EC00u) == 0xF820A000u && ((op >> 16) & 0x1Fu) != 31u) {
+        mask |= 1u << ((op >> 16) & 0x1Fu);
     }
     return mask;
 }

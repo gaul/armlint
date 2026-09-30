@@ -1,0 +1,8 @@
+conditional branch that is never taken at offset: 0x64 <_main+0x64>: -> delete; never taken: the flags here cannot pass ne (known 0x4 bytes back) (1 instructions)
+  b.ne #0x6c
+  b.ne #0x6c
+
+Optimization opportunities by type:
+       1  conditional branch that is never taken
+
+1 optimization opportunities in 28 instructions
