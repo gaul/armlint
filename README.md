@@ -927,6 +927,19 @@ backlog -- and one that checks the checks -- built separately with
   dead-write and CMP-to-CMN checks (`tools/rwfuzz -n 100000 zext`);
   a new rewrite gets a mode of its own. Needs an AArch64 host, since the programs run natively, and
   links `libarmlint.a`.
+* `tools/tblgen_audit.py` checks armlint's flag and register model
+  against LLVM's own instruction definitions. `llvm-tblgen --dump-json`
+  on `AArch64.td` lists every A64 instruction with its encoding and
+  its implicit NZCV and register defs and uses; the tool builds one
+  word per record, has `tools/tblgen_probe` print Capstone's access
+  lists next to armlint's classifiers for it, and then runs armlint
+  itself over `mov ; W ; cbz`, `mov ; W ; mov` and `cmp ; b.ne ; W ;
+  b.ne` probes, where a finding means a write or a read of W's went
+  unmodelled. That second step is what proves a blind spot, since
+  armlint already corrects much of what Capstone omits. It found
+  FJCVTZS, SUBPS, the SVE compares and the MOPS source pointer;
+  `--masks` derives the encoding masks for a new family. Needs a built
+  `llvm-tblgen` and clang.
 
 The workflow that produced several of the current checks: compile a
 representative corpus, run `pairscan` to rank pair shapes, classify

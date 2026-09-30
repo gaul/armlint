@@ -53,7 +53,7 @@ integration-test-regen: armlint
 
 # Corpus-mining research utilities (see "Mining tools" in README.md);
 # not part of the default build or test targets.
-tools: tools/pairscan tools/defuse tools/rwfuzz
+tools: tools/pairscan tools/defuse tools/rwfuzz tools/tblgen_probe
 
 tools/pairscan: tools/pairscan.c
 	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) $< $(CAPSTONE_LIBS) -o $@
@@ -63,6 +63,11 @@ tools/defuse: tools/defuse.c
 
 # Drives the check registry itself, so it links the library.
 tools/rwfuzz: tools/rwfuzz.c libarmlint.a armlint.h
+	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -I. $< libarmlint.a $(CAPSTONE_LIBS) -o $@
+
+# Prints armlint's classifiers next to Capstone's model for
+# tools/tblgen_audit.py, so it links the library too.
+tools/tblgen_probe: tools/tblgen_probe.c libarmlint.a armlint.h
 	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -I. $< libarmlint.a $(CAPSTONE_LIBS) -o $@
 
 # The default goal: everything that ships, without running the suites.
@@ -78,6 +83,7 @@ clean:
 		tools/pairscan \
 		tools/defuse \
 		tools/rwfuzz \
+		tools/tblgen_probe \
 		*.o
 
 .PHONY: all build clean lib test integration-test integration-test-regen tools

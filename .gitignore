@@ -5,4 +5,5 @@ libarmlint.a
 tools/pairscan
 tools/defuse
 tools/rwfuzz
+tools/tblgen_probe
 tools/*.dSYM/
