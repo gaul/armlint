@@ -9930,6 +9930,86 @@ static void test_and_known_noop(void)
     }
 }
 
+// check_mov_logic_known_bits over instruction words with the buffer
+// set: the constant register is killed by a MOVZ where the operation
+// does not overwrite it.
+static void test_mov_logic_known_bits(void)
+{
+    const char *name =
+        "MOV + AND/TST that known bits make a bitmask immediate";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // and w8, w8, #7 ; mov w9, #5 ; and w9, w8, w9 ; ret
+        { { 0x12000908u, 0x528000A9u, 0x0A090109u, 0xD65F03C0u }, 4, 1,
+          "-> and w9, w8, #0xfffffffd; w8 has no bits outside 0x7 (known "
+          "0x8 bytes back)" },
+        // The commuted operands, out of place: and w10, w9, w8, then
+        // mov w9, #0xd1ed kills the constant.
+        { { 0x12000908u, 0x528000A9u, 0x0A08012Au, 0x529A3DA9u,
+            0xD65F03C0u }, 5, 1,
+          "-> and w10, w8, #0xfffffffd; w8 has no bits outside 0x7 (known "
+          "0x8 bytes back)" },
+        // tst w8, w9 ; cset w9, ne (the constant register dies) ; ret
+        { { 0x12000908u, 0x528000A9u, 0x6A09011Fu, 0x1A9F07E9u,
+            0xD65F03C0u }, 5, 1,
+          "-> tst w8, #0xfffffffd; w8 has no bits outside 0x7 (known 0x8 "
+          "bytes back)" },
+        // X form: and x8, x8, #0x3f ; mov x9, #0x23 ; and x9, x8, x9
+        { { 0x92401508u, 0xD2800469u, 0x8A090109u, 0xD65F03C0u }, 4, 1,
+          "-> and x9, x8, #0xffffffffffffffe3; x8 has no bits outside "
+          "0x3f (known 0x8 bytes back)" },
+        // BIC: ~5 = 0xfffffffa is not a bitmask, but on three bits only
+        // bit 1 survives, and the nearest immediate is #0x2.
+        { { 0x12000908u, 0x528000A9u, 0x0A290109u, 0xD65F03C0u }, 4, 1,
+          "-> and w9, w8, #0x2; w8 has no bits outside 0x7 (known 0x8 "
+          "bytes back)" },
+        // The bound from a compare's fall-through: cmp w8, #8 ; b.hs
+        { { 0x7100211Fu, 0x54000062u, 0x528000A9u, 0x0A090109u,
+            0xD65F03C0u }, 5, 1,
+          "-> and w9, w8, #0xfffffffd; w8 has no bits outside 0x7 (known "
+          "0x8 bytes back)" },
+        // A chain: mov x9, #0x23 ; movk x9, #1, lsl #32 on a 6-bit x8:
+        // the top half is free, so #0xffffffffffffffe3 again.
+        { { 0x92401508u, 0xD2800469u, 0xF2C00029u, 0x8A090109u,
+            0xD65F03C0u }, 5, 1,
+          "-> and x9, x8, #0xffffffffffffffe3; x8 has no bits outside "
+          "0x3f (known 0xc bytes back)" },
+        // Negatives: a byte leaves two gaps (bits 1 and 3..7), so no
+        // run matches; nothing known; ORR has no free bits; a bitmask
+        // constant is check_mov_logic_imm_fold's; a known value is
+        // check_const_fold's; a side entry onto the operation.
+        { { 0x39400008u, 0x528000A9u, 0x0A090109u, 0xD65F03C0u }, 4, 0,
+          NULL },
+        { { 0x528000A9u, 0x0A090109u, 0xD65F03C0u }, 3, 0, NULL },
+        { { 0x12000908u, 0x528000A9u, 0x2A090109u, 0xD65F03C0u }, 4, 0,
+          NULL },
+        { { 0x12000908u, 0x528000E9u, 0x0A090109u, 0xD65F03C0u }, 4, 0,
+          NULL },
+        { { 0x52800028u, 0x528000A9u, 0x0A090109u, 0xD65F03C0u }, 4, 0,
+          NULL },
+        // and w8, w8, #7 ; mov w9, #5 ; 1: and w9, w8, w9 ; cbz x0, 1b
+        { { 0x12000908u, 0x528000A9u, 0x0A090109u, 0xB4FFFFE0u,
+            0xD65F03C0u }, 5, 0, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, name, detail,
+                                sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "mov_logic_known_bits case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
 static void test_mov_logic_imm_fold(void)
 {
     uint8_t code[16];
@@ -18862,6 +18942,7 @@ int main(void)
     test_mov_add_sub_split();
     test_mov_cmp_branch_bvs();
     test_mov_logic_imm_fold();
+    test_mov_logic_known_bits();
     test_mov_cage_orr_add();
     test_cheap_const_copy();
     test_reg_copy_chain();

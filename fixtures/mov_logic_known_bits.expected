@@ -1,0 +1,29 @@
+MOV + AND/TST that known bits make a bitmask immediate at offset: 0x4 <_main+0x4>: -> and w9, w8, #0xfffffffd; w8 has no bits outside 0x7 (known 0x8 bytes back) (2 instructions)
+  and w8, w8, #7
+  movz w9, #0x5
+  and w9, w8, w9
+
+MOV + AND/TST that known bits make a bitmask immediate at offset: 0x14 <_main+0x14>: -> tst w8, #0xfffffffd; w8 has no bits outside 0x7 (known 0x8 bytes back) (2 instructions)
+  and w8, w8, #7
+  movz w9, #0x5
+  tst w8, w9
+
+MOV + AND/TST that known bits make a bitmask immediate at offset: 0x28 <_main+0x28>: -> and x9, x8, #0xffffffffffffffe3; x8 has no bits outside 0x3f (known 0x8 bytes back) (2 instructions)
+  and x8, x8, #0x3f
+  movz x9, #0x23
+  and x9, x8, x9
+
+MOV + AND/TST that known bits make a bitmask immediate at offset: 0x38 <_main+0x38>: -> and w9, w8, #0x2; w8 has no bits outside 0x7 (known 0x8 bytes back) (2 instructions)
+  and w8, w8, #7
+  movz w9, #0x5
+  bic w9, w8, w9
+
+MOV + AND/TST that known bits make a bitmask immediate at offset: 0x4c <_main+0x4c>: -> and w9, w8, #0xfffffffd; w8 has no bits outside 0x7 (known 0x8 bytes back) (2 instructions)
+  b.hs #0x94
+  movz w9, #0x5
+  and w9, w8, w9
+
+Optimization opportunities by type:
+       5  MOV + AND/TST that known bits make a bitmask immediate
+
+5 optimization opportunities in 38 instructions

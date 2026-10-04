@@ -14170,6 +14170,180 @@ bool check_and_known_noop(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// The bitmask immediate nearest to `imm` that agrees with it on the
+// bits of `care`, trying every encodable immediate at the width: a
+// rotated run of ones replicated at each element size. A full-width
+// run is preferred to a replicated one (0xfffffffd over 0x55555555:
+// both agree with 5 on three bits), then the fewest differing bits.
+static bool nearest_bitmask_immediate(uint64_t imm, uint64_t care,
+                                      unsigned width, uint64_t *best)
+{
+    uint64_t wmask = width_mask(width);
+    bool found = false;
+    unsigned best_dist = 0;
+    for (unsigned esize = width; esize >= 2 && !found; esize /= 2) {
+        uint64_t emask = kv_ones(esize);
+        for (unsigned len = 1; len < esize; len++) {
+            uint64_t run = kv_ones(len);
+            for (unsigned rot = 0; rot < esize; rot++) {
+                uint64_t elem = rot == 0 ? run
+                    : ((run << rot) | (run >> (esize - rot))) & emask;
+                uint64_t v = 0;
+                for (unsigned pos = 0; pos < width; pos += esize) {
+                    v |= elem << pos;
+                }
+                uint64_t diff = (v ^ imm) & wmask;
+                if ((diff & care) != 0) {
+                    continue;
+                }
+                unsigned dist = (unsigned)__builtin_popcountll(diff);
+                if (!found || dist < best_dist) {
+                    found = true;
+                    best_dist = dist;
+                    *best = v;
+                }
+            }
+        }
+    }
+    return found;
+}
+
+bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->kv_valid = false;
+        return false;
+    }
+    if (!state->mov_active) {
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    unsigned sf, opc, n_bit, rd, rn, rm;
+    if (!decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn, &rm)) {
+        return false;
+    }
+    bool is_64bit = (sf != 0);
+    if (is_64bit != state->mov_is_64bit) {
+        return false;
+    }
+    // AND and ANDS (TST) only, with BIC and BICS as their Rm-inverting
+    // forms: a result bit where the input is known zero is zero
+    // whatever the mask says there, so those mask bits are free. ORR
+    // and EOR pass the input's zero bits through to the constant's.
+    if (opc != 0 && opc != 3) {
+        return false;
+    }
+    bool inverted = (n_bit != 0);
+    bool is_ands = (opc == 3);
+    if (rd == 31 && !is_ands) {
+        return false;
+    }
+    unsigned other;
+    if (inverted) {
+        if (rm != state->mov_rd) {
+            return false;
+        }
+        other = rn;
+    } else if (rm == state->mov_rd) {
+        other = rn;
+    } else if (rn == state->mov_rd) {
+        other = rm;
+    } else {
+        return false;
+    }
+    if (other == state->mov_rd || other == 31) {
+        return false;
+    }
+    unsigned width = is_64bit ? 64u : 32u;
+    uint64_t wmask = width_mask(width);
+    uint64_t imm = (inverted ? ~state->mov_value : state->mov_value) & wmask;
+    if (is_bitmask_immediate(imm, width)) {
+        return false;   // check_mov_logic_imm_fold's
+    }
+
+    // The input's possible bits: those neither its known-zero bits nor
+    // its range exclude. A known value is check_const_fold's.
+    kv_sync(state, insn, offset);
+    if (((state->kv_known >> other) & 1u) == 0) {
+        return false;
+    }
+    const kv_fact *f = &state->kv_facts[other];
+    uint64_t v, lo, hi;
+    int64_t slo, shi;
+    if (kv_fact_exact(f, &v)) {
+        return false;
+    }
+    kv_range(f, sf ? 1u : 0u, &lo, &hi, &slo, &shi);
+    if (lo > hi || (f->k0 & f->k1) != 0) {
+        return false;
+    }
+    uint64_t may = ~f->k0 & wmask & kv_ones(bits_used64(hi));
+    // A result that is always zero is a MOV #0, not a mask.
+    if ((imm & may) == 0) {
+        return false;
+    }
+    uint64_t best;
+    if (!nearest_bitmask_immediate(imm, may, width, &best)) {
+        return false;
+    }
+
+    char w_or_x = is_64bit ? 'x' : 'w';
+    char reg[8];
+    kv_reg_name(reg, sizeof(reg), other, sf);
+    out->name = "MOV + AND/TST that known bits make a bitmask immediate";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+    if (is_ands && rd == 31) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> tst %s, #0x%" PRIx64 "; %s has no bits outside 0x%" PRIx64
+            " (known 0x%zx bytes back)",
+            reg, best, reg, may, offset - state->kv_src_offset[other]);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> %s %c%u, %s, #0x%" PRIx64 "; %s has no bits outside 0x%"
+            PRIx64 " (known 0x%zx bytes back)",
+            is_ands ? "ands" : "and", w_or_x, rd, reg, best, reg, may,
+            offset - state->kv_src_offset[other]);
+    }
+
+    // The instruction that bounded the input first, then the chain and
+    // the operation.
+    snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+             state->kv_src_text[other]);
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 2u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned shift = (unsigned)e->shift_div_16 * 16u;
+        if (shift == 0) {
+            snprintf(out->lines[1u + i], sizeof(out->lines[0]),
+                "%s %c%u, #0x%x",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16);
+        } else {
+            snprintf(out->lines[1u + i], sizeof(out->lines[0]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, state->mov_rd, e->imm16, shift);
+        }
+    }
+    snprintf(out->lines[1u + chain_n], sizeof(out->lines[0]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // As check_mov_logic_imm_fold: the rewrite deletes the MOV, so
+    // unless the operation overwrites the constant register itself,
+    // wait for proof that it is dead.
+    if (rd == state->mov_rd) {
+        return true;
+    }
+    return defer_dead_mov(state, out, state->mov_rd);
+}
+
 // === CMP of a 32-bit value against 2^32 - k (check_cmp_cmn_w) ===
 
 // The target of a direct branch at `offset`, and whether it is
@@ -22179,6 +22353,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_add_sub_imm_fold,
     check_mov_add_sub_split,
     check_mov_logic_imm_fold,
+    check_mov_logic_known_bits,
     check_mov_cmp_branch_bvs,
     check_mov_cage_orr_add,
     check_cheap_const_copy,

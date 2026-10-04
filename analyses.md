@@ -2741,6 +2741,50 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the rewrite saves nothing. Those shapes are left to the
   self-op identity check.
 
+## MOV + AND/TST that known bits make a bitmask immediate
+
+* The shape above when the constant is *not* a bitmask immediate but
+  the known-value engine confines the other operand, so that one is
+  equivalent:
+
+  ```
+  cmp  w25, #0x80       ; Firefox: an ASCII character (b.hs leaves
+  b.hs L                ; w25 below 0x80)
+  mov  w8, #0x5f        ; folded to upper case: 0x5f = 0b1011111 is
+  and  w8, w25, w8      ; not a bitmask immediate...
+                        ->  and w8, w25, #0xffffffdf (bit 7 and up are
+                            zero anyway, so the mask may keep them)
+  and  w8, w8, #7       ; a three-bit field tested for two bits
+  mov  w9, #5
+  tst  w8, w9           ->  tst w8, #0xfffffffd
+  ```
+
+* **The bits.** A result bit where the input is known zero is zero
+  whatever the mask says, so the mask is free there; it must agree
+  with the constant on every bit the input may have set (its
+  known-zero bits and its range, as [the no-op AND
+  check](#andubfx-that-known-bits-make-a-no-op) reads them). Every
+  encodable immediate is tried; a full-width run is preferred to a
+  replicated one (`0xfffffffd` over `0x55555555`), then the fewest
+  differing bits. BIC/BICS fold through the complement as the sibling
+  does, and may land on a smaller immediate (`bic` of 5 on three bits
+  is `and #0x2`). ORR and EOR have no free bits: the input's zero bits
+  pass the constant's through.
+* **What it takes.** The gap in the constant has to be the only gap
+  over the bits the input may have set, so a byte with a `mov #5`
+  mask does not qualify (bits 3..7 are open and must stay clear): the
+  input's bound has to end at the constant's top bit, or the free
+  bits must let the run wrap. That is rarer than the immediate-misfit
+  audit's "if bits k+ are known clear" hint suggests, which counts the
+  constant alone.
+* **Left to other checks:** a bitmask constant (the sibling fold), a
+  known value (check_const_fold), a result that is always zero.
+* **Corpus, 2026-10-04:** Firefox XUL (30.3M instructions) **22**,
+  mostly a character bounded by a compare or TBNZ then masked; no
+  other check moved.
+* **Verification.** `test_mov_logic_known_bits` (13 word-level
+  cases) and `fixtures/mov_logic_known_bits.s`.
+
 ## MOV + CCMP/CCMN foldable to immediate form
 
 * `mov x8, #5 ; ccmp x0, x8, #0, ne` instead of

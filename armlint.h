@@ -1339,6 +1339,24 @@ bool check_mov_add_sub_split(armlint_state *state, const cs_insn *insn,
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// The same MOV + AND/ANDS (or BIC/BICS) shape when the constant is not
+// a bitmask immediate but the known-value engine confines the other
+// operand, so one is equivalent: a result bit where the input is known
+// zero is zero whatever the mask says, so those mask bits are free.
+//     and  w8, w8, #7        ; w8 is at most three bits
+//     mov  w9, #5
+//     and  w9, w8, w9        -> and w9, w8, #0xfffffffd
+// The constant must agree with the chain's on every bit the input may
+// have set; among the encodable immediates that do, the one with the
+// fewest differing bits is suggested. ORR and EOR have no free bits
+// (the input's zero bits pass the constant's through). A known value
+// is check_const_fold's, a bitmask constant check_mov_logic_imm_fold's,
+// and a result that is always zero a MOV #0. Reported as "MOV +
+// AND/TST that known bits make a bitmask immediate", with the
+// instruction that bounded the input first.
+bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
 // Detect a MOV chain materializing INT_MIN or INT_MAX at the
 // compare's width, compared for equality and branched on:
 //   MOV Xc, #INT_MIN ; CMP Xn, Xc ; B.EQ/B.NE target
