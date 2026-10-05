@@ -903,6 +903,7 @@ struct armlint_state {
     // lines are rendered into bvs_finding at the CMP, while the chain
     // state is still live; the branch completes it.
     bool bvs_active;
+    bool bvs_ccmp_active;      // a CCMP against the constant closed; its consumer next
     bool bvs_is_64bit;
     bool bvs_is_max;           // INT_MAX (cmn #1), else INT_MIN (cmp xzr)
     unsigned bvs_rn;           // the tested register
@@ -1803,6 +1804,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->cmp_active = false;
     state->tst_active = false;
     state->bvs_active = false;
+    state->bvs_ccmp_active = false;
     state->pending_bvs_active = false;
     state->umc_active = false;
     state->tbf_active = false;
@@ -20405,6 +20407,30 @@ bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
 // LLVM's review declined the general form; it is a TODO.md candidate
 // for an opt-in class.
 
+// The consumer's text with its eq/ne condition (the last operand)
+// replaced by vs/vc. The printed condition decides: an alias such as
+// CSET prints the inverse of the encoded one, and Z-true maps to
+// V-true either way.
+static bool bvs_recondition(const cs_insn *insn, char *buf, size_t size)
+{
+    const char *ops = insn->op_str;
+    const char *last = strrchr(ops, ' ');
+    if (last == NULL) {
+        return false;
+    }
+    const char *vcond;
+    if (strcmp(last + 1, "eq") == 0) {
+        vcond = "vs";
+    } else if (strcmp(last + 1, "ne") == 0) {
+        vcond = "vc";
+    } else {
+        return false;
+    }
+    snprintf(buf, size, "%s %.*s%s", insn->mnemonic,
+             (int)(last + 1 - ops), ops, vcond);
+    return true;
+}
+
 bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out)
 {
@@ -20412,49 +20438,112 @@ bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
     (void)out;   // emission goes through armlint_advance_pending_bvs
     if (insn->size != 4) {
         state->bvs_active = false;
+        state->bvs_ccmp_active = false;
         return false;
     }
     uint32_t op = insn_word(insn);
 
-    // (1) Close: the B.EQ/B.NE adjacent to the recorded CMP. Any other
-    //     instruction expires it (strict adjacency).
-    if (state->bvs_active) {
+    // (1) Close: the consumer adjacent to the recorded CMP -- a
+    //     B.EQ/B.NE, a CSEL-family select on eq/ne, or a CCMP on eq/ne
+    //     that also compares against the constant register, rewritten
+    //     too (0 - Rn overflows only at INT_MIN, Rn + 1 only at INT_MAX,
+    //     so it becomes ccmp xzr, Rn or ccmn Rn, #1 with its failure
+    //     flags moved from Z to V); its own eq/ne consumer, the next
+    //     instruction, then closes.
+    if (state->bvs_active || state->bvs_ccmp_active) {
+        bool second = state->bvs_ccmp_active;
         state->bvs_active = false;
+        state->bvs_ccmp_active = false;
         bool is_eq;
         int32_t imm19;
+        unsigned sf2, kind, cond, rd, rn, rm, nzcv;
+        bool is_ccmp;
+        char w_or_x = state->bvs_is_64bit ? 'x' : 'w';
+        unsigned rc = state->bvs_rc;
+        armlint_finding *p = &state->pending_bvs_finding;
+        char tail[ARMLINT_FINDING_LINE_LEN];
+        bool ok = false;
+        bool reg_dead_now = false;
+        bool chain_on = false;
+        char line_text[ARMLINT_FINDING_LINE_LEN];
+        snprintf(line_text, sizeof(line_text), "%s %s", insn->mnemonic,
+                 insn->op_str);
         if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
             uint64_t target = insn->address
                 + (uint64_t)((int64_t)imm19 * 4);
-            char w_or_x = state->bvs_is_64bit ? 'x' : 'w';
-            armlint_finding *p = &state->pending_bvs_finding;
-            *p = state->bvs_finding;
-            p->insn_count = state->bvs_insn_count + 1u;
-            // V is the equality either way: x + 1 overflows only at
-            // INT_MAX, 0 - x only at INT_MIN. b.eq -> b.vs, b.ne -> b.vc.
-            const char *b_mnem = is_eq ? "b.vs" : "b.vc";
-            if (state->bvs_is_max) {
-                snprintf(p->detail, sizeof(p->detail),
-                    "-> cmn %c%u, #1 ; %s 0x%" PRIx64,
-                    w_or_x, state->bvs_rn, b_mnem, target);
+            snprintf(tail, sizeof(tail), "%s 0x%" PRIx64,
+                     is_eq ? "b.vs" : "b.vc", target);
+            snprintf(line_text, sizeof(line_text), "%s 0x%" PRIx64,
+                     is_eq ? "b.eq" : "b.ne", target);
+            ok = true;
+        } else if (decode_csel_family(op, &sf2, &kind, &cond, &rd, &rn,
+                                      &rm)
+                   && cond <= 1u && rn != rc && rm != rc) {
+            ok = bvs_recondition(insn, tail, sizeof(tail));
+            reg_dead_now = rd == rc;
+        } else if (!second
+                   && decode_ccmp_ccmn_reg(op, &sf2, &is_ccmp, &rn, &rm,
+                                           &nzcv, &cond)
+                   && cond <= 1u && rn != rc) {
+            is_eq = cond == 0;
+            // A CCMP that only reads the flags would keep its own, but
+            // its reader -- a branch, as a rule -- ends the register
+            // scan unproven, so only the one against the constant
+            // register is taken.
+            if (rm == rc && is_ccmp && rn != 31u
+                    && (sf2 != 0) == state->bvs_is_64bit) {
+                // Z of the failure flags becomes V; N and C stay.
+                unsigned nz = (nzcv & 0xAu) | ((nzcv >> 2) & 1u);
+                if (state->bvs_is_max) {
+                    snprintf(tail, sizeof(tail),
+                        "ccmn %c%u, #1, #%u, %s", w_or_x, rn, nz,
+                        is_eq ? "vs" : "vc");
+                } else {
+                    snprintf(tail, sizeof(tail),
+                        "ccmp %czr, %c%u, #%u, %s", w_or_x, w_or_x, rn,
+                        nz, is_eq ? "vs" : "vc");
+                }
+                chain_on = true;
+                ok = true;
+            }
+        }
+        if (ok) {
+            if (!second) {
+                *p = state->bvs_finding;
+                if (state->bvs_is_max) {
+                    snprintf(p->detail, sizeof(p->detail),
+                        "-> cmn %c%u, #1 ; %s", w_or_x, state->bvs_rn,
+                        tail);
+                } else {
+                    snprintf(p->detail, sizeof(p->detail),
+                        "-> cmp %czr, %c%u ; %s", w_or_x, w_or_x,
+                        state->bvs_rn, tail);
+                }
             } else {
-                snprintf(p->detail, sizeof(p->detail),
-                    "-> cmp %czr, %c%u ; %s 0x%" PRIx64,
-                    w_or_x, w_or_x, state->bvs_rn, b_mnem, target);
+                size_t len = strlen(p->detail);
+                snprintf(p->detail + len, sizeof(p->detail) - len, " ; %s",
+                         tail);
             }
-            unsigned line = state->bvs_chain_lines + 1u;
+            p->insn_count += 1u;
+            unsigned line = state->bvs_chain_lines + 1u + (second ? 1u : 0u);
             if (line < ARMLINT_FINDING_LINES) {
-                snprintf(p->lines[line], sizeof(p->lines[line]),
-                    "%s 0x%" PRIx64, is_eq ? "b.eq" : "b.ne", target);
+                snprintf(p->lines[line], sizeof(p->lines[line]), "%s",
+                         line_text);
             }
-            // Deferred on two proofs (armlint_advance_pending_bvs):
-            // NZCV dead after the branch, the constant register dead.
-            state->pending_bvs_active = true;
-            state->pending_bvs_flags_dead = false;
-            state->pending_bvs_reg_dead = false;
-            state->pending_bvs_window = LIVENESS_WINDOW;
-            state->pending_bvs_reg = (int)state->bvs_rc;
-            state->pending_bvs_reg2 = -1;
-            state->pending_bvs_reg2_dead = true;
+            if (chain_on) {
+                state->bvs_ccmp_active = true;
+            } else {
+                // Deferred on two proofs (armlint_advance_pending_bvs):
+                // NZCV dead after the consumer, the constant register
+                // dead (a select that writes it has settled that).
+                state->pending_bvs_active = true;
+                state->pending_bvs_flags_dead = false;
+                state->pending_bvs_reg_dead = reg_dead_now;
+                state->pending_bvs_window = LIVENESS_WINDOW;
+                state->pending_bvs_reg = (int)rc;
+                state->pending_bvs_reg2 = -1;
+                state->pending_bvs_reg2_dead = true;
+            }
         }
     }
 

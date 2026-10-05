@@ -2060,6 +2060,21 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the marker `rustc_span` keeps in an inline `Span` for the interned
   format, inlined into every `Span::data` caller.
 
+* **Other consumers (2026-10-04).** A CSEL-family select on eq/ne
+  takes vs/vc instead (`cmp x9, x10 ; csel x3, xzr, x0, eq` ->
+  `cmp xzr, x9 ; csel x3, xzr, x0, vs`); a select that writes the
+  constant register settles that proof itself. A CCMP on eq/ne that
+  only reads the flags is left alone (its reader, a branch as a rule,
+  would end the register scan unproven). A CCMP on eq/ne that also compares
+  against the constant register -- `cmp x12, x10 ; ccmp x11, x10, #4,
+  ne` -- becomes `cmp xzr, x12 ; ccmp xzr, x11, #1, vc` (CCMN Rn, #1
+  for INT_MAX), Z of its failure flags moved to V, and its own eq/ne
+  consumer, the next instruction, closes with vs/vc. Firefox XUL
+  (30.3M instructions): **+127** findings (2,397 to 2,524);
+  librustc_driver (26.0M): **+10**. A raw scan counts 568 selects and
+  621 CCMPs after such a compare; most keep the constant register
+  live past the consumer.
+
 ## AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm
 
 * A field extracted with a mask and compared against a constant that

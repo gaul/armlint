@@ -26,39 +26,81 @@ MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x3
 register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; w8 is overwritten before any read (1 instructions)
   mov w8, #1
   ... 1 instruction ...
-  mov x8, #0x64
+  mov x8, #-0x8000000000000000
+
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x4c <_main+0x4c>: -> cmp xzr, x0 ; csel x1, xzr, x2, vs (3 instructions)
+  movz x8, #0x8000, lsl #48
+  cmp x0, x8
+  csel x1, xzr, x2, eq
 
 register write overwritten unread at offset: 0x58 <_main+0x58>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #1
   ... 1 instruction ...
-  mov w8, #0xffffff
+  mov x8, #-0x8000000000000000
 
-register write overwritten unread at offset: 0x6c <_main+0x6c>: -> delete; w8 is overwritten before any read (1 instructions)
-  mov w8, #1
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x60 <_main+0x60>: -> cmp xzr, x0 ; cset w8, vc (3 instructions)
+  movz x8, #0x8000, lsl #48
+  cmp x0, x8
+  cset w8, ne
+
+register write overwritten unread at offset: 0x68 <_main+0x68>: -> delete; w8 is overwritten before any read (1 instructions)
+  cset w8, ne
   ... 1 instruction ...
-  mov x8, #0x80000000
+  mov x8, #-0x8000000000000000
+
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x70 <_main+0x70>: -> cmp xzr, x0 ; ccmp xzr, x1, #1, vc ; b.vs 0x88 (4 instructions)
+  movz x8, #0x8000, lsl #48
+  cmp x0, x8
+  ccmp x1, x8, #4, ne
+  b.eq 0x88
 
 register write overwritten unread at offset: 0x80 <_main+0x80>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #1
   ... 1 instruction ...
-  mov x8, #-0x8000000000000000
+  mov x8, #0x7fffffffffffffff
 
-register write overwritten unread at offset: 0x94 <_main+0x94>: -> delete; x8 is overwritten before any read (1 instructions)
+MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC at offset: 0x88 <_main+0x88>: -> cmn x0, #1 ; ccmn x1, #1, #1, vc ; csel x2, x3, x4, vc (4 instructions)
+  movn x8, #0x8000, lsl #48
+  cmp x0, x8
+  ccmp x1, x8, #4, ne
+  csel x2, x3, x4, ne
+
+register write overwritten unread at offset: 0x98 <_main+0x98>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ... 1 instruction ...
+  mov x8, #0x64
+
+register write overwritten unread at offset: 0xac <_main+0xac>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ... 1 instruction ...
+  mov w8, #0xffffff
+
+register write overwritten unread at offset: 0xc0 <_main+0xc0>: -> delete; w8 is overwritten before any read (1 instructions)
+  mov w8, #1
+  ... 1 instruction ...
+  mov x8, #0x80000000
+
+register write overwritten unread at offset: 0xd4 <_main+0xd4>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #1
   ... 1 instruction ...
   mov x8, #-0x8000000000000000
 
-conditional branch that is never taken at offset: 0xac <_main+0xac>: -> delete; never taken: no value of x0 passes lt against 0x8000000000000000 (known 0xc bytes back) (1 instructions)
-  cmp x0, x8
-  b.lt #0x9c
+register write overwritten unread at offset: 0xe8 <_main+0xe8>: -> delete; x8 is overwritten before any read (1 instructions)
+  mov x8, #1
+  ... 1 instruction ...
+  mov x8, #-0x8000000000000000
 
-register write overwritten unread at offset: 0xbc <_main+0xbc>: -> delete; x9 is overwritten before any read (1 instructions)
+conditional branch that is never taken at offset: 0x100 <_main+0x100>: -> delete; never taken: no value of x0 passes lt against 0x8000000000000000 (known 0xc bytes back) (1 instructions)
+  cmp x0, x8
+  b.lt #0xf0
+
+register write overwritten unread at offset: 0x110 <_main+0x110>: -> delete; x9 is overwritten before any read (1 instructions)
   add x9, x0, x8
   adds w9, w10, w11
 
 Optimization opportunities by type:
-       7  register write overwritten unread
-       4  MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
+      11  register write overwritten unread
+       8  MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
        1  conditional branch that is never taken
 
-12 optimization opportunities in 61 instructions
+20 optimization opportunities in 82 instructions

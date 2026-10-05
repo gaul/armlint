@@ -1363,6 +1363,14 @@ bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
 // compare's width, compared for equality and branched on:
 //   MOV Xc, #INT_MIN ; CMP Xn, Xc ; B.EQ/B.NE target
 //     -> CMP XZR, Xn ; B.VS/B.VC target
+// The consumer may instead be a CSEL-family select on eq/ne (its
+// condition becomes vs/vc; one that writes the constant register
+// settles that proof itself), or a CCMP on eq/ne that also compares
+// against the constant register: that one becomes CCMP XZR, Rn (or
+// CCMN Rn, #1 for INT_MAX) with Z of its failure flags moved to V, and
+// its own eq/ne consumer, the next instruction, closes the shape. A
+// CCMP that only reads the flags is not taken: its reader, a branch
+// as a rule, would end the register scan unproven.
 //   MOV Xc, #INT_MAX ; CMP Xn, Xc ; B.EQ/B.NE target
 //     -> CMN Xn, #1  ; B.VS/B.VC target
 // No CMP immediate encodes either value, but signed overflow selects

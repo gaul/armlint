@@ -850,6 +850,8 @@ static void ccmp_reg(uint8_t out[4], unsigned sf, unsigned is_ccmp,
                      unsigned cond);
 static void ldr_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
 static void ldrb_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
+static int run_lvn_words(const uint32_t *words, size_t n, const char *name,
+                         char *detail, size_t detail_size);
 static void ldrh_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
 static void ldr_x_uimm_with(uint8_t out[4], unsigned rt, unsigned rn,
                             unsigned imm12);
@@ -8648,6 +8650,56 @@ static void test_mov_cmp_branch_bvs(void)
     assert(run_buffer_check(code, 28) == 0);
     cbz_cbnz(&code[20], 1, 0, 9, -5);
     assert(run_buffer_check(code, 28) == 1);
+
+    // -- Other consumers, as words with the buffer set. --
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // cmp x2, x0 ; csel x3, xzr, x4, eq ; mov x0, #1 ; adds ; ret
+        { { 0xD2F00000u, 0xEB00005Fu, 0x9A8403E3u, 0xD2800020u, 0x2B0700C5u,
+            0xD65F03C0u }, 6, 1, "-> cmp xzr, x2 ; csel x3, xzr, x4, vs" },
+        // cset w0, ne writes the constant register (an alias prints the
+        // inverse of its encoded condition; the text decides).
+        { { 0xD2F00000u, 0xEB00005Fu, 0x1A9F07E0u, 0x2B0700C5u, 0xD65F03C0u },
+          5, 1, "-> cmp xzr, x2 ; cset w0, vc" },
+        // A CCMP against the constant register, then its b.eq: Z of the
+        // failure flags (#4) becomes V (#1).
+        { { 0xD2F00000u, 0xEB00005Fu, 0xFA401064u, 0x54000060u, 0xD2800020u,
+            0x2B0700C5u, 0xD65F03C0u }, 7, 1,
+          "-> cmp xzr, x2 ; ccmp xzr, x3, #1, vc ; b.vs 0x18" },
+        // INT_MAX: the CCMP becomes a CCMN #1, the consumer a CSEL.
+        { { 0x92F00000u, 0xEB00005Fu, 0xFA401064u, 0x9A8710C5u, 0xD2800020u,
+            0x2B0700C5u, 0xD65F03C0u }, 7, 1,
+          "-> cmn x2, #1 ; ccmn x3, #1, #1, vc ; csel x5, x6, x7, vc" },
+        // Negatives: a CCMP that only reads the flags (its branch ends
+        // the register scan); a CCMP on another condition; a select
+        // reading the constant register; a second CCMP where the
+        // consumer must be.
+        { { 0xD2F00000u, 0xEB00005Fu, 0xFA441060u, 0x54000040u, 0xD2800020u,
+            0xD65F03C0u }, 6, 0, NULL },
+        { { 0xD2F00000u, 0xEB00005Fu, 0xFA44B060u, 0x54000040u, 0xD2800020u,
+            0xD65F03C0u }, 6, 0, NULL },
+        { { 0xD2F00000u, 0xEB00005Fu, 0x9A840003u, 0xD2800020u, 0x2B0700C5u,
+            0xD65F03C0u }, 6, 0, NULL },
+        { { 0xD2F00000u, 0xEB00005Fu, 0xFA401064u, 0xFA4010A4u, 0x54000060u,
+            0xD2800020u, 0x2B0700C5u, 0xD65F03C0u }, 8, 0, NULL },
+    };
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, kBvs, detail,
+                                sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "bvs consumer case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
 }
 
 static void test_mov_add_sub_imm_fold(void)

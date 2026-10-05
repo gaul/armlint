@@ -35,6 +35,35 @@ _main:
     mov     w8, #1
     adds    w9, w10, w11
 4:
+    // 5) A CSEL on eq, and a CSET on ne that writes the constant
+    //    register itself.
+    mov     x8, #0x8000000000000000
+    cmp     x0, x8
+    csel    x1, xzr, x2, eq     // -> cmp xzr, x0 ; csel x1, xzr, x2, vs
+    mov     x8, #1
+    adds    w9, w10, w11
+    mov     x8, #0x8000000000000000
+    cmp     x0, x8
+    cset    w8, ne              // -> cmp xzr, x0 ; cset w8, vc
+    adds    w9, w10, w11
+
+    // 6) A CCMP against the constant too, then its branch: both
+    //    compares become overflow tests, Z of the failure flags V.
+    mov     x8, #0x8000000000000000
+    cmp     x0, x8
+    ccmp    x1, x8, #4, ne      // -> cmp xzr, x0 ; ccmp xzr, x1, #1, vc ; b.vs 6f
+    b.eq    6f
+    mov     x8, #1
+    adds    w9, w10, w11
+6:
+    // 7) INT_MAX through a CCMN #1, the consumer a CSEL.
+    mov     x8, #0x7fffffffffffffff
+    cmp     x0, x8
+    ccmp    x1, x8, #4, ne
+    csel    x2, x3, x4, ne      // -> cmn x0, #1 ; ccmn x1, #1, #1, vc ; csel x2, x3, x4, vc
+    mov     x8, #1
+    adds    w9, w10, w11
+
     // Negatives:
     // N1) An add/sub-encodable constant is the CMP-immediate fold's
     //     (-> cmp x0, #0x64).
