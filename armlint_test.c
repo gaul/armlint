@@ -9930,6 +9930,74 @@ static void test_and_known_noop(void)
     }
 }
 
+// check_and_mov_cmp_ubfx over instruction words with the buffer set.
+// Each positive ends with the three proofs: the masked register and
+// NZCV overwritten (an ADDS), the constant register overwritten.
+static void test_and_mov_cmp_ubfx(void)
+{
+    const char *name =
+        "AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // and w9, w22, #0xfc00 ; mov w11, #0xd800 ; cmp w9, w11 ; b.eq ;
+        // mov w9, #0 ; mov w11, #0 ; adds w3, w4, w5 ; ret
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x54000080u, 0x52800009u,
+            0x5280000Bu, 0x2B050083u, 0xD65F03C0u }, 8, 1,
+          "-> ubfx w9, w22, #10, #6 ; cmp w9, #0x36" },
+        // The constant first, the CMP operands swapped, an instruction
+        // between, b.ne, and the RET proving NZCV dead last.
+        { { 0x529B0008u, 0x12161409u, 0x91000421u, 0x6B09011Fu, 0x54000061u,
+            0x52800008u, 0x52800009u, 0xD65F03C0u }, 8, 1,
+          "-> ubfx w9, w0, #10, #6 ; cmp w9, #0x36" },
+        // X form, a two-link chain: and x8, x0, #0xfffffffff000000 ;
+        // movz x9, #0x100, lsl #16 ; movk x9, #0x4, lsl #32 ; cmp ; b.eq
+        { { 0x92688C08u, 0xD2A02009u, 0xF2C00089u, 0xEB09011Fu, 0x54000060u,
+            0xAB020028u, 0xD2800009u, 0xD65F03C0u }, 8, 1,
+          "-> ubfx x8, x0, #24, #36 ; cmp x8, #0x401" },
+        // A mask reaching the sign bit with an unsigned condition (b.lo),
+        // the shifted-immediate form.
+        { { 0x12124408u, 0x52B00009u, 0x6B09011Fu, 0x54000063u, 0x2B020028u,
+            0x52800009u, 0xD65F03C0u }, 7, 1,
+          "-> ubfx w8, w0, #14, #18 ; cmp w8, #0x20, lsl #12" },
+        // Negatives: a signed condition over a sign-bit mask; the masked
+        // register read between the AND and the CMP; the constant fits
+        // the compare already; the masked register read after the
+        // branch; a mask of two runs; the chain feeds the AND; the
+        // constant has bits outside the mask.
+        { { 0x12124408u, 0x52B00009u, 0x6B09011Fu, 0x5400006Bu, 0x2B020028u,
+            0x52800009u, 0xD65F03C0u }, 7, 0, NULL },
+        { { 0x121616C9u, 0xB9000009u, 0x529B000Bu, 0x6B0B013Fu, 0x54000060u,
+            0x2B020029u, 0x5280000Bu, 0xD65F03C0u }, 8, 0, NULL },
+        { { 0x121C0EC9u, 0x5280060Bu, 0x6B0B013Fu, 0x54000060u, 0x2B020029u,
+            0x5280000Bu, 0xD65F03C0u }, 7, 0, NULL },
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x54000080u, 0xB9000009u,
+            0x2B020029u, 0x5280000Bu, 0xD65F03C0u }, 8, 0, NULL },
+        { { 0x12089EC9u, 0x5286800Bu, 0x6B0B013Fu, 0x54000060u, 0x2B020029u,
+            0x5280000Bu, 0xD65F03C0u }, 7, 0, NULL },
+        { { 0x529B0009u, 0x12161528u, 0x6B09011Fu, 0x54000060u, 0x2B020028u,
+            0x52800009u, 0xD65F03C0u }, 7, 0, NULL },
+        { { 0x121616C9u, 0x529B002Bu, 0x6B0B013Fu, 0x54000060u, 0x2B020029u,
+            0x5280000Bu, 0xD65F03C0u }, 7, 0, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, name, detail,
+                                sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "and_mov_cmp_ubfx case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
 // check_mov_logic_known_bits over instruction words with the buffer
 // set: the constant register is killed by a MOVZ where the operation
 // does not overwrite it.
@@ -18943,6 +19011,7 @@ int main(void)
     test_mov_cmp_branch_bvs();
     test_mov_logic_imm_fold();
     test_mov_logic_known_bits();
+    test_and_mov_cmp_ubfx();
     test_mov_cage_orr_add();
     test_cheap_const_copy();
     test_reg_copy_chain();

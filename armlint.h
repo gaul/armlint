@@ -1385,6 +1385,24 @@ bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
 bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 
+// Detect a field extracted with a mask and compared against a constant
+// that does not fit the compare immediate, while the constant shifted
+// down by the mask's trailing zeros does:
+//   and  w9, w22, #0xfc00 ; mov w11, #0xd800 ; cmp w9, w11 ; b.eq L
+//     -> ubfx w9, w22, #10, #6 ; cmp w9, #0x36 ; b.eq L
+// The AND and the chain are found through the known-value engine as
+// the CMP registers' last writers, in either order, with nothing
+// between that touches either register or branches. Both compare
+// operands are multiples of 2^tz, so Z and C are unchanged, and N and V
+// too unless the mask reaches the sign bit, when the branch must use
+// an equality or unsigned condition. Deferred on three fall-through
+// proofs (armlint_advance_pending_bvs): NZCV, the constant register
+// and the masked register (which now holds the shifted field) dead
+// after the branch. Reported as "AND + MOV + CMP of a masked field
+// foldable to UBFX + CMP #imm".
+bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // V8-cage fold (feature-gated: ARMLINT_FEATURE_V8CAGE / -m v8).
 // A MOV chain materialising a 32-bit constant C that is then merged
 // into the pointer-compression cage base with a direct 64-bit

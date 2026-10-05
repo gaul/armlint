@@ -921,7 +921,19 @@ struct armlint_state {
     bool pending_bvs_reg_dead;
     unsigned pending_bvs_window;
     int pending_bvs_reg;
+    int pending_bvs_reg2;      // a second register, or -1
+    bool pending_bvs_reg2_dead;
     armlint_finding pending_bvs_finding;
+
+    // check_and_mov_cmp_ubfx: the CMP of a masked register against a
+    // constant register has been seen; the branch completes it. The
+    // producers' lines are rendered into umc_finding at the CMP.
+    bool umc_active;
+    bool umc_top_bit;          // the mask reaches the sign bit
+    unsigned umc_rt;           // the masked register (the AND's Rd)
+    unsigned umc_rc;           // the constant register
+    unsigned umc_lines;        // lines rendered into umc_finding
+    armlint_finding umc_finding;
 
     // Most-recent instruction was ADR / ADRP with the recorded Rd.
     // Used by check_add_sub_zero to skip the canonical
@@ -1792,6 +1804,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->tst_active = false;
     state->bvs_active = false;
     state->pending_bvs_active = false;
+    state->umc_active = false;
     state->tbf_active = false;
     state->pending_tb_active = false;
     state->cset_active = false;
@@ -20275,6 +20288,8 @@ bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
             state->pending_bvs_reg_dead = false;
             state->pending_bvs_window = LIVENESS_WINDOW;
             state->pending_bvs_reg = (int)state->bvs_rc;
+            state->pending_bvs_reg2 = -1;
+            state->pending_bvs_reg2_dead = true;
         }
     }
 
@@ -20368,6 +20383,237 @@ bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
     return false;
 }
 
+// === AND #mask + MOV + CMP of a field -> UBFX + CMP #imm ===
+//
+// A field extracted with a mask and compared against a constant that
+// does not fit the compare immediate, while the constant shifted down
+// by the mask's trailing zeros does:
+//   and  w9, w22, #0xfc00      ubfx w9, w22, #10, #6
+//   mov  w11, #0xd800     ->   cmp  w9, #0x36
+//   cmp  w9, w11               b.eq L
+//   b.eq L
+// The UTF-16 surrogate test (c & 0xfc00) == 0xd800 is the common
+// shape. Both sides are multiples of 2^tz, so Z and C come out the
+// same; N and V do too unless the mask reaches the sign bit, when only
+// the equality and unsigned conditions survive. The AND's register
+// holds the shifted field afterwards, so it must be dead after the
+// branch, as must the constant register and NZCV (fall-through
+// proofs, as the B.VS fold's). LLVM 23 emits the three-instruction
+// form; the fold is proposed for it on the aarch64-and-mask-cmp-ubfx
+// branch.
+
+// The producers are found by walking back from the CMP through the
+// buffer words: the AND of one register and the move-wide chain of the
+// other, nothing between touching either register or transferring.
+bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    (void)out;   // emission goes through armlint_advance_pending_bvs
+    if (insn->size != 4) {
+        state->umc_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+
+    // (1) Close: the B.cond adjacent to the recorded CMP.
+    if (state->umc_active) {
+        state->umc_active = false;
+        if ((op & 0xFF000010u) == 0x54000000u) {
+            unsigned cond = op & 0xFu;
+            // eq ne hs lo hi ls always; mi pl vs vc ge lt gt le only
+            // below the sign bit (al and nv are not conditions).
+            bool ok = cond <= 3u || cond == 8u || cond == 9u
+                || (!state->umc_top_bit && cond <= 13u);
+            if (ok && !state->pending_bvs_active) {
+                armlint_finding *p = &state->pending_bvs_finding;
+                *p = state->umc_finding;
+                p->insn_count += 1u;
+                if (state->umc_lines < ARMLINT_FINDING_LINES) {
+                    snprintf(p->lines[state->umc_lines],
+                             sizeof(p->lines[0]), "%s %s",
+                             insn->mnemonic, insn->op_str);
+                }
+                state->pending_bvs_active = true;
+                state->pending_bvs_flags_dead = false;
+                state->pending_bvs_reg_dead = false;
+                state->pending_bvs_reg2_dead = false;
+                state->pending_bvs_window = LIVENESS_WINDOW;
+                state->pending_bvs_reg = (int)state->umc_rc;
+                state->pending_bvs_reg2 = (int)state->umc_rt;
+            }
+        }
+    }
+
+    // (2) Open: CMP Rn, Rm (SUBS to ZR, LSL #0).
+    unsigned sf, rd, rn, rm;
+    bool is_sub, is_s;
+    if (!decode_add_sub_shifted_lsl0(op, &sf, &is_sub, &is_s, &rd, &rn, &rm)
+            || !is_sub || !is_s || rd != 31 || rn == 31 || rm == 31
+            || rn == rm || state->buf == NULL) {
+        return false;
+    }
+    unsigned width = sf ? 64u : 32u;
+    uint64_t wmask = width_mask(width);
+
+    // Find the producers by walking back through the words: the AND of
+    // one CMP register and the move-wide chain of the other, each the
+    // nearest writer of its register, with every other word between
+    // touching neither register and transferring nowhere. Unmodelled
+    // words answer LIV_READ. A chain is walked link by link; a word
+    // that is not a link while one is open ends the search.
+    size_t and_off = SIZE_MAX, chain_start = SIZE_MAX, chain_end = SIZE_MAX;
+    unsigned rt = 0, rc = 0;
+    uint32_t and_op = 0;
+    mov_wide_insn mw;
+    size_t o = offset;
+    for (unsigned n = 0; n < LIVENESS_WINDOW && o >= 4u; n++) {
+        o -= 4u;
+        uint32_t w = buf_word_at(state->buf, o);
+        unsigned wrd = w & 0x1Fu;
+        mov_wide_insn k;
+        bool is_and = (w & 0x7F800000u) == 0x12000000u
+            && (wrd == rn || wrd == rm);
+        bool is_mov = decode_mov_wide(w, &k) && (wrd == rn || wrd == rm);
+        if (chain_end != SIZE_MAX && chain_start == SIZE_MAX) {
+            // Inside a chain: only its links.
+            if (!is_mov || k.rd != rc) {
+                return false;
+            }
+            if (k.opc != 3u) {
+                chain_start = o;
+                mw = k;
+            }
+        } else if (is_and && and_off == SIZE_MAX
+                   && (chain_end == SIZE_MAX || wrd != rc)) {
+            and_off = o;
+            and_op = w;
+            rt = wrd;
+            rc = wrd == rn ? rm : rn;
+        } else if (is_mov && chain_end == SIZE_MAX
+                   && (and_off == SIZE_MAX || wrd != rt)) {
+            chain_end = o;
+            rc = wrd;
+            rt = wrd == rn ? rm : rn;
+            if (k.opc != 3u) {
+                chain_start = o;
+                mw = k;
+            }
+        } else if (classify_word_reg_liveness(w, rn) != LIV_UNKNOWN
+                   || classify_word_reg_liveness(w, rm) != LIV_UNKNOWN
+                   || classify_liveness(w) == LIV_TERM_SAFE
+                   || classify_liveness(w) == LIV_TERM_UNSAFE) {
+            return false;
+        }
+        if (and_off != SIZE_MAX && chain_start != SIZE_MAX) {
+            break;
+        }
+    }
+    if (and_off == SIZE_MAX || chain_start == SIZE_MAX) {
+        return false;
+    }
+    size_t start = and_off < chain_start ? and_off : chain_start;
+    unsigned chain_n = (unsigned)((chain_end - chain_start) / 4u) + 1u;
+
+    // The AND: the CMP's width, a mask that is one run of bits not
+    // starting at bit 0, a source that is neither ZR nor the constant.
+    if (((and_op >> 31) != 0) != (sf != 0)
+            || (!sf && ((and_op >> 22) & 1u) != 0)) {
+        return false;
+    }
+    unsigned rs = (and_op >> 5) & 0x1Fu;
+    if (rs == 31u || rs == rc) {
+        return false;
+    }
+    uint64_t m;
+    if (!decode_bitmask_imm_value((and_op >> 22) & 1u, (and_op >> 16) & 0x3Fu,
+                                  (and_op >> 10) & 0x3Fu, width, &m)) {
+        return false;
+    }
+    m &= wmask;
+    unsigned tz = (unsigned)__builtin_ctzll(m);
+    uint64_t run = m >> tz;
+    if (tz == 0 || (run & (run + 1u)) != 0) {
+        return false;
+    }
+    unsigned len = (unsigned)__builtin_popcountll(m);
+
+    // The constant, as the CMP reads it: inside the mask, not a compare
+    // immediate itself, but one once shifted down.
+    uint64_t c = 0;
+    for (size_t l = chain_start; l <= chain_end; l += 4u) {
+        mov_wide_insn k;
+        decode_mov_wide(buf_word_at(state->buf, l), &k);
+        c = mov_wide_value(&k, c);
+    }
+    c &= wmask;
+    if (c == 0 || (c & ~m) != 0) {
+        return false;   // a TST, or a compare that never holds
+    }
+    uint64_t sign_bit = (uint64_t)1 << (width - 1u);
+    uint64_t neg = (~c + 1u) & wmask;
+    if (misfit_addsub_fits(c) || ((c & sign_bit) != 0 && misfit_addsub_fits(neg))) {
+        return false;   // the CMP-immediate fold's
+    }
+    uint64_t imm = c >> tz;
+    if (!misfit_addsub_fits(imm)) {
+        return false;
+    }
+
+    // Render now: the AND, the chain, the CMP; the branch's line stays
+    // free.
+    armlint_finding *f = &state->umc_finding;
+    f->name = "AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm";
+    f->start_offset = start;
+    f->insn_count = (unsigned)((offset - start) / 4u) + 1u;
+    clear_finding_strings(f);
+    char w_or_x = sf ? 'x' : 'w';
+    if (imm <= 0xFFFu) {
+        snprintf(f->detail, sizeof(f->detail),
+            "-> ubfx %c%u, %c%u, #%u, #%u ; cmp %c%u, #0x%" PRIx64,
+            w_or_x, rt, w_or_x, rs, tz, len, w_or_x, rt, imm);
+    } else {
+        snprintf(f->detail, sizeof(f->detail),
+            "-> ubfx %c%u, %c%u, #%u, #%u ; cmp %c%u, #0x%" PRIx64
+            ", lsl #12", w_or_x, rt, w_or_x, rs, tz, len, w_or_x, rt,
+            imm >> 12);
+    }
+    unsigned line = 0;
+    char chain_w_or_x = mw.is_64bit ? 'x' : 'w';
+    bool and_first = and_off < chain_start;
+    for (unsigned pass = 0; pass < 2; pass++) {
+        if ((pass == 0) == and_first) {
+            snprintf(f->lines[line++], sizeof(f->lines[0]),
+                "and %c%u, %c%u, #0x%" PRIx64, w_or_x, rt, w_or_x, rs, m);
+        } else {
+            unsigned max_chain = ARMLINT_FINDING_LINES - 3u;
+            for (unsigned i = 0; i < chain_n && i < max_chain; i++) {
+                mov_wide_insn e;
+                decode_mov_wide(buf_word_at(state->buf,
+                                            chain_start + 4u * i), &e);
+                const char *mnem = e.opc == 2 ? "movz"
+                                 : (e.opc == 0 ? "movn" : "movk");
+                if (e.hw == 0) {
+                    snprintf(f->lines[line++], sizeof(f->lines[0]),
+                        "%s %c%u, #0x%x", mnem, chain_w_or_x, rc, e.imm16);
+                } else {
+                    snprintf(f->lines[line++], sizeof(f->lines[0]),
+                        "%s %c%u, #0x%x, lsl #%u", mnem, chain_w_or_x, rc,
+                        e.imm16, e.hw * 16u);
+                }
+            }
+        }
+    }
+    snprintf(f->lines[line++], sizeof(f->lines[0]), "%s %s",
+             insn->mnemonic, insn->op_str);
+
+    state->umc_active = true;
+    state->umc_top_bit = (m & sign_bit) != 0;
+    state->umc_rt = rt;
+    state->umc_rc = rc;
+    state->umc_lines = line;
+    return false;
+}
+
 bool armlint_advance_pending_bvs(armlint_state *state, const cs_insn *insn,
                                  size_t offset, armlint_finding *out)
 {
@@ -20388,8 +20634,11 @@ bool armlint_advance_pending_bvs(armlint_state *state, const cs_insn *insn,
         ? LIV_UNKNOWN : classify_liveness(op);
     liveness_t rl = state->pending_bvs_reg_dead
         ? LIV_UNKNOWN : classify_reg_liveness(insn, state->pending_bvs_reg);
+    liveness_t rl2 = state->pending_bvs_reg2_dead
+        ? LIV_UNKNOWN : classify_reg_liveness(insn, state->pending_bvs_reg2);
     if (fl == LIV_READ || fl == LIV_TERM_UNSAFE
-            || rl == LIV_READ || rl == LIV_TERM_UNSAFE) {
+            || rl == LIV_READ || rl == LIV_TERM_UNSAFE
+            || rl2 == LIV_READ || rl2 == LIV_TERM_UNSAFE) {
         state->pending_bvs_active = false;
         return false;
     }
@@ -20402,7 +20651,12 @@ bool armlint_advance_pending_bvs(armlint_state *state, const cs_insn *insn,
         state->pending_bvs_reg_dead = true;
         settled = true;
     }
-    if (state->pending_bvs_flags_dead && state->pending_bvs_reg_dead) {
+    if (rl2 == LIV_OVERWRITE) {
+        state->pending_bvs_reg2_dead = true;
+        settled = true;
+    }
+    if (state->pending_bvs_flags_dead && state->pending_bvs_reg_dead
+            && state->pending_bvs_reg2_dead) {
         *out = state->pending_bvs_finding;
         state->pending_bvs_active = false;
         return true;
@@ -22355,6 +22609,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_logic_imm_fold,
     check_mov_logic_known_bits,
     check_mov_cmp_branch_bvs,
+    check_and_mov_cmp_ubfx,
     check_mov_cage_orr_add,
     check_cheap_const_copy,
     check_reg_copy_chain,

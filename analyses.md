@@ -2060,6 +2060,45 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the marker `rustc_span` keeps in an inline `Span` for the interned
   format, inlined into every `Span::data` caller.
 
+## AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm
+
+* A field extracted with a mask and compared against a constant that
+  does not fit the compare immediate, while the constant shifted down
+  by the mask's trailing zeros does:
+
+  ```
+  and  w9, w22, #0xfc00     ; Firefox: a UTF-16 high-surrogate test,
+  mov  w11, #0xd800         ; (c & 0xfc00) == 0xd800
+  cmp  w9, w11
+  b.eq L                    ->  ubfx w9, w22, #10, #6 ; cmp w9, #0x36 ; b.eq L
+  ```
+
+  Four instructions become three, and the constant is never
+  materialized. Both compare operands are multiples of 2^tz, so Z and
+  C come out the same; N and V do too unless the mask reaches the sign
+  bit, when only the equality and unsigned conditions survive.
+* **The producers** are found by walking back from the CMP through
+  the buffer words, at most a liveness window: the AND of one CMP
+  register and the move-wide chain of the other, in either order,
+  each the nearest writer of its register, with every other word
+  between touching neither register and transferring nowhere. The
+  mask must be one run of bits not starting at bit 0, the constant
+  inside it and nonzero (zero is a TST), not a compare immediate at
+  either sign, and a compare immediate (plain or shifted) once
+  shifted. The AND's source must not be the constant register.
+* **Three fall-through proofs**, through the B.VS fold's deferral
+  with a second register: NZCV dead after the branch, the constant
+  register dead, and the masked register dead, since it now holds the
+  shifted field. The branch must follow the CMP directly.
+* **Corpus, 2026-10-04:** Firefox XUL (30.3M instructions) **90**,
+  surrogate tests and other field compares. A raw scan finds 562
+  `and ; mov ; cmp` triples that qualify before the proofs; the rest
+  feed a CSEL or a CCMP, or keep a register live across the branch.
+  LLVM 23 emits the four-instruction form; the fold is proposed for
+  it on the `aarch64-and-mask-cmp-ubfx` branch.
+* **Verification.** `test_and_mov_cmp_ubfx` (11 word-level cases) and
+  `fixtures/and_mov_cmp_ubfx.s`.
+
 ## MOV + ADD/SUB foldable to the original source
 
 * An in-place ADD/SUB immediate on a register the previous
