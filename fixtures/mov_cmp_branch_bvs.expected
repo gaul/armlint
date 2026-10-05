@@ -70,6 +70,10 @@ register write overwritten unread at offset: 0x98 <_main+0x98>: -> delete; x8 is
   ... 1 instruction ...
   mov x8, #0x64
 
+MOV + ADD/SUB foldable to immediate form at offset: 0xa0 <_main+0xa0>: -> cmp x0, #0x64 (2 instructions)
+  movz x8, #0x64
+  cmp x0, x8
+
 register write overwritten unread at offset: 0xac <_main+0xac>: -> delete; x8 is overwritten before any read (1 instructions)
   mov x8, #1
   ... 1 instruction ...
@@ -101,6 +105,7 @@ register write overwritten unread at offset: 0x110 <_main+0x110>: -> delete; x9 
 Optimization opportunities by type:
       11  register write overwritten unread
        8  MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
+       1  MOV + ADD/SUB foldable to immediate form
        1  conditional branch that is never taken
 
-20 optimization opportunities in 82 instructions
+21 optimization opportunities in 82 instructions

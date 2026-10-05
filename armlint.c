@@ -2069,6 +2069,11 @@ static bool decode_fp_ldr_str_uimm(uint32_t op, bool *out_is_load,
                                    unsigned *out_rn, unsigned *out_rt);
 static bool nzcv_dead_at_target(const armlint_state *state,
                                 int64_t target);
+static bool reg_dead_at_target(const armlint_state *state, int64_t target,
+                               unsigned reg);
+static bool branch_reads_reg(uint32_t op, int reg);
+static bool direct_branch_target(uint32_t op, size_t offset,
+                                 int64_t *target, bool *conditional);
 
 // Shift-type names indexed by the shifted-register encoding's
 // shift-type field (bits 23..22).
@@ -4299,16 +4304,50 @@ static bool defer_dead_lse(armlint_state *state, const armlint_finding *out,
     return false;
 }
 
+// Whether a direct branch reads GPR `reg`: a CBZ/CBNZ or TBZ/TBNZ of
+// it. (classify_reg_liveness answers LIV_TERM_UNSAFE for every branch.)
+static bool branch_reads_reg(uint32_t op, int reg)
+{
+    return ((op & 0x7E000000u) == 0x34000000u
+            || (op & 0x7E000000u) == 0x36000000u)
+        && reg >= 0 && (op & 0x1Fu) == (unsigned)reg;
+}
+
 bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out)
 {
-    (void)offset;
     if (!state->pending_mz_active) {
         return false;
     }
     if (insn->size != 4) {
         state->pending_mz_active = false;
         return emit_pending_mz_fallback(state, out);
+    }
+    // A direct branch is followed: the register must be dead at its
+    // target (reg_dead_at_target), after which an unconditional one
+    // settles the proof and a conditional one leaves the fall-through
+    // scan to go on. A CBZ/TBZ of the register itself reads it.
+    uint32_t op = insn_word(insn);
+    int64_t target;
+    bool conditional;
+    if (direct_branch_target(op, offset, &target, &conditional)
+            && !branch_reads_reg(op, state->pending_mz_reg)) {
+        if (!reg_dead_at_target(state, target,
+                                (unsigned)state->pending_mz_reg)) {
+            state->pending_mz_active = false;
+            return emit_pending_mz_fallback(state, out);
+        }
+        if (!conditional) {
+            *out = state->pending_mz_finding;
+            state->pending_mz_active = false;
+            state->pending_mz_has_fallback = false;
+            return true;
+        }
+        if (state->pending_mz_window == 0 || --state->pending_mz_window == 0) {
+            state->pending_mz_active = false;
+            return emit_pending_mz_fallback(state, out);
+        }
+        return false;
     }
     switch (classify_reg_liveness(insn, state->pending_mz_reg)) {
     case LIV_OVERWRITE:
@@ -4334,10 +4373,12 @@ bool armlint_advance_pending_mz(armlint_state *state, const cs_insn *insn,
 // Stash *out as a deferred finding whose emission is gated on `reg` --
 // a register produced by an instruction the finding proposes to delete
 // -- being dead afterward. Such a fold only saves an instruction once a
-// later instruction overwrites `reg` before any read or control
-// transfer; armlint_advance_pending_mz runs that forward scan and emits
-// the stashed finding then. Returns false so the caller records nothing
-// now. Shared by every fold that deletes the producer of `reg`: the
+// later instruction overwrites `reg` before any read; armlint_advance_
+// pending_mz runs that forward scan and emits the stashed finding then.
+// A direct branch is followed (reg_dead_at_target walks the target,
+// a conditional one leaves the fall-through scan to go on); a call, a
+// return or an indirect branch ends the scan unproven. Returns false
+// so the caller records nothing now. Shared by every fold that deletes the producer of `reg`: the
 // MOV-chain folds (strength reductions, immediate/offset/FMOV folds,
 // MOV #0 -> ZR), the BFXIL/BFI synthesis (which drops the isolate's
 // temp register), the CSET inversion folds (EOR #1 / NEG), the
@@ -6386,6 +6427,88 @@ static bool nzcv_dead_at_target(const armlint_state *state,
             path_at[paths++] = (int64_t)off + (int64_t)words * 4;
             at += 4;
             window = LIVENESS_WINDOW;
+        }
+    }
+    return true;
+}
+
+// The register-side twin of nzcv_dead_at_target: is `reg` overwritten
+// before any read on every path from a branch target? The same walk
+// under classify_word_reg_liveness, following a B to its destination
+// and a B.cond, CBZ/CBNZ or TBZ/TBNZ down both edges (a CBZ or TBZ of
+// the register itself reads it). A call or return ends a path
+// unproven, as in the streaming scan: no PCS assumption.
+static bool reg_dead_at_target(const armlint_state *state, int64_t target,
+                               unsigned reg)
+{
+    if (state->buf == NULL) {
+        return false;
+    }
+    int64_t path_at[NZCV_TARGET_PATHS];
+    size_t seen[NZCV_TARGET_BUDGET];
+    unsigned paths = 0;
+    unsigned nseen = 0;
+    path_at[paths++] = target;
+    while (paths > 0) {
+        int64_t at = path_at[--paths];
+        unsigned window = LIVENESS_WINDOW;
+        // Only an arrival by branch can land on an examined word (a
+        // straight run that reaches one would re-examine it to the
+        // same end, or exhaust the budget), so only those are looked
+        // up: the common walk is a short straight run to a kill.
+        bool arrived = true;
+        for (;;) {
+            if (at < 0 || (uint64_t)at > state->buf_len
+                    || state->buf_len - (size_t)at < 4u) {
+                return false;
+            }
+            size_t off = (size_t)at;
+            if (arrived) {
+                bool examined = false;
+                for (unsigned k = 0; k < nseen && !examined; k++) {
+                    examined = seen[k] == off;
+                }
+                if (examined) {
+                    break;
+                }
+                arrived = false;
+            }
+            if (window == 0 || nseen == NZCV_TARGET_BUDGET
+                    || v8pool_skip_bytes(state->features, state->buf + off,
+                                         state->buf_len - off) != 0) {
+                return false;
+            }
+            seen[nseen++] = off;
+            window--;
+            uint32_t op = buf_word_at(state->buf, off);
+            int64_t edge;
+            bool conditional;
+            if (direct_branch_target(op, off, &edge, &conditional)) {
+                if (branch_reads_reg(op, (int)reg)) {
+                    return false;   // CBZ/TBZ of the register
+                }
+                if (!conditional) {
+                    at = edge;
+                    window = LIVENESS_WINDOW;
+                    arrived = true;
+                    continue;
+                }
+                if (paths == NZCV_TARGET_PATHS) {
+                    return false;
+                }
+                path_at[paths++] = edge;
+                at += 4;
+                window = LIVENESS_WINDOW;
+                continue;
+            }
+            liveness_t c = classify_word_reg_liveness(op, reg);
+            if (c == LIV_OVERWRITE) {
+                break;              // this path is proven
+            }
+            if (c != LIV_UNKNOWN) {
+                return false;       // a read, a call, or unmodelled
+            }
+            at += 4;
         }
     }
     return true;
@@ -14489,34 +14612,6 @@ liveness_t classify_word_reg_liveness(uint32_t op, unsigned reg)
     return op == 0xD503201Fu ? LIV_UNKNOWN : LIV_READ;
 }
 
-// Whether GPR `reg` is dead at a branch target in the scanned buffer:
-// overwritten before any read, within the window, without leaving
-// straight-line code -- the register-side twin of nzcv_dead_at_target.
-static bool reg_dead_at_target(const armlint_state *state, int64_t target,
-                               unsigned reg)
-{
-    if (state->buf == NULL || target < 0) {
-        return false;
-    }
-    size_t off = (size_t)target;
-    for (unsigned i = 0; i < LIVENESS_WINDOW; i++) {
-        if (off > state->buf_len || state->buf_len - off < 4u) {
-            return false;
-        }
-        switch (classify_word_reg_liveness(buf_word_at(state->buf, off),
-                                           reg)) {
-        case LIV_OVERWRITE:
-            return true;
-        case LIV_UNKNOWN:
-            break;
-        default:
-            return false;
-        }
-        off += 4u;
-    }
-    return false;
-}
-
 // The constant a one-instruction MOVZ/MOVN or ORR-from-ZR writes, when
 // it is 2^32 - k with k an ADD/SUB immediate (imm12, optionally LSL
 // #12): the comparand check_cmp_cmn_w folds.
@@ -20884,7 +20979,6 @@ bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
 bool armlint_advance_pending_bvs(armlint_state *state, const cs_insn *insn,
                                  size_t offset, armlint_finding *out)
 {
-    (void)offset;
     if (!state->pending_bvs_active) {
         return false;
     }
@@ -20893,6 +20987,43 @@ bool armlint_advance_pending_bvs(armlint_state *state, const cs_insn *insn,
         return false;
     }
     uint32_t op = insn_word(insn);
+    // A direct branch is followed: each proof still open must hold at
+    // its target (nzcv_dead_at_target, reg_dead_at_target); an
+    // unconditional branch then settles them all, a conditional one
+    // leaves the fall-through scan to go on. A B.cond reads the flags,
+    // a CBZ/TBZ of a register reads it, as the classifiers say.
+    int64_t target;
+    bool conditional;
+    if (direct_branch_target(op, offset, &target, &conditional)
+            && (state->pending_bvs_flags_dead
+                || classify_liveness(op) != LIV_READ)
+            && (state->pending_bvs_reg_dead
+                || !branch_reads_reg(op, state->pending_bvs_reg))
+            && (state->pending_bvs_reg2_dead
+                || !branch_reads_reg(op, state->pending_bvs_reg2))) {
+        bool ok = (state->pending_bvs_flags_dead
+                   || nzcv_dead_at_target(state, target))
+            && (state->pending_bvs_reg_dead
+                || reg_dead_at_target(state, target,
+                                      (unsigned)state->pending_bvs_reg))
+            && (state->pending_bvs_reg2_dead
+                || reg_dead_at_target(state, target,
+                                      (unsigned)state->pending_bvs_reg2));
+        if (!ok) {
+            state->pending_bvs_active = false;
+            return false;
+        }
+        if (!conditional) {
+            *out = state->pending_bvs_finding;
+            state->pending_bvs_active = false;
+            return true;
+        }
+        if (state->pending_bvs_window == 0
+                || --state->pending_bvs_window == 0) {
+            state->pending_bvs_active = false;
+        }
+        return false;
+    }
     // Classify both proofs before acting: one instruction can settle
     // one and break the other (CSET into the constant register reads
     // NZCV while overwriting it), and the break must win. A settled

@@ -10139,6 +10139,64 @@ static void test_mov_reg_offset_split(void)
     }
 }
 
+// The dead-MOV deferral across direct branches: the register must be
+// dead at the target (reg_dead_at_target) and, for a conditional
+// branch, on the fall-through too. The two-ADD fold stands in for
+// every fold on the deferral; the last case is the B.VS deferral.
+static void test_dead_mov_across_branch(void)
+{
+    const char *two_add = "MOV + ADD/SUB foldable to two immediate ADD/SUBs";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[10];
+        unsigned n;
+        const char *name;
+        int expect;
+    } cases[] = {
+        // movz w10, #0x88 ; movk w10, #1, lsl #16 ; add x9, x9, x10 ;
+        // b 1f ; ret ; 1: mov w10, #5 ; ret
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0x14000002u, 0xD65F03C0u,
+            0x528000AAu, 0xD65F03C0u }, 7, NULL, 1 },
+        // cbz x0, 1f with kills on both edges.
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0xB4000060u, 0x5280002Au,
+            0xD65F03C0u, 0x5280004Au, 0xD65F03C0u }, 8, NULL, 1 },
+        // cmp ; b.eq 1f with kills on both edges.
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0xF1000C1Fu, 0x54000060u,
+            0x5280002Au, 0xD65F03C0u, 0x5280004Au, 0xD65F03C0u }, 9, NULL, 1 },
+        // A chain of two B's to the kill.
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0x14000002u, 0xD65F03C0u,
+            0x14000002u, 0xD65F03C0u, 0x528000AAu, 0xD65F03C0u }, 9, NULL, 1 },
+        // Negatives: the target reads it; a CBZ of the register itself;
+        // the fall-through reads it; the target returns (no PCS
+        // assumption); a call.
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0x14000002u, 0xD65F03C0u,
+            0x8B0A0021u, 0xD65F03C0u }, 7, NULL, 0 },
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0xB400006Au, 0x5280002Au,
+            0xD65F03C0u, 0x5280004Au, 0xD65F03C0u }, 8, NULL, 0 },
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0xB4000060u, 0x8B0A0021u,
+            0xD65F03C0u, 0x5280004Au, 0xD65F03C0u }, 8, NULL, 0 },
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0x14000002u, 0x5280002Au,
+            0xD65F03C0u }, 6, NULL, 0 },
+        { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0x94000002u, 0x5280002Au,
+            0xD65F03C0u }, 6, NULL, 0 },
+        // B.VS: cmp x2, x0 ; b.eq 1f ; b 2f ; 1: ret ; 2: mov x0, #1 ;
+        // adds ; ret -- the B is followed to both proofs.
+        { { 0xD2F00000u, 0xEB00005Fu, 0x54000040u, 0x14000002u, 0xD65F03C0u,
+            0xD2800020u, 0x2B050083u, 0xD65F03C0u }, 8, kBvs, 1 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        const char *name = cases[i].name != NULL ? cases[i].name : two_add;
+        int got = run_lvn_words(cases[i].words, cases[i].n, name, detail,
+                                sizeof(detail));
+        if (got != cases[i].expect) {
+            fprintf(stderr, "dead_mov_across_branch case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
 // check_mov_logic_known_bits over instruction words with the buffer
 // set: the constant register is killed by a MOVZ where the operation
 // does not overwrite it.
@@ -19152,6 +19210,7 @@ int main(void)
     test_mov_cmp_branch_bvs();
     test_mov_logic_imm_fold();
     test_mov_logic_known_bits();
+    test_dead_mov_across_branch();
     test_mov_reg_offset_split();
     test_and_mov_cmp_ubfx();
     test_mov_cage_orr_add();

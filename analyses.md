@@ -1984,6 +1984,14 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   crossing, take SUB's constant in Rn, or sign-extend a W chain into
   an X ADD each mismatch within 5,000 programs (298, 1,110, 595, 245,
   87).
+* **Across branches (2026-10-04).** The dead-MOV deferral every MOV
+  fold shares follows direct branches through reg_dead_at_target (a B
+  to its destination, a conditional branch down both edges, under the
+  NZCV walk's windows and budget; a call, a return or a CBZ/TBZ of the
+  register itself ends it unproven). Firefox XUL: 460 to **544** here,
+  +2,128 over all checks; librustc_driver: 696 to 709, +1,683 over all
+  checks (the ADD/SUB chain fold +640, ADD + LDR +303). About 2% more
+  scan time.
 
 ## MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC
 
@@ -2074,6 +2082,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   librustc_driver (26.0M): **+10**. A raw scan counts 568 selects and
   621 CCMPs after such a compare; most keep the constant register
   live past the consumer.
+* **Across branches (2026-10-04).** The deferral's fall-through scan
+  no longer stops at a direct branch: a B is followed to its
+  destination and a B.cond, CBZ/CBNZ or TBZ/TBNZ must prove each open
+  proof at its target too (nzcv_dead_at_target, reg_dead_at_target),
+  after which the fall-through scan goes on. Firefox XUL: 2,522 to
+  **3,908**; librustc_driver: 189 to 254. The fold's own taken edge is
+  still assumed block-local, as before.
 
 ## AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm
 
