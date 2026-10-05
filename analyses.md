@@ -2516,15 +2516,17 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the instruction at hand, wherever it sits in the registry. An
   indirect branch's targets (a jump table's cases) are invisible to the
   target map, as they are to every check that trusts it.
-* **JIT patch sites.** A value a MOVK builds is never known, nor
-  anything computed from one: a JIT's patchable constant is a
-  fixed-length MOVZ/MOVK sequence, and a snapshot shows the placeholder,
-  not the value the sequence holds once patched (check_value_recompute
-  excludes those sequences for the same reason). That costs the JIT
-  dumps real findings -- SpiderMonkey Baseline boxes its constants as
-  `mov x2, #1 ; movk x2, #0xfff9, lsl #48` and then tests the payload
-  -- but no decision rests on a value that could change. ADR/ADRP
-  values move with the image and are not tracked either.
+* **JIT patch sites.** A value a MOVK builds is known only when the
+  links back to the MOVZ/MOVN are the minimal encoding of the result
+  (the MOVZ/MOVK chain check's rule): a JIT's patchable constant is a
+  fixed-length MOVZ/MOVK sequence, longer than its placeholder needs
+  (JSC's `mov x16, #0 ; movk x16, #0, lsl #16 ; ...`), and a snapshot
+  shows the placeholder, not the value the sequence holds once patched
+  (check_value_recompute excludes those sequences for the same reason).
+  A minimal chain is a constant -- SpiderMonkey Baseline boxes its
+  constants as `mov x2, #1 ; movk x2, #0xfff9, lsl #48` and then tests
+  the payload -- and decides as a MOVZ does. ADR/ADRP values move with
+  the image and are not tracked either.
 * **Selects.** The engine decides a CSEL's condition as readily as a
   branch's, but only branches are reported. SpiderMonkey's string
   loads under `spectreStringMitigations` follow a branch with a CSEL on

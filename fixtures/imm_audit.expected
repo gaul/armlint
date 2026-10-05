@@ -11,6 +11,10 @@ MOV + AND/ORR/EOR/TST: constant is not a bitmask immediate (imm audit) at offset
   movn w17, #0x5f
   tst w16, w17
 
+conditional branch that is always taken at offset: 0x24 <_main+0x24>: -> b 0x6c; always taken: w16 is 0x2fffd (known 0x14 bytes back) (1 instructions)
+  movk w16, #2, lsl #16
+  b.ne #0x6c
+
 MOV + AND/ORR/EOR/TST: constant is not a bitmask immediate (imm audit) at offset: 0x28 <_main+0x28>: -> #0x12; nearest bitmask immediates 0x2 and 0x10 (1 bit away) (2 instructions)
   movz x11, #0x12
   tst w9, w11
@@ -32,6 +36,7 @@ Optimization opportunities by type:
        2  MOV + ADD/SUB/CMP: constant has no add/sub immediate form (imm audit)
        1  MOV + CCMP/CCMN: constant is outside imm5 (imm audit)
        1  MOV + register-offset LDR/STR: constant has no immediate-offset form (imm audit)
+       1  conditional branch that is always taken
 
 Immediate misfits by value (-a imm), within one step of an immediate form:
        1  bitmask imm    w  #0x12         nearest bitmask immediates 0x2 and 0x10 (1 bit away)
@@ -44,4 +49,4 @@ Immediate misfits by value (-a imm), within one step of an immediate form:
 Immediate misfits by value (-a imm), beyond one step (informational):
        1  ldr/str offset x  #0x10000      immediate offsets cover -256..255 unscaled, 0..4095 x size scaled
 
-7 optimization opportunities in 28 instructions
+8 optimization opportunities in 28 instructions

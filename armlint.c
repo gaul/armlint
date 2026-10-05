@@ -12931,7 +12931,7 @@ static bool kv_op_value(const armlint_state *state, uint32_t op,
     unsigned ra = (op >> 10) & 0x1Fu;
     bool sub = ((op >> 30) & 1u) != 0;
     uint64_t a, b, c, v;
-    if (p->pcrel || p->movk || p->reads_flags) {
+    if (p->pcrel || p->reads_flags) {
         return false;
     }
     if ((op & 0x1F800000u) == 0x11000000u) {
@@ -12954,10 +12954,43 @@ static bool kv_op_value(const armlint_state *state, uint32_t op,
         unsigned opc = (op >> 29) & 3u;
         v = opc == 1u ? (a | imm) : opc == 2u ? (a ^ imm) : (a & imm);
     } else if ((op & 0x1F800000u) == 0x12800000u) {
-        // MOVZ/MOVN (MOVK was refused above).
+        // MOVZ/MOVN; MOVK onto a known value, when the links back to
+        // the MOVZ/MOVN are the minimal encoding of the result. A JIT's
+        // patch site is a fixed-length sequence, longer than its
+        // placeholder needs (check_movz_movk_bitmask's rule), so its
+        // value is not known.
         unsigned hw = (op >> 21) & 3u;
         uint64_t imm = (uint64_t)((op >> 5) & 0xFFFFu) << (16u * hw);
-        v = ((op >> 29) & 3u) == 2u ? imm : ~imm;
+        if (p->movk) {
+            if (rd == 31u || state->buf == NULL
+                    || !kv_value(state, rd, false, &a)) {
+                return false;
+            }
+            v = ((a & ~((uint64_t)0xFFFFu << (16u * hw))) | imm)
+                & kv_mask(sf);
+            size_t o = state->kv_pending.offset;
+            unsigned links = 1;
+            for (;;) {
+                if (o < 4u) {
+                    return false;
+                }
+                o -= 4u;
+                mov_wide_insn mw;
+                if (!decode_mov_wide(buf_word_at(state->buf, o), &mw)
+                        || mw.rd != rd || mw.is_64bit != sf) {
+                    return false;
+                }
+                links++;
+                if (mw.opc != 3u) {
+                    break;
+                }
+            }
+            if (links != minimal_mov_wide_count(v, sf ? 64u : 32u)) {
+                return false;
+            }
+        } else {
+            v = ((op >> 29) & 3u) == 2u ? imm : ~imm;
+        }
     } else if ((op & 0x1F800000u) == 0x13000000u) {
         // Bitfield: BFM also keeps bits of Rd.
         unsigned opc = (op >> 29) & 3u;
@@ -13100,7 +13133,8 @@ static void kv_op_fact(const armlint_state *state, uint32_t op,
             kv_fact_unknown(out);
         }
     } else if (p->pcrel || p->movk) {
-        // Image-relative, or a patch site.
+        // Image-relative, or a MOVK onto an unknown value (or a patch
+        // site: kv_op_value refused the chain).
     } else if ((op & 0x1F800000u) == 0x12000000u
             && ((op >> 29) & 3u) != 3u) {
         // AND/ORR/EOR (immediate).

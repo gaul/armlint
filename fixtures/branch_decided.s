@@ -90,7 +90,10 @@ _main:
     cbz     x0, 9f
     ret
 
-    // 14) A MOVK sequence may be a JIT's patch site.
+    // 14) A minimal MOVZ/MOVK chain is a constant (SpiderMonkey's boxed
+    //     constant), so this one IS decided; a chain longer than its
+    //     value needs is a JIT's patch site and stays unknown (the
+    //     unit test covers that one).
     mov     x2, #5
     movk    x2, #0xfffe, lsl #48
     cbz     w2, 9f

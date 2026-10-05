@@ -9588,6 +9588,15 @@ static void test_branch_decided(void)
         // mov w8, #1 ; cbz x8, 1f ; ret ; 1: ret
         { { 0x52800028u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 4, NEVER,
           "-> delete; never taken: x8 is 0x1 (known 0x4 bytes back)" },
+        // A minimal MOVZ/MOVK chain is known: movz x9, #0x100, lsl #16 ;
+        // movk x9, #4, lsl #32 ; cmp x9, #0 ; b.eq 1f ; ret ; 1: ret
+        { { 0xD2A02009u, 0xF2C00089u, 0xF100013Fu, 0x54000040u, 0xD65F03C0u,
+            0xD65F03C0u }, 6, NEVER,
+          "-> delete; never taken: x9 is 0x401000000 (known 0x8 bytes back)" },
+        // A chain longer than its value needs is a JIT placeholder:
+        // movz x16, #0 ; movk x16, #0, lsl #16 ; cbz x16, 1f ; ret ; 1: ret
+        { { 0xD2800010u, 0xF2A00010u, 0xB4000050u, 0xD65F03C0u, 0xD65F03C0u },
+          5, NONE, NULL },
         // ldr w8, [sp, #8] ; tbnz w8, #0, 1f ; str w8, [x19] ; tbz w8, #0, 1f ; ret ; 1: ret
         { { 0xB9400BE8u, 0x37000088u, 0xB9000268u, 0x36000048u, 0xD65F03C0u,
             0xD65F03C0u }, 6, ALWAYS,
@@ -9687,7 +9696,9 @@ static void test_branch_decided(void)
         // cbz x0, 1f ; bl 1f ; cbz x0, 1f ; ret ; 1: ret
         { { 0xB4000080u, 0x94000003u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
         // mov x2, #5 ; movk x2, #0xfffe, lsl #48 ; cbz w2, 1f ; ret ; 1: ret
-        { { 0xD28000A2u, 0xF2FFFFC2u, 0x34000042u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // (SpiderMonkey's boxed constant: a minimal chain, so known)
+        { { 0xD28000A2u, 0xF2FFFFC2u, 0x34000042u, 0xD65F03C0u, 0xD65F03C0u }, 5, NEVER,
+          "-> delete; never taken: w2 is 0x5 (known 0x4 bytes back)" },
         // mov w8, #1 ; cbz x8, 1f ; 1: ret
         { { 0x52800028u, 0xB4000028u, 0xD65F03C0u }, 3, NONE, NULL },
         // cmp x0, #5 ; b.eq 1f ; cmp x1, #5 ; b.eq 1f ; ret ; 1: ret

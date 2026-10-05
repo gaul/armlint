@@ -42,9 +42,13 @@ conditional branch that is never taken at offset: 0xac <_main+0xac>: -> delete; 
   b.hs #0x110
   b.hs #0x110
 
+conditional branch that is never taken at offset: 0xe8 <_main+0xe8>: -> delete; never taken: w2 is 0x5 (known 0x4 bytes back) (1 instructions)
+  movk x2, #0xfffe, lsl #48
+  cbz w2, #0x110
+
 Optimization opportunities by type:
-       8  conditional branch that is never taken
+       9  conditional branch that is never taken
        2  conditional branch that is always taken
        1  register already holds the recomputed value
 
-11 optimization opportunities in 69 instructions
+12 optimization opportunities in 69 instructions

@@ -610,11 +610,13 @@ bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
 // the barriers and MRS, and at a flush; conditional branches keep them,
 // since the fall-through keeps its registers. Writes come from the
 // decoded instruction, else from insn_gpr_write_mask, which
-// over-reports rather than miss one. A value a MOVK builds is never
-// known: a JIT's patch site is a MOVZ/MOVK sequence whose placeholder
-// is not the value it holds once patched (check_value_recompute's
-// reason too), so a branch on one is not decided; ADR/ADRP values move
-// with the image and are not tracked either. The finding is the branch
+// over-reports rather than miss one. A value a MOVK builds is known
+// only when the links back to the MOVZ/MOVN are the minimal encoding
+// of the result: a JIT's patch site is a fixed-length MOVZ/MOVK
+// sequence, longer than its placeholder needs, whose snapshot does not
+// show the value it holds once patched (check_value_recompute's reason
+// too), so a branch on one is not decided; ADR/ADRP values move with
+// the image and are not tracked either. The finding is the branch
 // alone, with the instruction that established the deciding fact shown
 // first. A branch to the next instruction is check_branch_to_next's,
 // and the conditions AL and NV decide nothing to report. Reported as
