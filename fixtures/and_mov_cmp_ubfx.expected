@@ -38,46 +38,73 @@ AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm at offset: 0x6c <_
   cmp w9, w11
   b.ne #0x84
 
-register write overwritten unread at offset: 0xb4 <_main+0xb4>: -> delete; x9 is overwritten before any read (1 instructions)
-  mov x9, #0
-  ... 1 instruction ...
-  mov w9, #-0x80000000
+AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm at offset: 0x88 <_main+0x88>: -> ubfx w9, w22, #10, #6 ; cmp w9, #0x36 (4 instructions)
+  and w9, w22, #0xfc00
+  movz w11, #0xd800
+  cmp w9, w11
+  csel w3, w4, w5, eq
 
-conditional branch that is never taken at offset: 0xc4 <_main+0xc4>: -> delete; never taken: no value of w8 passes lt against 0x80000000 (known 0xc bytes back) (1 instructions)
-  and w8, w0, #0xffffc000
-  b.lt #0x154
+register write overwritten unread at offset: 0x94 <_main+0x94>: -> delete; w3 is overwritten before any read (1 instructions)
+  csel w3, w4, w5, eq
+  ... 2 instructions ...
+  adds w3, w1, w2
 
-register write overwritten unread at offset: 0xcc <_main+0xcc>: -> delete; w9 is overwritten before any read (1 instructions)
+register write overwritten unread at offset: 0x98 <_main+0x98>: -> delete; w9 is overwritten before any read (1 instructions)
   mov w9, #0
+  ... 2 instructions ...
   and w9, w22, #0xfc00
 
-register write overwritten unread at offset: 0xe8 <_main+0xe8>: -> delete; w11 is overwritten before any read (1 instructions)
+register write overwritten unread at offset: 0x9c <_main+0x9c>: -> delete; w11 is overwritten before any read (1 instructions)
   mov w11, #0
   ... 2 instructions ...
   mov w11, #0xd800
 
-register write overwritten unread at offset: 0x104 <_main+0x104>: -> delete; w11 is overwritten before any read (1 instructions)
+AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm at offset: 0xa4 <_main+0xa4>: -> ubfx w9, w22, #10, #6 ; cmp w9, #0x36 (4 instructions)
+  and w9, w22, #0xfc00
+  movz w11, #0xd800
+  cmp w9, w11
+  cset w9, ne
+
+register write overwritten unread at offset: 0xec <_main+0xec>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #0
+  ... 1 instruction ...
+  mov w9, #-0x80000000
+
+conditional branch that is never taken at offset: 0xfc <_main+0xfc>: -> delete; never taken: no value of w8 passes lt against 0x80000000 (known 0xc bytes back) (1 instructions)
+  and w8, w0, #0xffffc000
+  b.lt #0x18c
+
+register write overwritten unread at offset: 0x104 <_main+0x104>: -> delete; w9 is overwritten before any read (1 instructions)
+  mov w9, #0
+  and w9, w22, #0xfc00
+
+register write overwritten unread at offset: 0x120 <_main+0x120>: -> delete; w11 is overwritten before any read (1 instructions)
+  mov w11, #0
+  ... 2 instructions ...
+  mov w11, #0xd800
+
+register write overwritten unread at offset: 0x13c <_main+0x13c>: -> delete; w11 is overwritten before any read (1 instructions)
   mov w11, #0
   ... 1 instruction ...
   mov w11, #0x3400
 
-register write overwritten unread at offset: 0x11c <_main+0x11c>: -> delete; w11 is overwritten before any read (1 instructions)
+register write overwritten unread at offset: 0x154 <_main+0x154>: -> delete; w11 is overwritten before any read (1 instructions)
   mov w11, #0
   ... 1 instruction ...
   mov w11, #0xd801
 
-conditional branch that is never taken at offset: 0x12c <_main+0x12c>: -> delete; never taken: w9 is in [0x0, 0xfc00] (known 0xc bytes back) (1 instructions)
+conditional branch that is never taken at offset: 0x164 <_main+0x164>: -> delete; never taken: w9 is in [0x0, 0xfc00] (known 0xc bytes back) (1 instructions)
   and w9, w22, #0xfc00
-  b.eq #0x154
+  b.eq #0x18c
 
-register write overwritten unread at offset: 0x134 <_main+0x134>: -> delete; w11 is overwritten before any read (1 instructions)
+register write overwritten unread at offset: 0x16c <_main+0x16c>: -> delete; w11 is overwritten before any read (1 instructions)
   mov w11, #0
   ... 1 instruction ...
   mov w11, #0xd800
 
 Optimization opportunities by type:
-       8  register write overwritten unread
-       5  AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm
+      11  register write overwritten unread
+       7  AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm
        2  conditional branch that is never taken
 
-15 optimization opportunities in 86 instructions
+20 optimization opportunities in 100 instructions

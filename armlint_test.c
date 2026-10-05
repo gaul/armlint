@@ -10027,11 +10027,28 @@ static void test_and_mov_cmp_ubfx(void)
         { { 0x12124408u, 0x52B00009u, 0x6B09011Fu, 0x54000063u, 0x2B020028u,
             0x52800009u, 0xD65F03C0u }, 7, 1,
           "-> ubfx w8, w0, #14, #18 ; cmp w8, #0x20, lsl #12" },
-        // Negatives: a signed condition over a sign-bit mask; the masked
-        // register read between the AND and the CMP; the constant fits
-        // the compare already; the masked register read after the
-        // branch; a mask of two runs; the chain feeds the AND; the
-        // constant has bits outside the mask.
+        // A CSEL consumer (the condition is unchanged), a CSET that
+        // writes the masked register, a CSINC that writes the constant.
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x1A850083u, 0x52800009u,
+            0x5280000Bu, 0x2B050083u, 0xD65F03C0u }, 8, 1,
+          "-> ubfx w9, w22, #10, #6 ; cmp w9, #0x36" },
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x1A9F07E9u, 0x5280000Bu,
+            0x2B050083u, 0xD65F03C0u }, 7, 1,
+          "-> ubfx w9, w22, #10, #6 ; cmp w9, #0x36" },
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x1A85348Bu, 0x52800009u,
+            0x2B050083u, 0xD65F03C0u }, 7, 1,
+          "-> ubfx w9, w22, #10, #6 ; cmp w9, #0x36" },
+        // Negatives: a select reading the masked register; a select on
+        // a signed condition over a sign-bit mask; a signed condition
+        // over a sign-bit mask; the masked register read between the
+        // AND and the CMP; the constant fits the compare already; the
+        // masked register read after the branch; a mask of two runs;
+        // the chain feeds the AND; the constant has bits outside the
+        // mask.
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x1A850123u, 0x52800009u,
+            0x5280000Bu, 0x2B050083u, 0xD65F03C0u }, 8, 0, NULL },
+        { { 0x12124408u, 0x52B00009u, 0x6B09011Fu, 0x1A85B083u, 0x52800008u,
+            0x52800009u, 0x2B050083u, 0xD65F03C0u }, 8, 0, NULL },
         { { 0x12124408u, 0x52B00009u, 0x6B09011Fu, 0x5400006Bu, 0x2B020028u,
             0x52800009u, 0xD65F03C0u }, 7, 0, NULL },
         { { 0x121616C9u, 0xB9000009u, 0x529B000Bu, 0x6B0B013Fu, 0x54000060u,

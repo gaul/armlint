@@ -20669,32 +20669,45 @@ bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
     }
     uint32_t op = insn_word(insn);
 
-    // (1) Close: the B.cond adjacent to the recorded CMP.
+    // (1) Close: the B.cond or CSEL-family select adjacent to the
+    //     recorded CMP. The condition is unchanged by the rewrite; a
+    //     select may not read either register, and one that writes
+    //     either settles that proof itself.
     if (state->umc_active) {
         state->umc_active = false;
+        unsigned cond = 16u;
+        bool rc_dead = false, rt_dead = false;
+        unsigned csf, ckind, ccond, crd, crn, crm;
         if ((op & 0xFF000010u) == 0x54000000u) {
-            unsigned cond = op & 0xFu;
-            // eq ne hs lo hi ls always; mi pl vs vc ge lt gt le only
-            // below the sign bit (al and nv are not conditions).
-            bool ok = cond <= 3u || cond == 8u || cond == 9u
-                || (!state->umc_top_bit && cond <= 13u);
-            if (ok && !state->pending_bvs_active) {
-                armlint_finding *p = &state->pending_bvs_finding;
-                *p = state->umc_finding;
-                p->insn_count += 1u;
-                if (state->umc_lines < ARMLINT_FINDING_LINES) {
-                    snprintf(p->lines[state->umc_lines],
-                             sizeof(p->lines[0]), "%s %s",
-                             insn->mnemonic, insn->op_str);
-                }
-                state->pending_bvs_active = true;
-                state->pending_bvs_flags_dead = false;
-                state->pending_bvs_reg_dead = false;
-                state->pending_bvs_reg2_dead = false;
-                state->pending_bvs_window = LIVENESS_WINDOW;
-                state->pending_bvs_reg = (int)state->umc_rc;
-                state->pending_bvs_reg2 = (int)state->umc_rt;
+            cond = op & 0xFu;
+        } else if (decode_csel_family(op, &csf, &ckind, &ccond, &crd, &crn,
+                                      &crm)
+                   && crn != state->umc_rc && crm != state->umc_rc
+                   && crn != state->umc_rt && crm != state->umc_rt) {
+            cond = ccond;
+            rc_dead = crd == state->umc_rc;
+            rt_dead = crd == state->umc_rt;
+        }
+        // eq ne hs lo hi ls always; mi pl vs vc ge lt gt le only below
+        // the sign bit (al and nv are not conditions).
+        bool ok = cond <= 3u || cond == 8u || cond == 9u
+            || (!state->umc_top_bit && cond <= 13u);
+        if (ok && !state->pending_bvs_active) {
+            armlint_finding *p = &state->pending_bvs_finding;
+            *p = state->umc_finding;
+            p->insn_count += 1u;
+            if (state->umc_lines < ARMLINT_FINDING_LINES) {
+                snprintf(p->lines[state->umc_lines],
+                         sizeof(p->lines[0]), "%s %s",
+                         insn->mnemonic, insn->op_str);
             }
+            state->pending_bvs_active = true;
+            state->pending_bvs_flags_dead = false;
+            state->pending_bvs_reg_dead = rc_dead;
+            state->pending_bvs_reg2_dead = rt_dead;
+            state->pending_bvs_window = LIVENESS_WINDOW;
+            state->pending_bvs_reg = (int)state->umc_rc;
+            state->pending_bvs_reg2 = (int)state->umc_rt;
         }
     }
 

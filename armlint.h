@@ -1405,11 +1405,13 @@ bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
 // between that touches either register or branches. Both compare
 // operands are multiples of 2^tz, so Z and C are unchanged, and N and V
 // too unless the mask reaches the sign bit, when the branch must use
-// an equality or unsigned condition. Deferred on three fall-through
-// proofs (armlint_advance_pending_bvs): NZCV, the constant register
-// and the masked register (which now holds the shifted field) dead
-// after the branch. Reported as "AND + MOV + CMP of a masked field
-// foldable to UBFX + CMP #imm".
+// an equality or unsigned condition. The consumer may also be a
+// CSEL-family select (its condition is unchanged) that reads neither
+// register; one that writes either settles that proof itself.
+// Deferred on three fall-through proofs (armlint_advance_pending_bvs):
+// NZCV, the constant register and the masked register (which now
+// holds the shifted field) dead after the consumer. Reported as "AND +
+// MOV + CMP of a masked field foldable to UBFX + CMP #imm".
 bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 

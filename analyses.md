@@ -2102,11 +2102,14 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   either sign, and a compare immediate (plain or shifted) once
   shifted. The AND's source must not be the constant register.
 * **Three fall-through proofs**, through the B.VS fold's deferral
-  with a second register: NZCV dead after the branch, the constant
+  with a second register: NZCV dead after the consumer, the constant
   register dead, and the masked register dead, since it now holds the
-  shifted field. The branch must follow the CMP directly.
+  shifted field. The consumer -- a B.cond, or since 2026-10-04 a
+  CSEL-family select that reads neither register (one that writes
+  either settles that proof itself) -- must follow the CMP directly.
 * **Corpus, 2026-10-04:** Firefox XUL (30.3M instructions) **90**,
-  surrogate tests and other field compares. A raw scan finds 562
+  surrogate tests and other field compares, **117** with the CSEL
+  consumers; librustc_driver (26.0M) 10, then 15. A raw scan finds 562
   `and ; mov ; cmp` triples that qualify before the proofs; the rest
   feed a CSEL or a CCMP, or keep a register live across the branch.
   LLVM 23 emits the four-instruction form; the fold is proposed for

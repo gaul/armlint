@@ -51,8 +51,25 @@ _main:
 5:
     ret
 
+    // 6) A CSEL consumer: the condition stays; a CSET that writes the
+    //    masked register settles that proof itself.
+    and     w9, w22, #0xfc00
+    mov     w11, #0xd800
+    cmp     w9, w11
+    csel    w3, w4, w5, eq      // -> ubfx w9, w22, #10, #6 ; cmp w9, #0x36
+    mov     w9, #0
+    mov     w11, #0
+    adds    w3, w1, w2
+    and     w9, w22, #0xfc00
+    mov     w11, #0xd800
+    cmp     w9, w11
+    cset    w9, ne              // -> ubfx w9, w22, #10, #6 ; cmp w9, #0x36
+    mov     w11, #0
+    adds    w3, w1, w2
+    ret
+
     // Negatives:
-    // 6) The constant fits the compare already (the sibling fold's).
+    // 7) The constant fits the compare already (the sibling fold's).
     and     w9, w22, #0xf0
     mov     w11, #0x30
     cmp     w9, w11
@@ -60,7 +77,7 @@ _main:
     adds    w9, w1, w2
     mov     w11, #0
 
-    // 7) The shifted constant still does not fit.
+    // 8) The shifted constant still does not fit.
     and     x8, x0, #0x7fffffffffffffff
     mov     x9, #0x7ff0000000000000
     cmp     x8, x9
@@ -68,7 +85,7 @@ _main:
     adds    x8, x1, x2
     mov     x9, #0
 
-    // 8) A signed condition over a mask that reaches the sign bit.
+    // 9) A signed condition over a mask that reaches the sign bit.
     and     w8, w0, #0xffffc000
     mov     w9, #0x80000000
     cmp     w8, w9
@@ -76,7 +93,7 @@ _main:
     adds    w8, w1, w2
     mov     w9, #0
 
-    // 9) The masked register read after the branch.
+    // 10) The masked register read after the branch.
     and     w9, w22, #0xfc00
     mov     w11, #0xd800
     cmp     w9, w11
@@ -85,7 +102,7 @@ _main:
     adds    w9, w1, w2
     mov     w11, #0
 
-    // 10) The masked register read between the AND and the CMP.
+    // 11) The masked register read between the AND and the CMP.
     and     w9, w22, #0xfc00
     str     w9, [x0]
     mov     w11, #0xd800
@@ -94,7 +111,7 @@ _main:
     adds    w9, w1, w2
     mov     w11, #0
 
-    // 11) The mask is not one run of bits.
+    // 12) The mask is not one run of bits.
     and     w9, w22, #0xff00ff00
     mov     w11, #0x3400
     cmp     w9, w11
@@ -102,7 +119,7 @@ _main:
     adds    w9, w1, w2
     mov     w11, #0
 
-    // 12) The constant has bits outside the mask.
+    // 13) The constant has bits outside the mask.
     and     w9, w22, #0xfc00
     mov     w11, #0xd801
     cmp     w9, w11
@@ -110,7 +127,7 @@ _main:
     adds    w9, w1, w2
     mov     w11, #0
 
-    // 13) A side entry between the producers and the CMP.
+    // 14) A side entry between the producers and the CMP.
     and     w9, w22, #0xfc00
 8:
     mov     w11, #0xd800
