@@ -4205,6 +4205,36 @@ there, so they would want the pool bit alone.
   loses: the register-offset and immediate-offset forms cost the same
   on current cores.
 
+## MOV chain + register-offset LDR/STR foldable to ADD + immediate offset
+
+* The shape above when the byte offset is beyond one immediate but a
+  chain of two or more links built it: a shifted ADD immediate on the
+  base plus a scaled (or unscaled) access offset, three instructions
+  to two:
+
+  ```
+  mov  w9, #0xa3e8          ; rustc: a field of the global context at
+  movk w9, #7, lsl #16      ; 0x7a3e8, beyond the 32 KiB the scaled
+  ldr  x8, [x8, x9]         ; offset reaches
+                            ->  add x9, x8, #0x7a, lsl #12
+                                ldr x8, [x9, #0x3e8]
+  ```
+
+  The constant register carries the address, so nothing new is
+  written and the proof is the sibling's: the register dead after the
+  access, or the load writing it. The low 12 bits must be a multiple
+  of the access size, or at most 255 for the unscaled form; the high
+  part at most 0xfff. One immediate's reach is the sibling's, a
+  bitmask or over-long chain the MOVZ/MOVK chain check's.
+* LLVM 23 emits the two-instruction form for a load but still the
+  three-instruction one for a store at the same offset.
+* **Corpus, 2026-10-04:** librustc_driver (26.0M instructions)
+  **1,750**, nearly all the one field (a raw scan counts 2,878 such
+  accesses; the rest keep the constant register live, mostly into a
+  call); Firefox XUL (30.3M) **3**.
+* **Verification.** `test_mov_reg_offset_split` (11 word-level cases)
+  and `fixtures/mov_reg_offset_split.s`.
+
 ## MUL + ADD/SUB foldable to MADD/MSUB
 
 * `mul xt, xa, xb ; add xd, xt, xc` -> `madd xd, xa, xb, xc`.

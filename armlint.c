@@ -19796,6 +19796,137 @@ bool check_mov_reg_offset_fold(armlint_state *state, const cs_insn *insn,
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
+// === MOV chain + register-offset LDR/STR -> ADD (shifted) + immediate ===
+//
+// A field beyond the immediate offsets' reach, built by a chain and
+// indexed by register:
+//   mov  w9, #0xa3e8
+//   movk w9, #7, lsl #16        ->  add x9, x8, #0x7a, lsl #12
+//   ldr  x8, [x8, x9]               ldr x8, [x9, #0x3e8]
+// The byte offset splits into a shifted ADD immediate and a scaled (or
+// unscaled) access offset; the constant register carries the address,
+// so nothing new is written and the one proof is the sibling fold's:
+// the constant register dead afterwards. rustc's global context has a
+// field at 0x7a3e8 read this way at thousands of sites (LLVM 23 emits
+// the two-instruction form for loads but not for stores).
+bool check_mov_reg_offset_split(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out)
+{
+    (void)offset;
+    if (insn->size != 4 || !state->mov_active
+            || state->mov_insn_count < 2) {
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    unsigned size, opc, rm, option, s, rn, rt;
+    if (!decode_ldr_reg_offset(op, &size, &opc, &rm, &option, &s,
+                               &rn, &rt)) {
+        return false;
+    }
+    // check_mov_reg_offset_fold's operand rules.
+    if (option != 3u || rm != state->mov_rd || rn == state->mov_rd) {
+        return false;
+    }
+    bool is_store;
+    const char *mnem;
+    char rt_wx;
+    if (classify_int_store(size, opc, &mnem, &rt_wx)) {
+        is_store = true;
+    } else if (classify_int_load(size, opc, &mnem, &rt_wx)) {
+        is_store = false;
+    } else {
+        return false;
+    }
+    if (is_store && rt == state->mov_rd) {
+        return false;
+    }
+    // A chain check_movz_movk_bitmask reports is its.
+    unsigned chain_width = state->mov_is_64bit ? 64u : 32u;
+    if (is_bitmask_immediate(state->mov_value, chain_width)
+            || state->mov_insn_count
+                > minimal_mov_wide_count(state->mov_value, chain_width)) {
+        return false;
+    }
+    // The byte offset: non-negative (a negative X chain is a MOVN of
+    // one link) and within what one shifted ADD can reach above the
+    // access's own range.
+    uint64_t v = state->mov_value;
+    unsigned shift = s ? size : 0u;
+    if (v >= ((uint64_t)1 << (24u - shift))) {
+        return false;
+    }
+    uint64_t byte_off = v << shift;
+    unsigned asize = 1u << size;
+    if (byte_off <= 32760u && (byte_off % asize) == 0) {
+        return false;   // the sibling fold's one immediate
+    }
+    uint64_t hi = byte_off >> 12;
+    uint64_t lo = byte_off & 0xFFFu;
+    if (hi == 0 || hi > 0xFFFu) {
+        return false;
+    }
+    bool scaled = (lo % asize) == 0;
+    if (!scaled && lo > 255u) {
+        return false;
+    }
+    const char *new_mnem = scaled ? mnem : unscaled_mnem(mnem);
+
+    char base_buf[8];
+    if (rn == 31) {
+        snprintf(base_buf, sizeof(base_buf), "sp");
+    } else {
+        snprintf(base_buf, sizeof(base_buf), "x%u", rn);
+    }
+    char rt_buf[8];
+    format_reg(rt_buf, sizeof(rt_buf), rt_wx, rt);
+    unsigned rc = state->mov_rd;
+
+    out->name = "MOV chain + register-offset LDR/STR foldable to ADD + "
+                "immediate offset";
+    out->start_offset = state->mov_start_offset;
+    out->insn_count = state->mov_insn_count + 1;
+    clear_finding_strings(out);
+    if (lo == 0) {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> add x%u, %s, #0x%" PRIx64 ", lsl #12 ; %s %s, [x%u]",
+            rc, base_buf, hi, new_mnem, rt_buf, rc);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "-> add x%u, %s, #0x%" PRIx64 ", lsl #12 ; %s %s, [x%u, #0x%"
+            PRIx64 "]", rc, base_buf, hi, new_mnem, rt_buf, rc, lo);
+    }
+
+    char w_or_x = state->mov_is_64bit ? 'x' : 'w';
+    unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
+    unsigned chain_n = state->mov_insn_count;
+    if (chain_n > max_mov_lines) {
+        chain_n = max_mov_lines;
+    }
+    for (unsigned i = 0; i < chain_n; i++) {
+        const mov_entry *e = &state->mov_entries[i];
+        const char *mov_mnem = e->opc == 2 ? "movz"
+                          : (e->opc == 0 ? "movn" : "movk");
+        unsigned mshift = (unsigned)e->shift_div_16 * 16u;
+        if (mshift == 0) {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x", mov_mnem, w_or_x, rc, e->imm16);
+        } else {
+            snprintf(out->lines[i], sizeof(out->lines[i]),
+                "%s %c%u, #0x%x, lsl #%u",
+                mov_mnem, w_or_x, rc, e->imm16, mshift);
+        }
+    }
+    snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
+        "%s %s", insn->mnemonic, insn->op_str);
+
+    // The constant register becomes the address: a load into it kills
+    // it at the consumer, anything else defers on its death.
+    if (!is_store && rt == rc) {
+        return true;
+    }
+    return defer_dead_mov(state, out, rc);
+}
+
 // === Immediate-misfit audit (-a imm) ===
 //
 // The MOV-chain folds above report a materialized constant that its
@@ -22672,6 +22803,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_extend_cvtf_fold,
     check_mov_zero_to_xzr,
     check_mov_reg_offset_fold,
+    check_mov_reg_offset_split,
     check_imm_misfit_audit,
     check_movz_movk_bitmask,
     check_lsl_fold,

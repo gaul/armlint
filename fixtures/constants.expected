@@ -1,3 +1,21 @@
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x34 <_field>: -> add x9, x0, #0x1d, lsl #12 ; ldr w9, [x9, #0xeb8] (3 instructions)
+  movz w9, #0xdeb8
+  movk w9, #0x1, lsl #16
+  ldr w9, [x0, x9]
+
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x44 <_field+0x10>: -> add x9, x1, #0x1d, lsl #12 ; ldr w9, [x9, #0xeb8] (3 instructions)
+  movz w9, #0xdeb8
+  movk w9, #0x1, lsl #16
+  ldr w9, [x1, x9]
+
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x54 <_field+0x20>: -> add x9, x3, #0x1d, lsl #12 ; ldr w9, [x9, #0xeb8] (3 instructions)
+  movz w9, #0xdeb8
+  movk w9, #0x1, lsl #16
+  ldr w9, [x3, x9]
+
+Optimization opportunities by type:
+       3  MOV chain + register-offset LDR/STR foldable to ADD + immediate offset
+
 Constant chains (-c): 36 words, 5 functions
   every chain: 7 building 3 distinct values, 18 instructions (50.00%)
   rebuilds within a function: 3 in 2 functions, 8 instructions (22.22%; 44.4% of chain instructions)
@@ -12,4 +30,4 @@ Constant chains (-c): 36 words, 5 functions
                4        2         1  w #0x1deb8             built 3 times in <_field>: 0x34, 0x44, 0x54
                4        1         1  x #0xf1357aea2e62a9c5  built 2 times in <_hash>: 0x0, 0x1c
 
-0 optimization opportunities in 36 instructions
+3 optimization opportunities in 36 instructions

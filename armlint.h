@@ -2386,6 +2386,20 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
 bool check_mov_reg_offset_fold(armlint_state *state, const cs_insn *insn,
                                size_t offset, armlint_finding *out);
 
+// The same shape when the byte offset is beyond one immediate but a
+// chain of two or more links built it: split it into a shifted ADD
+// immediate on the base and a scaled (or unscaled) access offset,
+//   mov w9, #0xa3e8 ; movk w9, #7, lsl #16 ; ldr x8, [x8, x9]
+//     -> add x9, x8, #0x7a, lsl #12 ; ldr x8, [x9, #0x3e8]
+// three instructions to two. The constant register carries the
+// address, so the proof is the sibling's (the register dead after the
+// access, or the load writing it). Offsets one immediate reaches are
+// the sibling's; a bitmask or over-long chain is check_movz_movk_
+// bitmask's. Reported as "MOV chain + register-offset LDR/STR foldable
+// to ADD + immediate offset".
+bool check_mov_reg_offset_split(armlint_state *state, const cs_insn *insn,
+                                size_t offset, armlint_finding *out);
+
 // Detect MUL Rt, Ra, Rb immediately followed by an ADD/SUB
 // (shifted-register, LSL #0, non-S-variant) that consumes Rt. The
 // pair folds to a single MADD/MSUB:

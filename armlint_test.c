@@ -10009,6 +10009,67 @@ static void test_and_mov_cmp_ubfx(void)
     }
 }
 
+// check_mov_reg_offset_split over instruction words with the buffer
+// set; the constant register is killed by a MOVZ where the access
+// does not write it.
+static void test_mov_reg_offset_split(void)
+{
+    const char *name = "MOV chain + register-offset LDR/STR foldable to "
+                       "ADD + immediate offset";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[8];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // movz w9, #0xa3e8 ; movk w9, #7, lsl #16 ; ldr x8, [x8, x9] ;
+        // mov x9, #0xd1ed ; ret
+        { { 0x52947D09u, 0x72A000E9u, 0xF8696908u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 1, "-> add x9, x8, #0x7a, lsl #12 ; ldr x8, [x9, #0x3e8]" },
+        // The load writes the constant register: emitted at once.
+        { { 0xD2947D09u, 0xF2A000E9u, 0xF8696909u, 0xD65F03C0u }, 4, 1,
+          "-> add x9, x8, #0x7a, lsl #12 ; ldr x9, [x9, #0x3e8]" },
+        // A store.
+        { { 0x52947D09u, 0x72A000E9u, 0xF8296801u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 1, "-> add x9, x0, #0x7a, lsl #12 ; str x1, [x9, #0x3e8]" },
+        // A scaled index: 0x10100 << 3.
+        { { 0x52802009u, 0x72A00029u, 0xF8697808u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 1, "-> add x9, x0, #0x80, lsl #12 ; ldr x8, [x9, #0x800]" },
+        // A low part the access size does not divide: the unscaled form.
+        { { 0x52800069u, 0x72A00029u, 0xF8696808u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 1, "-> add x9, x0, #0x10, lsl #12 ; ldur x8, [x9, #0x3]" },
+        // An SP base and a byte load.
+        { { 0x52947D09u, 0x72A000E9u, 0x38696BE8u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 1, "-> add x9, sp, #0x7a, lsl #12 ; ldrb w8, [x9, #0x3e8]" },
+        // Negatives: beyond one shifted ADD; the base is the constant;
+        // misaligned and beyond the unscaled range; a UXTW index; the
+        // constant register read afterwards.
+        { { 0x52800009u, 0x72A02009u, 0xF8696808u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 0, NULL },
+        { { 0x52947D09u, 0x72A000E9u, 0xF8696928u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 0, NULL },
+        { { 0x52810029u, 0x72A00029u, 0xF8696808u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 0, NULL },
+        { { 0x52947D09u, 0x72A000E9u, 0xF8694808u, 0xD29A3DA9u, 0xD65F03C0u },
+          5, 0, NULL },
+        { { 0x52947D09u, 0x72A000E9u, 0xF8696808u, 0xF9000009u, 0xD65F03C0u },
+          5, 0, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, name, detail,
+                                sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "mov_reg_offset_split case %zu: %d findings, "
+                    "detail \"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
 // check_mov_logic_known_bits over instruction words with the buffer
 // set: the constant register is killed by a MOVZ where the operation
 // does not overwrite it.
@@ -19022,6 +19083,7 @@ int main(void)
     test_mov_cmp_branch_bvs();
     test_mov_logic_imm_fold();
     test_mov_logic_known_bits();
+    test_mov_reg_offset_split();
     test_and_mov_cmp_ubfx();
     test_mov_cage_orr_add();
     test_cheap_const_copy();

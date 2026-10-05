@@ -1,0 +1,51 @@
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x0 <_main>: -> add x9, x8, #0x7a, lsl #12 ; ldr x8, [x9, #0x3e8] (3 instructions)
+  movz w9, #0xa3e8
+  movk w9, #0x7, lsl #16
+  ldr x8, [x8, x9]
+
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x14 <_main+0x14>: -> add x9, x8, #0x7a, lsl #12 ; ldr x9, [x9, #0x3e8] (3 instructions)
+  movz x9, #0xa3e8
+  movk x9, #0x7, lsl #16
+  ldr x9, [x8, x9]
+
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x24 <_main+0x24>: -> add x9, sp, #0x7a, lsl #12 ; str x1, [x9, #0x3e8] (3 instructions)
+  movz w9, #0xa3e8
+  movk w9, #0x7, lsl #16
+  str x1, [sp, x9]
+
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x38 <_main+0x38>: -> add x9, x0, #0x80, lsl #12 ; ldr x8, [x9, #0x800] (3 instructions)
+  movz w9, #0x100
+  movk w9, #0x1, lsl #16
+  ldr x8, [x0, x9, lsl #3]
+
+register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #0
+  mov w9, #3
+
+MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset: 0x48 <_main+0x48>: -> add x9, x0, #0x10, lsl #12 ; ldur x8, [x9, #0x3] (3 instructions)
+  movz w9, #0x3
+  movk w9, #0x1, lsl #16
+  ldr x8, [x0, x9]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x5c <_main+0x5c>: -> ldr x8, [x0, #0x1000] (2 instructions)
+  movz x9, #0x1000
+  ldr x8, [x0, x9]
+
+register write overwritten unread at offset: 0x64 <_main+0x64>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #0
+  mov w9, #1
+
+register write overwritten unread at offset: 0x74 <_main+0x74>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #0
+  mov w9, #0x801
+
+register write overwritten unread at offset: 0x84 <_main+0x84>: -> delete; x9 is overwritten before any read (1 instructions)
+  mov x9, #0
+  mov w9, #0xa3e8
+
+Optimization opportunities by type:
+       5  MOV chain + register-offset LDR/STR foldable to ADD + immediate offset
+       4  register write overwritten unread
+       1  MOV + register-offset LDR/STR foldable to immediate offset
+
+10 optimization opportunities in 39 instructions
