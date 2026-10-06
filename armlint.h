@@ -438,6 +438,18 @@ bool check_tst_cset(armlint_state *state, const cs_insn *insn,
 bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect NEG Rt, Rn (SUB Rt, ZR, Rn, no shift, non-S) immediately
+// followed by CBZ/CBNZ Rt of the same width: -x is zero exactly when
+// x is, so the branch can test Rn and the negation go. Rt must be
+// dead on every edge where it held -x: in place (Rt == Rn) that is
+// only the fall-through of a CBZ or the target of a CBNZ, since NEG
+// changed nothing where x = 0; out of place it is both edges. The
+// fall-through is proven by the register-liveness scan
+// (defer_dead_mov), the target by reg_dead_at_target. Reported as
+// "NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source".
+bool check_neg_cbz(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out);
+
 // Detect CSET Rd, cond (CSINC Rd, ZR, ZR, invert(cond)) immediately
 // followed by one of three consumers of Rd -- each expressible as a
 // single instruction reading the same still-live NZCV, making the

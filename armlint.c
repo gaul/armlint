@@ -310,6 +310,15 @@ struct armlint_state {
     unsigned tbf_rd;
     unsigned tbf_rs;
     unsigned tbf_bit;
+
+    // check_neg_cbz: a NEG Rt, Rn awaiting the adjacent CBZ/CBNZ Rt
+    // that can test Rn instead.
+    bool ncb_active;
+    unsigned ncb_sf;
+    unsigned ncb_rd;
+    unsigned ncb_rn;
+    size_t ncb_offset;
+    char ncb_disasm[ARMLINT_FINDING_LINE_LEN];
     size_t tbf_offset;
     char tbf_disasm[ARMLINT_FINDING_LINE_LEN];
 
@@ -1799,6 +1808,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->kv_valid = false;
     state->cwc_active = false;
     state->pending_cwc_active = false;
+    state->ncb_active = false;
     state->alr_active = false;
     state->aul_active = false;
     state->cmp_active = false;
@@ -5793,6 +5803,95 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
             "%s %s", insn->mnemonic, insn->op_str);
     }
 
+    return false;
+}
+
+// NEG Rt, Rn ; CBZ/CBNZ Rt tests whether -x is zero, and -x is zero
+// exactly when x is (at either width: -x mod 2^w = 0 iff x mod 2^w =
+// 0), so the branch can test the source and the negation go:
+//
+//   ldrb w8, [x24, #6] ; neg w8, w8 ; cbz w8, L   ->   cbz w8, L
+//   neg w8, w1 ; cbnz w8, L                       ->   cbnz w1, L
+//
+// The .NET 11 NegatedZeroCompare shape (dotnet/runtime#124332);
+// libcrypto's is OpenSSL's constant-time `!x` through `0 - x`. The
+// NEG is the SUB Rt, ZR, Rn alias with no shift (a shifted source
+// changes which values are zero) and no S (NEGS writes the flags).
+// Both must have the same width: an in-place W negation zeroes bits
+// 63:32 that the deletion leaves alone, which an X branch would see.
+//
+// Deadness of Rt, which the deletion stops writing with -x, is needed
+// on each edge where -x is what Rt held. In place (Rt == Rn) the edge
+// where x = 0 is exempt -- NEG changed nothing there, since -0 = 0 --
+// so a CBZ needs only its fall-through proven and a CBNZ only its
+// target; out of place both edges need it. The fall-through is the
+// register-liveness scan (defer_dead_mov), the target the word-level
+// scan reg_dead_at_target. The finding spans both instructions, so a
+// branch onto the CBZ -- a path on which Rt holds something else --
+// fails the central side-entry gate.
+bool check_neg_cbz(armlint_state *state, const cs_insn *insn,
+                   size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->ncb_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+
+    if (state->ncb_active) {
+        state->ncb_active = false;          // strict adjacency
+        unsigned c_sf, rt;
+        bool is_cbnz;
+        int32_t imm19;
+        if (decode_cbz_cbnz(op, &c_sf, &is_cbnz, &imm19, &rt)
+                && rt == state->ncb_rd && c_sf == state->ncb_sf) {
+            bool in_place = state->ncb_rd == state->ncb_rn;
+            bool need_target = !in_place || is_cbnz;
+            bool need_ft = !in_place || !is_cbnz;
+            int64_t target = (int64_t)offset + (int64_t)imm19 * 4;
+            uint64_t target_addr = insn->address
+                + (uint64_t)((int64_t)imm19 * 4);
+            if (need_target
+                    && !reg_dead_at_target(state, target, state->ncb_rd)) {
+                return false;
+            }
+            char wx = c_sf ? 'x' : 'w';
+            const char *mnem = is_cbnz ? "cbnz" : "cbz";
+            out->name = "NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source";
+            out->start_offset = state->ncb_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, 0x%" PRIx64 " (drop %s)", mnem, wx,
+                state->ncb_rn, target_addr, state->ncb_disasm);
+            snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+                state->ncb_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]), "%s %s",
+                insn->mnemonic, insn->op_str);
+            if (need_ft) {
+                return defer_dead_mov(state, out, state->ncb_rd);
+            }
+            return true;
+        }
+    }
+
+    // Open: NEG Rt, Rn -- SUB (shifted register) with Rn = ZR, LSL #0,
+    // non-S. ZR as the negated register is a constant zero (a decided
+    // branch, not this fold) and ZR as the destination a discarded
+    // result.
+    if ((op & 0x7FE0FFE0u) == 0x4B0003E0u) {
+        unsigned rd = op & 0x1Fu;
+        unsigned rm = (op >> 16) & 0x1Fu;
+        if (rd != 31u && rm != 31u) {
+            state->ncb_active = true;
+            state->ncb_sf = (op >> 31) & 1u;
+            state->ncb_rd = rd;
+            state->ncb_rn = rm;
+            state->ncb_offset = offset;
+            snprintf(state->ncb_disasm, sizeof(state->ncb_disasm),
+                "%s %s", insn->mnemonic, insn->op_str);
+        }
+    }
     return false;
 }
 
@@ -23056,6 +23155,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_tst_cset,     // reads tst_* state; must precede its owner,
     check_tst_branch,   // which expires the pair on any non-branch
     check_single_bit_cbz,
+    check_neg_cbz,
     check_cset_fold,
     check_cmp_cset_sign,
     check_cmpbr_fold,

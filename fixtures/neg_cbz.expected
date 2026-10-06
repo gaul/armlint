@@ -1,0 +1,16 @@
+NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source at offset: 0x4 <_main+0x4>: -> cbz w8, 0x10 (drop neg w8, w8) (2 instructions)
+  neg w8, w8
+  cbz w8, #0x10
+
+NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source at offset: 0x14 <_main+0x14>: -> cbnz w9, 0x24 (drop neg w9, w9) (2 instructions)
+  neg w9, w9
+  cbnz w9, #0x24
+
+NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source at offset: 0x2c <_main+0x2c>: -> cbz x1, 0x3c (drop neg x10, x1) (2 instructions)
+  neg x10, x1
+  cbz x10, #0x3c
+
+Optimization opportunities by type:
+       3  NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source
+
+3 optimization opportunities in 37 instructions

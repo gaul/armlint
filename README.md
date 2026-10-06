@@ -119,6 +119,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`tst #(1<<k)` + `b.eq`/`b.ne`](analyses.md#tst-single-bit--beqne-foldable-into-tbztbnz) | `tbz`/`tbnz Rn, #k` |
 | [`tst #(1<<k)` + `cset`/`csetm`](analyses.md#tst-single-bit--csetcsetm-foldable-into-ubfxsbfx) | `ubfx`/`sbfx Rd, Rn, #k, #1` |
 | [single-bit `and`/`ubfx`/`lsr #31` + `cbz`/`cbnz`](analyses.md#single-bit-test--cbzcbnz-foldable-into-tbztbnz) | `tbz`/`tbnz Rs, #k` |
+| [`neg` + `cbz`/`cbnz` of the result](analyses.md#neg--cbzcbnz-foldable-to-cbzcbnz-of-the-source) | `cbz`/`cbnz` of the source |
 | [`cset` + `cbz`/`cbnz`](analyses.md#cset--cbzcbnz-foldable-into-bcond) | `b.<cond>` / `b.<inverse cond>` |
 | [`cset` + `eor #1`](analyses.md#cset--cbzcbnz-foldable-into-bcond) | `cset <inverse cond>` |
 | [`cset` + `neg`](analyses.md#cset--cbzcbnz-foldable-into-bcond) | `csetm` |

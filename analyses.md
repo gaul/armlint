@@ -340,6 +340,48 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Same win as the TST fold -- one fewer instruction -- plus the
   scratch register is freed.
 
+## NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source
+
+* `neg w8, w8 ; cbz w8, L` branches on whether `-x` is zero, and `-x`
+  is zero exactly when `x` is -- at either width, since `-x mod 2^w =
+  0` iff `x mod 2^w = 0` -- so `cbz w8, L` on the un-negated value does
+  the same and the NEG goes. The .NET 11 NegatedZeroCompare shape
+  (dotnet/runtime#124332); in libcrypto it is OpenSSL's constant-time
+  `!x` written as `0 - x` (`ldrb w8, [x24, #6] ; neg w8, w8 ; cbz
+  w8`), in clang a `std::deque` move's `neg x8, x2 ; cbz x8` before a
+  call.
+* **The shape.** NEG is the `SUB Rt, ZR, Rn` alias with no shift and
+  no S: a shifted source (`neg w8, w1, lsl #1`) changes which values
+  are zero, and NEGS writes the flags. The branch must have the NEG's
+  width: an in-place W negation zeroes bits 63:32 that the deletion
+  leaves alone, which an X-form branch would see. A ZR source is a
+  constant zero (a decided branch, not this fold); a ZR destination is
+  a discarded result.
+* **The proof.** The deletion stops writing `-x` into `Rt`, so `Rt`
+  must be dead on every edge where it held `-x`. In place (`Rt ==
+  Rn`) the edge where `x = 0` is exempt -- `-0 = 0`, so the NEG
+  changed nothing there -- and a CBZ needs only its fall-through
+  proven, a CBNZ only its target; out of place both edges need it.
+  The fall-through is the register-liveness scan every
+  producer-deleting fold uses (which follows a direct branch to its
+  target), the target the word-level `reg_dead_at_target` walk. A
+  call ends either unproven: no PCS assumption. The finding spans
+  both instructions, so a branch onto the CBZ -- a path on which `Rt`
+  holds something else -- fails the central side-entry gate.
+* **Corpus, 2026-10-06.** libcrypto 12, clang 1, librustc_driver 1,
+  go 1, no other check moved. The shape census (TODO's row) counted
+  libcrypto 53, clang 55, rustc 29, go 4 with no deadness applied,
+  and the proof is what separates the two: libcrypto's other 41 sites
+  flow the negated byte into a loop whose paths reach a call before
+  any overwrite, clang's 21 out-of-place sites die at a `bl` two
+  instructions on (`neg x8, x2 ; cbz x8 ; mov x0 ; mov x1 ; bl`), and
+  its in-place ones are loop counters (`neg x11, x11 ; L: cbz x11 ;
+  ... ; add x11, x11, #16 ; b.ne L`) whose CBZ is the loop header --
+  live, and a branch target besides.
+* Saves an instruction and a cycle of dependent latency in front of
+  the branch; the fused `cmp`/`b.cond` objection to EOR+CBZ does not
+  apply, since the CBZ was already there.
+
 ## CSET + CBZ/CBNZ foldable into B.cond
 
 * `cset w8, eq ; cbnz w8, L` instead of `b.eq L`. The CSET

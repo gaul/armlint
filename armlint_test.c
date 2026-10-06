@@ -2990,6 +2990,107 @@ static void neg_(uint8_t out[4], unsigned sf, unsigned s, unsigned rd,
     write_le32(out, op);
 }
 
+static void test_neg_cbz(void)
+{
+    const char *name = "NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    uint8_t code[32];
+    const uint32_t add_w0_w8_1 = 0x11000500u;   // add w0, w8, #1: reads w8
+
+    // In place, CBZ: only the fall-through must kill w8 (on the taken
+    // edge x = 0 and the NEG changed nothing).
+    //   neg w8, w8 ; cbz w8, L ; mov w8, #1 ; L: ret
+    neg_(&code[0], 0, 0, 8, 8);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    movz_w(&code[8], 8, 1);
+    ret_(&code[12]);
+    detail[0] = '\0';
+    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> cbz w8, 0xc (drop neg w8, w8)") == 0);
+
+    // ... and a read on the fall-through refuses it.
+    write_le32(&code[8], add_w0_w8_1);
+    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 0);
+
+    // In place, CBNZ: only the target must kill w8; the fall-through
+    // may read it.
+    //   neg w8, w8 ; cbnz w8, L ; add w0, w8, #1 ; L: mov w8, #1 ; ret
+    neg_(&code[0], 0, 0, 8, 8);
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
+    write_le32(&code[8], add_w0_w8_1);
+    movz_w(&code[12], 8, 1);
+    ret_(&code[16]);
+    detail[0] = '\0';
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> cbnz w8, 0xc (drop neg w8, w8)") == 0);
+
+    // ... and a read at the target refuses it.
+    write_le32(&code[12], add_w0_w8_1);
+    movz_w(&code[8], 8, 1);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+
+    // Out of place: both edges must kill w8.
+    //   neg w8, w1 ; cbz w8, L ; mov w8, #1 ; L: mov w8, #2 ; ret
+    neg_(&code[0], 0, 0, 8, 1);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    movz_w(&code[8], 8, 1);
+    movz_w(&code[12], 8, 2);
+    ret_(&code[16]);
+    detail[0] = '\0';
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> cbz w1, 0xc (drop neg w8, w1)") == 0);
+    // The CBNZ twin of the same fragment.
+    cbz_cbnz(&code[4], 0, 1, 8, 2);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 1);
+    // A read at the target, or on the fall-through, refuses it.
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    write_le32(&code[12], add_w0_w8_1);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+    movz_w(&code[12], 8, 2);
+    write_le32(&code[8], add_w0_w8_1);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+
+    // X form, in place.
+    neg_(&code[0], 1, 0, 3, 3);
+    cbz_cbnz(&code[4], 1, 0, 3, 2);
+    movz_x(&code[8], 3, 1, 0);
+    ret_(&code[12]);
+    detail[0] = '\0';
+    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> cbz x3, 0xc (drop neg x3, x3)") == 0);
+
+    // Negatives on the shape: a width mismatch, NEGS, a shifted
+    // source, a ZR source, and a gap.
+    neg_(&code[0], 0, 0, 8, 8);
+    cbz_cbnz(&code[4], 1, 0, 8, 2);
+    movz_w(&code[8], 8, 1);
+    ret_(&code[12]);
+    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 0);
+    neg_(&code[0], 0, 1, 8, 8);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 0);
+    write_le32(&code[0], 0x4B0107E8u);          // neg w8, w1, lsl #1
+    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 0);
+    neg_(&code[0], 0, 0, 8, 31);
+    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 0);
+    neg_(&code[0], 0, 0, 8, 8);
+    write_le32(&code[4], 0xD503201Fu);          // nop
+    cbz_cbnz(&code[8], 0, 0, 8, 2);
+    movz_w(&code[12], 8, 1);
+    ret_(&code[16]);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+
+    // A branch onto the CBZ: on that path w8 holds something else, so
+    // the central side-entry gate suppresses the fold.
+    //   cbz w0, M ; neg w8, w8 ; M: cbz w8, L ; mov w8, #1 ; L: ret
+    cbz_cbnz(&code[0], 0, 0, 0, 2);
+    neg_(&code[4], 0, 0, 8, 8);
+    cbz_cbnz(&code[8], 0, 0, 8, 2);
+    movz_w(&code[12], 8, 1);
+    ret_(&code[16]);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+}
+
 static void test_cset_fold(void)
 {
     uint8_t code[16];
@@ -19177,6 +19278,7 @@ int main(void)
     test_cmp_zero_branch();
     test_tst_branch();
     test_single_bit_cbz();
+    test_neg_cbz();
     test_cset_fold();
     test_cset_recompare();
     test_cmp_cset_sign();
