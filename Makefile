@@ -44,6 +44,7 @@ test: armlint.o armlint_test.o
 # (exit 2) without one, rather than passing having tested nothing.
 integration-test: armlint
 	./scripts/run_fixtures.sh
+	./scripts/json_test.sh
 
 # Regenerate fixtures/*.expected from current armlint output -- use
 # after an intentional behavior change, then review the diff before

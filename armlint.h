@@ -3368,6 +3368,13 @@ void armlint_summary_print(const armlint_summary *summary);
 // a NULL summary.
 size_t armlint_summary_instructions(const armlint_summary *summary);
 
+// Bytes the lint scan stepped over without linting, across all runs:
+// words this Capstone build cannot decode (resynchronized past one
+// word at a time) and, under ARMLINT_FEATURE_V8POOL, the constant
+// pools it skips whole. Non-zero means partial coverage of the range,
+// so a clean count is not a clean sweep. 0 for a NULL summary.
+size_t armlint_summary_skipped(const armlint_summary *summary);
+
 // A code anchor for attributing findings to their containing
 // function: a defined text symbol, or a bare function start
 // (LC_FUNCTION_STARTS in a stripped Mach-O), in which case name is
@@ -3401,6 +3408,24 @@ const char *armlint_symbol_annotation(char *buf, size_t cap,
                                       const armlint_symbol *symbols,
                                       size_t nsymbols, uint64_t vaddr);
 
+// The anchor the annotation above would name for vaddr, or NULL when
+// it would write "": the same rules (greatest anchor at or below
+// vaddr, unless sized and vaddr lies at or past its end), as data
+// rather than text, for a consumer that attributes findings itself.
+const armlint_symbol *armlint_symbol_lookup(const armlint_symbol *symbols,
+                                            size_t nsymbols, uint64_t vaddr);
+
+// Per-finding callback for check_instructions. vaddr is the absolute
+// address of the finding's first instruction (base_addr plus its
+// offset) and bytes points at that instruction's encoding inside the
+// scanned buffer: insn_count * 4 bytes, the window the finding spans.
+// A deferred finding is reported when its proof completes, several
+// instructions past the window it names, so findings do not arrive in
+// strictly increasing address order, and two checks can report the
+// same address.
+typedef void (*armlint_finding_fn)(void *ctx, const armlint_finding *finding,
+                                   uint64_t vaddr, const uint8_t *bytes);
+
 // Top-level driver: disassemble inst[0..len) at base_addr, run all
 // checks, and return the number of findings (or -1 on a decoding
 // error). In verbose mode each finding is printed -- its one-line
@@ -3415,10 +3440,17 @@ const char *armlint_symbol_annotation(char *buf, size_t cap,
 // base_addr + start_offset. Symbolization changes rendering only:
 // findings, counts, and summary tallies are identical with and without
 // a table.
+//
+// If on_finding is non-NULL it is invoked once per finding with ctx as
+// its first argument (see armlint_finding_fn). It is independent of
+// both summary and verbose, so a consumer wanting only the per-finding
+// stream passes NULL for the summary and false for verbose. The
+// driver's --json mode is built on it.
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
                        armlint_summary *summary, unsigned features,
-                       const armlint_symbol *symbols, size_t nsymbols);
+                       const armlint_symbol *symbols, size_t nsymbols,
+                       armlint_finding_fn on_finding, void *ctx);
 
 // A by-extension tally of every instruction decoded, the AArch64 analog
 // of a psABI-level census: each instruction is attributed to the FEAT_*

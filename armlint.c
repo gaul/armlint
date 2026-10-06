@@ -22899,6 +22899,7 @@ struct armlint_summary {
     } entries[ARMLINT_SUMMARY_MAX];
     size_t count;
     size_t instructions;   // total decoded instructions across all runs
+    size_t skipped;        // bytes stepped over unlinted (see the header)
     // Immediate-misfit audit findings by (consumer class, width,
     // constant): open-addressed on the constant, allocated on first
     // use and grown by doubling. misfit_dropped counts findings that
@@ -22929,6 +22930,11 @@ void armlint_summary_destroy(armlint_summary *summary)
 size_t armlint_summary_instructions(const armlint_summary *summary)
 {
     return summary == NULL ? 0 : summary->instructions;
+}
+
+size_t armlint_summary_skipped(const armlint_summary *summary)
+{
+    return summary == NULL ? 0 : summary->skipped;
 }
 
 static void dedup_attach(armlint_dedup *dedup);
@@ -23167,16 +23173,11 @@ void armlint_summary_print(const armlint_summary *summary)
     free(idx);
 }
 
-const char *armlint_symbol_annotation(char *buf, size_t cap,
-                                      const armlint_symbol *symbols,
-                                      size_t nsymbols, uint64_t vaddr)
+const armlint_symbol *armlint_symbol_lookup(const armlint_symbol *symbols,
+                                            size_t nsymbols, uint64_t vaddr)
 {
-    if (cap == 0) {
-        return buf;
-    }
-    buf[0] = '\0';
     if (nsymbols == 0 || vaddr < symbols[0].vaddr) {
-        return buf;
+        return NULL;
     }
     // Greatest anchor at or below vaddr: binary search for the first
     // anchor strictly above, then step back one.
@@ -23190,16 +23191,31 @@ const char *armlint_symbol_annotation(char *buf, size_t cap,
         }
     }
     const armlint_symbol *sym = &symbols[lo - 1];
-    uint64_t delta = vaddr - sym->vaddr;
     // A sized anchor reaches only to its end. Past it the code belongs
     // to some function the table does not record -- Firefox's stripped
     // libxul.so keeps 110 exports for 28M instructions, and its
     // 108-byte uprofiler_get would otherwise annotate 40 MB of code as
-    // "<uprofiler_get+0x2b3a1c>" -- so print nothing rather than a
+    // "<uprofiler_get+0x2b3a1c>" -- so name nothing rather than a
     // misleading owner.
-    if (sym->size != 0 && delta >= sym->size) {
+    if (sym->size != 0 && vaddr - sym->vaddr >= sym->size) {
+        return NULL;
+    }
+    return sym;
+}
+
+const char *armlint_symbol_annotation(char *buf, size_t cap,
+                                      const armlint_symbol *symbols,
+                                      size_t nsymbols, uint64_t vaddr)
+{
+    if (cap == 0) {
         return buf;
     }
+    buf[0] = '\0';
+    const armlint_symbol *sym = armlint_symbol_lookup(symbols, nsymbols, vaddr);
+    if (sym == NULL) {
+        return buf;
+    }
+    uint64_t delta = vaddr - sym->vaddr;
     // The %.120s precision cap keeps a pathological mangled name from
     // overrunning the buffer mid-token: with cap >=
     // ARMLINT_SYMBOL_ANNOTATION_LEN the delta and closing '>' always
@@ -23262,15 +23278,34 @@ static bool dedup_note_finding(armlint_dedup *dedup,
 // side-entry gate: attribute it to its function when the summary
 // carries a dedup (which decides the repeat mark), print it under -v,
 // and tally it.
-static void emit_finding(const armlint_finding *finding, bool verbose,
-                         armlint_summary *summary,
-                         const armlint_symbol *symbols, size_t nsymbols,
-                         uint64_t base_addr)
+// Everything a scan does with one finding: the dedup attribution, the
+// verbose report, the summary tally, and the caller's callback (with
+// the finding's absolute address and the bytes of the window it names,
+// which start at inst + start_offset).
+typedef struct {
+    bool verbose;
+    armlint_summary *summary;
+    const armlint_symbol *symbols;
+    size_t nsymbols;
+    uint64_t base_addr;
+    const uint8_t *inst;
+    armlint_finding_fn on_finding;
+    void *ctx;
+} finding_sink;
+
+static void emit_finding(const finding_sink *sink,
+                         const armlint_finding *finding)
 {
-    bool repeat = summary != NULL
-        && dedup_note_finding(summary->dedup, finding, base_addr);
-    report_finding(finding, verbose, symbols, nsymbols, base_addr, repeat);
-    summary_add(summary, finding);
+    bool repeat = sink->summary != NULL
+        && dedup_note_finding(sink->summary->dedup, finding, sink->base_addr);
+    report_finding(finding, sink->verbose, sink->symbols, sink->nsymbols,
+        sink->base_addr, repeat);
+    summary_add(sink->summary, finding);
+    if (sink->on_finding != NULL) {
+        sink->on_finding(sink->ctx, finding,
+            sink->base_addr + finding->start_offset,
+            sink->inst + finding->start_offset);
+    }
 }
 
 // Single ordered list of every per-instruction action the driver
@@ -23410,8 +23445,19 @@ const size_t armlint_check_registry_count =
 int check_instructions(csh handle, const uint8_t *inst, size_t len,
                        uint64_t base_addr, bool verbose,
                        armlint_summary *summary, unsigned features,
-                       const armlint_symbol *symbols, size_t nsymbols)
+                       const armlint_symbol *symbols, size_t nsymbols,
+                       armlint_finding_fn on_finding, void *ctx)
 {
+    const finding_sink sink = {
+        .verbose = verbose,
+        .summary = summary,
+        .symbols = symbols,
+        .nsymbols = nsymbols,
+        .base_addr = base_addr,
+        .inst = inst,
+        .on_finding = on_finding,
+        .ctx = ctx,
+    };
     armlint_state *state = armlint_state_create();
     if (state == NULL) {
         return -1;
@@ -23441,9 +23487,11 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             armlint_finding finding;
             if (armlint_flush(state, &finding)
                     && !armlint_finding_has_side_entry(state, &finding)) {
-                emit_finding(&finding, verbose, summary, symbols,
-                    nsymbols, base_addr);
+                emit_finding(&sink, &finding);
                 errors++;
+            }
+            if (summary != NULL) {
+                summary->skipped += pool;
             }
             code += pool;
             size -= pool;
@@ -23462,8 +23510,7 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
                                               &finding)
                         && !armlint_finding_has_side_entry(state,
                                                            &finding)) {
-                    emit_finding(&finding, verbose, summary, symbols,
-                        nsymbols, base_addr);
+                    emit_finding(&sink, &finding);
                     errors++;
                 }
             }
@@ -23474,9 +23521,11 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
             armlint_finding finding;
             if (armlint_flush(state, &finding)
                     && !armlint_finding_has_side_entry(state, &finding)) {
-                emit_finding(&finding, verbose, summary, symbols,
-                    nsymbols, base_addr);
+                emit_finding(&sink, &finding);
                 errors++;
+            }
+            if (summary != NULL) {
+                summary->skipped += 4;
             }
             code += 4;
             size -= 4;
@@ -23487,8 +23536,7 @@ int check_instructions(csh handle, const uint8_t *inst, size_t len,
     armlint_finding finding;
     if (armlint_flush(state, &finding)
             && !armlint_finding_has_side_entry(state, &finding)) {
-        emit_finding(&finding, verbose, summary, symbols, nsymbols,
-            base_addr);
+        emit_finding(&sink, &finding);
         errors++;
     }
 

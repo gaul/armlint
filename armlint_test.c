@@ -359,7 +359,7 @@ static int run_driver_check(const uint8_t *code, size_t code_size,
                             unsigned features)
 {
     return check_instructions(g_handle, code, code_size, 0, false, NULL,
-                              features, NULL, 0);
+                              features, NULL, 0, NULL, NULL);
 }
 
 static int run_cssc_check(const uint8_t *code, size_t code_size)
@@ -19157,7 +19157,7 @@ static void test_dedup(void)
     armlint_summary_set_dedup(summary, d);
     assert(armlint_dedup_scan(d, code, 0x30, 0x1000, 0, consts, 3));
     assert(check_instructions(g_handle, code, 0x30, 0x1000, false, summary,
-                              0, consts, 3) == 3);
+                              0, consts, 3, NULL, NULL) == 3);
     assert(armlint_dedup_findings(d) == 3);
     assert(armlint_dedup_repeats(d) == 2);
     assert(armlint_dedup_copies(d, false) == 1);
@@ -19165,7 +19165,7 @@ static void test_dedup(void)
     // A run over a range the dedup did not key is tallied but never
     // attributed.
     assert(check_instructions(g_handle, code, 0x30, 0x8000, false, summary,
-                              0, NULL, 0) == 3);
+                              0, NULL, 0, NULL, NULL) == 3);
     assert(armlint_dedup_findings(d) == 6);
     assert(armlint_dedup_repeats(d) == 2);
     armlint_summary_destroy(summary);
@@ -19351,6 +19351,82 @@ static void test_constants(void)
     armlint_constants_destroy(NULL);
 }
 
+// check_instructions' per-finding callback, the skipped-bytes counter
+// and the symbol lookup the --json driver mode is built on.
+struct cb_rec {
+    unsigned n;
+    const char *name[8];
+    uint64_t vaddr[8];
+    const uint8_t *bytes[8];
+    unsigned count[8];
+};
+
+static void cb_record(void *ctx, const armlint_finding *f, uint64_t vaddr,
+                      const uint8_t *bytes)
+{
+    struct cb_rec *r = ctx;
+    assert(r->n < 8);
+    r->name[r->n] = f->name;
+    r->vaddr[r->n] = vaddr;
+    r->bytes[r->n] = bytes;
+    r->count[r->n] = f->insn_count;
+    r->n++;
+}
+
+static void test_finding_callback(void)
+{
+    // mov x0, #7 ; cmp x0, #7 ; csel x1, x2, x3, eq ; <undecodable> ; ret
+    uint8_t code[20];
+    write_le32(&code[0], 0xD28000E0u);
+    write_le32(&code[4], 0xF1001C1Fu);
+    write_le32(&code[8], 0x9A830041u);
+    write_le32(&code[12], 0xFFFFFFFFu);
+    ret_(&code[16]);
+
+    armlint_summary *summary = armlint_summary_create();
+    assert(summary != NULL);
+    struct cb_rec rec = { 0 };
+    int n = check_instructions(g_handle, code, sizeof(code), 0x1000, false,
+                               summary, 0, NULL, 0, cb_record, &rec);
+    assert(n >= 1);
+    // One call per finding, with the finding's absolute address and the
+    // bytes of the window it names inside the scanned buffer.
+    assert((unsigned)n == rec.n);
+    bool seen = false;
+    for (unsigned i = 0; i < rec.n; i++) {
+        assert(rec.vaddr[i] >= 0x1000 && rec.vaddr[i] < 0x1000 + sizeof(code));
+        assert(rec.bytes[i] == code + (rec.vaddr[i] - 0x1000));
+        if (strcmp(rec.name[i], "conditional select decided by known flags")
+                == 0) {
+            assert(rec.vaddr[i] == 0x1008);
+            assert(rec.count[i] == 1);
+            seen = true;
+        }
+    }
+    assert(seen);
+    // The undecodable word is stepped over and counted, not decoded.
+    assert(armlint_summary_instructions(summary) == 4);
+    assert(armlint_summary_skipped(summary) == 4);
+    // The callback changes nothing about the count.
+    assert(check_instructions(g_handle, code, sizeof(code), 0x1000, false,
+                              NULL, 0, NULL, 0, NULL, NULL) == n);
+    assert(armlint_summary_skipped(NULL) == 0);
+    armlint_summary_destroy(summary);
+
+    // The lookup names what the annotation would: the greatest anchor
+    // at or below the address, unless sized and the address lies at or
+    // past its end.
+    const armlint_symbol syms[] = {
+        { 0x1000, "_a", 8 }, { 0x1010, "_b", 0 },
+    };
+    assert(armlint_symbol_lookup(syms, 2, 0x1004) == &syms[0]);
+    assert(armlint_symbol_lookup(syms, 2, 0x1008) == NULL);
+    assert(armlint_symbol_lookup(syms, 2, 0x1010) == &syms[1]);
+    assert(armlint_symbol_lookup(syms, 2, 0x1fff) == &syms[1]);
+    assert(armlint_symbol_lookup(syms, 2, 0xff0) == NULL);
+    assert(armlint_symbol_lookup(syms, 0, 0x1000) == NULL);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -19421,6 +19497,7 @@ int main(void)
     test_cmp_cmn_w();
     test_branch_decided();
     test_csel_decided();
+    test_finding_callback();
     test_const_fold();
     test_and_known_noop();
     test_mov_zero_to_xzr();

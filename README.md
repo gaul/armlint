@@ -327,7 +327,8 @@ int lint(const uint8_t *code, size_t code_len, uint64_t base_addr)
     int findings = check_instructions(
         handle, code, code_len, base_addr, /*verbose=*/true, summary,
         /*features=*/0,    // or ARMLINT_FEATURE_CSSC etc.
-        /*symbols=*/NULL, /*nsymbols=*/0);   // see armlint_symbol
+        /*symbols=*/NULL, /*nsymbols=*/0,    // see armlint_symbol
+        /*on_finding=*/NULL, /*ctx=*/NULL);  // see armlint_finding_fn
     armlint_summary_print(summary);   // optional by-type tally
 
     armlint_summary_destroy(summary);
@@ -338,7 +339,29 @@ int lint(const uint8_t *code, size_t code_len, uint64_t base_addr)
 
 The `summary` is optional -- pass `NULL` to skip the by-type tally --
 and `verbose` controls whether each opportunity is printed as it is
-found. armlint can also read arbitrary AArch64 binaries (ELF, thin
+found. `armlint_summary_skipped` reports how many bytes the scan
+stepped over without linting (words this Capstone build cannot
+decode, and V8 constant pools under `-m v8`), so incomplete coverage
+of a data-laden section is not mistaken for a clean scan.
+
+The optional `on_finding` callback is called once per opportunity,
+with `ctx` as its first argument, the finding itself (its name, the
+rewrite in `detail`, and the instructions it spans in `lines`), the
+absolute address of its first instruction (`base_addr` plus the
+finding's offset), and a pointer to that instruction's bytes inside
+the scanned buffer -- `insn_count * 4` of them, the window the
+finding names. Where the summary answers "how many of each kind", the
+callback answers "which instructions, at what address" -- the form
+needed to join findings against anything else keyed by address, such
+as an execution profile that weights each opportunity by how often
+the code it names actually runs. It is independent of both `summary`
+and `verbose`, so a consumer wanting only the per-finding stream
+passes `NULL` for the summary and `false` for verbose.
+`armlint_symbol_lookup` gives such a consumer the containing function
+as data, by the rules the `-v` annotation prints it. The driver's
+`--json` mode is built on both.
+
+armlint can also read arbitrary AArch64 binaries (ELF, thin
 Mach-O, or universal/fat Mach-O) directly:
 
 ```sh
@@ -349,6 +372,7 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
 ./armlint -d /bin/ls        # also report functions that copy one another
 ./armlint -c /bin/ls        # also report the constants MOVZ/MOVK chains build
+./armlint --json /bin/ls    # the findings as a JSON document keyed by address
 ```
 
 A universal binary can carry more than one ARM64 slice. macOS 27's
@@ -456,6 +480,57 @@ either structure -- prints the historic unannotated form, as does a
 finding past the end of an ELF symbol whose recorded size stops short
 of it: a stripped `libxul.so` keeps only its exports, and the last one
 before 40 MB of unnamed code must not claim all of it.
+
+Pass `--json` to replace the human report with the findings as a JSON
+document, one object per line inside a `findings` array:
+
+```console
+$ ./armlint --json /bin/ls
+{"file": "/bin/ls",
+  "findings": [
+    {"vaddr": 4294969184, "check": "ADD + LDR foldable to immediate-offset LDR", "detail": "-> ldr w8, [x8, #0x2c]", "section": "__TEXT,__text", "slice": "arm64e", "function_start": 4294969116, "function_offset": 68, "length": 8, "bytes": "08b10091080140b9", "text": ["add x8, x8, #0x2c", "ldr w8, [x8]"]},
+    ...
+  ],
+  "instructions": 3846,
+  "skipped": 0,
+  "opportunities": 55
+}
+```
+
+`vaddr` is the finding's **absolute** address -- not the
+section-relative offset `-v` prints -- and is a number rather than a
+hex string so that it composes with arithmetic. That is the point of
+the mode: findings become joinable against anything else keyed by
+address, and the join worth making is an execution profile, which
+turns a static count of opportunities into a dynamic one. How often
+a compiler *emits* a suboptimal encoding is a poor proxy for what it
+costs; one inside a JIT's dispatch loop outweighs thousands in cold
+initialization code, and only a profile can tell the two apart.
+
+The document is [x86lint's](https://github.com/gaul/x86lint) shape,
+with the differences AArch64 forces. A finding spans a window of
+whole instructions, so `length` is a multiple of four, `bytes` is the
+window's encoding, and `text` is an array of its disassembled lines
+rather than one string; `detail` carries the rewrite the check
+proposes. `function` and `function_offset` appear when the binary
+kept symbols to attribute against -- `function_start` (an address) in
+place of the name when only `LC_FUNCTION_STARTS` records the boundary
+-- and `slice` names the ARM64 variant when the file is a universal
+binary, since `-s all` puts several slices' findings in one document.
+`skipped` counts the bytes the scan stepped over without linting,
+so that a scan that resynchronized past undecodable words is not
+read as a clean sweep.
+
+Findings are written as they are found rather than collected first,
+so a large binary streams instead of accumulating tens of thousands
+of objects in memory; the totals close the document because the scan
+only knows them then. Section and symbol names are copied from the
+file verbatim, so a binary whose string tables are not UTF-8 yields
+strings that are not either. The exit status is unchanged, and a file
+the driver rejects leaves stdout empty rather than half a document.
+`--json` describes the lint scan alone: `-v`, `-i`, `-d` and `-c` are
+separate reports whose output would interleave with it, and the
+driver refuses the combination rather than choosing for the caller.
 
 The process exits non-zero when any opportunity is found, so armlint
 can gate a compiler test suite.

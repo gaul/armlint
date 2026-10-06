@@ -324,6 +324,138 @@ static armlint_dedup *g_dedup = NULL;
 // and main prints the constant report last.
 static armlint_constants *g_constants = NULL;
 
+// --json: the findings as a machine-readable stream, for a consumer
+// that joins them against something else keyed by address -- most
+// usefully an execution profile, so each opportunity can be weighted
+// by how often the instruction it names actually runs. Findings print
+// as they are found rather than accumulating in an array: a large
+// binary yields tens of thousands of them, and the per-finding
+// callback exists precisely so that nothing has to be buffered to
+// report them. The totals therefore land after the findings, being
+// unknown until the scan ends.
+//
+// The document covers the lint scan only. -v, -i, -d and -c are
+// reports with their own shapes, and interleaving any of them with
+// this one would produce neither valid JSON nor a coherent schema, so
+// the driver rejects the combination rather than choosing for the
+// caller. The same shape as x86lint's, with two AArch64 differences:
+// a finding spans a window of whole instructions, so `text` is an
+// array of its lines and `length` a multiple of four, and a finding
+// carries the check's `detail` (the rewrite) besides its name.
+static bool g_json = false;
+static bool g_json_begun = false;       // the opening line is out
+static bool g_json_any = false;         // a finding has been written
+static const char *g_json_path = NULL;
+static const char *g_json_section = ""; // the section being scanned
+static const char *g_json_slice = NULL; // the fat slice, when there is one
+
+// Write s as a JSON string. Escapes what the grammar requires -- the
+// quote, the backslash, and every control character -- and passes
+// bytes >= 0x80 through unchanged: section and symbol names are copied
+// out of the file verbatim, so a binary whose string tables are not
+// UTF-8 yields strings that are not either, the same bytes nm and
+// objdump reproduce.
+static void json_string(const char *s)
+{
+    putchar('"');
+    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; ++p) {
+        switch (*p) {
+        case '"':  fputs("\\\"", stdout); break;
+        case '\\': fputs("\\\\", stdout); break;
+        case '\b': fputs("\\b", stdout);  break;
+        case '\f': fputs("\\f", stdout);  break;
+        case '\n': fputs("\\n", stdout);  break;
+        case '\r': fputs("\\r", stdout);  break;
+        case '\t': fputs("\\t", stdout);  break;
+        default:
+            if (*p < 0x20) {
+                printf("\\u%04x", (unsigned)*p);
+            } else {
+                putchar((char)*p);
+            }
+        }
+    }
+    putchar('"');
+}
+
+// Open the document. Deferred to the first range scanned (or to the
+// close, for a file with no code), so that every way the file itself
+// can be rejected -- an unknown format, a malformed header -- leaves
+// stdout empty rather than holding half a document. A failure inside
+// the scan can still truncate it, which the exit status reports and
+// the diagnostic on stderr explains.
+static void json_begin(void)
+{
+    if (g_json_begun) {
+        return;
+    }
+    g_json_begun = true;
+    printf("{\"file\": ");
+    json_string(g_json_path);
+    printf(",\n  \"findings\": [");
+}
+
+// What scan_code hands the callback: the range's symbol table, for
+// the function attribution the verbose report prints as "<f+0x18>".
+struct json_ctx {
+    const armlint_symbol *symbols;
+    size_t nsymbols;
+};
+
+// One finding, one line: compact enough to grep and to stream through
+// jq, and small enough that a scan yielding tens of thousands of them
+// stays readable. vaddr is a number rather than a hex string so that
+// it composes with arithmetic -- range tests against a code object,
+// sums of profile weights -- which is the whole point of reporting
+// the absolute address. A function start that LC_FUNCTION_STARTS
+// records without a name is reported by its address.
+static void json_finding(void *ctx, const armlint_finding *f,
+                         uint64_t vaddr, const uint8_t *bytes)
+{
+    const struct json_ctx *j = ctx;
+
+    printf("%s\n    {\"vaddr\": %" PRIu64 ", \"check\": ",
+        g_json_any ? "," : "", vaddr);
+    json_string(f->name);
+    g_json_any = true;
+    printf(", \"detail\": ");
+    json_string(f->detail);
+    printf(", \"section\": ");
+    json_string(g_json_section);
+    if (g_json_slice != NULL) {
+        printf(", \"slice\": ");
+        json_string(g_json_slice);
+    }
+
+    const armlint_symbol *sym =
+        armlint_symbol_lookup(j->symbols, j->nsymbols, vaddr);
+    if (sym != NULL) {
+        if (sym->name != NULL) {
+            printf(", \"function\": ");
+            json_string(sym->name);
+        } else {
+            printf(", \"function_start\": %" PRIu64, sym->vaddr);
+        }
+        printf(", \"function_offset\": %" PRIu64, vaddr - sym->vaddr);
+    }
+
+    unsigned length = f->insn_count * 4u;
+    printf(", \"length\": %u, \"bytes\": \"", length);
+    for (unsigned i = 0; i < length; ++i) {
+        printf("%02x", bytes[i]);
+    }
+    printf("\", \"text\": [");
+    bool first = true;
+    for (unsigned i = 0; i < ARMLINT_FINDING_LINES; ++i) {
+        if (f->lines[i][0] != '\0') {
+            fputs(first ? "" : ", ", stdout);
+            json_string(f->lines[i]);
+            first = false;
+        }
+    }
+    printf("]}");
+}
+
 // Read `size` bytes at `base_offset` and run all checks with the
 // given feature/audit set. vmaddr is the section's runtime base,
 // reported back to the user in findings; symbols/nsymbols (possibly
@@ -378,9 +510,15 @@ static int scan_code(FILE *f, const char *path, long base_offset,
                             g_features, symbols, nsymbols);
         n = 0;
     } else {
+        struct json_ctx jctx = { symbols, nsymbols };
+        if (g_json) {
+            json_begin();
+        }
         n = check_instructions(handle, buf, aligned, vmaddr,
                                g_verbose, g_summary, features,
-                               symbols, nsymbols);
+                               symbols, nsymbols,
+                               g_json ? json_finding : NULL,
+                               g_json ? &jctx : NULL);
     }
     free(buf);
     return n;
@@ -438,7 +576,7 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
     size_t nsyms = 0;
     char *strtab = NULL;
     uint64_t strsize = 0;
-    if (g_verbose || g_census != NULL || g_dedup != NULL
+    if (g_verbose || g_json || g_census != NULL || g_dedup != NULL
             || g_constants != NULL) {
         uint16_t symidx = 0;    // section 0 is the null section: "none"
         for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
@@ -517,14 +655,16 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
         // trampolines, not compiler output, so a finding there
         // restates the psABI. The name is the only marker -- their
         // sh_type is plain SHT_PROGBITS.
+        const char *sname = "";
         if (shstr != NULL && shdr->sh_name < shstrsize) {
-            const char *sname = shstr + shdr->sh_name;
+            sname = shstr + shdr->sh_name;
             if (strcmp(sname, ".plt") == 0
                     || strcmp(sname, ".iplt") == 0
                     || strncmp(sname, ".plt.", 5) == 0) {
                 continue;
             }
         }
+        g_json_section = sname;
         if (shdr->sh_offset > file_size
             || shdr->sh_size > file_size - shdr->sh_offset) {
             fprintf(stderr, "%s: section %u out of bounds\n", path, i);
@@ -673,6 +813,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
         uint64_t size;
         uint64_t addr;
         uint32_t ordinal;   // 1-based across all segments, as n_sect counts
+        char name[34];      // "__TEXT,__text", for the --json document
     } *sections = NULL;
     size_t nsections = 0, sections_cap = 0;
     symtab_command st;
@@ -776,6 +917,9 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                 sections[nsections].size = sec.size;
                 sections[nsections].addr = sec.addr;
                 sections[nsections].ordinal = sect_ordinal;
+                snprintf(sections[nsections].name,
+                    sizeof(sections[nsections].name), "%.16s,%.16s",
+                    sec.segname, sec.sectname);
                 nsections++;
             }
         } else if (lc.cmd == LC_SYMTAB
@@ -797,7 +941,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
     // boundaries -- -v finding annotations, the census's per-function
     // pac-ret coverage, -d's functions and -c's -- so only the default
     // summary mode skips the IO.
-    bool want_symbols = g_verbose || g_census != NULL || g_dedup != NULL
+    bool want_symbols = g_verbose || g_json || g_census != NULL || g_dedup != NULL
         || g_constants != NULL;
     nlist_64 *nl = NULL;
     size_t nsyms = 0;
@@ -927,6 +1071,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
                 ntable = anchors_finish(tmp, n, table);
             }
         }
+        g_json_section = cs->name;
         int n = scan_code(f, path, base_offset + (long)cs->offset,
                           cs->size, cs->addr, handle, features,
                           table, ntable);
@@ -1122,8 +1267,10 @@ static int scan_fat(FILE *f, const char *path, bool is_fat_64,
         if (!all && k != pick) {
             continue;
         }
+        g_json_slice = arm64_variant_name(slices[k].cpusubtype);
         int n = scan_macho(f, path, (long)slices[k].offset, slices[k].size,
                            handle);
+        g_json_slice = NULL;
         if (n < 0) {
             return -1;
         }
@@ -1203,6 +1350,10 @@ int main(int argc, char **argv)
                     "(known: pac, imm)\n", argv[0], argv[i]);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--json") == 0) {
+            // The findings as one JSON document on stdout, in place
+            // of the human report (see json_finding).
+            g_json = true;
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             // Which ARM64 slice of a universal binary to scan: "all",
             // a fat_arch index, or a variant name such as arm64e.x1.
@@ -1212,16 +1363,25 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 1;
     }
+
+    // --json owns stdout: -v would interleave per-finding text with
+    // the document, and -i, -d and -c are other reports.
+    if (g_json && (g_verbose || census || dedup || constants)) {
+        fprintf(stderr, "%s: --json cannot be combined with -v, -i, -d or -c\n",
+            argv[0]);
+        return 1;
+    }
+    g_json_path = path;
 
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
@@ -1334,6 +1494,18 @@ int main(int argc, char **argv)
         armlint_dedup_print(g_dedup, g_verbose);
         armlint_constants_print(g_constants, g_verbose);
         rc = 0;
+    } else if (g_json) {
+        // The totals close the document because the scan only knows
+        // them now. A file with no code still gets a complete document
+        // with an empty array.
+        json_begin();
+        printf("\n  ],\n"
+               "  \"instructions\": %zu,\n"
+               "  \"skipped\": %zu,\n"
+               "  \"opportunities\": %d\n}\n",
+            armlint_summary_instructions(g_summary),
+            armlint_summary_skipped(g_summary), errors);
+        rc = errors != 0;
     } else {
         armlint_summary_print(g_summary);
         armlint_dedup_print(g_dedup, g_verbose);
