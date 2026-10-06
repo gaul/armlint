@@ -123,6 +123,10 @@ register write overwritten unread at offset: 0x5c <_main+0x5c>: -> delete; x3 is
   ... 5 instructions ...
   and x3, x2, x0
 
+operation on known values foldable to MOV #imm at offset: 0x74 <_main+0x74>: -> mov x3, #0x0 (x2 is anything, x0 is 0x0) (1 instructions)
+  mov x0, #0
+  and x3, x2, x0
+
 MOV #0 + use foldable to ZR at offset: 0x70 <_main+0x70>: -> and x3, x2, xzr (2 instructions)
   movz x0, #0x0
   and x3, x2, x0
@@ -272,5 +276,6 @@ Optimization opportunities by type:
        7  register write overwritten unread
        6  compare whose flags are overwritten unread
        1  CSEL same-operand identity
+       1  operation on known values foldable to MOV #imm
 
-67 optimization opportunities in 85 instructions
+68 optimization opportunities in 85 instructions

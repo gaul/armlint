@@ -16,11 +16,11 @@ operation on known values foldable to MOV #imm at offset: 0x24 <_main+0x24>: -> 
   neg w5, w1
 
 operation on known values foldable to MOV #imm at offset: 0x30 <_main+0x30>: -> mov x1, #0x5 (x0 is 0x0) (1 instructions)
-  cbnz x0, #0xc8
+  cbnz x0, #0xf4
   add x1, x0, #5
 
 operation on known values foldable to MOV #imm at offset: 0x40 <_main+0x40>: -> mov x1, #0x8 (x0 is 0x7) (1 instructions)
-  b.ne #0xc8
+  b.ne #0xf4
   add x1, x0, #1
 
 operation on known values foldable to MOV #imm at offset: 0x50 <_main+0x50>: -> mov x3, #0xc (x1 is 0x3, x2 is 0x4) (1 instructions)
@@ -32,30 +32,42 @@ operation on known values foldable to MOV #imm at offset: 0x58 <_main+0x58>: -> 
   mov w6, #0xff
   ubfx w7, w6, #4, #4
 
-operation on known values leaves its register unchanged at offset: 0x68 <_main+0x68>: -> delete; x9 already holds 0x0 (x9 is 0x0, x20 is 0x0) (1 instructions)
+operation on known values foldable to MOV #imm at offset: 0x64 <_main+0x64>: -> mov w9, #0x0 (w4 has no bits outside 0xf0) (1 instructions)
+  and w4, w5, #0xf0
+  lsr w9, w4, #8
+
+operation on known values foldable to MOV #imm at offset: 0x6c <_main+0x6c>: -> mov w0, #0x8 (w8 has bits 0x8 set) (1 instructions)
+  tbz w8, #3, #0xf4
+  and w0, w8, #8
+
+operation on known values foldable to MOV #imm at offset: 0x74 <_main+0x74>: -> mov x12, #0x0 (x13 is anything, x11 is 0x0) (1 instructions)
+  mov x11, #0
+  and x12, x13, x11
+
+operation on known values leaves its register unchanged at offset: 0x84 <_main+0x84>: -> delete; x9 already holds 0x0 (x9 is 0x0, x20 is 0x0) (1 instructions)
   mov x9, #0
   mov x20, #0
   sub x9, x9, x20
 
-self-op identity at offset: 0x90 <_main+0x90>: eor x10, x9, x9 -> mov x10, xzr (1 instructions)
+self-op identity at offset: 0xac <_main+0xac>: eor x10, x9, x9 -> mov x10, xzr (1 instructions)
   eor x10, x9, x9
 
-ZR-operand ALU spelling at offset: 0x94 <_main+0x94>: -> mov x11, x9 (1 instructions)
+ZR-operand ALU spelling at offset: 0xb0 <_main+0xb0>: -> mov x11, x9 (1 instructions)
   orr x11, x9, xzr
 
-ADD/SUB #0 is redundant at offset: 0x9c <_main+0x9c>: add x13, x9, #0 -> mov x13, x9 (1 instructions)
+ADD/SUB #0 is redundant at offset: 0xb8 <_main+0xb8>: add x13, x9, #0 -> mov x13, x9 (1 instructions)
   add x13, x9, #0
 
-redundant zero-extension after zeroing op at offset: 0xa0 <_main+0xa0>: and w14, w14, #0xff is a no-op (bits >= 3 already zero) (2 instructions)
+redundant zero-extension after zeroing op at offset: 0xbc <_main+0xbc>: and w14, w14, #0xff is a no-op (bits >= 3 already zero) (2 instructions)
   mov w14, #5
   and w14, w14, #0xff
 
 Optimization opportunities by type:
-       8  operation on known values foldable to MOV #imm
+      11  operation on known values foldable to MOV #imm
        1  ADD/SUB #0 is redundant
        1  ZR-operand ALU spelling
        1  operation on known values leaves its register unchanged
        1  redundant zero-extension after zeroing op
        1  self-op identity
 
-13 optimization opportunities in 51 instructions
+16 optimization opportunities in 62 instructions

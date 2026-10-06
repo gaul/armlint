@@ -42,6 +42,18 @@ _main:
     ubfx    w7, w6, #4, #4
     ret
 
+    // 6b) Results the known bits fix although no input is exact: w4 is
+    //     confined to bits 7:4, so a shift by 8 empties it; the TBZ
+    //     fell through, so bit 3 of w8 is set; AND with a zero is zero
+    //     whatever the other operand holds.
+    and     w4, w5, #0xf0
+    lsr     w9, w4, #8
+    tbz     w8, #3, 9f
+    and     w0, w8, #8
+    mov     x11, #0
+    and     x12, x13, x11
+    ret
+
     // 7) A result its register already holds: x9 stays 0.
     mov     x9, #0
     mov     x20, #0
@@ -75,6 +87,13 @@ _main:
     mov     x9, #5
     adds    x10, x9, #1
     add     x11, x15, #1
+    ret
+
+    // 11b) Bits the operation leaves unknown: bits 3:0 of the result
+    //      are w10's bits 7:4.
+    and     w10, w5, #0xf0
+    add     x1, x2, x3
+    lsr     w11, w10, #4
     ret
 
     // 12) A side entry onto the operation.

@@ -14222,11 +14222,48 @@ static void kv_describe_inputs(const armlint_state *state, uint32_t op,
         }
         bool sf = p->sf && !(widening && i < 2u);
         uint64_t v = 0;
-        kv_value(state, r, false, &v);
         char reg[8];
         kv_reg_name(reg, sizeof(reg), r, sf);
-        n += (size_t)snprintf(buf + n, size - n, "%s%s is 0x%" PRIx64,
-                              n > 0 ? ", " : "", reg, v & kv_mask(sf));
+        if (kv_value(state, r, false, &v)) {
+            n += (size_t)snprintf(buf + n, size - n, "%s%s is 0x%" PRIx64,
+                                  n > 0 ? ", " : "", reg, v & kv_mask(sf));
+        } else {
+            // Known bits only: the bits that may be set (the known
+            // zeros and the range's top bit folded in, as the AND
+            // no-op check puts it), and any known to be set.
+            kv_fact f;
+            uint64_t lo, hi, wmask = kv_mask(sf);
+            int64_t slo, shi;
+            kv_get(state, r, &f);
+            kv_range(&f, sf ? 1u : 0u, &lo, &hi, &slo, &shi);
+            uint64_t may = ~f.k0 & wmask;
+            if (lo <= hi) {
+                may &= kv_ones(bits_used64(hi));
+            }
+            uint64_t ones = f.k1 & wmask;
+            if (kv_fact_unconstrained(&f)) {
+                // Nothing known: the other input decides the result
+                // alone (a zero under AND, all ones under ORR). The
+                // register's recorded producer, if any, is stale --
+                // the facts it gave were dropped since -- so it is not
+                // listed among the sources.
+                n += (size_t)snprintf(buf + n, size - n, "%s%s is anything",
+                                      n > 0 ? ", " : "", reg);
+                continue;
+            } else if (ones != 0 && may == wmask) {
+                n += (size_t)snprintf(buf + n, size - n,
+                    "%s%s has bits 0x%" PRIx64 " set", n > 0 ? ", " : "",
+                    reg, ones);
+            } else if (ones != 0) {
+                n += (size_t)snprintf(buf + n, size - n,
+                    "%s%s has bits 0x%" PRIx64 " set and none outside 0x%"
+                    PRIx64, n > 0 ? ", " : "", reg, ones, may);
+            } else {
+                n += (size_t)snprintf(buf + n, size - n,
+                    "%s%s has no bits outside 0x%" PRIx64,
+                    n > 0 ? ", " : "", reg, may);
+            }
+        }
         bool seen = false;
         for (unsigned j = 0; j < *nsrc; j++) {
             seen = seen || state->kv_src_offset[src[j]]
@@ -14294,9 +14331,19 @@ bool check_const_fold(armlint_state *state, const cs_insn *insn,
     for (unsigned i = 0; i < p.nin; i++) {
         reg_input = reg_input || p.in[i] < 31u;
     }
+    // The result: every input a known value, or -- an input known only
+    // by its bits -- every bit of the result pinned by the operation
+    // (`lsr w9, w4, #24` with w4 confined to its low nibble is zero).
     uint64_t v;
-    if (!reg_input || !kv_op_value(state, op, &p, &v)) {
+    if (!reg_input) {
         return false;
+    }
+    if (!kv_op_value(state, op, &p, &v)) {
+        kv_fact f;
+        kv_op_fact(state, op, &p, &f);
+        if (!kv_fact_exact(&f, &v)) {
+            return false;
+        }
     }
     // A recompute of the value the register holds is
     // check_value_recompute's, which has just read this instruction.

@@ -1277,10 +1277,11 @@ static void test_funnel_to_extr(void)
     sub_x_sh(&code[4], 2, 2, 3, 1, 56);
     assert(run_helper_check(code, 8) == 0);
 
-    // AND is not a funnel op (disjoint fields AND to zero).
+    // AND is not a funnel op (disjoint fields AND to zero -- which the
+    // known-bits fold reports as exactly that, a MOV #0).
     lsl_x(&code[0], 2, 1, 8);
     and_x_sh(&code[4], 2, 2, 3, 1, 56);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Flag-setting ADDS: an EXTR would drop the NZCV write.
     lsl_x(&code[0], 2, 1, 8);
@@ -4686,11 +4687,12 @@ static void test_and_lsr_to_ubfx(void)
     lsr_w(&code[4], 0, 0, 4);
     assert(run_helper_check(code, 8) == 0);
 
-    // Run entirely shifted out (n > hi): result is always 0. and w0,
-    // w1, #0xff0 (bits [4,11]) ; lsr w0, w0, #12.
+    // Run entirely shifted out (n > hi): result is always 0 -- the
+    // known-bits fold's MOV #0, not a UBFX. and w0, w1, #0xff0 (bits
+    // [4,11]) ; lsr w0, w0, #12.
     and_run(&code[0], 0, 0, 1, 4, 8);
     lsr_w(&code[4], 0, 0, 12);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // Non-contiguous (replicated) mask 0x0f0f0f0f (esize=8): no single
     // run, so no UBFX. N=0, immr=0, imms=0b110011.
@@ -5369,7 +5371,7 @@ static void test_redundant_sext(void)
     // this is not a producer.
     sbfiz_w(&code[0], 0, 1, 24, 8);
     sxtb_w(&code[4], 0, 0);
-    assert(run_helper_check(code, 8) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
     // sbfx w0, w1, #4, #8 ; sxtb x0, w0 -- width mismatch (W_p = 32,
     // W_c = 64). NOT redundant.
@@ -6928,7 +6930,7 @@ static void test_bfxil_synth(void)
     and_w_highmask(&code[0], 0, 0, 8);
     and_w_lowmask(&code[4], 5, 0, 8);   // Rs == clear.Rd
     orr_w(&code[8], 0, 0, 5);
-    assert(run_helper_check(code, 12) == 0);
+    CONST_FOLDS_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // -- Negative: clear is not in-place (Rd != Rn). --
 
@@ -10002,6 +10004,19 @@ static void test_const_fold(void)
         { { 0x93407FE8u, 0xD65F03C0u }, 2, NONE, NULL },
         // mov x9, #5 ; 2: add x10, x9, #1 ; cbz x0, 2b ; ret
         { { 0xD28000A9u, 0x9100052Au, 0xB4FFFFE0u, 0xD65F03C0u }, 4, NONE, NULL },
+        // Results the known bits fix although no input is exact.
+        // lsr w4, w5, #4 ; and w4, w4, #0xf ; lsr w9, w4, #24 ; ret
+        { { 0x53047CA4u, 0x12000C84u, 0x53187C89u, 0xD65F03C0u }, 4, FOLD,
+          "-> mov w9, #0x0 (w4 has no bits outside 0xf)" },
+        // tbz w8, #3, 1f ; and w0, w8, #8 ; 1: ret
+        { { 0x36180048u, 0x121D0100u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov w0, #0x8 (w8 has bits 0x8 set)" },
+        // mov x0, #0 ; and x3, x2, x0 ; ret -- zero under AND
+        { { 0xD2800000u, 0x8A000043u, 0xD65F03C0u }, 3, FOLD,
+          "-> mov x3, #0x0 (x2 is anything, x0 is 0x0)" },
+        // and w8, w8, #0xf0 ; add x1, x2, x3 ; lsr w0, w8, #4 ; ret --
+        // bits 3:0 of the result are w8's bits 7:4, unknown.
+        { { 0x121C0D08u, 0x8B030041u, 0x53047D00u, 0xD65F03C0u }, 4, NONE, NULL },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         char other[ARMLINT_FINDING_DETAIL_LEN];
@@ -10452,10 +10467,11 @@ static void test_mov_logic_imm_fold(void)
     // C = 0 is not a bitmask immediate so check_mov_logic_imm_fold
     // skips, but check_mov_zero_to_xzr fires on it (suggesting "use
     // XZR for the second AND operand"), so the overall count is 1 --
-    // once X0 is dead after the consumer.
+    // once X0 is dead after the consumer. (The known-bits fold also
+    // sees that AND with zero is zero; not counted here.)
     movz_x(&code[0], 0, 0, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_x0_dead(code, 8) == 1);
+    CONST_FOLDS_UNCOUNTED(assert(run_x0_dead(code, 8) == 1););
 
     // BIC (N = 1) folds via the complemented immediate:
     // movz x0, #0xff ; bic x3, x2, x0 -> and x3, x2, #0xffffffffffffff00.
@@ -10732,10 +10748,11 @@ static void test_mov_zero_to_xzr(void)
     assert(run_x0_dead(code, 8) == 1);
 
     // (c) AND/ORR/EOR shifted-LSL0:
-    // AND with Rm = mov_rd.
+    // AND with Rm = mov_rd (the known-bits fold's MOV #0 too; not
+    // counted here).
     movz_x(&code[0], 0, 0, 0);
     and_x(&code[4], 3, 2, 0);
-    assert(run_x0_dead(code, 8) == 1);
+    CONST_FOLDS_UNCOUNTED(assert(run_x0_dead(code, 8) == 1););
 
     // ORR with Rm = mov_rd -> MOV Rd, Rn (the canonical MOV
     // register form is ORR Rd, XZR, Rm; this is the mirror).

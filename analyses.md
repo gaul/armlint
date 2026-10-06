@@ -2755,8 +2755,42 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   checks gain the folds their scaffolding contains (`mov x1, #7 ; add
   x8, x1, #0x10`), and ten unit-test fragments no longer count this
   check's finding.
-* Not covered: a result the known bits fix although an input is not
-  exact (`lsr w9, w4, #24` with w4 below 16); see TODO.md.
+* **Results the known bits fix although no input is exact** (added
+  2026-10-06). The engine also carries what it knows of a register
+  bit by bit -- the bits an AND cleared, a shift emptied or an ORR
+  set, a bit a TBZ's fall-through pinned, the 0-or-1 of a CSET -- and
+  propagates it through the logical, shift and bitfield operations.
+  When that pins every bit of a result, the result is a constant
+  whatever the inputs' other bits hold:
+
+  ```
+  lsl  x5, x10, #8      ; regex-automata: the byte just shifted out
+  and  x8, x5, #0xff    ->  mov x8, #0x0 (x5 has no bits outside 0xff..00)
+
+  tbz  w8, #3, L        ; the fall-through has bit 3 set
+  and  w8, w8, #8       ->  mov w8, #0x8 (w8 has bits 0x8 set)
+
+  mov  w8, #0           ; AND with zero is zero, whatever w9 is
+  cset w9, eq
+  and  w0, w9, w8       ->  mov w0, #0x0 (w9 has no bits outside 0x1, w8 is 0x0)
+  ```
+
+  The input descriptions name what was known: `has no bits outside
+  M` (the bits that may be set, the known zeros and the range's top
+  bit folded in, as the AND no-op check puts it), `has bits B set`,
+  or `is anything` for an input the result does not depend on, whose
+  recorded producer is then not listed. The same one-instruction
+  gate and the same exclusions apply. Corpus: librustc_driver +231
+  folds and +41 deletions (165 of them an AND, 64 an LSR, 27 a UBFX),
+  clang +139 and +18 (124 AND), uutils +27 and +2, libcrypto +1 -- the
+  2026-09-26 probe's census (571 across the corpus) within a few
+  sites, and no other check moved. By what was known: rustc 137
+  zero-confined inputs, 49 with set bits, 86 inputs that did not
+  matter; clang 60, 45 and 52. Unit tests hold up the three shapes
+  above and a result with a bit left unknown; five older fragments
+  that AND disjoint fields to zero, shift a field out, or AND with a
+  zero register now carry this fold uncounted, since that is exactly
+  what they compute.
 
 ## AND/UBFX that known bits make a no-op
 
