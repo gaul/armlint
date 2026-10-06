@@ -6679,11 +6679,18 @@ static void test_csel_self(void)
     csel_w(&code[0], 31, 1, 1, 0);
     assert(run_helper_check(code, 4) == 0);
 
-    // -- Negative: Rn = 31 (CSEL Rd, XZR, XZR, cond -- writes 0
-    //    always; the rewrite would be MOV Rd, XZR, but we follow
-    //    check_self_op's convention of excluding ZR-source). --
+    // -- Positive: Rn = 31 (CSEL Rd, ZR, ZR, cond writes zero on
+    //    both arms; the rewrite is MOV Rd, #0). LLVM emits it for an
+    //    if-converted diamond whose two arms both became zero. --
 
     csel_w(&code[0], 0, 31, 31, 0);
+    assert(run_helper_check(code, 4) == 1);
+    csel_x(&code[0], 19, 31, 31, 3 /* LO */);
+    assert(run_helper_check(code, 4) == 1);
+
+    // -- Negative: Rd = 31 with ZR operands (a NOP spelling). --
+
+    csel_x(&code[0], 31, 31, 31, 0);
     assert(run_helper_check(code, 4) == 0);
 
     // -- Two adjacent CSEL same-operand: each fires. --

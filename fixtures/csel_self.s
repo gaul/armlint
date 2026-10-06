@@ -15,6 +15,11 @@ _main:
     // which condition is chosen because both branches are equal.
     csel    x4, x5, x5, lt
 
+    // Positive: both arms ZR -- a constant zero that reads NZCV for
+    // nothing; the rewrite is MOV Rd, #0.
+    csel    w19, wzr, wzr, lo
+    csel    x20, xzr, xzr, eq
+
     // Negative: CSEL with different Rn and Rm is a genuine select.
     csel    x6, x7, x8, eq
 

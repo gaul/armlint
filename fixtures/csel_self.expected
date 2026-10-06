@@ -7,7 +7,13 @@ CSEL same-operand identity at offset: 0x4 <_main+0x4>: csel w2, w3, w3, ne -> mo
 CSEL same-operand identity at offset: 0x8 <_main+0x8>: csel x4, x5, x5, lt -> mov x4, x5 (cond irrelevant: both branches = x5) (1 instructions)
   csel x4, x5, x5, lt
 
-Optimization opportunities by type:
-       3  CSEL same-operand identity
+CSEL same-operand identity at offset: 0xc <_main+0xc>: csel w19, wzr, wzr, lo -> mov w19, #0 (cond irrelevant: both branches = wzr) (1 instructions)
+  csel w19, wzr, wzr, lo
 
-3 optimization opportunities in 6 instructions
+CSEL same-operand identity at offset: 0x10 <_main+0x10>: csel x20, xzr, xzr, eq -> mov x20, #0 (cond irrelevant: both branches = xzr) (1 instructions)
+  csel x20, xzr, xzr, eq
+
+Optimization opportunities by type:
+       5  CSEL same-operand identity
+
+5 optimization opportunities in 8 instructions

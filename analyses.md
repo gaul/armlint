@@ -1267,8 +1267,17 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   different "else" branches (Rn+1, ~Rn, -Rn) and are NOT identities
   when `Rn == Rm`. The decoder enforces `(op & 0x7FE00C00) ==
   0x1A800000`, which fixes op2 = 00.
-* `Rd = 31` (result discarded) and `Rn = 31` (`ZR` source) are
-  excluded for consistency with the other self-op identity check.
+* `Rn = Rm = 31` (`csel Rd, zr, zr, cond`) is a constant zero that
+  still reads NZCV, and is reported with the rewrite `mov Rd, #0` --
+  the MOVZ spelling Apple's cores eliminate at rename, not the ORR
+  `mov Rd, zr`. LLVM emits it for an if-converted diamond whose two
+  arms both became zero, beside sibling selects off the same compare
+  (`cset w27, lo ; csel w19, wzr, wzr, lo ; csinc x21, x8, xzr, hs`):
+  rustc 46, clang 43, uutils 2, bash 2 (2026-10-06). The .NET 10
+  `IsDefaultValue` code (`fcmp d0, d0 ; csel w0, wzr, wzr, eq`) was
+  the prompt.
+* `Rd = 31` (result discarded) is excluded: that instruction is dead
+  outright, and respelling a dead instruction is not the advice.
 
 ## FCSEL same-operand identity (`FCSEL Vd, Vn, Vn, cond`)
 

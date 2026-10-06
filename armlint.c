@@ -9722,8 +9722,8 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
         return false;
     }
     unsigned rd = op & 0x1Fu;
-    if (rd == 31 || rn == 31) {
-        return false;
+    if (rd == 31) {
+        return false;                   // result discarded: dead outright
     }
 
     unsigned sf = (op >> 31) & 1u;
@@ -9734,10 +9734,21 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
     out->insn_count = 1;
     clear_finding_strings(out);
 
-    snprintf(out->detail, sizeof(out->detail),
-        "%s %s -> mov %c%u, %c%u (cond irrelevant: both branches = %c%u)",
-        insn->mnemonic, insn->op_str,
-        w_or_x, rd, w_or_x, rn, w_or_x, rn);
+    if (rn == 31) {
+        // Both arms ZR: a constant zero that still reads NZCV. The
+        // rewrite is MOVZ -- the zero spelling Apple's cores eliminate
+        // at rename, where "mov Rd, zr" is an ORR that is not on that
+        // list -- so this arm prints "#0" where the register arm below
+        // prints the source.
+        snprintf(out->detail, sizeof(out->detail),
+            "%s %s -> mov %c%u, #0 (cond irrelevant: both branches = %czr)",
+            insn->mnemonic, insn->op_str, w_or_x, rd, w_or_x);
+    } else {
+        snprintf(out->detail, sizeof(out->detail),
+            "%s %s -> mov %c%u, %c%u (cond irrelevant: both branches = %c%u)",
+            insn->mnemonic, insn->op_str,
+            w_or_x, rd, w_or_x, rn, w_or_x, rn);
+    }
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
