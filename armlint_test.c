@@ -51,10 +51,17 @@ static bool g_branches_uncounted;
 // negatives hold up as the better rewrite.
 static bool g_folds_uncounted;
 
+static bool g_selects_uncounted;
+
 static bool counted(const armlint_finding *f)
 {
     if (g_branches_uncounted
             && strncmp(f->name, "conditional branch that is ", 27) == 0) {
+        return false;
+    }
+    if (g_selects_uncounted
+            && strcmp(f->name, "conditional select decided by known flags")
+               == 0) {
         return false;
     }
     if (g_folds_uncounted
@@ -69,6 +76,10 @@ static bool counted(const armlint_finding *f)
 
 #define DECIDED_BRANCHES_UNCOUNTED(stmt) \
     do { g_branches_uncounted = true; stmt; g_branches_uncounted = false; } \
+    while (0)
+
+#define DECIDED_SELECTS_UNCOUNTED(stmt) \
+    do { g_selects_uncounted = true; stmt; g_selects_uncounted = false; } \
     while (0)
 
 #define CONST_FOLDS_UNCOUNTED(stmt) \
@@ -3374,7 +3385,9 @@ static void test_cset_recompare(void)
     cmp_w_imm(&code[4], 8, 0);
     csel_w(&code[8], 0, 1, 2, 11);         // lt
     cmp_w_reg(&code[12], 3, 4);
-    assert(run_helper_check(code, 16) == 0);
+    // (w8 is 0 or 1, so LT never holds: the decided-select fold's;
+    // not counted here.)
+    DECIDED_SELECTS_UNCOUNTED(assert(run_helper_check(code, 16) == 0););
 
     // -- Negative: a further flag reader after the consumer. --
 
@@ -3441,7 +3454,7 @@ static void test_cset_recompare(void)
     cmp_w_imm(&code[8], 8, 0);
     csel_w(&code[12], 0, 1, 2, 0);
     ret_(&code[16]);
-    DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 20) == 0););
+    DECIDED_SELECTS_UNCOUNTED(DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 20) == 0);););
 
     // -- Negative: a read-modify-write of the temp in the gap (the
     //    boolean-XOR shape Rust's median3 emits) leaves the zero-test
@@ -3680,7 +3693,7 @@ static void test_tst_cset(void)
     tst_w_bit(&code[0], 0, 4);
     cset_(&code[4], 0, 8, 4);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    DECIDED_SELECTS_UNCOUNTED(assert(run_helper_check(code, 12) == 0););
 
     // -- Negative: a W-form CSETM cannot replicate a high bit. --
 
@@ -6020,7 +6033,7 @@ static void test_zero_cmp_to_s_variant(void)
     write_le32(&code[4], 0x6A00001Fu | (0u << 16) | (0u << 5));
     csel_w(&code[8], 3, 4, 5, 8);
     ret_(&code[12]);
-    assert(run_zb_check(code, 16) == 1);
+    DECIDED_SELECTS_UNCOUNTED(assert(run_zb_check(code, 16) == 1););
 }
 
 // CMP Rn, Rm, LSL #amt (X-form): SUBS ZR with a non-zero inline
@@ -9737,6 +9750,65 @@ enum { NONE, NEVER, ALWAYS, FOLD, SAME, NOOP };
 
 // check_branch_decided over instruction words with the buffer set, for
 // both of its finding names: never taken, always taken, or neither.
+
+// check_csel_decided over instruction words with the buffer set.
+static void test_csel_decided(void)
+{
+    const char *name = "conditional select decided by known flags";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    static const struct {
+        uint32_t words[6];
+        unsigned n;
+        int expect;
+        const char *detail;
+    } cases[] = {
+        // LLVM's shape: cmp x0, #7 ; b.ne 1f ; cmp x0, #7 ; cset w1, eq ;
+        // 1: ret -- the repeated compare's flags were never branched
+        // on, and the first branch's fall-through settles them.
+        { { 0xF1001C1Fu, 0x54000061u, 0xF1001C1Fu, 0x1A9F17E1u,
+            0xD65F03C0u }, 5, 1,
+          "-> mov w1, #1; ne never holds: x0 is 0x7 (known 0x8 bytes back)" },
+        // mov x0, #7 ; cmp x0, #7 ; csel x1, x2, x3, eq ; ret
+        { { 0xD28000E0u, 0xF1001C1Fu, 0x9A830041u, 0xD65F03C0u }, 4, 1,
+          "-> mov x1, x2; eq always holds: x0 is 0x7 (known 0x8 bytes back)" },
+        // tst w0, #1 ; csel w1, w2, w3, hi ; ret -- TST never sets C.
+        { { 0x7200001Fu, 0x1A838041u, 0xD65F03C0u }, 3, 1,
+          "-> mov w1, w3; hi never holds: tst cannot set flags that pass hi "
+          "(known 0x4 bytes back)" },
+        // The else operations: mov x0, #7 ; cmp x0, #8 ; then csinc x1,
+        // x2, x3, eq / csinv x4, x5, x6, eq / csneg x7, x8, x9, eq /
+        // cset w12, eq (CSINC W12, WZR, WZR, NE: NE always holds).
+        { { 0xD28000E0u, 0xF100201Fu, 0x9A830441u, 0xD65F03C0u }, 4, 1,
+          "-> add x1, x3, #1; eq never holds: x0 is 0x7 (known 0x8 bytes back)" },
+        { { 0xD28000E0u, 0xF100201Fu, 0xDA8600A4u, 0xD65F03C0u }, 4, 1,
+          "-> mvn x4, x6; eq never holds: x0 is 0x7 (known 0x8 bytes back)" },
+        { { 0xD28000E0u, 0xF100201Fu, 0xDA890507u, 0xD65F03C0u }, 4, 1,
+          "-> neg x7, x9; eq never holds: x0 is 0x7 (known 0x8 bytes back)" },
+        { { 0xD28000E0u, 0xF100201Fu, 0x1A9F17ECu, 0xD65F03C0u }, 4, 1,
+          "-> mov w12, #0; ne always holds: x0 is 0x7 (known 0x8 bytes back)" },
+        // Negatives: open flags; the Spectre shape (a branch tested
+        // these flags); check_csel_self's identity; Rd = ZR; a side
+        // entry onto the select.
+        { { 0xEB01001Fu, 0x9A840062u, 0xD65F03C0u }, 3, 0, NULL },
+        { { 0xEB01001Fu, 0x54000041u, 0x9A9F0062u, 0xD65F03C0u }, 4, 0, NULL },
+        { { 0xD28000E0u, 0xF1001C1Fu, 0x9A820041u, 0xD65F03C0u }, 4, 0, NULL },
+        { { 0xD28000E0u, 0xF1001C1Fu, 0x9A83005Fu, 0xD65F03C0u }, 4, 0, NULL },
+        { { 0xD28000E0u, 0xF1001C1Fu, 0x9A830041u, 0xB4FFFFE5u,
+            0xD65F03C0u }, 5, 0, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        detail[0] = '\0';
+        int got = run_lvn_words(cases[i].words, cases[i].n, name, detail,
+                                sizeof(detail));
+        if (got != cases[i].expect
+                || (cases[i].detail != NULL
+                    && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "csel_decided case %zu: %d findings, detail "
+                    "\"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
 
 static void test_branch_decided(void)
 {
@@ -19348,6 +19420,7 @@ int main(void)
     test_dead_write();
     test_cmp_cmn_w();
     test_branch_decided();
+    test_csel_decided();
     test_const_fold();
     test_and_known_noop();
     test_mov_zero_to_xzr();

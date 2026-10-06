@@ -481,6 +481,7 @@ struct armlint_state {
     uint32_t kv_ver[32];
     uint32_t kv_nzcv_ver;
     uint16_t kv_nzcv_states;
+    bool kv_nzcv_branched;      // a B.cond has read this NZCV version
     size_t kv_nzcv_src_offset;
     char kv_nzcv_src_text[ARMLINT_FINDING_LINE_LEN];
     uint16_t kv_setter_kind;
@@ -13554,6 +13555,7 @@ static void kv_reset(armlint_state *state)
     }
     state->kv_known = 0;
     state->kv_nzcv_states = KV_STATES_ANY;
+    state->kv_nzcv_branched = false;
     state->kv_nzcv_src_offset = SIZE_MAX;
     state->kv_setter_kind = KV_STATES_ANY;
     state->kv_setter_offset = SIZE_MAX;
@@ -13774,6 +13776,7 @@ static void kv_commit(armlint_state *state)
     if (pd->nzcv_written) {
         state->kv_nzcv_ver++;
         state->kv_nzcv_states = pd->nzcv_states;
+        state->kv_nzcv_branched = false;
         state->kv_nzcv_src_offset = pd->offset;
         memcpy(state->kv_nzcv_src_text, pd->text, ARMLINT_FINDING_LINE_LEN);
         state->kv_setter_kind = pd->nzcv_kind;
@@ -13819,6 +13822,7 @@ static void kv_commit(armlint_state *state)
         unsigned cond = pd->br_cond;
         bool current = state->kv_cmp_ver == state->kv_nzcv_ver;
         state->kv_nzcv_states &= kv_states_failing(cond);
+        state->kv_nzcv_branched = true;
         state->kv_nzcv_src_offset = pd->offset;
         memcpy(state->kv_nzcv_src_text, pd->text, ARMLINT_FINDING_LINE_LEN);
         if (current && state->kv_cmp_rep >= 0) {
@@ -14039,6 +14043,63 @@ static void kv_describe_cmp(char *buf, size_t size, const kv_cmp *k,
     }
 }
 
+// Whether condition `cond` holds (1), fails (0) or is open (-1) under
+// the NZCV the engine has brought to the current instruction, with the
+// reason and the instruction that settled it. First the flag setter's
+// operation alone (a TST never sets C), then the compare that set the
+// flags with what is known of its register -- now, if it is unwritten
+// since (the branches between may have narrowed it), else as it was --
+// and last the states the branches before this one left.
+static int kv_decide_cond(const armlint_state *state, unsigned cond,
+                          char *why, size_t why_size,
+                          const char **src_text, size_t *src_offset)
+{
+    int taken = kv_eval_states(cond, state->kv_setter_kind);
+    *src_text = NULL;
+    *src_offset = SIZE_MAX;
+    if (taken >= 0) {
+        snprintf(why, why_size, "%s cannot set flags that %s %s",
+                 state->kv_setter_mnem, taken != 0 ? "fail" : "pass",
+                 a64_cond_names[cond]);
+        *src_text = state->kv_setter_text;
+        *src_offset = state->kv_setter_offset;
+    }
+    const kv_cmp *k = &state->kv_last_cmp;
+    if (taken < 0 && state->kv_cmp_ver == state->kv_nzcv_ver
+            && k->kind != KV_CMP_NONE) {
+        kv_fact f = k->fact;
+        bool now = k->rn < 31u && state->kv_ver[k->rn] == k->rn_ver
+            && ((state->kv_known >> k->rn) & 1u) != 0;
+        if (now) {
+            f = state->kv_facts[k->rn];
+        }
+        taken = kv_eval_cmp(k, &f, cond);
+        if (taken >= 0) {
+            kv_describe_cmp(why, why_size, k, &f, cond, taken != 0);
+            if (now) {
+                *src_text = state->kv_src_text[k->rn];
+                *src_offset = state->kv_src_offset[k->rn];
+            } else {
+                *src_text = state->kv_setter_text;
+                *src_offset = state->kv_setter_offset;
+            }
+        }
+    }
+    if (taken < 0) {
+        taken = kv_eval_states(cond, state->kv_nzcv_states);
+        if (taken >= 0) {
+            snprintf(why, why_size, "the flags here cannot %s %s",
+                     taken != 0 ? "fail" : "pass", a64_cond_names[cond]);
+        }
+    }
+    if (taken >= 0 && *src_text == NULL
+            && state->kv_nzcv_src_offset != SIZE_MAX) {
+        *src_text = state->kv_nzcv_src_text;
+        *src_offset = state->kv_nzcv_src_offset;
+    }
+    return taken;
+}
+
 // Detect a conditional branch whose outcome the path to it already
 // decides; see armlint.h.
 bool check_branch_decided(armlint_state *state, const cs_insn *insn,
@@ -14072,52 +14133,8 @@ bool check_branch_decided(armlint_state *state, const cs_insn *insn,
         if (cond >= 14u) {
             return false;
         }
-        // First the flag setter's operation alone (a TST never sets C),
-        // then the compare that set the flags with what is known of its
-        // register -- now, if it is unwritten since (the branches
-        // between may have narrowed it), else as it was -- and last the
-        // states the branches before this one left.
-        taken = kv_eval_states(cond, state->kv_setter_kind);
-        if (taken >= 0) {
-            snprintf(why, sizeof(why), "%s cannot set flags that %s %s",
-                     state->kv_setter_mnem, taken != 0 ? "fail" : "pass",
-                     a64_cond_names[cond]);
-            src_text = state->kv_setter_text;
-            src_offset = state->kv_setter_offset;
-        }
-        const kv_cmp *k = &state->kv_last_cmp;
-        if (taken < 0 && state->kv_cmp_ver == state->kv_nzcv_ver
-                && k->kind != KV_CMP_NONE) {
-            kv_fact f = k->fact;
-            bool now = k->rn < 31u && state->kv_ver[k->rn] == k->rn_ver
-                && ((state->kv_known >> k->rn) & 1u) != 0;
-            if (now) {
-                f = state->kv_facts[k->rn];
-            }
-            taken = kv_eval_cmp(k, &f, cond);
-            if (taken >= 0) {
-                kv_describe_cmp(why, sizeof(why), k, &f, cond, taken != 0);
-                if (now) {
-                    src_text = state->kv_src_text[k->rn];
-                    src_offset = state->kv_src_offset[k->rn];
-                } else {
-                    src_text = state->kv_setter_text;
-                    src_offset = state->kv_setter_offset;
-                }
-            }
-        }
-        if (taken < 0) {
-            taken = kv_eval_states(cond, state->kv_nzcv_states);
-            if (taken >= 0) {
-                snprintf(why, sizeof(why), "the flags here cannot %s %s",
-                         taken != 0 ? "fail" : "pass", a64_cond_names[cond]);
-            }
-        }
-        if (taken >= 0 && src_text == NULL
-                && state->kv_nzcv_src_offset != SIZE_MAX) {
-            src_text = state->kv_nzcv_src_text;
-            src_offset = state->kv_nzcv_src_offset;
-        }
+        taken = kv_decide_cond(state, cond, why, sizeof(why), &src_text,
+                               &src_offset);
     } else {
         unsigned r = op & 0x1Fu;
         bool nz = ((op >> 24) & 1u) != 0;
@@ -14190,6 +14207,127 @@ bool check_branch_decided(armlint_state *state, const cs_insn *insn,
         snprintf(out->detail, sizeof(out->detail),
             "-> delete; never taken: %s%s", why, known);
     }
+    unsigned line = 0;
+    if (src_text != NULL) {
+        snprintf(out->lines[line++], sizeof(out->lines[0]), "%s", src_text);
+    }
+    insn_text(out->lines[line], sizeof(out->lines[line]), insn);
+    return true;
+}
+
+// Detect a conditional select whose condition the path to it already
+// decides; see armlint.h.
+bool check_csel_decided(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->kv_valid = false;
+        return false;
+    }
+    kv_sync(state, insn, offset);
+    uint32_t op = insn_word(insn);
+    // CSEL family: sf op 0 11010100 Rm cond 0 o2 Rn Rd; op:o2 picks
+    // CSEL 00, CSINC 01, CSINV 10, CSNEG 11.
+    if ((op & 0x1FE00800u) != 0x1A800000u) {
+        return false;
+    }
+    bool sf = (op >> 31) != 0;
+    unsigned kind = (((op >> 30) & 1u) << 1) | ((op >> 10) & 1u);
+    unsigned cond = (op >> 12) & 0xFu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rd = op & 0x1Fu;
+    if (cond >= 14u || rd == 31u) {
+        return false;       // AL/NV decide nothing here; a discarded result
+    }
+    if (kind == 0u && rn == rm) {
+        return false;       // check_csel_self's identity
+    }
+    // Two shapes are decided on purpose and left alone: the fold would
+    // undo a Spectre mitigation whose select exists to make a value
+    // data-dependent on a bounds check in the speculation window.
+    // A select that masks a register to zero in place (csel x16, x16,
+    // xzr, ls): LLVM's jump-table hardening re-compares the index
+    // after the range branch and masks it (bash's 18 sites, all of
+    // them), speculative load hardening masks the same way, and
+    // SpiderMonkey's spectreZeroRegister is this select on the
+    // compared register. And a select on flags a branch has already
+    // tested: SpiderMonkey's string loads under
+    // spectreStringMitigations follow a branch with a CSEL on the same
+    // condition (17,118 in its Ion dump against 2 elsewhere).
+    if (kind == 0u && ((rm == 31u && rn == rd) || (rn == 31u && rm == rd))) {
+        return false;
+    }
+    if (state->kv_nzcv_branched) {
+        return false;
+    }
+    char why[80];
+    const char *src_text;
+    size_t src_offset;
+    int taken = kv_decide_cond(state, cond, why, sizeof(why), &src_text,
+                               &src_offset);
+    if (taken < 0) {
+        return false;
+    }
+
+    char wx = sf ? 'x' : 'w';
+    char rewrite[64];
+    if (taken != 0) {
+        // Rn is selected, whatever the family.
+        if (rn == 31u) {
+            snprintf(rewrite, sizeof(rewrite), "mov %c%u, #0", wx, rd);
+        } else if (rn == rd) {
+            snprintf(rewrite, sizeof(rewrite), "delete; %c%u selects itself",
+                     wx, rd);
+        } else {
+            snprintf(rewrite, sizeof(rewrite), "mov %c%u, %c%u", wx, rd, wx,
+                     rn);
+        }
+    } else if (kind == 0u) {
+        if (rm == 31u) {
+            snprintf(rewrite, sizeof(rewrite), "mov %c%u, #0", wx, rd);
+        } else if (rm == rd) {
+            snprintf(rewrite, sizeof(rewrite), "delete; %c%u selects itself",
+                     wx, rd);
+        } else {
+            snprintf(rewrite, sizeof(rewrite), "mov %c%u, %c%u", wx, rd, wx,
+                     rm);
+        }
+    } else if (kind == 1u) {
+        if (rm == 31u) {
+            snprintf(rewrite, sizeof(rewrite), "mov %c%u, #1", wx, rd);
+        } else {
+            snprintf(rewrite, sizeof(rewrite), "add %c%u, %c%u, #1", wx, rd,
+                     wx, rm);
+        }
+    } else if (kind == 2u) {
+        if (rm == 31u) {
+            snprintf(rewrite, sizeof(rewrite), "mov %c%u, #-1", wx, rd);
+        } else {
+            snprintf(rewrite, sizeof(rewrite), "mvn %c%u, %c%u", wx, rd, wx,
+                     rm);
+        }
+    } else {
+        if (rm == 31u) {
+            snprintf(rewrite, sizeof(rewrite), "mov %c%u, #0", wx, rd);
+        } else {
+            snprintf(rewrite, sizeof(rewrite), "neg %c%u, %c%u", wx, rd, wx,
+                     rm);
+        }
+    }
+
+    out->name = "conditional select decided by known flags";
+    out->start_offset = offset;
+    out->insn_count = 1;
+    clear_finding_strings(out);
+    char known[40] = "";
+    if (src_text != NULL) {
+        snprintf(known, sizeof(known), " (known 0x%zx bytes back)",
+                 offset - src_offset);
+    }
+    snprintf(out->detail, sizeof(out->detail), "-> %s; %s %s holds: %s%s",
+             rewrite, a64_cond_names[cond], taken != 0 ? "always" : "never",
+             why, known);
     unsigned line = 0;
     if (src_text != NULL) {
         snprintf(out->lines[line++], sizeof(out->lines[0]), "%s", src_text);
@@ -23212,6 +23350,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_br_x30,
     check_branch_to_next,
     check_branch_decided,
+    check_csel_decided,
     check_lse_rmw,
     check_pac_lr_spill,
     check_pac_raw_indirect,

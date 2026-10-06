@@ -1,0 +1,49 @@
+register already holds the recomputed value at offset: 0x8 <_main+0x8>: -> delete; NZCV already holds these flags (set 0x8 bytes back) (1 instructions)
+  cmp x0, #7
+  cmp x0, #7
+
+conditional select decided by known flags at offset: 0xc <_main+0xc>: -> mov w1, #1; ne never holds: x0 is 0x7 (known 0x8 bytes back) (1 instructions)
+  b.ne #0x10
+  cset w1, eq
+
+conditional select decided by known flags at offset: 0x1c <_main+0x1c>: -> mov x1, x2; eq always holds: x0 is 0x7 (known 0x8 bytes back) (1 instructions)
+  mov x0, #7
+  csel x1, x2, x3, eq
+
+conditional select decided by known flags at offset: 0x2c <_main+0x2c>: -> mov x1, x2; ne always holds: x0 is in [0x1, 0xffffffffffffffff] (known 0x8 bytes back) (1 instructions)
+  cbz x0, #0xa0
+  csel x1, x2, x3, ne
+
+conditional select decided by known flags at offset: 0x38 <_main+0x38>: -> mov w1, w3; hi never holds: tst cannot set flags that pass hi (known 0x4 bytes back) (1 instructions)
+  tst w0, #1
+  csel w1, w2, w3, hi
+
+conditional select decided by known flags at offset: 0x48 <_main+0x48>: -> add x1, x3, #1; eq never holds: x0 is 0x7 (known 0x8 bytes back) (1 instructions)
+  mov x0, #7
+  csinc x1, x2, x3, eq
+
+conditional select decided by known flags at offset: 0x4c <_main+0x4c>: -> mvn x4, x6; eq never holds: x0 is 0x7 (known 0xc bytes back) (1 instructions)
+  mov x0, #7
+  csinv x4, x5, x6, eq
+
+conditional select decided by known flags at offset: 0x50 <_main+0x50>: -> neg x7, x9; eq never holds: x0 is 0x7 (known 0x10 bytes back) (1 instructions)
+  mov x0, #7
+  csneg x7, x8, x9, eq
+
+conditional select decided by known flags at offset: 0x54 <_main+0x54>: -> mov x10, x11; ne always holds: x0 is 0x7 (known 0x14 bytes back) (1 instructions)
+  mov x0, #7
+  cinc x10, x11, eq
+
+conditional select decided by known flags at offset: 0x58 <_main+0x58>: -> mov w12, #0; ne always holds: x0 is 0x7 (known 0x18 bytes back) (1 instructions)
+  mov x0, #7
+  cset w12, eq
+
+CSEL same-operand identity at offset: 0x84 <_main+0x84>: csel x1, x2, x2, eq -> mov x1, x2 (cond irrelevant: both branches = x2) (1 instructions)
+  csel x1, x2, x2, eq
+
+Optimization opportunities by type:
+       9  conditional select decided by known flags
+       1  CSEL same-operand identity
+       1  register already holds the recomputed value
+
+11 optimization opportunities in 41 instructions

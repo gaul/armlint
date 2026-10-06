@@ -134,6 +134,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [instruction recomputing a value its register or NZCV already holds, across a gap](analyses.md#value-already-in-its-register-local-value-numbering) | delete (an ADR/ADRP of a held page is reported apart: a relink fix) |
 | [register write overwritten before any read, across a gap](analyses.md#register-write-overwritten-unread) | delete the write |
 | [conditional branch the path to it already decides](analyses.md#conditional-branch-decided-by-known-values) | delete it (never taken) or `b` (always taken) |
+| [`csel`/`csinc`/`csinv`/`csneg` whose condition the path decides](analyses.md#conditional-select-decided-by-known-flags) | `mov` of the operand it picks (`add #1`/`mvn`/`neg` of it, or the constant) |
 | [ALU operation whose inputs are all known values, or whose result the known bits pin](analyses.md#operation-on-known-values-foldable-to-mov-imm) | `mov Rd, #result`, or delete when Rd already holds it |
 | [`and #mask`/`ubfx #0` of a value its known bits already keep inside the mask](analyses.md#andubfx-that-known-bits-make-a-no-op) | delete in place, `mov Rd, Rn` out of place |
 | [sign-extending producer + `sxtb`/`sxth`/`sxtw`](analyses.md#redundant-sign-extension-after-a-producer-that-already-replicated-the-sign) | drop the sign-extension |

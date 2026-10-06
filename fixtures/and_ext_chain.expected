@@ -51,6 +51,10 @@ operation on known values foldable to MOV #imm at offset: 0x4c <_main+0x4c>: -> 
   and w12, w12, #0xf
   and w16, w12, #0x7f
 
+conditional select decided by known flags at offset: 0x54 <_main+0x54>: -> mov w18, #0; eq always holds: w16 is 0x0 (known 0x8 bytes back) (1 instructions)
+  and w16, w12, #0x7f
+  cset w18, ne
+
 AND/extend chain foldable to one at offset: 0x4c <_main+0x4c>: -> tst w12, #0x60 (2 instructions)
   and w16, w12, #0x7f
   tst w16, #0x60
@@ -79,6 +83,7 @@ register already holds the recomputed value at offset: 0x88 <_main+0x88>: -> del
 Optimization opportunities by type:
       10  AND/extend chain foldable to one
        3  register write overwritten unread
+       1  conditional select decided by known flags
        1  dead sign-extension masked by zero-extension
        1  low-32 zero-extension foldable to MOV Wd, Wn
        1  operation on known values foldable to MOV #imm
@@ -86,4 +91,4 @@ Optimization opportunities by type:
        1  redundant zero-extension after zeroing op
        1  register already holds the recomputed value
 
-19 optimization opportunities in 40 instructions
+20 optimization opportunities in 40 instructions

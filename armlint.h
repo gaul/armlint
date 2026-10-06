@@ -637,6 +637,21 @@ bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
 bool check_branch_decided(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect a CSEL/CSINC/CSINV/CSNEG whose condition the path to it
+// already decides, by the same three steps as the branch check above
+// (the flag setter's operation alone, the compare with what is known
+// of its register, the states earlier branches left). The select is
+// then a MOV of the operand it picks -- Rn, or Rm through the else
+// operation: ADD #1, MVN, NEG, or the constant when Rm is ZR -- that
+// reads no flags. A select on flags a branch has already tested is
+// left alone (kv_nzcv_branched): SpiderMonkey's Spectre string
+// mitigation follows a branch with a CSEL on the same condition,
+// decided on purpose. CSEL Rd, Rn, Rn is check_csel_self's, Rd = ZR a
+// discarded result, AL/NV not conditions. Reported as "conditional
+// select decided by known flags".
+bool check_csel_decided(armlint_state *state, const cs_insn *insn,
+                        size_t offset, armlint_finding *out);
+
 // Detect the Armv8.0 exclusive-monitor retry loop and suggest the
 // single Armv8.1 FEAT_LSE atomic (-m lse). Three shapes, matched
 // with strict adjacency plus exact branch targets:

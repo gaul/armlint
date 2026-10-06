@@ -13,6 +13,10 @@ CMP #0 of a live CSET is redundant at offset: 0x14 <_main+0x14>: -> drop the zer
   cmp w9, #0
   csel x2, x3, x4, ne
 
+conditional select decided by known flags at offset: 0x2c <_main+0x2c>: -> mov w2, w4; lt never holds: w10 is in [0x0, 0x1] (known 0x8 bytes back) (1 instructions)
+  cset w10, eq
+  csel w2, w3, w4, lt
+
 register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; w2 is overwritten before any read (1 instructions)
   csel w2, w3, w4, lt
   ... 3 instructions ...
@@ -26,5 +30,6 @@ CMP #0 of a live CSET is redundant at offset: 0x7c <_main+0x7c>: -> drop the zer
 Optimization opportunities by type:
        3  CMP #0 of a live CSET is redundant
        2  register write overwritten unread
+       1  conditional select decided by known flags
 
-5 optimization opportunities in 37 instructions
+6 optimization opportunities in 37 instructions

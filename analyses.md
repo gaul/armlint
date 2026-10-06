@@ -2675,6 +2675,72 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   fragments ending in a branch their own instructions decide no longer
   count this check's finding.
 
+## Conditional select decided by known flags
+
+* A CSEL, CSINC, CSINV or CSNEG whose condition the path to it has
+  already decided picks the same operand every time, so it is a MOV
+  of that operand -- or of the else operation applied to it: ADD #1,
+  MVN, NEG, and the constant when the else operand is ZR -- and the
+  flag read goes:
+
+  ```
+  cmp  w9, #0x2b        ; librustc_driver: tail merging left the
+  b.eq L                ; compare repeated after the branch that
+  ...                   ; read it, and a CSET/CINC of the repeat
+  cmp  w9, #0x2b
+  cset w9, eq           ->  mov w9, #0; ne always holds: the flags here cannot fail ne
+  cinc x8, x8, eq       ->  delete; x8 selects itself
+
+  mov  w0, #-0x80000000 ; clang: a constant compared, then selected on
+  cmp  w0, #0
+  cset w0, eq           ->  mov w0, #0; ne always holds: w0 is 0x80000000
+
+  tst  w0, #1
+  csel w1, w2, w3, hi   ->  mov w1, w3; hi never holds: tst cannot set flags that pass hi
+  ```
+
+* **The decision** is [the decided-branch check's](#conditional-branch-decided-by-known-values),
+  by the same three steps on the same engine: the flag setter's
+  operation alone (a TST never sets C), the compare that set the
+  flags with what is known of its register -- a constant, a range a
+  CBZ or an earlier branch narrowed, known bits -- and the states the
+  branches before it left, which a repeated compare inherits. The
+  finding is the select alone, with the instruction that settled it
+  shown first.
+* **Left alone on purpose.** Two shapes are decided by design, and
+  the fold would undo a Spectre mitigation whose select exists to make
+  a value data-dependent on a bounds check inside the speculation
+  window. A select that masks a register to zero in place (`csel x16,
+  x16, xzr, ls`): LLVM's jump-table hardening re-compares the index
+  after the range branch and masks it -- every one of `/bin/bash`'s 18
+  decided selects, `cmp x16, #0x12 ; b.hi default ; cmp x16, #0x12 ;
+  csel x16, x16, xzr, ls` -- speculative load hardening masks the same
+  way, and SpiderMonkey's `spectreZeroRegister` is this select on the
+  compared register. And a select on flags a branch has already
+  tested, whichever way: SpiderMonkey's string loads under
+  `spectreStringMitigations` follow a branch with a CSEL on the same
+  condition (17,118 in its Ion dump against 2 elsewhere, 2026-09-26).
+  The first exclusion also costs librustc_driver 121 and clang 1
+  in-place masks of the `if c { x } else { 0 }` kind, which a tool
+  that cannot tell a hardening pass's output from a programmer's
+  idiom accepts as the cheaper error. `csel Rd, Rn, Rn` is the
+  [same-operand identity's](#csel-same-operand-identity-csel-rd-rn-rn-cond),
+  Rd = ZR a discarded result, AL and NV not conditions.
+* **The rewrite** is one for one; a MOV is eliminated at rename on
+  Apple's cores and the select's dependency on the flag setter is
+  gone either way, so the fold is the "cheaper, not shorter" kind
+  until the compare it leaves unread goes too (the dead-compare
+  check's finding once the rewrite is applied).
+* **Corpus, 2026-10-06:** librustc_driver 627 (CSEL 292, CSET 273,
+  CINC 37, CSINC 13, CSINV 6, CNEG 6; 304 decided by a known value, 63
+  by the states a branch left, 54 by a range), clang 279 (CSEL 156,
+  CSET 108), uutils 123, go 3, libcrypto 1, bash 0; no other check
+  moved. The 2026-09-26 census counted 1,082 whose flags no branch
+  had tested, LLVM 1,004. Three unit-test fragments and two fixtures
+  of other checks carry the finding uncounted, since a CSET's 0-or-1
+  compared with zero, or a TST before a HI select, is exactly a
+  decided select.
+
 ## Operation on known values foldable to MOV #imm
 
 * An ALU instruction every input of which is a known value computes a
