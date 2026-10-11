@@ -3975,6 +3975,78 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the JS::Value shifted tags, and the four 32-bit words of the
   cycle-collection IIDs that every `QueryInterface` compares -- none
   of which a renumbering reaches.
+* Its twin, the [constant audit](#constant-audit--a-const) below, reads
+  the same consumers for the constants that do encode.
+
+## constant audit (`-a const`)
+
+* The immediate-misfit audit's twin: the same four consumers --
+  `add`/`sub`/`adds`/`subs` with `cmp`/`cmn`, the logical ops with
+  `tst`, `ccmp`/`ccmn`, a register-offset `ldr`/`str` indexed by the
+  constant -- fed by an adjacent `movz`/`movn`/`movk` chain under the
+  same operand rules, for the constants that DO encode: `movz w8, #0 ;
+  cmp w6, w8`, where `cmp w6, #0` was available. One classifier serves
+  both audits (`imm_audit_classify`); the misfit audit reports the
+  sites it marks unencodable, the constant audit the rest.
+* The MOV-chain folds report this shape as a 2-for-1 once the forward
+  register-liveness scan proves the constant's register dead, since
+  their rewrite deletes the chain. The audit reports every site with
+  no proof: the consumer's immediate form is a valid rewrite with the
+  chain kept, so the finding renders that form -- `-> cmp w6, #0x0`;
+  `-> cmn w2, #0x1` for a negative whose magnitude encodes
+  sign-crossed, and `ccmn` likewise; `-> mov w9, w10` for a plain
+  `add`/`sub` of zero; `-> and w9, w10, #0xffffff00` for `bic` of
+  `0xff`, the complemented mask being the one with an immediate form;
+  `-> ldr x0, [x2, #0x100]` or the `ldur`/`stur` spelling when only the
+  unscaled offset fits. A site the fold proves is reported under both
+  names. Zero and all-ones under a logical op are identities rather
+  than immediates and stay skipped, as in the misfit audit; zero under
+  `add`/`sub`/`cmp` is the headline case and is reported, the table's
+  hint naming the zero register and `cbz`/`cbnz`.
+* Why no proof: in compiler output the deletion proof fails for reasons
+  unrelated to the site -- the scan stops at a call, or the allocator
+  keeps the register for a second use -- and a JIT whose register
+  allocator materializes every constant input produces the shape at
+  every compare, with a deoptimization call on the branch's other
+  edge. The fold's count is what a peephole could delete; the audit's
+  is the population an instruction-selection change reaches.
+* The summary tallies the audit by (consumer class, width, constant),
+  the constant as the consumer reads it (a load/store as its byte
+  offset), in a third by-value table after the misfit audit's two,
+  with the immediate form as its hint column; the finding carries the
+  tuple on the same fields as a misfit finding plus a fit flag.
+* Corpora. V8's Maglev tier over JetStream 3 (74 benchmarks, 10.9M
+  instructions, `-m v8 -a const`): 15,928 sites -- 14,486 `cmp`, 1,075
+  `cmn`, 228 `subs`, 50 `sub`, one `add`, 88 bitmask -- led by zero
+  (3,808), one (965), and -2 and -1 under `cmn` (482 and 442). Maglev's
+  compare, branch and bounds-check nodes asked the register allocator
+  for both operands in registers, so every constant they compared
+  against was materialized first; with the constant taken as an
+  immediate in the IR (a pending V8 change, `[maglev] Take the constant
+  operand of int32 compares as an immediate`), the same corpus reports
+  2,534 sites, zero at 1,181. clang-24 (21.9M instructions): 4,167 sites,
+  2,544 add/sub, 1,191 bitmask and 432 load/store, led by `movz x11,
+  #0 ; cmp x10, x11` throughout GlobalISel's match-table executor
+  (1,566 zero compares) and `movz w10, #0x1, lsl #16 ; orr w9, w9,
+  w10` in `AArch64AsmBackend::getFixupKind` (675). SpiderMonkey Ion
+  (16.5M): 2,635, of which 2,481 are one `tst` of a single-bit flag in
+  its inline-cache stubs, the mask moved through an allocated register
+  (`mov w1, #0x2 ; tst w0, w1`; `0x20000` 417, `0x8` 379, `0x20` 344).
+  SpiderMonkey Baseline (35.8M): 321, small `cmp` constants. go 1.27
+  (1.67M): 27, of them 26 `cmn #1`.
+  dyld (169k): 13. bash (119k): none.
+* Left out. A compare with the constant on the LEFT (`movz w2, #0xe0 ;
+  cmp w2, w9`): `subs` has no immediate slot for Rn, so the rewrite
+  swaps the operands and commutes the condition of every flag reader,
+  which neither the audit nor the folds follow; in the Maglev corpus
+  that was the larger half, 11,343 of 24,476 constant compares, every
+  constant-index bounds check (`CheckInt32Condition(3, length)`) among
+  them (see TODO.md). A constant built by the bitmask `mov` alias
+  (`orr Rd, zr, #imm`) opens no chain and is not seen by either audit:
+  578 of 215,190 materialized-constant consumers in that corpus. A
+  consumer in a shifted- or extended-register form (`add x3, x1, x2,
+  lsl #2`, `ldr w0, [x1, w2, uxtw #2]`) is outside all four classes,
+  as it is for the folds.
 
 ## exclusive-monitor retry loop foldable into an LSE atomic (feature-gated: `-m lse`)
 

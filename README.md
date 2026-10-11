@@ -189,6 +189,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`autiasp`/`autibsp` + `ret`](analyses.md#split-pointer-authentication-return-foldable-into-retaaretab-feature-gated--m-pauth) | `retaa`/`retab` (`-m pauth`; auto-armed on arm64e) |
 | [unsigned LR spill; raw `br`/`blr`; zero-discriminator `braaz`/`blraaz`](analyses.md#pac-hygiene-audit--a-pac-auto-armed-on-arm64e) | audit-only review items (`-a pac`; auto-armed on arm64e) |
 | [`mov` chain + `cmp`/`tst`/`ccmp`/`ldr` whose immediate form the value misses](analyses.md#immediate-misfit-audit--a-imm) | audit-only review items, tallied by value, the constants within one step of an immediate first (`-a imm`) |
+| [`mov` chain + `cmp`/`tst`/`ccmp`/`ldr` whose immediate form the value fits, the register not proven dead](analyses.md#constant-audit--a-const) | audit-only review items, every site tallied by value (`-a const`) |
 | [`ldxr`/`stxr` fetch-op retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `ldadd`/`ldset`/`ldeor`/`ldclr` (+ `mvn`/`neg`/`mov` pre-op) (`-m lse`) |
 | [`ldxr`/`stxr` exchange retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `swp` (`-m lse`) |
 | [`ldxr` + `cmp` + `b.ne` + `stxr` CAS retry loop](analyses.md#exclusive-monitor-retry-loop-foldable-into-an-lse-atomic-feature-gated--m-lse) | `mov` + `cas` + `cmp` (`-m lse`) |
@@ -372,6 +373,8 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
 ./armlint -d /bin/ls        # also report functions that copy one another
 ./armlint -c /bin/ls        # also report the constants MOVZ/MOVK chains build
+./armlint -a imm /bin/ls    # also audit the constants that miss an immediate
+./armlint -a const jit.elf  # also audit the constants materialized needlessly
 ./armlint --json /bin/ls    # the findings as a JSON document keyed by address
 ```
 
@@ -440,7 +443,12 @@ slice never opted in, so it stays silent unless you pass `-a pac`
 explicitly. `imm` audits every materialized constant against its
 consumer's immediate encoding and tallies the misses by value, so the
 constants worth renumbering surface; see [Immediate-misfit audit
-(`-a imm`)](#immediate-misfit-audit--a-imm) below.
+(`-a imm`)](#immediate-misfit-audit--a-imm) below. `const` is its twin
+for the constants that encode: every materialized constant whose
+consumer could have taken it as an immediate, counted whether or not
+the constant's register dies and tallied by value, so a compiler that
+materializes what it could have encoded surfaces as its constants; see
+[Constant audit (`-a const`)](#constant-audit--a-const).
 
 By default armlint prints only a summary: the opportunities grouped by
 type and sorted by prevalence, so it is clear which to look at first,
@@ -716,6 +724,83 @@ the table opened with a 16 MiB reservation bound one step past
 `0xfff000` at 92,109 sites, since fixed in V8 by comparing against the
 largest encodable bound.
 
+## Constant audit (`-a const`)
+
+`armlint -a const` is the misfit audit's twin for the constants that
+encode: a `movz`/`movn`/`movk` chain whose consumer has an immediate
+form the value *fits* -- `movz w8, #0 ; cmp w6, w8`, where `cmp w6, #0`
+(or `cbz w6`) was available. The same four consumer classes, the same
+operand rules and the same adjacency; what differs is the verdict. The
+`mov` folds already report this shape, but only once the forward scan
+proves the constant's register dead, because their rewrite deletes the
+chain. In compiler output that proof fails for reasons unrelated to
+the site -- a call ends the scan, a register allocator keeps the
+constant live for a second use -- and in a JIT that materializes every
+constant input the shape is the rule, not the exception. The audit
+needs no proof: the consumer's immediate form is a valid rewrite with
+the chain kept, and the finding shows that form (`-> cmp w6, #0x0`; a
+sign-crossed `cmn` for a negative whose magnitude encodes; `-> mov w9,
+w10` for an add of zero; the scaled or unscaled offset form of a load
+or store), so a site the fold proves is reported under both names. Its
+count is the population an instruction-selection change reaches, and
+the summary tallies it by value:
+
+```console
+$ ./armlint -m v8 -a const maglev.elf
+Optimization opportunities by type:
+   15840  MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit)
+   ...
+      88  MOV + AND/ORR/EOR/TST: constant is a bitmask immediate (const audit)
+   ...
+
+Constants with an immediate form, by value (-a const):
+    3808  add/sub imm12  w  #0x0          zero: the zero register, or cbz/cbnz under eq/ne
+     965  add/sub imm12  w  #0x1          add/sub immediate
+     482  add/sub imm12  w  #0xfffffffe   sign-crossed: #0x2 under the opposite add/sub (cmp/cmn)
+     442  add/sub imm12  w  #0xffffffff   sign-crossed: #0x1 under the opposite add/sub (cmp/cmn)
+     365  add/sub imm12  w  #0x2          add/sub immediate
+     343  add/sub imm12  w  #0x3          add/sub immediate
+     304  add/sub imm12  w  #0xb          add/sub immediate
+    ...
+  (1173 more distinct values)
+```
+
+Each row is a count of sites, the consumer class and width letter as in
+the misfit tables, the constant as the consumer reads it (a load/store
+as its byte offset), and the immediate form it had. That run is V8's
+Maglev tier over JetStream 3 (74 benchmarks, 10.9M instructions,
+`-m v8 -a const` on a `tools/v8dump2elf.py` dump): 15,928 sites, 14,486
+of them `cmp` and 1,075 `cmn`, zero alone at 3,808. Maglev's compare,
+branch and bounds-check nodes asked the register allocator for both
+operands in registers, so every constant they compared against was
+materialized first; with the constant taken as an immediate in the IR
+instead (a pending V8 change,
+`[maglev] Take the constant operand of int32 compares as an immediate`),
+the same corpus reports 2,534 sites, zero at 1,181. Across the other
+corpora the audit separates compilers from JITs: clang-24 (21.9M
+instructions) has 4,167 sites, led by `movz x11, #0 ; cmp x10, x11`
+throughout GlobalISel's match-table executor (1,566 zero compares) and
+`movz w10, #0x1, lsl #16 ; orr w9, w9, w10` in
+`AArch64AsmBackend::getFixupKind` (675); SpiderMonkey's Ion output
+(16.5M) has 2,635, nearly all one `tst` of a single-bit flag in its
+inline-cache stubs, the mask moved through a register
+(`mov w1, #0x2 ; tst w0, w1`; 2,481); its Baseline output (35.8M) 321
+small `cmp` constants; go 27; dyld 13; bash none.
+
+What the audit leaves out, with the numbers from the Maglev corpus
+above: a compare with the constant on the *left* (`movz w2, #0xe0 ;
+cmp w2, w9`) has no immediate form for that instruction -- the rewrite
+swaps the operands and commutes the condition of every flag reader,
+which neither the audit nor the folds follow -- and that was the
+larger half, 11,343 of 24,476 constant compares, every constant-index
+bounds check among them; a constant built by the bitmask `mov` alias
+(`orr Rd, zr, #imm`) is not a chain and is not seen (578 of 215,190
+materialized-constant consumers); and a consumer in a shifted- or
+extended-register form (`add x3, x1, x2, lsl #2`) is outside all four
+classes. Like `-a imm`, the findings count toward the total and the
+exit status; the table is for reading.
+[analyses.md](analyses.md#constant-audit--a-const) walks the rules.
+
 ## Duplicate code (`-d`)
 
 `armlint -d` adds a report on which functions are copies of one
@@ -841,9 +926,11 @@ Limitations:
 `movz`/`movn` + `movk` chains. A chain is a run of two or more of them
 into one register at one width: the runs the "suboptimal MOVZ/MOVK
 sequence" check judges. The [`-a imm` audit](#immediate-misfit-audit--a-imm)
-reports a constant that just misses its consumer's immediate form.
-This report is its complement: it counts what every constant too wide
-for one instruction costs. Constants are tallied by width and value,
+reports a constant that just misses its consumer's immediate form, and
+the [`-a const` audit](#constant-audit--a-const) one that fits it but
+was materialized anyway. This report is their complement: it counts
+what every constant too wide for one instruction costs. Constants are
+tallied by width and value,
 so `w #0x1deb8` and `x #0x1deb8` are two values, and ranked by the
 instructions spent on them.
 

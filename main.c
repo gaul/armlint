@@ -1345,9 +1345,11 @@ int main(int argc, char **argv)
                 g_features |= ARMLINT_AUDIT_PAC;
             } else if (strcmp(argv[i], "imm") == 0) {
                 g_features |= ARMLINT_AUDIT_IMM;
+            } else if (strcmp(argv[i], "const") == 0) {
+                g_features |= ARMLINT_AUDIT_CONST;
             } else {
                 fprintf(stderr, "%s: unknown -a audit '%s' "
-                    "(known: pac, imm)\n", argv[0], argv[i]);
+                    "(known: pac, imm, const)\n", argv[0], argv[i]);
                 return 1;
             }
         } else if (strcmp(argv[i], "--json") == 0) {
@@ -1363,13 +1365,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 1;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm] [-s all|INDEX|NAME] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 1;
     }

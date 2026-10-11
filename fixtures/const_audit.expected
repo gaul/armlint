@@ -1,0 +1,102 @@
+MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit) at offset: 0x0 <_main>: -> cmp w6, #0x0 (2 instructions)
+  movz w8, #0x0
+  cmp w6, w8
+
+MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit) at offset: 0xc <_main+0xc>: -> cmp w6, #0x3cb000 (3 instructions)
+  movz w8, #0xb000
+  movk w8, #0x3c, lsl #16
+  cmp w6, w8
+
+conditional branch that is never taken at offset: 0x18 <_main+0x18>: -> delete; never taken: w6 is 0x0 (known 0x10 bytes back) (1 instructions)
+  b.ne #0x8c
+  b.ge #0x8c
+
+MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit) at offset: 0x1c <_main+0x1c>: -> cmn w2, #0x1 (2 instructions)
+  movn w8, #0x0
+  cmp w2, w8
+
+MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit) at offset: 0x28 <_main+0x28>: -> add w9, w10, #0xa (2 instructions)
+  movz w8, #0xa
+  add w9, w10, w8
+
+MOV + ADD/SUB foldable to immediate form at offset: 0x28 <_main+0x28>: -> add w9, w10, #0xa (2 instructions)
+  movz w8, #0xa
+  add w9, w10, w8
+
+MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit) at offset: 0x30 <_main+0x30>: -> mov w11, w12 (2 instructions)
+  movz w8, #0x0
+  add w11, w12, w8
+
+MOV + AND/ORR/EOR/TST: constant is a bitmask immediate (const audit) at offset: 0x38 <_main+0x38>: -> and w2, w3, #0x7ff80000 (2 instructions)
+  movz w16, #0x7ff8, lsl #16
+  and w2, w3, w16
+
+register write overwritten unread at offset: 0x2c <_main+0x2c>: -> delete; w9 is overwritten before any read (1 instructions)
+  add w9, w10, w8
+  ... 5 instructions ...
+  bic w9, w10, w8
+
+MOV + AND/ORR/EOR/TST: constant is a bitmask immediate (const audit) at offset: 0x40 <_main+0x40>: -> and w9, w10, #0xffffff00 (2 instructions)
+  movz w8, #0xff
+  bic w9, w10, w8
+
+MOV + CCMP/CCMN: constant is within imm5 (const audit) at offset: 0x48 <_main+0x48>: -> ccmp w7, #0x11, #0x4, ne (2 instructions)
+  movz w16, #0x11
+  ccmp w7, w16, #4, ne
+
+MOV + CCMP/CCMN foldable to immediate form at offset: 0x48 <_main+0x48>: -> ccmp w7, #0x11, #0x4, ne (2 instructions)
+  movz w16, #0x11
+  ccmp w7, w16, #0x4, ne
+
+MOV + CCMP/CCMN: constant is within imm5 (const audit) at offset: 0x50 <_main+0x50>: -> ccmn w7, #0x3, #0x4, ne (2 instructions)
+  movn w16, #0x2
+  ccmp w7, w16, #4, ne
+
+MOV + register-offset LDR/STR: constant has an immediate-offset form (const audit) at offset: 0x58 <_main+0x58>: -> ldr x0, [x2, #0x100] (2 instructions)
+  movz x1, #0x100
+  ldr x0, [x2, x1]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x58 <_main+0x58>: -> ldr x0, [x2, #0x100] (2 instructions)
+  movz x1, #0x100
+  ldr x0, [x2, x1]
+
+MOV + register-offset LDR/STR: constant has an immediate-offset form (const audit) at offset: 0x60 <_main+0x60>: -> ldur x0, [x2, #0x3] (2 instructions)
+  movz x1, #0x3
+  ldr x0, [x2, x1]
+
+MOV + register-offset LDR/STR foldable to immediate offset at offset: 0x60 <_main+0x60>: -> ldur x0, [x2, #0x3] (2 instructions)
+  movz x1, #0x3
+  ldr x0, [x2, x1]
+
+MOV + register-offset LDR/STR: constant has an immediate-offset form (const audit) at offset: 0x68 <_main+0x68>: -> ldr x0, [x2, #0x100] (2 instructions)
+  movz x1, #0x20
+  ldr x0, [x2, x1, lsl #3]
+
+compare whose flags are overwritten unread at offset: 0x54 <_main+0x54>: -> delete; NZCV overwritten unread by cmp x0, x16 (1 instructions)
+  ccmp w7, w16, #4, ne
+
+Optimization opportunities by type:
+       5  MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit)
+       3  MOV + register-offset LDR/STR: constant has an immediate-offset form (const audit)
+       2  MOV + AND/ORR/EOR/TST: constant is a bitmask immediate (const audit)
+       2  MOV + CCMP/CCMN: constant is within imm5 (const audit)
+       2  MOV + register-offset LDR/STR foldable to immediate offset
+       1  MOV + ADD/SUB foldable to immediate form
+       1  MOV + CCMP/CCMN foldable to immediate form
+       1  compare whose flags are overwritten unread
+       1  conditional branch that is never taken
+       1  register write overwritten unread
+
+Constants with an immediate form, by value (-a const):
+       2  add/sub imm12  w  #0x0          zero: the zero register, or cbz/cbnz under eq/ne
+       2  ldr/str offset x  #0x100        scaled immediate offset
+       1  ldr/str offset x  #0x3          unscaled immediate offset (ldur/stur)
+       1  add/sub imm12  w  #0xa          add/sub immediate
+       1  ccmp imm5      w  #0x11         ccmp/ccmn imm5
+       1  add/sub imm12  w  #0x3cb000     add/sub immediate #0x3cb, lsl #12
+       1  bitmask imm    w  #0x7ff80000   bitmask immediate
+       1  bitmask imm    w  #0xffffff00   bitmask immediate
+       1  ccmp imm5      w  #0xfffffffd   sign-crossed: #0x3 under the opposite ccmp/ccmn
+       1  add/sub imm12  w  #0xffffffff   sign-crossed: #0x1 under the opposite add/sub (cmp/cmn)
+
+19 optimization opportunities in 36 instructions

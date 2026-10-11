@@ -187,6 +187,15 @@ void armlint_state_reset(armlint_state *state);
 // definition (a limit, a sentinel address, a bit assignment) as the
 // place to renumber. See check_imm_misfit_audit.
 #define ARMLINT_AUDIT_IMM (1u << 17)
+// Constant audit (-a const): the immediate-misfit audit's twin for the
+// constants that DO encode -- a MOVZ/MOVN/MOVK-materialized constant
+// feeding one of the same consumers, whose immediate form takes the
+// value. The MOV-chain folds report the subset of these sites whose
+// constant register they prove dead; the audit reports every site,
+// with no liveness proof, and the summary tallies them by value, so
+// a compiler that materializes what it could have encoded shows up
+// as its constants. See check_const_audit.
+#define ARMLINT_AUDIT_CONST (1u << 18)
 
 // Enable ISA-extension-gated checks (a bitmask of ARMLINT_FEATURE_*).
 void armlint_state_set_features(armlint_state *state, unsigned features);
@@ -234,13 +243,15 @@ typedef struct {
     unsigned insn_count;
     char detail[ARMLINT_FINDING_DETAIL_LEN];
     char lines[ARMLINT_FINDING_LINES][ARMLINT_FINDING_LINE_LEN];
-    // Set only by the immediate-misfit audit (zero for every other
+    // Set only by the two constant audits (zero for every other
     // check; clear_finding_strings resets them with the text): the
     // consumer class, its operation width (32 or 64; for a load/store
-    // the access size in bits) and the constant the immediate form
-    // would have needed (for a load/store the byte offset).
+    // the access size in bits), whether the constant encoded (the
+    // -a const audit) or missed (-a imm), and the constant the
+    // immediate form would carry (for a load/store the byte offset).
     unsigned char misfit_kind;
     unsigned char misfit_width;
+    unsigned char misfit_fit;
     uint64_t misfit_value;
 } armlint_finding;
 
@@ -823,6 +834,22 @@ bool check_pac_zero_disc_indirect(armlint_state *state, const cs_insn *insn,
 // audit)".
 bool check_imm_misfit_audit(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
+
+// Constant audit (opt-in, ARMLINT_AUDIT_CONST / -a const): the
+// immediate-misfit audit's twin for the constants that encode. A
+// MOVZ/MOVN/MOVK chain immediately followed by an add/sub, logical,
+// conditional-compare or register-offset load/store consumer whose
+// immediate form takes the value, under the misfit audit's operand
+// rules. Reported at once, with no liveness proof: the MOV-chain
+// folds report the subset of these sites whose constant register
+// they prove dead (the two-for-one rewrites), and the audit counts
+// every site, which is the population a compiler change reaches. The
+// finding renders the consumer's immediate form with the chain kept,
+// and the driver's summary tallies the audit by value. Reported as
+// "MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const
+// audit)" and its three siblings.
+bool check_const_audit(armlint_state *state, const cs_insn *insn,
+                       size_t offset, armlint_finding *out);
 
 // Detect a producer that provably zeros bits 63..P of its destination,
 // followed -- directly or after instructions that leave the register

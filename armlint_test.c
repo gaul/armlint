@@ -16876,6 +16876,175 @@ static void test_imm_audit(void)
     assert(f.misfit_value == 0x10d9u && f.misfit_width == 8);
 }
 
+// The -a const audit (check_const_audit): the misfit audit's twin for
+// the constants that encode, reported with no liveness proof and
+// rendered as the consumer's immediate form.
+static const char *const kConstAddSub =
+    "MOV + ADD/SUB/CMP: constant has an add/sub immediate form (const audit)";
+static const char *const kConstLogical =
+    "MOV + AND/ORR/EOR/TST: constant is a bitmask immediate (const audit)";
+static const char *const kConstCcmp =
+    "MOV + CCMP/CCMN: constant is within imm5 (const audit)";
+static const char *const kConstLdst =
+    "MOV + register-offset LDR/STR: constant has an immediate-offset form "
+    "(const audit)";
+
+static int run_const_audit(const uint8_t *code, size_t code_size,
+                           const char *name)
+{
+    return run_named_features_check(code, code_size, ARMLINT_AUDIT_CONST,
+                                    name);
+}
+
+// The audit's finding for `name` over code, asserting there is one.
+static armlint_finding const_audit_finding(const uint8_t *code,
+                                           size_t code_size,
+                                           const char *name)
+{
+    armlint_finding f;
+    bool found = first_named_finding(code, code_size, ARMLINT_AUDIT_CONST,
+                                     name, &f);
+    assert(found);
+    assert(f.misfit_fit == 1);
+    return f;
+}
+
+static void test_const_audit(void)
+{
+    uint8_t code[16];
+    armlint_finding f;
+
+    // The headline shape: a zero compared from a register.
+    // movz w8, #0 ; cmp w6, w8 -> cmp w6, #0.
+    movz_w(&code[0], 8, 0);
+    cmp_w_reg(&code[4], 6, 8);
+    assert(run_const_audit(code, 8, kConstAddSub) == 1);
+    f = const_audit_finding(code, 8, kConstAddSub);
+    assert(strcmp(f.detail, "-> cmp w6, #0x0") == 0);
+    assert(f.misfit_value == 0 && f.misfit_width == 32);
+    // Silent without the audit bit, and under -a imm alone.
+    assert(run_named_features_check(code, 8, 0, kConstAddSub) == 0);
+    assert(run_named_features_check(code, 8, ARMLINT_AUDIT_IMM,
+                                    kConstAddSub) == 0);
+    // A shifted immediate: 0x3cb000 = 0x3cb << 12, built by two
+    // instructions.
+    movz_w(&code[0], 8, 0xb000);
+    movk_w(&code[4], 8, 0x3c, 1);
+    cmp_w_reg(&code[8], 6, 8);
+    assert(run_const_audit(code, 12, kConstAddSub) == 1);
+    f = const_audit_finding(code, 12, kConstAddSub);
+    assert(f.misfit_value == 0x3cb000u);
+    assert(strcmp(f.detail, "-> cmp w6, #0x3cb000") == 0);
+    // A negative constant whose magnitude encodes takes the
+    // sign-crossed form: movn w8, #0 (-1) ; cmp w2, w8 -> cmn w2, #1.
+    movn_w(&code[0], 8, 0);
+    cmp_w_reg(&code[4], 2, 8);
+    f = const_audit_finding(code, 8, kConstAddSub);
+    assert(strcmp(f.detail, "-> cmn w2, #0x1") == 0);
+    assert(f.misfit_value == 0xffffffffu);
+    // A W chain feeding an X consumer: movz w8, #0xa ; cmp x6, x8.
+    movz_w(&code[0], 8, 0xa);
+    cmp_x_reg(&code[4], 6, 8);
+    f = const_audit_finding(code, 8, kConstAddSub);
+    assert(strcmp(f.detail, "-> cmp x6, #0xa") == 0);
+    assert(f.misfit_width == 64);
+    // A misfit is the other audit's: 16 MiB.
+    movz_x(&code[0], 16, 0x100, 1);
+    cmp_x_reg(&code[4], 0, 16);
+    assert(run_const_audit(code, 8, kConstAddSub) == 0);
+    assert(run_named_features_check(code, 8,
+        ARMLINT_AUDIT_IMM | ARMLINT_AUDIT_CONST, kMisfitAddSub) == 1);
+    // Adjacency: an intervening instruction closes the chain.
+    movz_w(&code[0], 8, 0xa);
+    write_le32(&code[4], 0xD503201Fu);      // nop
+    cmp_w_reg(&code[8], 6, 8);
+    assert(run_const_audit(code, 12, kConstAddSub) == 0);
+    // The constant register as the other operand is excluded.
+    movz_w(&code[0], 8, 0xa);
+    cmp_w_reg(&code[4], 8, 8);
+    assert(run_const_audit(code, 8, kConstAddSub) == 0);
+    // A plain ADD: add w9, w10, w8 with w8 = 0xa; with w8 = 0 the
+    // immediate form is a MOV.
+    movz_w(&code[0], 8, 0xa);
+    encode_sr(&code[4], 0x0B000000u, 9, 10, 8);
+    f = const_audit_finding(code, 8, kConstAddSub);
+    assert(strcmp(f.detail, "-> add w9, w10, #0xa") == 0);
+    movz_w(&code[0], 8, 0);
+    encode_sr(&code[4], 0x0B000000u, 9, 10, 8);
+    f = const_audit_finding(code, 8, kConstAddSub);
+    assert(strcmp(f.detail, "-> mov w9, w10") == 0);
+
+    // Bitmask: 0x7 under TST; 0x7ff80000 (twelve contiguous bits, the
+    // exponent-and-quiet-bit mask of a NaN test) under AND, built by
+    // movz w16, #0x7ff8, lsl #16.
+    movz_w(&code[0], 17, 0x7);
+    tst_w_reg(&code[4], 16, 17);
+    assert(run_const_audit(code, 8, kConstLogical) == 1);
+    f = const_audit_finding(code, 8, kConstLogical);
+    assert(strcmp(f.detail, "-> tst w16, #0x7") == 0);
+    write_le32(&code[0], 0x52AFFF10u);
+    encode_sr(&code[4], 0x0A000000u, 2, 3, 16);
+    f = const_audit_finding(code, 8, kConstLogical);
+    assert(strcmp(f.detail, "-> and w2, w3, #0x7ff80000") == 0);
+    assert(f.misfit_value == 0x7ff80000u);
+    // An inverting form takes the complemented mask:
+    // movz w8, #0xff ; bic w9, w10, w8 -> and w9, w10, #0xffffff00.
+    movz_w(&code[0], 8, 0xff);
+    encode_sr(&code[4], 0x0A200000u, 9, 10, 8);
+    f = const_audit_finding(code, 8, kConstLogical);
+    assert(strcmp(f.detail, "-> and w9, w10, #0xffffff00") == 0);
+    assert(f.misfit_value == 0xffffff00u);
+    // Not a bitmask immediate is the other audit's: 0x12.
+    movz_x(&code[0], 11, 0x12, 0);
+    tst_w_reg(&code[4], 9, 11);
+    assert(run_const_audit(code, 8, kConstLogical) == 0);
+    // Zero and all-ones are identities, not immediates.
+    movz_w(&code[0], 8, 0);
+    encode_sr(&code[4], 0x0A000000u, 9, 9, 8);
+    assert(run_const_audit(code, 8, kConstLogical) == 0);
+    movn_w(&code[0], 8, 0);
+    encode_sr(&code[4], 0x0A000000u, 9, 9, 8);
+    assert(run_const_audit(code, 8, kConstLogical) == 0);
+
+    // CCMP: 0x11 is within imm5, 0x2d is not, and -3 crosses to CCMN.
+    movz_w(&code[0], 16, 0x11);
+    ccmp_reg(&code[4], 0, 1, 7, 16, 4, 1);
+    assert(run_const_audit(code, 8, kConstCcmp) == 1);
+    f = const_audit_finding(code, 8, kConstCcmp);
+    assert(strcmp(f.detail, "-> ccmp w7, #0x11, #0x4, ne") == 0);
+    movz_w(&code[0], 16, 0x2d);
+    ccmp_reg(&code[4], 0, 1, 7, 16, 4, 1);
+    assert(run_const_audit(code, 8, kConstCcmp) == 0);
+    movn_w(&code[0], 16, 2);
+    ccmp_reg(&code[4], 0, 1, 7, 16, 4, 1);
+    f = const_audit_finding(code, 8, kConstCcmp);
+    assert(strcmp(f.detail, "-> ccmn w7, #0x3, #0x4, ne") == 0);
+
+    // Register-offset load: an index the scaled imm12 takes, one only
+    // the unscaled simm9 takes, and one beyond both.
+    // movz x1, #0x100 ; ldr x0, [x2, x1] -> ldr x0, [x2, #0x100].
+    movz_x(&code[0], 1, 0x100, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 0);
+    assert(run_const_audit(code, 8, kConstLdst) == 1);
+    f = const_audit_finding(code, 8, kConstLdst);
+    assert(strcmp(f.detail, "-> ldr x0, [x2, #0x100]") == 0);
+    assert(f.misfit_value == 0x100u && f.misfit_width == 64);
+    movz_x(&code[0], 1, 0x3, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 0);
+    f = const_audit_finding(code, 8, kConstLdst);
+    assert(strcmp(f.detail, "-> ldur x0, [x2, #0x3]") == 0);
+    movz_x(&code[0], 1, 0x1, 1);
+    ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 0);
+    assert(run_const_audit(code, 8, kConstLdst) == 0);
+    // An element index under LSL #3 is eight times as many bytes:
+    // movz x1, #0x20 ; ldr x0, [x2, x1, lsl #3] -> ldr x0, [x2, #0x100].
+    movz_x(&code[0], 1, 0x20, 0);
+    ldst_regoff(&code[4], 3, 1, 0, 2, 1, 3, 1);
+    f = const_audit_finding(code, 8, kConstLdst);
+    assert(strcmp(f.detail, "-> ldr x0, [x2, #0x100]") == 0);
+    assert(f.misfit_value == 0x100u);
+}
+
 static void test_pac_zero_disc(void)
 {
     uint8_t code[16];
@@ -19541,6 +19710,7 @@ int main(void)
     test_pac_jump_table();
     test_pac_zero_disc();
     test_imm_audit();
+    test_const_audit();
     test_br_x30();
     test_branch_to_next();
     test_lse_rmw();
