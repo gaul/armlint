@@ -321,6 +321,13 @@ static const char *g_slice = NULL;
 // scan, for the summary line and the --json document.
 static bool g_scan_all = false;
 static size_t g_restrict_symbols = 0;
+// -f NAME: lint just the one function, every site that spells its
+// name (a versioned export has several). g_func_sites and
+// g_func_bytes report what was scanned; no site at all is a tool
+// failure.
+static const char *g_func = NULL;
+static size_t g_func_sites = 0;
+static uint64_t g_func_bytes = 0;
 // Non-NULL in -i census mode: scan_code then tallies instead of
 // linting, and main prints the census in place of the findings report.
 static armlint_census *g_census = NULL;
@@ -507,13 +514,66 @@ static void mask_outside_ranges(uint8_t *buf, uint64_t size,
     }
 }
 
+// -f: the kept ranges of one section, from its anchor table -- every
+// anchor named g_func, reaching to its recorded size or, unsized, to
+// the next anchor or the section end (the rule the annotation, the
+// census and -d already define a function by, and the only one
+// Mach-O's sizeless nlist admits). The table is sorted and deduped,
+// so one address yields one site. Returns the count, with *keep
+// allocated for it (NULL when there is none); -1 on allocation
+// failure.
+static int keep_named_function(const armlint_symbol *table, size_t ntable,
+                               uint64_t base, uint64_t size,
+                               code_range **keep)
+{
+    *keep = NULL;
+    size_t n = 0;
+    for (size_t k = 0; k < ntable; k++) {
+        if (table[k].name != NULL && strcmp(table[k].name, g_func) == 0) {
+            n++;
+        }
+    }
+    if (n == 0) {
+        return 0;
+    }
+    *keep = malloc(n * sizeof(**keep));
+    if (*keep == NULL) {
+        return -1;
+    }
+    size_t m = 0;
+    for (size_t k = 0; k < ntable; k++) {
+        if (table[k].name == NULL || strcmp(table[k].name, g_func) != 0
+                || table[k].vaddr < base || table[k].vaddr - base >= size) {
+            continue;
+        }
+        uint64_t start = table[k].vaddr - base;
+        uint64_t end;
+        if (table[k].size != 0) {
+            end = table[k].size > size - start ? size : start + table[k].size;
+        } else if (k + 1 < ntable && table[k + 1].vaddr - base < size) {
+            end = table[k + 1].vaddr - base;
+        } else {
+            end = size;
+        }
+        (*keep)[m].start = start;
+        (*keep)[m].end = end;
+        m++;
+        g_func_sites++;
+        g_func_bytes += end - start;
+    }
+    return (int)m;
+}
+
 // Read `size` bytes at `base_offset` and run all checks with the
 // given feature/audit set. vmaddr is the section's runtime base,
 // reported back to the user in findings; symbols/nsymbols (possibly
 // NULL/0) annotate verbose findings with the containing function.
 // When restricted is set, only the nkeep ranges in keep are linted
-// (see mask_outside_ranges); the census is never restricted, being a
-// description of the file rather than a per-function report.
+// (see mask_outside_ranges). The census is restricted only under -f
+// -- it is a description of the file, not a per-function report,
+// unless one function is exactly what was asked for -- and then it
+// scans each kept range as its own slice rather than through the
+// mask, so the masked words do not count as undecodable.
 static int scan_code(FILE *f, const char *path, long base_offset,
                      uint64_t size, uint64_t vmaddr, csh handle,
                      unsigned features,
@@ -564,8 +624,23 @@ static int scan_code(FILE *f, const char *path, long base_offset,
         // Census mode: tally only. The report prints once, after every
         // section of every slice has been scanned. Boundaries feed the
         // per-function pac-ret coverage.
-        armlint_census_scan(g_census, handle, buf, aligned, vmaddr,
-                            g_features, symbols, nsymbols);
+        if (restricted) {
+            for (size_t k = 0; k < nkeep; k++) {
+                uint64_t start = keep[k].start & ~(uint64_t)3;
+                uint64_t end = (keep[k].end + 3) & ~(uint64_t)3;
+                if (end > aligned) {
+                    end = aligned;
+                }
+                if (start < end) {
+                    armlint_census_scan(g_census, handle, buf + start,
+                                        end - start, vmaddr + start,
+                                        g_features, symbols, nsymbols);
+                }
+            }
+        } else {
+            armlint_census_scan(g_census, handle, buf, aligned, vmaddr,
+                                g_features, symbols, nsymbols);
+        }
         n = 0;
     } else {
         struct json_ctx jctx = { symbols, nsymbols };
@@ -693,7 +768,7 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
     // and the census never restricts. Mach-O records no symbol sizes,
     // so this is an ELF-only gate.
     size_t nfunc_syms = 0;
-    if (have_symtab && !g_scan_all && g_census == NULL) {
+    if (have_symtab && !g_scan_all && g_census == NULL && g_func == NULL) {
         for (size_t s = 0; s < nsyms; ++s) {
             unsigned type = syms[s].st_info & 0xfu;
             if ((type == STT_FUNC || type == STT_GNU_IFUNC)
@@ -820,7 +895,28 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
         code_range *keep = NULL;
         size_t nkeep = 0;
         bool restricted = false;
-        if (nfunc_syms > 0) {
+        if (g_func != NULL) {
+            // -f: the named function's sites, or nothing from this
+            // section. Skipped whole rather than scanned masked, so a
+            // name matching nowhere leaves stdout empty under --json.
+            int m = keep_named_function(table, ntable, shdr->sh_addr,
+                                        shdr->sh_size, &keep);
+            if (m < 0) {
+                fprintf(stderr, "%s: failed to allocate the -f ranges\n",
+                    path);
+                free(tmp);
+                free(table);
+                errors = -1;
+                break;
+            }
+            if (m == 0) {
+                free(tmp);
+                free(table);
+                continue;
+            }
+            nkeep = (size_t)m;
+            restricted = true;
+        } else if (nfunc_syms > 0) {
             keep = malloc(nfunc_syms * sizeof(*keep));
             if (keep != NULL) {
                 restricted = true;
@@ -1080,7 +1176,7 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
     // pac-ret coverage, -d's functions and -c's -- so only the default
     // summary mode skips the IO.
     bool want_symbols = g_verbose || g_json || g_census != NULL || g_dedup != NULL
-        || g_constants != NULL;
+        || g_constants != NULL || g_func != NULL;
     nlist_64 *nl = NULL;
     size_t nsyms = 0;
     char *strtab = NULL;
@@ -1210,11 +1306,35 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
             }
         }
         g_json_section = cs->name;
-        // Never restricted: nlist records no symbol sizes, so there
-        // is nothing to place a function's end by.
+        // Restricted only under -f: nlist records no symbol sizes, so
+        // there is nothing to place a function's end by except the
+        // next anchor, which is what -f settles for.
+        code_range *keep = NULL;
+        size_t nkeep = 0;
+        bool restricted = false;
+        if (g_func != NULL) {
+            int m = keep_named_function(table, ntable, cs->addr, cs->size,
+                                        &keep);
+            if (m < 0) {
+                fprintf(stderr, "%s: failed to allocate the -f ranges\n",
+                    path);
+                free(tmp);
+                free(table);
+                errors = -1;
+                break;
+            }
+            if (m == 0) {
+                free(tmp);
+                free(table);
+                continue;
+            }
+            nkeep = (size_t)m;
+            restricted = true;
+        }
         int n = scan_code(f, path, base_offset + (long)cs->offset,
                           cs->size, cs->addr, handle, features,
-                          table, ntable, false, NULL, 0);
+                          table, ntable, restricted, keep, nkeep);
+        free(keep);
         free(tmp);
         free(table);
         if (n < 0) {
@@ -1432,6 +1552,9 @@ int main(int argc, char **argv)
             // Scan every byte of every code section, including the
             // bytes the symbol table places outside any function.
             g_scan_all = true;
+        } else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
+            // Lint just the one function: every site spelling NAME.
+            g_func = argv[++i];
         } else if (strcmp(argv[i], "-i") == 0) {
             census = true;
         } else if (strcmp(argv[i], "-d") == 0) {
@@ -1509,17 +1632,23 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-A] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 2;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-A] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 2;
     }
 
+    // -A widens the scan to every byte and -f narrows it to one
+    // function; combining them has no coherent meaning.
+    if (g_func != NULL && g_scan_all) {
+        fprintf(stderr, "%s: -A and -f are mutually exclusive\n", argv[0]);
+        return 2;
+    }
     // --json owns stdout: -v would interleave per-finding text with
     // the document, and -i, -d and -c are other reports.
     if (g_json && (g_verbose || census || dedup || constants)) {
@@ -1637,8 +1766,17 @@ int main(int argc, char **argv)
     if (errors < 0) {
         goto out;
     }
+    if (g_func != NULL && g_func_sites == 0) {
+        fprintf(stderr, "%s: no function symbol named '%s'\n", path, g_func);
+        goto out;
+    }
     if (census) {
         armlint_census_print(g_census, g_verbose);
+        if (g_func != NULL) {
+            printf("  scan restricted to function '%s': %zu site%s, "
+                "%" PRIu64 " bytes\n", g_func, g_func_sites,
+                g_func_sites == 1 ? "" : "s", g_func_bytes);
+        }
         if (g_dedup != NULL || g_constants != NULL) {
             printf("\n");
         }
@@ -1651,9 +1789,14 @@ int main(int argc, char **argv)
         // with an empty array.
         json_begin();
         printf("\n  ],\n");
-        if (g_restrict_symbols != 0) {
-            // What narrowed the scan, so that a restricted scan is not
-            // read as a clean sweep of the whole file.
+        // What narrowed the scan, so that a restricted scan is not
+        // read as a clean sweep of the whole file.
+        if (g_func != NULL) {
+            printf("  \"restriction\": {\"function\": ");
+            json_string(g_func);
+            printf(", \"sites\": %zu, \"bytes\": %" PRIu64 "},\n",
+                g_func_sites, g_func_bytes);
+        } else if (g_restrict_symbols != 0) {
             printf("  \"restriction\": {\"symbols\": %zu},\n",
                 g_restrict_symbols);
         }
@@ -1667,7 +1810,11 @@ int main(int argc, char **argv)
         armlint_summary_print(g_summary);
         armlint_dedup_print(g_dedup, g_verbose);
         armlint_constants_print(g_constants, g_verbose);
-        if (g_restrict_symbols != 0) {
+        if (g_func != NULL) {
+            printf("scan restricted to function '%s': %zu site%s, "
+                "%" PRIu64 " bytes\n", g_func, g_func_sites,
+                g_func_sites == 1 ? "" : "s", g_func_bytes);
+        } else if (g_restrict_symbols != 0) {
             printf("scan restricted to %zu function symbol%s "
                 "(-A scans every byte)\n", g_restrict_symbols,
                 g_restrict_symbols == 1 ? "" : "s");

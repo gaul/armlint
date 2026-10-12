@@ -372,6 +372,7 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -m v8 jit.elf     # a V8 JIT dump from tools/v8dump2elf.py
 ./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
 ./armlint -A libfoo.so      # every byte, not only the function symbols' ranges
+./armlint -f _main /bin/foo # lint just the one function
 ./armlint -d /bin/ls        # also report functions that copy one another
 ./armlint -c /bin/ls        # also report the constants MOVZ/MOVK chains build
 ./armlint -a imm /bin/ls    # also audit the constants that miss an immediate
@@ -410,6 +411,23 @@ restriction is ELF-only: Mach-O's `nlist` records no symbol sizes,
 so there is nothing to place a function's end by. The `-i` census is
 a description of the file rather than a per-function report and is
 never restricted.
+
+Pass `-f NAME` to restrict the scan to the one function named NAME
+-- "lint just this function". Every site spelling NAME is scanned (a
+versioned export has several, and `-s all` adds up the slices'), the
+count line reflects only their instructions, and the summary says
+what was scanned: `scan restricted to function 'NAME': 1 site, 4012
+bytes`. A name matching nowhere is a tool failure (exit 2) rather
+than a clean scan of nothing. The function's extent is its recorded
+size where the container records one (ELF `st_size`), and otherwise
+reaches to the next symbol or function start, the way the `-v`
+annotation, the census and `-d` already delimit a function -- so
+`-f` works on Mach-O, whose `nlist` has no sizes, and on a stripped
+ELF library's exports, since the dynamic symbol table is the one
+consulted when `.symtab` is gone. `-f` combines with `-i` for a
+per-function census, which turns "this binary dispatches on the CPU"
+into "and here is what each target actually uses", one command per
+variant; it is mutually exclusive with `-A`.
 
 Linker-synthesized import glue is excluded from both the scan and
 the census: Mach-O `__stubs`, `__stub_helper`, and `__objc_stubs`,
@@ -553,7 +571,11 @@ place of the name when only `LC_FUNCTION_STARTS` records the boundary
 binary, since `-s all` puts several slices' findings in one document.
 `skipped` counts the bytes the scan stepped over without linting,
 so that a scan that resynchronized past undecodable words is not
-read as a clean sweep.
+read as a clean sweep, and `restriction` carries what narrowed the
+scan -- `{"symbols": N}` under the default symbol-table restriction,
+`{"function": NAME, "sites": N, "bytes": N}` under `-f`, and absent
+under `-A` or when nothing restricted it -- so a partial scan is not
+read as a clean sweep of the whole file either.
 
 Findings are written as they are found rather than collected first,
 so a large binary streams instead of accumulating tens of thousands

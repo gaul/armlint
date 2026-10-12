@@ -135,6 +135,71 @@ expect '"skipped": 0,'
 run 1 -v sized.o
 expect 'CSEL same-operand identity at offset: 0x0 <f>:'
 
+# -f NAME: two sized functions with one finding each, and a third
+# finding in g only; "lint just g" sees g's two and nothing of f.
+cat >"$T/two.s" <<'EOF'
+    .text
+    .globl f
+    .type f, %function
+f:
+    csel x1, x2, x2, eq
+    ret
+    .size f, . - f
+    .globl g
+    .type g, %function
+g:
+    csel x3, x4, x4, eq
+    mov x0, x0
+    ret
+    .size g, . - g
+EOF
+assemble two
+
+echo "-f single-function scan:"
+run 1 -f g two.o
+expect '^       1  CSEL same-operand identity$'
+expect '^       1  redundant MOV to self$'
+expect "^scan restricted to function 'g': 1 site, 12 bytes$"
+expect '^2 optimization opportunities in 3 instructions$'
+reject 'scan restricted to 2 function symbols' "-f replaces the symbol restriction"
+run 1 -f f two.o
+expect '^1 optimization opportunities in 2 instructions$'
+reject 'redundant MOV to self' "f does not hold g's finding"
+run 1 -v -f g two.o
+expect 'redundant MOV to self at offset: 0xc <g\+0x4>:'
+
+run 1 --json -f g two.o
+expect '"restriction": \{"function": "g", "sites": 1, "bytes": 12\},'
+expect '"opportunities": 2$'
+
+# The census under -f scans the function's slice alone, as a slice
+# rather than through the mask: nothing reads as undecodable.
+run 0 -i -f g two.o
+expect '^ISA census: 3 instructions, 0 undecodable words skipped$'
+expect "^  scan restricted to function 'g': 1 site, 12 bytes$"
+
+# A name matching nowhere is a tool failure, and --json then leaves
+# stdout empty rather than a document restricted to nothing.
+run 2 -f nosuch two.o
+expect_err "no function symbol named 'nosuch'"
+run 2 --json -f nosuch two.o
+[ -s "$T/out" ] && fail "--json -f nosuch wrote to stdout"
+run 2 -A -f g two.o
+expect_err 'mutually exclusive'
+
+# Mach-O carries no symbol sizes, so -f reaches to the next anchor:
+# the same functions under plain labels, assembled for arm64 Mach-O.
+if [ "$(uname -s)" = "Darwin" ]; then
+    grep -v '\.type\|\.size' "$T/two.s" >"$T/two_macho.s"
+    if clang -arch arm64 -c -o "$T/two_macho.o" "$T/two_macho.s" 2>/dev/null; then
+        run 1 -f g two_macho.o
+        expect "^scan restricted to function 'g': 1 site, 12 bytes$"
+        expect '^2 optimization opportunities in 3 instructions$'
+        run 1 -f f two_macho.o
+        expect '^1 optimization opportunities in 2 instructions$'
+    fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     echo "driver: passed"
     exit 0
