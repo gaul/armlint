@@ -23257,11 +23257,14 @@ static void summary_add_function(armlint_summary *summary,
     }
     char *name = NULL;
     if (anchor->name != NULL) {
-        name = strdup(anchor->name);
+        /* C11 has no strdup; glibc hides it under -std=c11. */
+        size_t len = strlen(anchor->name) + 1;
+        name = malloc(len);
         if (name == NULL) {
             summary->funcs_dropped++;
             return;
         }
+        memcpy(name, anchor->name, len);
     }
     summary->funcs[h].vaddr = anchor->vaddr;
     summary->funcs[h].name = name;
