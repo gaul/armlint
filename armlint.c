@@ -23359,9 +23359,25 @@ static void summary_print_misfits(const armlint_summary *summary,
     printf("\n");
 }
 
+// The skipped-bytes line closes the report: bytes the scan stepped
+// over are partial coverage, so a clean count is not a clean sweep,
+// and the line prints even when nothing else does.
+static void summary_print_skipped(const armlint_summary *summary)
+{
+    if (summary->skipped > 0) {
+        printf("%zu bytes skipped unlinted (undecodable words, V8 constant "
+            "pools, or bytes outside the function symbols)\n\n",
+            summary->skipped);
+    }
+}
+
 void armlint_summary_print(const armlint_summary *summary)
 {
-    if (summary == NULL || summary->count == 0) {
+    if (summary == NULL) {
+        return;
+    }
+    if (summary->count == 0) {
+        summary_print_skipped(summary);
         return;
     }
 
@@ -23405,12 +23421,14 @@ void armlint_summary_print(const armlint_summary *summary)
     // audit's table follows, with what did. Only the top entries of
     // each print; the rest are counted.
     if (summary->misfit_count == 0) {
+        summary_print_skipped(summary);
         return;
     }
     size_t *idx = malloc(summary->misfit_count * sizeof(*idx));
     if (idx == NULL) {
         printf("Constants by value (-a imm, -a const): %zu distinct values "
             "(table not printed: out of memory)\n\n", summary->misfit_count);
+        summary_print_skipped(summary);
         return;
     }
     size_t n = 0;
@@ -23454,6 +23472,7 @@ void armlint_summary_print(const armlint_summary *summary)
             summary->misfit_dropped);
     }
     free(idx);
+    summary_print_skipped(summary);
 }
 
 const armlint_symbol *armlint_symbol_lookup(const armlint_symbol *symbols,

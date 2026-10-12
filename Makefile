@@ -45,6 +45,7 @@ test: armlint.o armlint_test.o
 integration-test: armlint
 	./scripts/run_fixtures.sh
 	./scripts/json_test.sh
+	./scripts/driver_test.sh
 
 # Regenerate fixtures/*.expected from current armlint output -- use
 # after an intentional behavior change, then review the diff before

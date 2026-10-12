@@ -46,6 +46,7 @@
 #define STB_LOCAL     0
 #define STT_NOTYPE    0
 #define STT_FUNC      2
+#define STT_GNU_IFUNC 10
 
 typedef struct {
     unsigned char e_ident[EI_NIDENT];
@@ -313,6 +314,13 @@ static armlint_summary *g_summary = NULL;
 // one, and anything else names one slice by its fat_arch index or its
 // variant name.
 static const char *g_slice = NULL;
+// -A: scan every byte of each code section. By default an ELF binary
+// that kept its .symtab is scanned only inside the ranges of its
+// function symbols (see scan_elf); -A is the override, x86lint's -a.
+// g_restrict_symbols counts the function symbols that restricted the
+// scan, for the summary line and the --json document.
+static bool g_scan_all = false;
+static size_t g_restrict_symbols = 0;
 // Non-NULL in -i census mode: scan_code then tallies instead of
 // linting, and main prints the census in place of the findings report.
 static armlint_census *g_census = NULL;
@@ -456,14 +464,61 @@ static void json_finding(void *ctx, const armlint_finding *f,
     printf("]}");
 }
 
+// A byte range of a code section the scan keeps: section-relative,
+// end-exclusive.
+typedef struct {
+    uint64_t start;
+    uint64_t end;
+} code_range;
+
+static int code_range_cmp(const void *a, const void *b)
+{
+    const code_range *x = a, *y = b;
+    return x->start < y->start ? -1 : x->start > y->start ? 1 : 0;
+}
+
+// Overwrite every word of buf outside the kept ranges with 0xffffffff,
+// an unallocated encoding Capstone refuses to decode (0 would not do:
+// it decodes as UDF #0). The scan's resync loop then steps over those
+// words one at a time and tallies them as skipped, so the excluded
+// volume surfaces in the summary's skipped count instead of being
+// linted as code. Ranges are rounded outward to whole words -- a
+// symbol's size need not be a multiple of four -- so coverage errs
+// toward keeping bytes. keep must be sorted by start.
+static void mask_outside_ranges(uint8_t *buf, uint64_t size,
+                                const code_range *keep, size_t nkeep)
+{
+    uint64_t pos = 0;
+    for (size_t i = 0; i <= nkeep; i++) {
+        uint64_t start = i < nkeep ? keep[i].start & ~(uint64_t)3 : size;
+        uint64_t end = i < nkeep ? (keep[i].end + 3) & ~(uint64_t)3 : size;
+        if (start > size) {
+            start = size;
+        }
+        if (end > size) {
+            end = size;
+        }
+        if (start > pos) {
+            memset(buf + pos, 0xff, (size_t)(start - pos));
+        }
+        if (end > pos) {
+            pos = end;
+        }
+    }
+}
+
 // Read `size` bytes at `base_offset` and run all checks with the
 // given feature/audit set. vmaddr is the section's runtime base,
 // reported back to the user in findings; symbols/nsymbols (possibly
 // NULL/0) annotate verbose findings with the containing function.
+// When restricted is set, only the nkeep ranges in keep are linted
+// (see mask_outside_ranges); the census is never restricted, being a
+// description of the file rather than a per-function report.
 static int scan_code(FILE *f, const char *path, long base_offset,
                      uint64_t size, uint64_t vmaddr, csh handle,
                      unsigned features,
-                     const armlint_symbol *symbols, size_t nsymbols)
+                     const armlint_symbol *symbols, size_t nsymbols,
+                     bool restricted, const code_range *keep, size_t nkeep)
 {
     // A64 instructions are 4 bytes. Truncate trailing slop (e.g.
     // section padding) rather than fail the whole binary.
@@ -482,6 +537,9 @@ static int scan_code(FILE *f, const char *path, long base_offset,
             path, base_offset);
         free(buf);
         return -1;
+    }
+    if (restricted && g_census == NULL) {
+        mask_outside_ranges(buf, aligned, keep, nkeep);
     }
     // -d keys the range's functions first, so that the lint run's
     // findings resolve against them.
@@ -568,16 +626,15 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
 
     // Load the symbol table whole, preferring the full .symtab over
     // .dynsym (a stripped binary's exports still name the functions
-    // that matter most). Four consumers want the boundaries -- -v
-    // finding annotations, the census's per-function pac-ret coverage,
-    // -d's functions and -c's -- so only the default summary mode
-    // skips the IO.
+    // that matter most). Five consumers want the boundaries: the
+    // default scan restriction below, -v finding annotations, the
+    // census's per-function pac-ret coverage, -d's functions and -c's.
     Elf64_Sym *syms = NULL;
     size_t nsyms = 0;
     char *strtab = NULL;
     uint64_t strsize = 0;
-    if (g_verbose || g_json || g_census != NULL || g_dedup != NULL
-            || g_constants != NULL) {
+    bool have_symtab = false;   // the table is .symtab, not .dynsym
+    {
         uint16_t symidx = 0;    // section 0 is the null section: "none"
         for (uint16_t i = 0; i < ehdr.e_shnum; ++i) {
             if (shdrs[i].sh_type == SHT_SYMTAB) {
@@ -606,6 +663,7 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
                                    str->sh_size)) {
                     strsize = str->sh_size;
                     strtab[strsize] = '\0';
+                    have_symtab = shdrs[symidx].sh_type == SHT_SYMTAB;
                 } else {
                     free(syms);
                     free(strtab);
@@ -613,6 +671,35 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
                     strtab = NULL;
                     nsyms = 0;
                 }
+            }
+        }
+    }
+
+    // The default restriction: lint only inside the function symbols'
+    // ranges. Executable sections routinely interleave non-code that
+    // decodes cleanly -- literal pools, jump tables, alignment
+    // islands -- which a linear sweep lints as code (four copies of
+    // SHA-1's round constant in libcrypto's literal pools once made
+    // six of ten "dead write" findings). When the binary says where
+    // its functions are, scanning only there removes those findings
+    // at the source. Only .symtab qualifies: .dynsym survives
+    // stripping but lists exports alone, and restricting to those
+    // would silently skip almost every internal function -- a clean
+    // report that scanned nothing -- so a stripped binary scans whole
+    // sections exactly as before. STT_FUNC and STT_GNU_IFUNC symbols
+    // place the functions; a table that kept its symbols but dropped
+    // their types (some strippers do) must not exclude every byte, so
+    // the restriction needs at least one. -A forces the full sweep,
+    // and the census never restricts. Mach-O records no symbol sizes,
+    // so this is an ELF-only gate.
+    size_t nfunc_syms = 0;
+    if (have_symtab && !g_scan_all && g_census == NULL) {
+        for (size_t s = 0; s < nsyms; ++s) {
+            unsigned type = syms[s].st_info & 0xfu;
+            if ((type == STT_FUNC || type == STT_GNU_IFUNC)
+                    && syms[s].st_shndx != 0
+                    && syms[s].st_shndx < ehdr.e_shnum) {
+                nfunc_syms++;
             }
         }
     }
@@ -722,11 +809,62 @@ static int scan_elf(FILE *f, const char *path, uint64_t file_size, csh handle)
             }
         }
 
+        // This section's kept ranges under the restriction: its
+        // function symbols, section-relative (st_value is absolute in
+        // a linked binary, section-relative in an ET_REL object). An
+        // unsized symbol -- an assembly label without .size -- extends
+        // to the next function's start or the section end. A section
+        // with no function symbol at all is masked whole: the table
+        // positively places the functions, and this is not where it
+        // put any. Allocation failure keeps the unmasked full sweep.
+        code_range *keep = NULL;
+        size_t nkeep = 0;
+        bool restricted = false;
+        if (nfunc_syms > 0) {
+            keep = malloc(nfunc_syms * sizeof(*keep));
+            if (keep != NULL) {
+                restricted = true;
+                for (size_t s = 0; s < nsyms; ++s) {
+                    const Elf64_Sym *sym = &syms[s];
+                    unsigned type = sym->st_info & 0xfu;
+                    if ((type != STT_FUNC && type != STT_GNU_IFUNC)
+                            || sym->st_shndx != i) {
+                        continue;
+                    }
+                    uint64_t off;
+                    if (ehdr.e_type == ET_REL) {
+                        off = sym->st_value;
+                    } else if (sym->st_value >= shdr->sh_addr) {
+                        off = sym->st_value - shdr->sh_addr;
+                    } else {
+                        continue;
+                    }
+                    if (off >= shdr->sh_size) {
+                        continue;
+                    }
+                    keep[nkeep].start = off;
+                    keep[nkeep].end = sym->st_size > shdr->sh_size - off
+                        ? shdr->sh_size : off + sym->st_size;
+                    nkeep++;
+                }
+                qsort(keep, nkeep, sizeof(*keep), code_range_cmp);
+                for (size_t k = 0; k < nkeep; ++k) {
+                    if (keep[k].end == keep[k].start) {
+                        keep[k].end = k + 1 < nkeep ? keep[k + 1].start
+                                                    : shdr->sh_size;
+                    }
+                }
+                g_restrict_symbols += nkeep;
+            }
+        }
+
         // ELF has no arm64e slice concept: pac-ret/BTI on Linux is
         // recorded in .note.gnu.property, not the cpusubtype, so the
         // Mach-O auto-arm does not apply here -- pass the baseline.
         int n = scan_code(f, path, (long)shdr->sh_offset, shdr->sh_size,
-                          shdr->sh_addr, handle, g_features, table, ntable);
+                          shdr->sh_addr, handle, g_features, table, ntable,
+                          restricted, keep, nkeep);
+        free(keep);
         free(tmp);
         free(table);
         if (n < 0) {
@@ -1072,9 +1210,11 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
             }
         }
         g_json_section = cs->name;
+        // Never restricted: nlist records no symbol sizes, so there
+        // is nothing to place a function's end by.
         int n = scan_code(f, path, base_offset + (long)cs->offset,
                           cs->size, cs->addr, handle, features,
-                          table, ntable);
+                          table, ntable, false, NULL, 0);
         free(tmp);
         free(table);
         if (n < 0) {
@@ -1288,6 +1428,10 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) {
             g_verbose = true;
+        } else if (strcmp(argv[i], "-A") == 0) {
+            // Scan every byte of every code section, including the
+            // bytes the symbol table places outside any function.
+            g_scan_all = true;
         } else if (strcmp(argv[i], "-i") == 0) {
             census = true;
         } else if (strcmp(argv[i], "-d") == 0) {
@@ -1365,13 +1509,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-A] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 2;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-A] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 2;
     }
@@ -1506,8 +1650,14 @@ int main(int argc, char **argv)
         // them now. A file with no code still gets a complete document
         // with an empty array.
         json_begin();
-        printf("\n  ],\n"
-               "  \"instructions\": %zu,\n"
+        printf("\n  ],\n");
+        if (g_restrict_symbols != 0) {
+            // What narrowed the scan, so that a restricted scan is not
+            // read as a clean sweep of the whole file.
+            printf("  \"restriction\": {\"symbols\": %zu},\n",
+                g_restrict_symbols);
+        }
+        printf("  \"instructions\": %zu,\n"
                "  \"skipped\": %zu,\n"
                "  \"opportunities\": %d\n}\n",
             armlint_summary_instructions(g_summary),
@@ -1517,6 +1667,11 @@ int main(int argc, char **argv)
         armlint_summary_print(g_summary);
         armlint_dedup_print(g_dedup, g_verbose);
         armlint_constants_print(g_constants, g_verbose);
+        if (g_restrict_symbols != 0) {
+            printf("scan restricted to %zu function symbol%s "
+                "(-A scans every byte)\n", g_restrict_symbols,
+                g_restrict_symbols == 1 ? "" : "s");
+        }
         printf("%d optimization opportunities in %zu instructions\n",
             errors, armlint_summary_instructions(g_summary));
         rc = errors != 0;

@@ -18,4 +18,6 @@ Optimization opportunities by type:
        3  ADR + load of its target foldable to LDR (literal)
        1  ADR + BR foldable to direct branch
 
+8 bytes skipped unlinted (undecodable words, V8 constant pools, or bytes outside the function symbols)
+
 4 optimization opportunities in 18 instructions

@@ -371,6 +371,7 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -m cssc /bin/ls   # also suggest CSSC instructions
 ./armlint -m v8 jit.elf     # a V8 JIT dump from tools/v8dump2elf.py
 ./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
+./armlint -A libfoo.so      # every byte, not only the function symbols' ranges
 ./armlint -d /bin/ls        # also report functions that copy one another
 ./armlint -c /bin/ls        # also report the constants MOVZ/MOVK chains build
 ./armlint -a imm /bin/ls    # also audit the constants that miss an immediate
@@ -390,6 +391,25 @@ position in the fat header, as `otool -f` numbers it) picks one.
 FEAT_PAuth_LR (`pacibsppc`, `retabsppc`), which Capstone 5 does not
 decode: a scan of that slice skips those words as data, and the PAC
 audit and `-m pauth` do not arm themselves there.
+
+When an ELF binary kept its symbol table (`.symtab`), the scan is
+restricted to the byte ranges of its function symbols: executable
+sections routinely interleave non-code that *decodes* cleanly --
+literal pools, jump tables, alignment islands -- which a linear
+sweep would otherwise lint as code (four copies of SHA-1's round
+constant in libcrypto's literal pools once made six of ten "dead
+write" findings). Excluded bytes are tallied into the skipped count
+and a summary line reports the restriction; pass `-A` to scan every
+byte anyway. The dynamic symbol table is never used for this -- it
+survives stripping but lists only exports, and scanning just those
+would silently miss almost all code -- so a stripped binary scans
+whole sections exactly as before, as does one whose table kept its
+symbols but dropped their types. An unsized assembly label extends
+to the next function's start, keeping coverage conservative. The
+restriction is ELF-only: Mach-O's `nlist` records no symbol sizes,
+so there is nothing to place a function's end by. The `-i` census is
+a description of the file rather than a per-function report and is
+never restricted.
 
 Linker-synthesized import glue is excluded from both the scan and
 the census: Mach-O `__stubs`, `__stub_helper`, and `__objc_stubs`,
@@ -465,6 +485,12 @@ Optimization opportunities by type:
 
 42 optimization opportunities in 4153 instructions
 ```
+
+When the scan stepped over bytes without linting them -- words this
+Capstone build cannot decode, V8 constant pools under `-m v8`, or
+the bytes outside the function symbols' ranges -- a line before the
+total says how many, so that partial coverage of a data-laden
+section is not mistaken for a clean sweep.
 
 Pass `-v` to also print each opportunity -- its one-line summary plus
 the offending instructions, as shown below -- ahead of the summary:

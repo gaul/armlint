@@ -3387,7 +3387,9 @@ void armlint_summary_destroy(armlint_summary *summary);
 
 // Print the accumulated counts as "Optimization opportunities by type",
 // one line per finding name sorted by descending count (ties broken by
-// name). Emits a trailing blank line; a no-op when empty.
+// name), then the bytes skipped unlinted when there were any (see
+// armlint_summary_skipped). Each block emits a trailing blank line; a
+// no-op when both are empty.
 void armlint_summary_print(const armlint_summary *summary);
 
 // Total instructions decoded across the check_instructions runs tallied
