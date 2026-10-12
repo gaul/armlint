@@ -105,16 +105,29 @@ for flag in -v -i -d -c; do
     (cd "$T" && "$ROOT/armlint" --json "$flag" fixture.o) >"$T/combo.out" 2>"$T/combo.err"
     rc=$?
     set -e
-    [ "$rc" = 1 ] || fail "--json $flag exited $rc, not 1"
+    [ "$rc" = 2 ] || fail "--json $flag exited $rc, not 2 (tool failure)"
     grep -q 'cannot be combined' "$T/combo.err" || fail "--json $flag: no refusal on stderr"
     [ -s "$T/combo.out" ] && fail "--json $flag wrote to stdout"
 done
 
-# A file the driver rejects leaves no half-written document behind.
+# A file the driver rejects leaves no half-written document behind, and
+# exits 2: a tool failure, distinct from the 1 a dirty scan returns.
 set +e
 "$ROOT/armlint" --json "$FIXTURE" >"$T/reject.out" 2>/dev/null
+reject_rc=$?
 set -e
 [ -s "$T/reject.out" ] && fail "--json wrote a partial document for a non-binary input"
+[ "$reject_rc" = 2 ] || fail "a rejected file exited $reject_rc, not 2"
+
+# The grep convention end to end: a clean fixture exits 0.
+printf '    .text\n    .globl _main\n_main:\n    ret\n' >"$T/clean.s"
+if clang "${CC_FLAGS[@]}" -c -o "$T/clean.o" "$T/clean.s" 2>/dev/null; then
+    set +e
+    (cd "$T" && "$ROOT/armlint" clean.o) >/dev/null 2>&1
+    clean_rc=$?
+    set -e
+    [ "$clean_rc" = 0 ] || fail "a clean object exited $clean_rc, not 0"
+fi
 
 if [ "$FAIL" -eq 0 ]; then
     echo "json: passed"

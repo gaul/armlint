@@ -1332,7 +1332,7 @@ int main(int argc, char **argv)
                     "(known: cssc, lrcpc2, pauth, lse, cmpbr, "
                     "sha3, fp16, v8)\n",
                     argv[0], argv[i]);
-                return 1;
+                return 2;
             }
         } else if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
             // Enable opt-in audit checks: informational findings
@@ -1350,7 +1350,7 @@ int main(int argc, char **argv)
             } else {
                 fprintf(stderr, "%s: unknown -a audit '%s' "
                     "(known: pac, imm, const)\n", argv[0], argv[i]);
-                return 1;
+                return 2;
             }
         } else if (strcmp(argv[i], "--json") == 0) {
             // The findings as one JSON document on stdout, in place
@@ -1367,13 +1367,13 @@ int main(int argc, char **argv)
         } else {
             fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
-            return 1;
+            return 2;
         }
     }
     if (path == NULL) {
         fprintf(stderr, "usage: %s [-v] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
-        return 1;
+        return 2;
     }
 
     // --json owns stdout: -v would interleave per-finding text with
@@ -1381,17 +1381,22 @@ int main(int argc, char **argv)
     if (g_json && (g_verbose || census || dedup || constants)) {
         fprintf(stderr, "%s: --json cannot be combined with -v, -i, -d or -c\n",
             argv[0]);
-        return 1;
+        return 2;
     }
     g_json_path = path;
 
     FILE *f = fopen(path, "rb");
     if (f == NULL) {
         perror(path);
-        return 1;
+        return 2;
     }
 
-    int rc = 1;
+    // The exit status follows the grep convention -- 0 for a clean
+    // scan, 1 when any opportunity is found, 2 on a tool failure (a
+    // bad invocation, an unreadable or malformed file, an allocation
+    // failure) -- so a CI job can tell a dirty scan from a broken run.
+    // Every goto-out path below is an error, so failure is the default.
+    int rc = 2;
     csh handle = 0;
     bool capstone_open = false;
 

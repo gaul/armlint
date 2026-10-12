@@ -540,8 +540,11 @@ the driver rejects leaves stdout empty rather than half a document.
 separate reports whose output would interleave with it, and the
 driver refuses the combination rather than choosing for the caller.
 
-The process exits non-zero when any opportunity is found, so armlint
-can gate a compiler test suite.
+The exit status follows the grep convention -- 0 for a clean scan, 1
+when any opportunity is found, 2 on a tool failure (a bad invocation,
+an unreadable or malformed file) -- so armlint can gate a compiler
+test suite and CI can tell a dirty scan from a broken run. The `-i`
+census, `-d` and `-c` reports are informational and never set it.
 
 ## ISA census (`-i`)
 
