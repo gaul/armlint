@@ -26,4 +26,7 @@ MOV + AND/TST that known bits make a bitmask immediate at offset: 0x4c <_main+0x
 Optimization opportunities by type:
        5  MOV + AND/TST that known bits make a bitmask immediate
 
+Optimization opportunities by function:
+       5  _main
+
 5 optimization opportunities in 38 instructions

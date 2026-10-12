@@ -25,4 +25,7 @@ MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate at offset: 0x3c <_main+0x3c>: 
 Optimization opportunities by type:
        6  MOV + FMOV/SCVTF/UCVTF foldable to FMOV immediate
 
+Optimization opportunities by function:
+       6  _main
+
 6 optimization opportunities in 29 instructions

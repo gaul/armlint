@@ -164,4 +164,7 @@ Optimization opportunities by type:
        7  ADD + STR foldable to immediate-offset STR
        1  ADD foldable into every access it feeds
 
+Optimization opportunities by function:
+      40  _main
+
 40 optimization opportunities in 91 instructions

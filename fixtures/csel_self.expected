@@ -16,4 +16,7 @@ CSEL same-operand identity at offset: 0x10 <_main+0x10>: csel x20, xzr, xzr, eq 
 Optimization opportunities by type:
        5  CSEL same-operand identity
 
+Optimization opportunities by function:
+       5  _main
+
 5 optimization opportunities in 8 instructions

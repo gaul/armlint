@@ -14,4 +14,7 @@ Optimization opportunities by type:
        2  conditional branch that is never taken
        1  compare-zero branch foldable into CBZ/CBNZ
 
+Optimization opportunities by function:
+       3  _main
+
 3 optimization opportunities in 23 instructions

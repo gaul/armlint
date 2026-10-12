@@ -37,4 +37,7 @@ Optimization opportunities by type:
        1  TBZ/TBNZ #0 of a live CSET foldable to B.cond
        1  register already holds the recomputed value
 
+Optimization opportunities by function:
+       8  _main
+
 8 optimization opportunities in 28 instructions

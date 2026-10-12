@@ -162,4 +162,7 @@ Optimization opportunities by type:
        3  register already holds the recomputed value
        1  compare whose flags are overwritten unread
 
+Optimization opportunities by function:
+      36  _main
+
 36 optimization opportunities in 46 instructions

@@ -49,4 +49,7 @@ Optimization opportunities by type:
        2  CSET + EOR #1 foldable to inverted CSET
        1  CSET + NEG foldable to CSETM
 
+Optimization opportunities by function:
+      11  _main
+
 11 optimization opportunities in 36 instructions

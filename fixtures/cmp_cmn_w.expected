@@ -31,4 +31,7 @@ Optimization opportunities by type:
        1  low-32 zero-extension foldable to MOV Wd, Wn
        1  register write overwritten unread
 
+Optimization opportunities by function:
+       7  _main
+
 7 optimization opportunities in 58 instructions

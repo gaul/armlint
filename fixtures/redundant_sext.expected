@@ -35,4 +35,7 @@ Optimization opportunities by type:
        2  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
        1  dead sign-extension masked by zero-extension
 
+Optimization opportunities by function:
+       8  _main
+
 8 optimization opportunities in 21 instructions

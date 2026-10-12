@@ -13,4 +13,7 @@ NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source at offset: 0x2c <_main+0x2c>: 
 Optimization opportunities by type:
        3  NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source
 
+Optimization opportunities by function:
+       3  _main
+
 3 optimization opportunities in 37 instructions

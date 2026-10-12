@@ -13,4 +13,7 @@ widening extend + SCVTF/UCVTF foldable to W-form conversion at offset: 0x18 <_ma
 Optimization opportunities by type:
        3  widening extend + SCVTF/UCVTF foldable to W-form conversion
 
+Optimization opportunities by function:
+       3  _main
+
 3 optimization opportunities in 16 instructions

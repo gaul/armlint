@@ -41,4 +41,7 @@ Optimization opportunities by type:
        2  MOV + CCMP/CCMN foldable to sign-crossed immediate form
        1  operation on known values foldable to MOV #imm
 
+Optimization opportunities by function:
+       9  _main
+
 9 optimization opportunities in 28 instructions

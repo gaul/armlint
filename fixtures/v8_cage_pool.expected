@@ -13,6 +13,9 @@ Optimization opportunities by type:
        2  MOV + ORR with the V8 cage base foldable to ADD immediate
        1  LDR literal foldable to MOV/FMOV immediate
 
+Optimization opportunities by function:
+       3  _main
+
 16 bytes skipped unlinted (undecodable words, V8 constant pools, or bytes outside the function symbols)
 
 3 optimization opportunities in 9 instructions

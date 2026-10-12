@@ -5,4 +5,7 @@ conditional branch that is never taken at offset: 0x64 <_main+0x64>: -> delete; 
 Optimization opportunities by type:
        1  conditional branch that is never taken
 
+Optimization opportunities by function:
+       1  _main
+
 1 optimization opportunities in 28 instructions

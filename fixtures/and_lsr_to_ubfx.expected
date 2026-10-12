@@ -73,4 +73,7 @@ Optimization opportunities by type:
        1  operation on known values foldable to MOV #imm
        1  register already holds the recomputed value
 
+Optimization opportunities by function:
+      17  _main
+
 17 optimization opportunities in 24 instructions

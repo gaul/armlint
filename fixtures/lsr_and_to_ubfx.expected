@@ -45,4 +45,7 @@ Optimization opportunities by type:
        1  redundant zero-extension after zeroing op
        1  register write overwritten unread
 
+Optimization opportunities by function:
+      10  _main
+
 10 optimization opportunities in 26 instructions

@@ -80,4 +80,7 @@ Optimization opportunities by type:
        2  LSR+LSL foldable into bit-clearing AND
        1  low-32 zero-extension foldable to MOV Wd, Wn
 
+Optimization opportunities by function:
+      19  _main
+
 19 optimization opportunities in 23 instructions

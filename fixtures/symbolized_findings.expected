@@ -7,4 +7,8 @@ branch to the next instruction is a no-op at offset: 0x14 <_second+0x8>: -> dele
 Optimization opportunities by type:
        2  branch to the next instruction is a no-op
 
+Optimization opportunities by function:
+       1  _first
+       1  _second
+
 2 optimization opportunities in 7 instructions

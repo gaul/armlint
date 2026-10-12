@@ -29,4 +29,7 @@ MOVI #0 + vector compare foldable to compare-with-zero at offset: 0x30 <_main+0x
 Optimization opportunities by type:
        7  MOVI #0 + vector compare foldable to compare-with-zero
 
+Optimization opportunities by function:
+       7  _main
+
 7 optimization opportunities in 21 instructions

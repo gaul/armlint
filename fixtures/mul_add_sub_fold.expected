@@ -85,4 +85,7 @@ Optimization opportunities by type:
        1  MUL + NEG foldable to MNEG
        1  register already holds the recomputed value
 
+Optimization opportunities by function:
+      20  _main
+
 20 optimization opportunities in 32 instructions

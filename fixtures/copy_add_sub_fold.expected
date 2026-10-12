@@ -21,4 +21,7 @@ MOV + ADD/SUB foldable to the original source at offset: 0x20 <_main+0x20>: -> a
 Optimization opportunities by type:
        5  MOV + ADD/SUB foldable to the original source
 
+Optimization opportunities by function:
+       5  _main
+
 5 optimization opportunities in 23 instructions

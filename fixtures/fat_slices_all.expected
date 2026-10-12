@@ -11,4 +11,7 @@ Optimization opportunities by type:
        2  redundant MOV to self
        1  LR spill without PACIASP/PACIBSP (PAC audit)
 
+Optimization opportunities by function:
+       3  _main
+
 3 optimization opportunities in 8 instructions

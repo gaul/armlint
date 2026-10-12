@@ -37,4 +37,7 @@ Optimization opportunities by type:
        3  SUBS + CMP of identical operands: redundant compare
        1  ADDS + CMN of identical operands: redundant compare
 
+Optimization opportunities by function:
+      10  _main
+
 10 optimization opportunities in 13 instructions

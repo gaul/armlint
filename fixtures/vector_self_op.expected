@@ -28,4 +28,7 @@ vector self-op identity at offset: 0x20 <_main+0x20>: -> delete: writes v7 its o
 Optimization opportunities by type:
        9  vector self-op identity
 
+Optimization opportunities by function:
+       9  _main
+
 9 optimization opportunities in 16 instructions

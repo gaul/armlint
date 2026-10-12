@@ -70,4 +70,7 @@ Optimization opportunities by type:
        1  redundant zero-extension after zeroing op
        1  self-op identity
 
+Optimization opportunities by function:
+      16  _main
+
 16 optimization opportunities in 62 instructions

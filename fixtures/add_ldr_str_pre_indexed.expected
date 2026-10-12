@@ -168,4 +168,7 @@ Optimization opportunities by type:
        1  LDR + SUB foldable to post-indexed LDR
        1  SUB + STR foldable to pre-indexed STR
 
+Optimization opportunities by function:
+      39  _main
+
 39 optimization opportunities in 77 instructions

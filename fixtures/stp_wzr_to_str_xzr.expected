@@ -13,4 +13,7 @@ STP wzr, wzr foldable into STR xzr at offset: 0xc <_main+0xc>: -> str xzr, [sp, 
 Optimization opportunities by type:
        4  STP wzr, wzr foldable into STR xzr
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 10 instructions

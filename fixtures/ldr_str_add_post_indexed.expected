@@ -180,4 +180,7 @@ Optimization opportunities by type:
        1  STP + SUB foldable to post-indexed STP
        1  STR + SUB foldable to post-indexed STR
 
+Optimization opportunities by function:
+      42  _main
+
 42 optimization opportunities in 78 instructions

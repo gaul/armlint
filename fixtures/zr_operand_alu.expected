@@ -84,4 +84,7 @@ Optimization opportunities by type:
       13  register write overwritten unread
       10  ZR-operand ALU spelling
 
+Optimization opportunities by function:
+      23  _main
+
 23 optimization opportunities in 19 instructions

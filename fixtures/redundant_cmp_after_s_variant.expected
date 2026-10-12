@@ -46,4 +46,7 @@ Optimization opportunities by type:
        1  ADD/SUB/AND/BIC + zero-CMP foldable to S-variant
        1  branch to the next instruction is a no-op
 
+Optimization opportunities by function:
+      10  _main
+
 10 optimization opportunities in 16 instructions

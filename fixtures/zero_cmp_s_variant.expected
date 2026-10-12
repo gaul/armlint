@@ -150,4 +150,7 @@ Optimization opportunities by type:
        1  conditional branch that is always taken
        1  conditional branch that is never taken
 
+Optimization opportunities by function:
+      36  _main
+
 36 optimization opportunities in 66 instructions

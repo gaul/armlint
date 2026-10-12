@@ -108,4 +108,7 @@ Optimization opportunities by type:
        1  MOV + ADD/SUB foldable to immediate form
        1  conditional branch that is never taken
 
+Optimization opportunities by function:
+      21  _main
+
 21 optimization opportunities in 82 instructions

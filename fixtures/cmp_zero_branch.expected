@@ -51,4 +51,7 @@ Optimization opportunities by type:
        2  conditional branch that is never taken
        1  branch to the next instruction is a no-op
 
+Optimization opportunities by function:
+      12  _main
+
 12 optimization opportunities in 35 instructions

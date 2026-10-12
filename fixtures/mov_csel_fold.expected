@@ -130,4 +130,7 @@ Optimization opportunities by type:
        6  MOV #1 + CSEL foldable to CSINC/CSET
        3  MOV #-1 + CSEL foldable to CSINV/CSETM
 
+Optimization opportunities by function:
+      29  _main
+
 29 optimization opportunities in 35 instructions

@@ -100,4 +100,7 @@ Optimization opportunities by type:
        2  SMULL/UMULL + NEG foldable to SMNEGL/UMNEGL
        2  register already holds the recomputed value
 
+Optimization opportunities by function:
+      24  _main
+
 24 optimization opportunities in 36 instructions

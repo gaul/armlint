@@ -20,4 +20,7 @@ redundant zero-extension after zeroing op at offset: 0x28 <_main+0x28>: uxtb w0,
 Optimization opportunities by type:
        4  redundant zero-extension after zeroing op
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 28 instructions

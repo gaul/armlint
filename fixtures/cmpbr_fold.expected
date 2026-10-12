@@ -34,4 +34,7 @@ Optimization opportunities by type:
        7  CMP + B.cond foldable to compare-and-branch (CMPBR)
        1  compare-zero branch foldable into CBZ/CBNZ
 
+Optimization opportunities by function:
+       8  _main
+
 8 optimization opportunities in 37 instructions

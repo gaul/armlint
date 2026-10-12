@@ -190,4 +190,7 @@ Optimization opportunities by type:
        1  compare whose flags are overwritten unread
        1  self-op identity
 
+Optimization opportunities by function:
+      43  _main
+
 43 optimization opportunities in 39 instructions

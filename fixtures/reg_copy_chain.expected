@@ -34,4 +34,7 @@ Optimization opportunities by type:
        7  chained register copy foldable to the original source
        1  copy-back register MOV is redundant
 
+Optimization opportunities by function:
+       8  _main
+
 8 optimization opportunities in 24 instructions

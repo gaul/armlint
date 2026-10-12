@@ -9,4 +9,7 @@ AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth) at offset: 0x18 <_main+0x1
 Optimization opportunities by type:
        2  AUTIASP/AUTIBSP + RET foldable to RETAA/RETAB (PAuth)
 
+Optimization opportunities by function:
+       2  _main
+
 2 optimization opportunities in 21 instructions

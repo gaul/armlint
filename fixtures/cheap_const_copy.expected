@@ -18,4 +18,7 @@ Optimization opportunities by type:
        3  MOV of one-instruction constant foldable to MOV #imm
        1  MOV #0 + use foldable to ZR
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 15 instructions

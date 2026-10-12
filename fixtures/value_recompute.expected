@@ -68,4 +68,7 @@ Optimization opportunities by type:
        1  conditional branch that is always taken
        1  suboptimal MOVZ/MOVK sequence
 
+Optimization opportunities by function:
+      15  _main
+
 15 optimization opportunities in 78 instructions

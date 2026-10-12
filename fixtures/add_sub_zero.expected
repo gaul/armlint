@@ -16,4 +16,7 @@ Optimization opportunities by type:
        3  ADD/SUB #0 is redundant
        1  register write overwritten unread
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 8 instructions

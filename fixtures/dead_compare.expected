@@ -13,4 +13,7 @@ compare whose flags are overwritten unread at offset: 0x30 <_main+0x30>: -> dele
 Optimization opportunities by type:
        4  compare whose flags are overwritten unread
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 35 instructions

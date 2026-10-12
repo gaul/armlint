@@ -13,4 +13,7 @@ MOV to SP overwritten unread at offset: 0x14 <_main+0x14>: -> delete; sp is rewr
 Optimization opportunities by type:
        3  MOV to SP overwritten unread
 
+Optimization opportunities by function:
+       3  _main
+
 3 optimization opportunities in 16 instructions

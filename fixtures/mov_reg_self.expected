@@ -7,4 +7,7 @@ redundant MOV to self at offset: 0x4 <_main+0x4>: mov x5, x5 is a no-op (1 instr
 Optimization opportunities by type:
        2  redundant MOV to self
 
+Optimization opportunities by function:
+       2  _main
+
 2 optimization opportunities in 6 instructions

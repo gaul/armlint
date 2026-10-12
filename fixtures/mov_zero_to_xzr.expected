@@ -278,4 +278,7 @@ Optimization opportunities by type:
        1  CSEL same-operand identity
        1  operation on known values foldable to MOV #imm
 
+Optimization opportunities by function:
+      68  _main
+
 68 optimization opportunities in 85 instructions

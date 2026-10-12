@@ -4,4 +4,7 @@ BR x30 foldable to RET at offset: 0x4 <_main+0x4>: -> ret (1 instructions)
 Optimization opportunities by type:
        1  BR x30 foldable to RET
 
+Optimization opportunities by function:
+       1  _main
+
 1 optimization opportunities in 5 instructions

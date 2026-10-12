@@ -11,4 +11,7 @@ Optimization opportunities by type:
        2  UMOV of lane 0 foldable to FMOV
        1  UMOV of lane 0 foldable to FMOV (FP16)
 
+Optimization opportunities by function:
+       3  _main
+
 3 optimization opportunities in 8 instructions

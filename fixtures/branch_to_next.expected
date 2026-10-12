@@ -13,4 +13,7 @@ branch to the next instruction is a no-op at offset: 0xc <_main+0xc>: -> delete:
 Optimization opportunities by type:
        4  branch to the next instruction is a no-op
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 10 instructions

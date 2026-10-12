@@ -100,4 +100,7 @@ Optimization opportunities by type:
        1  operation on known values leaves its register unchanged
        1  shift + shifted OR/EOR/ADD foldable into ROR
 
+Optimization opportunities by function:
+      23  _main
+
 23 optimization opportunities in 35 instructions

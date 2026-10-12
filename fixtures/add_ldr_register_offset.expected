@@ -76,4 +76,7 @@ Optimization opportunities by type:
        3  ADD + STR foldable to register-offset STR
        2  register already holds the recomputed value
 
+Optimization opportunities by function:
+      18  _main
+
 18 optimization opportunities in 46 instructions

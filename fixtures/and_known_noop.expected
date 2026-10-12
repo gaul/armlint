@@ -32,4 +32,7 @@ Optimization opportunities by type:
        1  TST+B.EQ/NE foldable into TBZ/TBNZ
        1  redundant zero-extension after zeroing op
 
+Optimization opportunities by function:
+       7  _main
+
 7 optimization opportunities in 39 instructions

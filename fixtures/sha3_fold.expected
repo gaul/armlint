@@ -26,4 +26,7 @@ Optimization opportunities by type:
        1  BIC + EOR foldable to BCAX (SHA3)
        1  vector self-op identity
 
+Optimization opportunities by function:
+       6  _main
+
 6 optimization opportunities in 26 instructions

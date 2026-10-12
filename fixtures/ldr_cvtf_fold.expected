@@ -38,4 +38,7 @@ Optimization opportunities by type:
        5  register write overwritten unread
        4  load + SCVTF/UCVTF via GPR foldable to FP load + convert
 
+Optimization opportunities by function:
+       9  _main
+
 9 optimization opportunities in 21 instructions

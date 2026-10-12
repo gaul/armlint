@@ -30,4 +30,7 @@ FP/vector zeroing via GPR foldable to MOVI at offset: 0x28 <_main+0x28>: -> movi
 Optimization opportunities by type:
        9  FP/vector zeroing via GPR foldable to MOVI
 
+Optimization opportunities by function:
+       9  _main
+
 9 optimization opportunities in 20 instructions

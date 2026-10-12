@@ -72,4 +72,7 @@ Optimization opportunities by type:
       11  register write overwritten unread
        4  remainder by power of two foldable to AND
 
+Optimization opportunities by function:
+      15  _main
+
 15 optimization opportunities in 29 instructions

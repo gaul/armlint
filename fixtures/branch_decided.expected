@@ -51,4 +51,7 @@ Optimization opportunities by type:
        2  conditional branch that is always taken
        1  register already holds the recomputed value
 
+Optimization opportunities by function:
+      12  _main
+
 12 optimization opportunities in 69 instructions

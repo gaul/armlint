@@ -89,4 +89,7 @@ Optimization opportunities by type:
       14  register write overwritten unread
        6  MOV + MADD/MSUB foldable to shifted ADD/SUB
 
+Optimization opportunities by function:
+      20  _main
+
 20 optimization opportunities in 26 instructions

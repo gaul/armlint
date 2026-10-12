@@ -25,4 +25,7 @@ suboptimal MOVZ/MOVK sequence at offset: 0x3c <_main+0x3c>: -> movn w6, #0x1234 
 Optimization opportunities by type:
        5  suboptimal MOVZ/MOVK sequence
 
+Optimization opportunities by function:
+       5  _main
+
 5 optimization opportunities in 20 instructions

@@ -107,4 +107,7 @@ Optimization opportunities by type:
        7  AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm
        2  conditional branch that is never taken
 
+Optimization opportunities by function:
+      20  _main
+
 20 optimization opportunities in 100 instructions

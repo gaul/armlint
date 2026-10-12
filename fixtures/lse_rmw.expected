@@ -63,4 +63,7 @@ Optimization opportunities by type:
        9  LDXR/STXR loop foldable to LSE atomic (LSE)
        1  register write overwritten unread
 
+Optimization opportunities by function:
+      10  _main
+
 10 optimization opportunities in 84 instructions

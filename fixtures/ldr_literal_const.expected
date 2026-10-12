@@ -22,6 +22,9 @@ LDR literal foldable to MOV/FMOV immediate at offset: 0x18 <_main+0x18>: -> movi
 Optimization opportunities by type:
        7  LDR literal foldable to MOV/FMOV immediate
 
+Optimization opportunities by function:
+       7  _main
+
 36 bytes skipped unlinted (undecodable words, V8 constant pools, or bytes outside the function symbols)
 
 7 optimization opportunities in 23 instructions

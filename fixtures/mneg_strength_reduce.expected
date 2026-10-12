@@ -109,4 +109,7 @@ Optimization opportunities by type:
        1  MUL by constant foldable to shift/add
        1  register already holds the recomputed value
 
+Optimization opportunities by function:
+      23  _main
+
 23 optimization opportunities in 28 instructions

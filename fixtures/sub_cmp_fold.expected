@@ -175,4 +175,7 @@ Optimization opportunities by type:
        5  ADD + CMN of identical operands foldable to ADDS
        1  SUBS + CMP of identical operands: redundant compare
 
+Optimization opportunities by function:
+      44  _main
+
 44 optimization opportunities in 37 instructions

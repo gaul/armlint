@@ -38,6 +38,9 @@ Optimization opportunities by type:
        1  MOV + register-offset LDR/STR: constant has no immediate-offset form (imm audit)
        1  conditional branch that is always taken
 
+Optimization opportunities by function:
+       8  _main
+
 Immediate misfits by value (-a imm), within one step of an immediate form:
        1  bitmask imm    w  #0x12         nearest bitmask immediates 0x2 and 0x10 (1 bit away)
        1  ccmp imm5      w  #0x2d         ccmp/ccmn immediates cover 0..31 (ccmn: -1..-32)

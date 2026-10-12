@@ -42,4 +42,7 @@ Optimization opportunities by type:
        9  ADD/SUB immediate chain foldable to one
        1  register already holds the recomputed value
 
+Optimization opportunities by function:
+      10  _main
+
 10 optimization opportunities in 49 instructions

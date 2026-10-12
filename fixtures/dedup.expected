@@ -13,6 +13,11 @@ suboptimal MOVZ/MOVK sequence at offset: 0x20 <_cousin>: w0 = 0x55555555 (2 inst
 Optimization opportunities by type:
        3  suboptimal MOVZ/MOVK sequence
 
+Optimization opportunities by function:
+       1  _cousin
+       1  _twin_a
+       1  _twin_b
+
 Duplicate code (-d): 6 functions, 68 bytes
   identical: 2 copies of 2 functions, 24 bytes (35.3%)
   up to constants: 3 copies of 2 functions, 36 bytes (52.9%)

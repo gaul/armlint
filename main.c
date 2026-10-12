@@ -1171,12 +1171,11 @@ static int scan_macho(FILE *f, const char *path, long base_offset,
     // decoded function-start addresses. Best-effort throughout --
     // absence (a stripped binary; Go's linker emits neither) or
     // malformed metadata degrades to unannotated findings. All
-    // linkedit offsets are slice-relative. Four consumers want the
-    // boundaries -- -v finding annotations, the census's per-function
-    // pac-ret coverage, -d's functions and -c's -- so only the default
-    // summary mode skips the IO.
-    bool want_symbols = g_verbose || g_json || g_census != NULL || g_dedup != NULL
-        || g_constants != NULL || g_func != NULL;
+    // linkedit offsets are slice-relative. Every mode wants the
+    // boundaries: the summary's by-function table, -v finding
+    // annotations, -f, the census's per-function pac-ret coverage,
+    // -d's functions and -c's.
+    bool want_symbols = true;
     nlist_64 *nl = NULL;
     size_t nsyms = 0;
     char *strtab = NULL;

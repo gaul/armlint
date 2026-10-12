@@ -48,4 +48,7 @@ Optimization opportunities by type:
        4  register write overwritten unread
        1  MOV + register-offset LDR/STR foldable to immediate offset
 
+Optimization opportunities by function:
+      10  _main
+
 10 optimization opportunities in 39 instructions

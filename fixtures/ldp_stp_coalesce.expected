@@ -81,4 +81,7 @@ Optimization opportunities by type:
        3  adjacent zero STRs foldable into STR xzr
        1  adjacent LDRSWs foldable into LDPSW
 
+Optimization opportunities by function:
+      19  _main
+
 19 optimization opportunities in 55 instructions

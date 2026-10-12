@@ -87,6 +87,9 @@ Optimization opportunities by type:
        1  conditional branch that is never taken
        1  register write overwritten unread
 
+Optimization opportunities by function:
+      19  _main
+
 Constants with an immediate form, by value (-a const):
        2  add/sub imm12  w  #0x0          zero: the zero register, or cbz/cbnz under eq/ne
        2  ldr/str offset x  #0x100        scaled immediate offset

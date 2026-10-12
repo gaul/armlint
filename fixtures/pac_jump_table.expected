@@ -7,4 +7,7 @@ unauthenticated BR/BLR (PAC audit) at offset: 0x1c <_main+0x1c>: -> blraaz x10 (
 Optimization opportunities by type:
        2  unauthenticated BR/BLR (PAC audit)
 
+Optimization opportunities by function:
+       2  _main
+
 2 optimization opportunities in 9 instructions

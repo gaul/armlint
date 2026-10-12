@@ -3387,9 +3387,12 @@ void armlint_summary_destroy(armlint_summary *summary);
 
 // Print the accumulated counts as "Optimization opportunities by type",
 // one line per finding name sorted by descending count (ties broken by
-// name), then the bytes skipped unlinted when there were any (see
-// armlint_summary_skipped). Each block emits a trailing blank line; a
-// no-op when both are empty.
+// name); then, when a scan with a symbol table has emitted findings,
+// "Optimization opportunities by function" -- the ten functions
+// holding the most, the rest summed into a residue line, and the
+// findings placed under no anchor as their own row; then the bytes
+// skipped unlinted when there were any (see armlint_summary_skipped).
+// Each block emits a trailing blank line; a no-op when all are empty.
 void armlint_summary_print(const armlint_summary *summary);
 
 // Total instructions decoded across the check_instructions runs tallied
@@ -3466,9 +3469,10 @@ typedef void (*armlint_finding_fn)(void *ctx, const armlint_finding *finding,
 //
 // symbols/nsymbols (see armlint_symbol; NULL/0 for none) annotate each
 // verbose finding header with the containing function, resolved at
-// base_addr + start_offset. Symbolization changes rendering only:
-// findings, counts, and summary tallies are identical with and without
-// a table.
+// base_addr + start_offset, and tally each finding by that function
+// in the summary's by-function table. Symbolization changes rendering
+// only: findings, counts, and by-type tallies are identical with and
+// without a table.
 //
 // If on_finding is non-NULL it is invoked once per finding with ctx as
 // its first argument (see armlint_finding_fn). It is independent of

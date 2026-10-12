@@ -23171,6 +23171,26 @@ struct armlint_summary {
     // Duplicate-code attribution (-d), installed by
     // armlint_summary_set_dedup; not owned.
     armlint_dedup *dedup;
+    // The by-function tally: findings per containing anchor, keyed by
+    // the anchor's address in an open-addressed table grown by
+    // doubling, with the name copied (the caller's symbol tables need
+    // not outlive the summary). attributed is set once a scan with a
+    // symbol table has emitted a finding, which is what makes the
+    // table worth printing; nofunc counts findings such a scan placed
+    // under no anchor. funcs_dropped counts findings that could not
+    // be tallied because a growth allocation failed.
+    struct summary_func *funcs;
+    size_t funcs_cap;      // a power of two; 0 until the first finding
+    size_t funcs_count;
+    size_t funcs_dropped;
+    size_t nofunc;
+    bool attributed;
+};
+
+struct summary_func {
+    uint64_t vaddr;
+    char *name;            // NULL for a nameless function start
+    size_t count;          // 0 marks an empty slot
 };
 
 armlint_summary *armlint_summary_create(void)
@@ -23182,8 +23202,148 @@ void armlint_summary_destroy(armlint_summary *summary)
 {
     if (summary != NULL) {
         free(summary->misfits);
+        for (size_t i = 0; i < summary->funcs_cap; i++) {
+            free(summary->funcs[i].name);
+        }
+        free(summary->funcs);
     }
     free(summary);
+}
+
+// Tally one finding against the anchor containing it, or against no
+// anchor when the scan's table placed none there. Silent on a NULL
+// summary; a growth failure drops the tally and counts the drop.
+static void summary_add_function(armlint_summary *summary,
+                                 const armlint_symbol *anchor)
+{
+    if (summary == NULL) {
+        return;
+    }
+    summary->attributed = true;
+    if (anchor == NULL) {
+        summary->nofunc++;
+        return;
+    }
+    if (summary->funcs_count * 2 >= summary->funcs_cap) {
+        size_t cap = summary->funcs_cap == 0 ? 256 : summary->funcs_cap * 2;
+        struct summary_func *grown = calloc(cap, sizeof(*grown));
+        if (grown == NULL) {
+            summary->funcs_dropped++;
+            return;
+        }
+        for (size_t i = 0; i < summary->funcs_cap; i++) {
+            if (summary->funcs[i].count == 0) {
+                continue;
+            }
+            size_t h = (size_t)(summary->funcs[i].vaddr
+                                * 0x9E3779B97F4A7C15ull >> 20) & (cap - 1);
+            while (grown[h].count != 0) {
+                h = (h + 1) & (cap - 1);
+            }
+            grown[h] = summary->funcs[i];
+        }
+        free(summary->funcs);
+        summary->funcs = grown;
+        summary->funcs_cap = cap;
+    }
+    size_t mask = summary->funcs_cap - 1;
+    size_t h = (size_t)(anchor->vaddr * 0x9E3779B97F4A7C15ull >> 20) & mask;
+    while (summary->funcs[h].count != 0) {
+        if (summary->funcs[h].vaddr == anchor->vaddr) {
+            summary->funcs[h].count++;
+            return;
+        }
+        h = (h + 1) & mask;
+    }
+    char *name = NULL;
+    if (anchor->name != NULL) {
+        name = strdup(anchor->name);
+        if (name == NULL) {
+            summary->funcs_dropped++;
+            return;
+        }
+    }
+    summary->funcs[h].vaddr = anchor->vaddr;
+    summary->funcs[h].name = name;
+    summary->funcs[h].count = 1;
+    summary->funcs_count++;
+}
+
+// Order for the by-function table: descending count, then name, then
+// address, so the listing is deterministic.
+static int summary_func_cmp(const void *a, const void *b)
+{
+    const struct summary_func *const *x = a, *const *y = b;
+    if ((*x)->count != (*y)->count) {
+        return (*x)->count > (*y)->count ? -1 : 1;
+    }
+    if (((*x)->name != NULL) != ((*y)->name != NULL)) {
+        return (*x)->name != NULL ? -1 : 1;
+    }
+    if ((*x)->name != NULL) {
+        int c = strcmp((*x)->name, (*y)->name);
+        if (c != 0) {
+            return c;
+        }
+    }
+    return (*x)->vaddr < (*y)->vaddr ? -1 : (*x)->vaddr > (*y)->vaddr;
+}
+
+// The by-function companion table: the top offenders, so a whole-
+// binary count reads as "and here is where to start". Capped -- a
+// large binary spreads findings over thousands of functions -- with
+// the tail summed into a residue line, and the findings a scan with
+// a symbol table placed under no anchor (code before a section's
+// first symbol, or past the end of a sized one) reported as their
+// own honest row. Printed only once some scan had a table to
+// attribute against: a table-less scan has nothing to say here.
+static void summary_print_functions(const armlint_summary *summary)
+{
+    if (!summary->attributed
+            || summary->funcs_count + summary->nofunc == 0) {
+        return;
+    }
+    enum { TOP = 10 };
+    const struct summary_func **order =
+        malloc((summary->funcs_count + 1) * sizeof(*order));
+    if (order == NULL) {
+        printf("Optimization opportunities by function: %zu functions "
+            "(table not printed: out of memory)\n\n", summary->funcs_count);
+        return;
+    }
+    size_t n = 0;
+    size_t attributed = 0;
+    for (size_t i = 0; i < summary->funcs_cap; i++) {
+        if (summary->funcs[i].count != 0) {
+            order[n++] = &summary->funcs[i];
+            attributed += summary->funcs[i].count;
+        }
+    }
+    qsort(order, n, sizeof(*order), summary_func_cmp);
+    printf("Optimization opportunities by function:\n");
+    size_t shown = 0;
+    for (size_t i = 0; i < n && i < TOP; i++) {
+        if (order[i]->name != NULL) {
+            printf("  %6zu  %s\n", order[i]->count, order[i]->name);
+        } else {
+            printf("  %6zu  0x%" PRIx64 "\n", order[i]->count,
+                order[i]->vaddr);
+        }
+        shown += order[i]->count;
+    }
+    if (n > TOP) {
+        printf("  %6zu  in %zu more functions\n", attributed - shown,
+            n - TOP);
+    }
+    if (summary->nofunc != 0) {
+        printf("  %6zu  outside every function range\n", summary->nofunc);
+    }
+    if (summary->funcs_dropped != 0) {
+        printf("  (%zu findings not tallied: the table could not grow)\n",
+            summary->funcs_dropped);
+    }
+    printf("\n");
+    free(order);
 }
 
 size_t armlint_summary_instructions(const armlint_summary *summary)
@@ -23410,6 +23570,7 @@ void armlint_summary_print(const armlint_summary *summary)
         printf("  %6u  %s\n", count, name);
     }
     printf("\n");
+    summary_print_functions(summary);
 
     // The constant audits' by-value tables, most frequent first (ties
     // by value). The misfit audit's constants come as two tables,
@@ -23603,6 +23764,11 @@ static void emit_finding(const finding_sink *sink,
     report_finding(finding, sink->verbose, sink->symbols, sink->nsymbols,
         sink->base_addr, repeat);
     summary_add(sink->summary, finding);
+    if (sink->nsymbols > 0) {
+        summary_add_function(sink->summary,
+            armlint_symbol_lookup(sink->symbols, sink->nsymbols,
+                sink->base_addr + finding->start_offset));
+    }
     if (sink->on_finding != NULL) {
         sink->on_finding(sink->ctx, finding,
             sink->base_addr + finding->start_offset,

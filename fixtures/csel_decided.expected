@@ -46,4 +46,7 @@ Optimization opportunities by type:
        1  CSEL same-operand identity
        1  register already holds the recomputed value
 
+Optimization opportunities by function:
+      11  _main
+
 11 optimization opportunities in 41 instructions

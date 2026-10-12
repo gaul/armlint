@@ -13,4 +13,7 @@ UMOV of lane 0 foldable to FMOV at offset: 0xc <_main+0xc>: -> fmov x6, d7 (1 in
 Optimization opportunities by type:
        4  UMOV of lane 0 foldable to FMOV
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 16 instructions

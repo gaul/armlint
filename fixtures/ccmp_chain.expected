@@ -23,4 +23,7 @@ Optimization opportunities by type:
        3  CMP + CCMP chain decidable by one compare
        1  register write overwritten unread
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 30 instructions

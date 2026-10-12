@@ -25,4 +25,7 @@ self-op identity at offset: 0x1c <_main+0x1c>: and w14, w15, w15 -> mov w14, w15
 Optimization opportunities by type:
        8  self-op identity
 
+Optimization opportunities by function:
+       8  _main
+
 8 optimization opportunities in 12 instructions

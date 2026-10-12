@@ -17,4 +17,7 @@ Optimization opportunities by type:
        4  zero-discriminator authenticated BR/BLR (PAC audit)
        1  unauthenticated BR/BLR (PAC audit)
 
+Optimization opportunities by function:
+       5  _main
+
 5 optimization opportunities in 12 instructions

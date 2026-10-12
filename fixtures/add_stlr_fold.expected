@@ -62,4 +62,7 @@ Optimization opportunities by type:
        9  register write overwritten unread
        6  ADD + STLR foldable to STLUR (LRCPC2)
 
+Optimization opportunities by function:
+      15  _main
+
 15 optimization opportunities in 36 instructions

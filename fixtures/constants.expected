@@ -16,6 +16,9 @@ MOV chain + register-offset LDR/STR foldable to ADD + immediate offset at offset
 Optimization opportunities by type:
        3  MOV chain + register-offset LDR/STR foldable to ADD + immediate offset
 
+Optimization opportunities by function:
+       3  _field
+
 Constant chains (-c): 36 words, 5 functions
   every chain: 7 building 3 distinct values, 18 instructions (50.00%)
   rebuilds within a function: 3 in 2 functions, 8 instructions (22.22%; 44.4% of chain instructions)

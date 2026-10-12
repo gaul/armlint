@@ -80,4 +80,7 @@ Optimization opportunities by type:
       10  register write overwritten unread
        8  shift foldable into shifted-register form
 
+Optimization opportunities by function:
+      18  _main
+
 18 optimization opportunities in 37 instructions

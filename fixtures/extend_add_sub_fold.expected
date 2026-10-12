@@ -88,4 +88,7 @@ Optimization opportunities by type:
        2  register already holds the recomputed value
        1  ADD/SUB of a live extend foldable to extended-register form
 
+Optimization opportunities by function:
+      21  _main
+
 21 optimization opportunities in 27 instructions

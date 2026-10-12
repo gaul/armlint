@@ -504,6 +504,28 @@ Optimization opportunities by type:
 42 optimization opportunities in 4153 instructions
 ```
 
+When the binary carries function boundaries to attribute against --
+a symbol table, or a stripped Mach-O's `LC_FUNCTION_STARTS` -- the
+summary adds a by-function companion table: the ten functions
+holding the most findings, the tail summed into a residue line, so
+a whole-binary count reads as "and here is where to start". A
+finding the boundaries place under no function -- code before a
+section's first symbol, or past the end of a sized ELF symbol --
+lands in an honest `outside every function range` row rather than
+the nearest neighbour, and a nameless function start is listed by
+its address:
+
+```console
+$ ./armlint gofmt      # a Go linux/arm64 build
+...
+Optimization opportunities by function:
+      53  time.Time.appendFormat
+      51  internal/diff.Diff
+      49  runtime/pprof.(*profileBuilder).pbMapping
+      ...
+    5481  in 1533 more functions
+```
+
 When the scan stepped over bytes without linting them -- words this
 Capstone build cannot decode, V8 constant pools under `-m v8`, or
 the bytes outside the function symbols' ranges -- a line before the

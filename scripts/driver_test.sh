@@ -187,6 +187,28 @@ run 2 --json -f nosuch two.o
 run 2 -A -f g two.o
 expect_err 'mutually exclusive'
 
+# The by-function table: g holds two findings, f one, and under -A
+# the words past sized.o's one function land in no range.
+echo "by-function table:"
+run 1 two.o
+expect '^Optimization opportunities by function:$'
+expect '^       2  g$'
+expect '^       1  f$'
+reject 'outside every function range'
+run 1 -A sized.o
+expect '^       1  f$'
+expect '^       1  outside every function range$'
+# Only the global label anchors: a local untyped ELF label is an
+# inner jump target, not a function, so f's unsized reach covers both.
+run 1 untyped.o
+expect '^       2  f$'
+reject '  g$'
+run 1 -f g two.o
+expect '^       2  g$'
+reject '^       1  f$' "-f tallies only the scanned function"
+run 1 --json two.o
+reject 'by function' "the table stays out of the document"
+
 # Mach-O carries no symbol sizes, so -f reaches to the next anchor:
 # the same functions under plain labels, assembled for arm64 Mach-O.
 if [ "$(uname -s)" = "Darwin" ]; then

@@ -18,4 +18,7 @@ Optimization opportunities by type:
        3  BFI synthesis via AND-ORR
        1  BFXIL synthesis via AND-ORR
 
+Optimization opportunities by function:
+       4  _main
+
 4 optimization opportunities in 26 instructions

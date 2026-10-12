@@ -60,4 +60,7 @@ Optimization opportunities by type:
        2  SXTW + register-offset STR foldable into the store
        2  register write overwritten unread
 
+Optimization opportunities by function:
+      14  _main
+
 14 optimization opportunities in 31 instructions

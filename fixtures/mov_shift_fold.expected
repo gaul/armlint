@@ -94,4 +94,7 @@ Optimization opportunities by type:
        6  MOV + variable shift foldable to immediate shift
        1  operation on known values foldable to MOV #imm
 
+Optimization opportunities by function:
+      21  _main
+
 21 optimization opportunities in 26 instructions
