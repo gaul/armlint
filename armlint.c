@@ -23356,6 +23356,26 @@ size_t armlint_summary_skipped(const armlint_summary *summary)
     return summary == NULL ? 0 : summary->skipped;
 }
 
+unsigned armlint_bti_landing(const uint8_t *buf, size_t len, size_t offset)
+{
+    if (buf == NULL || offset > len || len - offset < 4) {
+        return 0;
+    }
+    uint32_t word = (uint32_t)buf[offset] | ((uint32_t)buf[offset + 1] << 8)
+        | ((uint32_t)buf[offset + 2] << 16) | ((uint32_t)buf[offset + 3] << 24);
+    // BTI is HINT #32 + targets<<1: D503241F | targets << 6.
+    if ((word & 0xFFFFFF3Fu) == 0xD503241Fu) {
+        unsigned targets = (word >> 6) & 3u;
+        return ((targets & 1u) ? ARMLINT_BTI_CALL : 0)
+            | ((targets & 2u) ? ARMLINT_BTI_JUMP : 0);
+    }
+    // PACIASP (HINT #25) and PACIBSP (HINT #27) are implicit BTI c.
+    if (word == 0xD503233Fu || word == 0xD503237Fu) {
+        return ARMLINT_BTI_CALL;
+    }
+    return 0;
+}
+
 static void dedup_attach(armlint_dedup *dedup);
 
 void armlint_summary_set_dedup(armlint_summary *summary,

@@ -19057,6 +19057,38 @@ static void test_census_coverage(void)
     armlint_census_destroy(census);
 }
 
+static void test_bti_landing(void)
+{
+    // bti c, bti j, bti jc, a plain bti (no targets: a NOP-like
+    // placeholder that admits nothing), paciasp, pacibsp, and an
+    // ordinary instruction, each as the little-endian word.
+    static const uint8_t code[] = {
+        0x5f, 0x24, 0x03, 0xd5,     // bti c
+        0x9f, 0x24, 0x03, 0xd5,     // bti j
+        0xdf, 0x24, 0x03, 0xd5,     // bti jc
+        0x1f, 0x24, 0x03, 0xd5,     // bti (no targets)
+        0x3f, 0x23, 0x03, 0xd5,     // paciasp
+        0x7f, 0x23, 0x03, 0xd5,     // pacibsp
+        0xc0, 0x03, 0x5f, 0xd6,     // ret
+        0x1f, 0x20, 0x03, 0xd5,     // nop
+        0x5f, 0x24,                 // a truncated bti c
+    };
+    assert(armlint_bti_landing(code, sizeof(code), 0) == ARMLINT_BTI_CALL);
+    assert(armlint_bti_landing(code, sizeof(code), 4) == ARMLINT_BTI_JUMP);
+    assert(armlint_bti_landing(code, sizeof(code), 8)
+        == (ARMLINT_BTI_CALL | ARMLINT_BTI_JUMP));
+    assert(armlint_bti_landing(code, sizeof(code), 12) == 0);
+    assert(armlint_bti_landing(code, sizeof(code), 16) == ARMLINT_BTI_CALL);
+    assert(armlint_bti_landing(code, sizeof(code), 20) == ARMLINT_BTI_CALL);
+    assert(armlint_bti_landing(code, sizeof(code), 24) == 0);
+    assert(armlint_bti_landing(code, sizeof(code), 28) == 0);
+    // Past the last whole word, at the end, and beyond it.
+    assert(armlint_bti_landing(code, sizeof(code), 32) == 0);
+    assert(armlint_bti_landing(code, sizeof(code), sizeof(code)) == 0);
+    assert(armlint_bti_landing(code, sizeof(code), sizeof(code) + 8) == 0);
+    assert(armlint_bti_landing(NULL, 0, 0) == 0);
+}
+
 static void test_symbol_annotation(void)
 {
     char buf[ARMLINT_SYMBOL_ANNOTATION_LEN];
@@ -19726,6 +19758,7 @@ int main(void)
     test_census();
     test_census_coverage();
     test_symbol_annotation();
+    test_bti_landing();
     test_dedup();
     test_constants();
 

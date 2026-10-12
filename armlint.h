@@ -3407,6 +3407,23 @@ size_t armlint_summary_instructions(const armlint_summary *summary);
 // so a clean count is not a clean sweep. 0 for a NULL summary.
 size_t armlint_summary_skipped(const armlint_summary *summary);
 
+// What a word admits as a BTI landing pad, for the driver's -b
+// verification of an ELF binary's indirect branch targets. With
+// FEAT_BTI enforced (the GNU property note's BTI bit, which the loader
+// maps the pages PROT_BTI from) an indirect branch must land on a BTI
+// whose targets field admits it -- BTI c takes BLR and the BR x16/x17
+// of a PLT entry, BTI j takes any BR, BTI jc both -- and PACIASP and
+// PACIBSP count as BTI c, since every function that signs its return
+// address opens with one. Any other word, or a target too close to the
+// end of the buffer for a whole word, admits nothing. The flags are
+// ARMLINT_BTI_CALL (BLR, and BR through x16 or x17) and ARMLINT_BTI_JUMP
+// (BR through any register).
+enum {
+    ARMLINT_BTI_CALL = 1,
+    ARMLINT_BTI_JUMP = 2,
+};
+unsigned armlint_bti_landing(const uint8_t *buf, size_t len, size_t offset);
+
 // A code anchor for attributing findings to their containing
 // function: a defined text symbol, or a bare function start
 // (LC_FUNCTION_STARTS in a stripped Mach-O), in which case name is

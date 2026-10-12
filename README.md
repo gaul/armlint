@@ -373,6 +373,7 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint -s all /bin/bash  # every ARM64 slice of a universal binary
 ./armlint -A libfoo.so      # every byte, not only the function symbols' ranges
 ./armlint -f _main /bin/foo # lint just the one function
+./armlint -b libfoo.so      # also verify the BTI landing pads (ELF)
 ./armlint -d /bin/ls        # also report functions that copy one another
 ./armlint -c /bin/ls        # also report the constants MOVZ/MOVK chains build
 ./armlint -a imm /bin/ls    # also audit the constants that miss an immediate
@@ -606,15 +607,110 @@ only knows them then. Section and symbol names are copied from the
 file verbatim, so a binary whose string tables are not UTF-8 yields
 strings that are not either. The exit status is unchanged, and a file
 the driver rejects leaves stdout empty rather than half a document.
-`--json` describes the lint scan alone: `-v`, `-i`, `-d` and `-c` are
-separate reports whose output would interleave with it, and the
-driver refuses the combination rather than choosing for the caller.
+`--json` describes the lint scan alone: `-v`, `-i`, `-d`, `-c` and
+`-b` are separate reports whose output would interleave with it, and
+the driver refuses the combination rather than choosing for the
+caller.
 
 The exit status follows the grep convention -- 0 for a clean scan, 1
 when any opportunity is found, 2 on a tool failure (a bad invocation,
 an unreadable or malformed file) -- so armlint can gate a compiler
-test suite and CI can tell a dirty scan from a broken run. The `-i`
-census, `-d` and `-c` reports are informational and never set it.
+test suite and CI can tell a dirty scan from a broken run. `-b`
+findings set the exit status like any other; the `-i` census, `-d`
+and `-c` reports are informational and never set it.
+
+## BTI landing-pad verification (`-b`)
+
+With FEAT_BTI enforced, an indirect `br` or `blr` must land on a
+`bti` whose targets admit it or the CPU raises a Branch Target
+exception. The loader turns enforcement on, mapping the code
+`PROT_BTI`, when the binary's GNU property note
+(`.note.gnu.property`, `GNU_PROPERTY_AARCH64_FEATURE_1_AND`) carries
+the BTI bit, so a binary makes two claims that can drift apart: the
+note says "every indirect target is padded," and the code either
+honours that or does not. `armlint -b` cross-checks them, the way
+[x86lint](https://github.com/gaul/x86lint)'s `-e` does for
+`ENDBR64`.
+
+Which addresses an indirect branch can reach is not a property of
+the instruction stream -- nothing in the bytes distinguishes a
+landing site from fall-through code, which is why this is a driver
+pass over the ELF metadata rather than a check in the table above.
+A linked binary evidences a checkable subset of its indirect
+targets:
+
+* the entry point (`e_entry`) of a program with a `PT_INTERP`
+  interpreter -- `ld.so` transfers to it with an indirect branch. A
+  kernel-entered binary (static, static-PIE, `ld.so` itself) owes no
+  pad there;
+* `.init` and `.fini` (`DT_INIT`/`DT_FINI`), called through pointers;
+* every `.preinit_array`/`.init_array`/`.fini_array` slot;
+* `R_AARCH64_JUMP_SLOT` and `R_AARCH64_GLOB_DAT` relocations
+  resolving to a definition in the same binary -- the slot's runtime
+  value is that entry;
+* `R_AARCH64_IRELATIVE` -- the loader calls the ifunc resolver
+  indirectly;
+* every defined dynamic function symbol -- a cross-object call
+  always arrives through the caller's PLT or GOT;
+* absolute-address relocations (`R_AARCH64_RELATIVE`,
+  `R_AARCH64_ABS64`, and the packed `SHT_RELR` form) whose baked
+  pointer lands in an executable section -- vtables and callback
+  tables.
+
+The last class proves only that the address is *taken*, not that it
+is branched to, so it counts only when the pointer addresses a
+function entry known to `.symtab` or `.dynsym`; a compare-only label
+is `NOTYPE` and drops out, and a stripped binary loses this one
+evidence class (the tool's usual trade: a false negative over a
+false claim). The converse check -- flagging a *superfluous* `bti`
+-- is not attempted, since a target materialized by `adrp`+`add`
+leaves no relocation behind and absence of evidence proves nothing.
+
+Every evidenced target is entered by a call or through a PLT: the
+loader's `blr` into the entry point, init/fini and resolvers, a GOT
+slot's `blr`, a PLT entry's `br x16`/`x17`. `bti c` admits all of
+those (`br` is permitted when it comes through `x16` or `x17`, which
+is why a PLT branches that way and why compilers' indirect tail
+calls use those registers under `-mbranch-protection`), as do
+`bti jc` and the `paciasp`/`pacibsp` a pac-ret prologue opens with. A
+`bti j` admits `br` alone and is reported as a pad of the wrong
+flavour -- a verdict x86, with its one `ENDBR64`, cannot express.
+
+Four verdicts, reconciling the pads against the note:
+
+* BTI declared, all targets padded -- clean;
+* BTI declared, some target bare or `bti j` -- each miss is printed
+  with its address, symbol and evidence (a Branch Target exception
+  the moment the pages are mapped `PROT_BTI`);
+* BTI not declared, but the targets carry pads -- the compiler
+  emitted them and the link lost it: the linker ANDs the property
+  across all inputs, so a single object built without
+  `-mbranch-protection` silently disarms enforcement for the whole
+  binary. One finding; `-v` lists any targets without pads (in a
+  poisoned link, usually the culprit object's);
+* no declaration, no pads -- not a BTI binary; nothing to hold it
+  to, no findings.
+
+The same word carries the pac-ret and GCS bits, so `-b` reports them
+in the same pass: `-mbranch-protection=standard` emits BTI and
+pac-ret together, and an asymmetric declaration earns a line. Those
+lines are informational and never set the exit status -- the note's
+pac-ret claim is about every input object having signed, which a
+linked binary's instruction stream cannot be held to (a leaf
+function legitimately never signs; the `-a pac` audit judges that
+function by function). In the annotation-lost verdict the pads
+evidence branch protection only, so the line states the bit's
+absence without claiming a loss.
+
+Relocatable objects are rejected: their address-taken evidence
+dissolves into the final link, so the question is only answerable
+for executables and shared objects. Mach-O has no BTI -- arm64e's
+branch protection is pointer authentication, the `-a pac` audit's
+subject -- so `-b` applies to ELF alone. The library exports the
+single-site predicate (`armlint_bti_landing`); the evidence
+collection lives in the driver, and `scripts/driver_test.sh` checks
+every evidence class and verdict against shared objects it writes
+itself.
 
 ## ISA census (`-i`)
 

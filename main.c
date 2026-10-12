@@ -41,8 +41,34 @@
 #define EM_AARCH64    183
 #define SHT_PROGBITS  1
 #define SHT_SYMTAB    2
+#define SHT_RELA      4
+#define SHT_NOTE      7
+#define SHT_NOBITS    8
 #define SHT_DYNSYM    11
+#define SHT_INIT_ARRAY    14
+#define SHT_FINI_ARRAY    15
+#define SHT_PREINIT_ARRAY 16
+#define SHT_RELR      19
+#define SHF_ALLOC     0x2
 #define SHF_EXECINSTR 0x4
+#define SHN_UNDEF     0
+#define PT_INTERP     3
+#define NT_GNU_PROPERTY_TYPE_0 5
+// The AArch64 GNU property word and its bits: BTI (every indirect
+// branch target carries a landing pad, so the loader maps the code
+// PROT_BTI), PAC (every function signs its return address) and GCS
+// (the code runs under a guarded control stack).
+#define GNU_PROPERTY_AARCH64_FEATURE_1_AND 0xc0000000u
+#define GNU_PROPERTY_AARCH64_FEATURE_1_BTI 0x1u
+#define GNU_PROPERTY_AARCH64_FEATURE_1_PAC 0x2u
+#define GNU_PROPERTY_AARCH64_FEATURE_1_GCS 0x4u
+#define R_AARCH64_ABS64     257
+#define R_AARCH64_GLOB_DAT  1025
+#define R_AARCH64_JUMP_SLOT 1026
+#define R_AARCH64_RELATIVE  1027
+#define R_AARCH64_IRELATIVE 1032
+#define ELF64_R_SYM(i)  ((uint32_t)((i) >> 32))
+#define ELF64_R_TYPE(i) ((uint32_t)((i) & 0xffffffffu))
 #define STB_LOCAL     0
 #define STT_NOTYPE    0
 #define STT_FUNC      2
@@ -86,6 +112,29 @@ typedef struct {
     uint64_t st_value;
     uint64_t st_size;
 } Elf64_Sym;
+
+typedef struct {
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
+} Elf64_Phdr;
+
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+} Elf64_Rela;
+
+typedef struct {
+    uint32_t n_namesz;
+    uint32_t n_descsz;
+    uint32_t n_type;
+} Elf64_Nhdr;
 
 // === Mach-O minimal definitions ===
 //
@@ -236,6 +285,739 @@ static bool read_at(FILE *f, long off, void *buf, size_t n)
     return fread(buf, 1, n, f) == n;
 }
 
+// === BTI landing-pad verification, -b ===
+//
+// With FEAT_BTI enforced -- the loader maps the code PROT_BTI when the
+// GNU property note carries the BTI bit -- an indirect BR or BLR must
+// land on a BTI whose targets admit it, or the CPU raises a Branch
+// Target exception. Which addresses an indirect branch can reach is
+// not a property of the instruction stream: nothing in the bytes
+// distinguishes a landing site from fall-through code. But the ELF
+// metadata of a linked binary evidences a checkable subset, collected
+// below exactly as x86lint's -e collects it for ENDBR64. The subset
+// under-approximates (a function pointer materialized by ADRP+ADD
+// leaves no relocation behind), so a target the metadata does
+// evidence really is reachable indirectly and a missing pad there
+// really faults; the converse -- flagging a superfluous BTI -- would
+// be guessing, and is not attempted.
+//
+// Every evidenced target is entered by a call or through a PLT: the
+// loader's BLR into the entry point, init/fini and resolvers, a GOT
+// slot's BLR, and a PLT entry's BR x16/x17. BTI c admits all of
+// those (BR is permitted when it comes through x16 or x17, which is
+// why a PLT branches that way and why the compilers' indirect tail
+// calls use those registers under -mbranch-protection), as do BTI jc
+// and the PACIASP/PACIBSP a pac-ret prologue opens with. A BTI j is
+// a pad of the wrong flavour -- it admits BR alone -- and is reported
+// as such: a sharper verdict than x86 has, where there is one ENDBR64.
+
+// Evidence sources, strongest first: when several name the same
+// address (an exported function also referenced by a GOT relocation),
+// dedup keeps the smallest kind. Every kind but the last proves the
+// address is *branched* to. An address relocation proves only that
+// the address is *taken*: glibc bakes pointers to bracket labels that
+// are only compared against interrupted PCs, with no pad by design.
+// The verify loop therefore counts BTI_ADDR evidence only when the
+// target is a known function entry, and its last-place rank keeps it
+// from shadowing a stronger claim to the same address.
+enum bti_kind {
+    BTI_ENTRY,    // e_entry: ld.so transfers to it indirectly
+    BTI_INIT,     // .init/.fini: DT_INIT/DT_FINI, called through a pointer
+    BTI_ARRAY,    // .preinit_array/.init_array/.fini_array slot
+    BTI_PLT,      // R_AARCH64_JUMP_SLOT resolving to a local definition
+    BTI_GOT,      // R_AARCH64_GLOB_DAT resolving to a local definition
+    BTI_IFUNC,    // R_AARCH64_IRELATIVE: the loader calls the resolver
+    BTI_EXPORT,   // defined dynsym function: reachable via any caller's PLT
+    BTI_ADDR,     // absolute-address relocation into an executable section
+};
+
+static const char *const bti_kind_name[] = {
+    "entry point",
+    ".init/.fini entry",
+    "init/fini array entry",
+    "PLT relocation",
+    "GOT relocation",
+    "ifunc resolver",
+    "exported function",
+    "address relocation",
+};
+
+struct bti_target {
+    uint64_t va;
+    uint32_t sym;       // index into .dynsym, or 0 (STN_UNDEF) for none
+    uint8_t kind;       // enum bti_kind
+};
+
+struct bti_targets {
+    struct bti_target *v;
+    size_t n;
+    size_t cap;
+};
+
+static bool bti_push(struct bti_targets *t, uint64_t va, uint32_t sym,
+                     uint8_t kind)
+{
+    if (t->n == t->cap) {
+        size_t cap = t->cap == 0 ? 64 : t->cap * 2;
+        struct bti_target *v = realloc(t->v, cap * sizeof(*v));
+        if (v == NULL) {
+            return false;
+        }
+        t->v = v;
+        t->cap = cap;
+    }
+    t->v[t->n].va = va;
+    t->v[t->n].sym = sym;
+    t->v[t->n].kind = kind;
+    ++t->n;
+    return true;
+}
+
+static int bti_target_cmp(const void *a, const void *b)
+{
+    const struct bti_target *ta = a, *tb = b;
+    if (ta->va != tb->va) {
+        return ta->va < tb->va ? -1 : 1;
+    }
+    if (ta->kind != tb->kind) {
+        return ta->kind < tb->kind ? -1 : 1;
+    }
+    return 0;
+}
+
+static bool u64_push(uint64_t **v, size_t *n, size_t *cap, uint64_t x)
+{
+    if (*n == *cap) {
+        size_t ncap = *cap == 0 ? 64 : *cap * 2;
+        uint64_t *nv = realloc(*v, ncap * sizeof(*nv));
+        if (nv == NULL) {
+            return false;
+        }
+        *v = nv;
+        *cap = ncap;
+    }
+    (*v)[(*n)++] = x;
+    return true;
+}
+
+static int u64_cmp(const void *a, const void *b)
+{
+    uint64_t ua = *(const uint64_t *)a, ub = *(const uint64_t *)b;
+    return ua < ub ? -1 : ua > ub ? 1 : 0;
+}
+
+static bool u64_contains(const uint64_t *v, size_t n, uint64_t x)
+{
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (v[mid] < x) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < n && v[lo] == x;
+}
+
+// Read a whole section's contents, bounds-checked against the file.
+// NULL for a section with no bytes in the file or on I/O or
+// allocation failure; the callers treat all of these as absent
+// evidence and move on (the summary line still states how many
+// targets were actually checked).
+static uint8_t *load_section(FILE *f, const Elf64_Shdr *shdr,
+                             uint64_t file_size)
+{
+    if (shdr->sh_type == SHT_NOBITS || shdr->sh_size == 0
+            || shdr->sh_offset > file_size
+            || shdr->sh_size > file_size - shdr->sh_offset) {
+        return NULL;
+    }
+    uint8_t *buf = malloc(shdr->sh_size);
+    if (buf != NULL && !read_at(f, (long)shdr->sh_offset, buf, shdr->sh_size)) {
+        free(buf);
+        buf = NULL;
+    }
+    return buf;
+}
+
+// The AArch64 feature word of the GNU property note (an
+// NT_GNU_PROPERTY_TYPE_0 note named "GNU"), or 0 when no note carries
+// one. Property notes are 8-aligned in ELF64; other note sections
+// (build-id) use 4, hence the per-section alignment. Each property is
+// {u32 pr_type, u32 pr_datasz, data padded to 8}.
+static uint32_t elf_aarch64_feature_1_and(FILE *f, const Elf64_Shdr *sh,
+                                          uint64_t shnum, uint64_t file_size)
+{
+    uint32_t feat = 0;
+    bool found = false;
+    for (uint64_t i = 0; i < shnum && !found; ++i) {
+        if (sh[i].sh_type != SHT_NOTE) {
+            continue;
+        }
+        uint8_t *buf = load_section(f, &sh[i], file_size);
+        if (buf == NULL) {
+            continue;
+        }
+        uint64_t size = sh[i].sh_size;
+        uint64_t align = sh[i].sh_addralign == 8 ? 8 : 4;
+        uint64_t off = 0;
+        while (off + sizeof(Elf64_Nhdr) <= size) {
+            Elf64_Nhdr nh;
+            memcpy(&nh, buf + off, sizeof(nh));
+            uint64_t name_off = off + sizeof(nh);
+            uint64_t desc_off = (name_off + nh.n_namesz + align - 1)
+                & ~(align - 1);
+            if (desc_off > size || nh.n_descsz > size - desc_off
+                    || nh.n_namesz > size - name_off) {
+                break;      // malformed: stop parsing this section
+            }
+            if (nh.n_type == NT_GNU_PROPERTY_TYPE_0 && nh.n_namesz == 4
+                    && memcmp(buf + name_off, "GNU", 4) == 0) {
+                uint64_t p = desc_off;
+                uint64_t dend = desc_off + nh.n_descsz;
+                while (p + 8 <= dend) {
+                    uint32_t pr_type, pr_datasz;
+                    memcpy(&pr_type, buf + p, 4);
+                    memcpy(&pr_datasz, buf + p + 4, 4);
+                    if (pr_datasz > dend - (p + 8)) {
+                        break;
+                    }
+                    if (!found
+                            && pr_type == GNU_PROPERTY_AARCH64_FEATURE_1_AND
+                            && pr_datasz >= 4) {
+                        memcpy(&feat, buf + p + 8, 4);
+                        found = true;
+                    }
+                    p += 8 + (((uint64_t)pr_datasz + 7) & ~(uint64_t)7);
+                }
+            }
+            off = (desc_off + nh.n_descsz + align - 1) & ~(align - 1);
+        }
+        free(buf);
+    }
+    return feat;
+}
+
+// Resolve one RELR-relocated slot: the packed format encodes only
+// WHERE a relative relocation applies; its target is the slot's raw
+// link-time value, read here from whichever section holds the slot.
+// Slots arrive sorted, so the single-section cache almost always
+// hits. Returns false only on allocation failure; a slot outside any
+// loadable section, an unreadable section, and a 0/-1 sentinel value
+// are skipped.
+static bool bti_relr_slot(FILE *f, const Elf64_Shdr *sh, uint64_t shnum,
+                          uint64_t file_size, uint64_t where,
+                          uint64_t *cache_i, uint8_t **cache,
+                          struct bti_targets *targets)
+{
+    if (*cache_i >= shnum || where < sh[*cache_i].sh_addr
+            || where - sh[*cache_i].sh_addr > sh[*cache_i].sh_size - 8) {
+        free(*cache);
+        *cache = NULL;
+        *cache_i = shnum;
+        for (uint64_t i = 0; i < shnum; ++i) {
+            if ((sh[i].sh_flags & SHF_ALLOC) && sh[i].sh_type != SHT_NOBITS
+                    && sh[i].sh_size >= 8 && where >= sh[i].sh_addr
+                    && where - sh[i].sh_addr <= sh[i].sh_size - 8) {
+                *cache = load_section(f, &sh[i], file_size);
+                if (*cache == NULL) {
+                    return true;
+                }
+                *cache_i = i;
+                break;
+            }
+        }
+        if (*cache_i >= shnum) {
+            return true;
+        }
+    }
+    uint64_t value;
+    memcpy(&value, *cache + (where - sh[*cache_i].sh_addr), 8);
+    if (value == 0 || value == UINT64_MAX) {
+        return true;
+    }
+    return bti_push(targets, value, 0, BTI_ADDR);
+}
+
+// Name a target: by its recorded dynsym index, or by reverse value
+// lookup for targets evidenced without a symbol. NULL when nothing
+// matches.
+static const char *bti_sym_name(const Elf64_Sym *dynsym, size_t ndynsym,
+                                const char *dynstr, uint64_t dynstr_size,
+                                uint32_t symi, uint64_t va)
+{
+    if (dynstr == NULL) {
+        return NULL;
+    }
+    if (symi == 0) {
+        for (size_t s = 1; s < ndynsym; ++s) {
+            unsigned st = dynsym[s].st_info & 0xfu;
+            if ((st == STT_FUNC || st == STT_GNU_IFUNC)
+                    && dynsym[s].st_shndx != SHN_UNDEF
+                    && dynsym[s].st_value == va) {
+                symi = (uint32_t)s;
+                break;
+            }
+        }
+        if (symi == 0) {
+            return NULL;
+        }
+    }
+    if (symi >= ndynsym || dynsym[symi].st_name == 0
+            || dynsym[symi].st_name >= dynstr_size) {
+        return NULL;
+    }
+    return dynstr + dynsym[symi].st_name;
+}
+
+// Verify that every indirect branch target the ELF metadata evidences
+// begins with a landing pad that admits a call (armlint_bti_landing),
+// and reconcile the result with the binary's property note. Four
+// verdicts: BTI declared and every target padded -- clean; BTI
+// declared with misses -- each is a Branch Target exception once the
+// pages are mapped PROT_BTI, so every miss is printed regardless of
+// verbosity; BTI not declared but pads present -- the compiler emitted
+// them and the link lost the note (the property is ANDed across
+// inputs, so one object built without -mbranch-protection silently
+// disarms the whole binary), one finding, with the per-target detail
+// behind -v; no declaration and no pads -- not a BTI binary, no
+// findings. Returns the finding count, or -1 on tool failure.
+static int check_elf_bti(FILE *f, const char *path, uint64_t file_size,
+                         bool verbose)
+{
+    Elf64_Ehdr ehdr;
+    if (!read_at(f, 0, &ehdr, sizeof(ehdr))) {
+        fprintf(stderr, "%s: failed to read ELF header\n", path);
+        return -1;
+    }
+    // A relocatable object's indirect targets are a compile-time
+    // question (its address-taken evidence dissolves into the final
+    // link), and half its metadata does not exist yet.
+    if (ehdr.e_type == ET_REL) {
+        fprintf(stderr,
+            "%s: -b requires a linked executable or shared object\n", path);
+        return -1;
+    }
+    uint64_t shnum = ehdr.e_shnum;
+    if (shnum == 0) {
+        printf("BTI: no section headers; nothing to check\n");
+        return 0;
+    }
+
+    int rc = -1;
+    struct bti_targets targets = {NULL, 0, 0};
+    Elf64_Sym *dynsym = NULL;
+    size_t ndynsym = 0;
+    char *dynstr = NULL;
+    uint64_t dynstr_size = 0;
+    char *shstr = NULL;
+    uint64_t shstrsize = 0;
+    uint8_t **exec_bufs = NULL;
+    uint64_t *fentry = NULL;
+    size_t nfentry = 0;
+    size_t fentry_cap = 0;
+
+    Elf64_Shdr *sh = malloc(shnum * sizeof(*sh));
+    if (sh == NULL
+            || ehdr.e_shoff > file_size
+            || shnum > (file_size - ehdr.e_shoff) / sizeof(*sh)
+            || !read_at(f, (long)ehdr.e_shoff, sh, shnum * sizeof(*sh))) {
+        fprintf(stderr, "%s: failed to read section headers\n", path);
+        goto out;
+    }
+    if (ehdr.e_shstrndx != 0 && ehdr.e_shstrndx < shnum) {
+        shstr = (char *)load_section(f, &sh[ehdr.e_shstrndx], file_size);
+        if (shstr != NULL) {
+            shstrsize = sh[ehdr.e_shstrndx].sh_size;
+            shstr[shstrsize - 1] = '\0';
+        }
+    }
+
+    uint32_t feat = elf_aarch64_feature_1_and(f, sh, shnum, file_size);
+    bool bti = (feat & GNU_PROPERTY_AARCH64_FEATURE_1_BTI) != 0;
+    bool pac = (feat & GNU_PROPERTY_AARCH64_FEATURE_1_PAC) != 0;
+    bool gcs = (feat & GNU_PROPERTY_AARCH64_FEATURE_1_GCS) != 0;
+
+    // The dynamic symbol table names relocation targets and lists the
+    // exported functions, each an indirect target in its own right.
+    for (uint64_t i = 0; i < shnum; ++i) {
+        if (sh[i].sh_type != SHT_DYNSYM
+                || sh[i].sh_entsize != sizeof(Elf64_Sym)) {
+            continue;
+        }
+        dynsym = (Elf64_Sym *)load_section(f, &sh[i], file_size);
+        if (dynsym == NULL) {
+            break;
+        }
+        ndynsym = sh[i].sh_size / sizeof(Elf64_Sym);
+        if (sh[i].sh_link < shnum) {
+            dynstr = (char *)load_section(f, &sh[sh[i].sh_link], file_size);
+            if (dynstr != NULL) {
+                dynstr_size = sh[sh[i].sh_link].sh_size;
+                dynstr[dynstr_size - 1] = '\0';     // bound every lookup
+            }
+        }
+        break;
+    }
+
+    // Function entries known to the symbol tables (.symtab when the
+    // binary kept one, .dynsym always), for grading the
+    // address-relocation evidence in the verify loop: a baked code
+    // pointer is proven a branch target only when it addresses a
+    // function entry. A compare-only label is NOTYPE and drops out
+    // here; a stripped binary loses this evidence class and nothing
+    // else -- erring, as everywhere, toward the false negative.
+    bool oom = false;
+    for (uint64_t i = 0; i < shnum && !oom; ++i) {
+        if (sh[i].sh_type != SHT_SYMTAB
+                || sh[i].sh_entsize != sizeof(Elf64_Sym)) {
+            continue;
+        }
+        Elf64_Sym *syms = (Elf64_Sym *)load_section(f, &sh[i], file_size);
+        if (syms == NULL) {
+            continue;
+        }
+        size_t nsyms = sh[i].sh_size / sizeof(Elf64_Sym);
+        for (size_t s = 1; s < nsyms && !oom; ++s) {
+            unsigned st = syms[s].st_info & 0xfu;
+            if ((st == STT_FUNC || st == STT_GNU_IFUNC)
+                    && syms[s].st_shndx != SHN_UNDEF
+                    && syms[s].st_value != 0) {
+                oom |= !u64_push(&fentry, &nfentry, &fentry_cap,
+                    syms[s].st_value);
+            }
+        }
+        free(syms);
+    }
+    for (size_t s = 1; s < ndynsym && !oom; ++s) {
+        unsigned st = dynsym[s].st_info & 0xfu;
+        if ((st == STT_FUNC || st == STT_GNU_IFUNC)
+                && dynsym[s].st_shndx != SHN_UNDEF && dynsym[s].st_value != 0) {
+            oom |= !u64_push(&fentry, &nfentry, &fentry_cap,
+                dynsym[s].st_value);
+        }
+    }
+    if (nfentry != 0) {
+        qsort(fentry, nfentry, sizeof(*fentry), u64_cmp);
+    }
+
+    // The entry point is an indirect branch target only for a program
+    // with an interpreter: ld.so's _dl_start_user transfers to e_entry
+    // with a BR through x16, which a BTI c admits. A kernel-entered
+    // binary -- static, static-PIE, ld.so itself -- starts with no
+    // guarded page to land on and owes no pad there.
+    bool has_interp = false;
+    if (ehdr.e_phoff != 0 && ehdr.e_phentsize == sizeof(Elf64_Phdr)
+            && ehdr.e_phoff <= file_size
+            && ehdr.e_phnum <= (file_size - ehdr.e_phoff) / sizeof(Elf64_Phdr)) {
+        for (uint16_t i = 0; i < ehdr.e_phnum; ++i) {
+            Elf64_Phdr ph;
+            if (!read_at(f, (long)(ehdr.e_phoff + i * sizeof(ph)), &ph,
+                         sizeof(ph))) {
+                break;
+            }
+            if (ph.p_type == PT_INTERP) {
+                has_interp = true;
+                break;
+            }
+        }
+    }
+    if (has_interp && ehdr.e_entry != 0) {
+        oom |= !bti_push(&targets, ehdr.e_entry, 0, BTI_ENTRY);
+    }
+
+    for (uint64_t i = 0; i < shnum && !oom; ++i) {
+        const Elf64_Shdr *s = &sh[i];
+        switch (s->sh_type) {
+        case SHT_PROGBITS:
+            // .init and .fini hold DT_INIT/DT_FINI, which the loader
+            // calls through a function pointer. Identified by name;
+            // without a section string table they are simply not
+            // evidenced.
+            if (shstr != NULL && s->sh_name < shstrsize
+                    && (s->sh_flags & SHF_EXECINSTR) && s->sh_addr != 0) {
+                const char *name = shstr + s->sh_name;
+                if (strcmp(name, ".init") == 0 || strcmp(name, ".fini") == 0) {
+                    oom |= !bti_push(&targets, s->sh_addr, 0, BTI_INIT);
+                }
+            }
+            break;
+        case SHT_PREINIT_ARRAY:
+        case SHT_INIT_ARRAY:
+        case SHT_FINI_ARRAY: {
+            // Each slot is a function pointer the startup code calls
+            // indirectly. The linker stores the link-time address in
+            // the slot even when a RELATIVE (or packed RELR)
+            // relocation also covers it, so the raw values serve PIE
+            // and non-PIE alike.
+            uint8_t *buf = load_section(f, s, file_size);
+            if (buf == NULL) {
+                break;
+            }
+            for (uint64_t off = 0; off + 8 <= s->sh_size && !oom; off += 8) {
+                uint64_t va;
+                memcpy(&va, buf + off, 8);
+                if (va != 0 && va != UINT64_MAX) {
+                    oom |= !bti_push(&targets, va, 0, BTI_ARRAY);
+                }
+            }
+            free(buf);
+            break;
+        }
+        case SHT_RELA: {
+            if (s->sh_entsize != sizeof(Elf64_Rela)) {
+                break;
+            }
+            uint8_t *buf = load_section(f, s, file_size);
+            if (buf == NULL) {
+                break;
+            }
+            size_t n = s->sh_size / sizeof(Elf64_Rela);
+            for (size_t r = 0; r < n && !oom; ++r) {
+                Elf64_Rela rela;
+                memcpy(&rela, buf + r * sizeof(rela), sizeof(rela));
+                uint32_t type = ELF64_R_TYPE(rela.r_info);
+                uint32_t symi = ELF64_R_SYM(rela.r_info);
+                switch (type) {
+                case R_AARCH64_JUMP_SLOT:
+                case R_AARCH64_GLOB_DAT:
+                case R_AARCH64_ABS64:
+                    // Meaningful when the symbol is defined here: the
+                    // runtime slot value is then this object's own
+                    // function entry. Imports resolve elsewhere. A
+                    // symbolless absolute relocation is a baked
+                    // address, handled like RELATIVE.
+                    if (symi != 0 && symi < ndynsym) {
+                        const Elf64_Sym *y = &dynsym[symi];
+                        unsigned st = y->st_info & 0xfu;
+                        if ((st != STT_FUNC && st != STT_GNU_IFUNC)
+                                || y->st_shndx == SHN_UNDEF || y->st_value == 0) {
+                            break;
+                        }
+                        uint64_t va = y->st_value;
+                        uint8_t kind = type == R_AARCH64_JUMP_SLOT ? BTI_PLT
+                            : type == R_AARCH64_GLOB_DAT ? BTI_GOT : BTI_ADDR;
+                        if (type == R_AARCH64_ABS64) {
+                            va += (uint64_t)rela.r_addend;
+                        }
+                        oom |= !bti_push(&targets, va, symi, kind);
+                    } else if (type == R_AARCH64_ABS64 && rela.r_addend != 0) {
+                        oom |= !bti_push(&targets, (uint64_t)rela.r_addend, 0,
+                            BTI_ADDR);
+                    }
+                    break;
+                case R_AARCH64_IRELATIVE:
+                    // The addend is the ifunc resolver, which the
+                    // loader calls indirectly at startup.
+                    if (rela.r_addend != 0) {
+                        oom |= !bti_push(&targets, (uint64_t)rela.r_addend, 0,
+                            BTI_IFUNC);
+                    }
+                    break;
+                case R_AARCH64_RELATIVE:
+                    // A baked pointer; one landing in an executable
+                    // section is an address-taken function or label.
+                    if (rela.r_addend != 0) {
+                        oom |= !bti_push(&targets, (uint64_t)rela.r_addend, 0,
+                            BTI_ADDR);
+                    }
+                    break;
+                }
+            }
+            free(buf);
+            break;
+        }
+        case SHT_RELR: {
+            if (s->sh_entsize != 8) {
+                break;
+            }
+            uint8_t *buf = load_section(f, s, file_size);
+            if (buf == NULL) {
+                break;
+            }
+            uint64_t cache_i = shnum;
+            uint8_t *cache = NULL;
+            uint64_t where = 0;
+            size_t n = s->sh_size / 8;
+            for (size_t r = 0; r < n && !oom; ++r) {
+                uint64_t e;
+                memcpy(&e, buf + r * 8, 8);
+                if ((e & 1) == 0) {
+                    oom |= !bti_relr_slot(f, sh, shnum, file_size, e,
+                        &cache_i, &cache, &targets);
+                    where = e + 8;
+                } else {
+                    for (unsigned b = 1; b < 64 && !oom; ++b) {
+                        if (e & (1ULL << b)) {
+                            oom |= !bti_relr_slot(f, sh, shnum, file_size,
+                                where + (b - 1) * 8, &cache_i, &cache,
+                                &targets);
+                        }
+                    }
+                    where += 63 * 8;
+                }
+            }
+            free(cache);
+            free(buf);
+            break;
+        }
+        }
+    }
+
+    // Every defined dynamic function symbol is indirectly reachable:
+    // a cross-object call always arrives through the caller's PLT or
+    // GOT, an indirect branch landing here.
+    for (size_t s = 1; s < ndynsym && !oom; ++s) {
+        unsigned st = dynsym[s].st_info & 0xfu;
+        if ((st == STT_FUNC || st == STT_GNU_IFUNC)
+                && dynsym[s].st_shndx != SHN_UNDEF && dynsym[s].st_value != 0) {
+            oom |= !bti_push(&targets, dynsym[s].st_value, (uint32_t)s,
+                BTI_EXPORT);
+        }
+    }
+
+    if (oom) {
+        fprintf(stderr, "%s: failed to allocate target list\n", path);
+        goto out;
+    }
+    if (targets.n != 0) {
+        qsort(targets.v, targets.n, sizeof(*targets.v), bti_target_cmp);
+    }
+
+    // The landing pads are read raw, never through the symbol-table
+    // mask. Only targets inside an executable section are checked:
+    // the address-relocation sweep pushes every baked pointer it
+    // sees, and the ones aimed at data drop out here.
+    exec_bufs = calloc(shnum, sizeof(*exec_bufs));
+    if (exec_bufs == NULL) {
+        fprintf(stderr, "%s: failed to allocate section list\n", path);
+        goto out;
+    }
+    for (uint64_t i = 0; i < shnum; ++i) {
+        if (sh[i].sh_type == SHT_PROGBITS && (sh[i].sh_flags & SHF_EXECINSTR)
+                && (sh[i].sh_flags & SHF_ALLOC) && sh[i].sh_addr != 0) {
+            exec_bufs[i] = load_section(f, &sh[i], file_size);
+        }
+    }
+
+    size_t checked = 0;
+    size_t misses = 0;
+    size_t wrong = 0;
+    uint64_t prev_va = 0;
+    bool have_prev = false;
+    for (size_t t = 0; t < targets.n; ++t) {
+        uint64_t va = targets.v[t].va;
+        if (have_prev && va == prev_va) {
+            continue;       // sorted dedup; the most specific kind is first
+        }
+        prev_va = va;
+        have_prev = true;
+        if (targets.v[t].kind == BTI_ADDR && !u64_contains(fentry, nfentry, va)) {
+            continue;       // address-taken only: see enum bti_kind
+        }
+        uint64_t sec = shnum;
+        for (uint64_t i = 0; i < shnum; ++i) {
+            if (exec_bufs[i] != NULL && va >= sh[i].sh_addr
+                    && va - sh[i].sh_addr < sh[i].sh_size) {
+                sec = i;
+                break;
+            }
+        }
+        if (sec == shnum) {
+            continue;
+        }
+        ++checked;
+        unsigned pad = armlint_bti_landing(exec_bufs[sec], sh[sec].sh_size,
+                                           va - sh[sec].sh_addr);
+        if (pad & ARMLINT_BTI_CALL) {
+            continue;
+        }
+        ++misses;
+        wrong += pad != 0;
+        if (bti || verbose) {
+            const char *nm = bti_sym_name(dynsym, ndynsym, dynstr,
+                dynstr_size, targets.v[t].sym, va);
+            printf("indirect branch target %s: 0x%" PRIx64 "%s%s%s (%s)\n",
+                pad != 0 ? "has BTI j, which admits no call"
+                         : "missing BTI c",
+                va, nm != NULL ? " <" : "", nm != NULL ? nm : "",
+                nm != NULL ? ">" : "", bti_kind_name[targets.v[t].kind]);
+        }
+    }
+
+    if (checked == 0) {
+        printf("BTI: no indirect branch targets evidenced; nothing to check\n");
+        rc = 0;
+    } else if (bti) {
+        if (misses == 0) {
+            printf("BTI: BTI property note present; all %zu indirect branch "
+                "targets land on a BTI c\n", checked);
+        } else {
+            printf("BTI: BTI property note present; %zu of %zu indirect "
+                "branch targets lack a BTI c%s (Branch Target exception "
+                "when BTI is enforced)\n", misses, checked,
+                wrong != 0 ? ", some carrying a BTI j" : "");
+        }
+        rc = (int)misses;
+    } else if (misses < checked) {
+        printf("BTI: no BTI in the property note, but %zu of %zu indirect "
+            "branch targets begin with a BTI c (BTI annotation lost at "
+            "link?)\n", checked - misses, checked);
+        if (misses > 0 && !verbose) {
+            printf("  (pass -v to list the %zu targets without one)\n",
+                misses);
+        }
+        rc = (int)misses + 1;
+    } else {
+        printf("BTI: no BTI in the property note and no BTI landing pads; "
+            "not a BTI binary\n");
+        rc = 0;
+    }
+
+    // The same word carries the pac-ret bit, and
+    // -mbranch-protection=standard emits both, so an asymmetric
+    // declaration earns a line. Informational only, never the exit
+    // status: pac-ret leaves a prologue in the instruction stream
+    // (which the -a pac audit judges, function by function), but the
+    // note's claim is about every input object having signed, which a
+    // linked binary's instruction stream cannot be held to -- a leaf
+    // function legitimately never signs. In the annotation-lost
+    // verdict the pads evidence branch protection only -- a lost note
+    // takes BTI and PAC down together -- so the line states the bit's
+    // absence without claiming a loss. GCS has no instruction-stream
+    // signature at all and is reported as declared.
+    if (bti && pac) {
+        printf("PAC: pac-ret declared alongside BTI\n");
+    } else if (bti) {
+        printf("PAC: no pac-ret in the property note despite BTI "
+            "(-mbranch-protection=bti?)\n");
+    } else if (pac) {
+        printf("PAC: pac-ret declared without BTI (pac-ret-only asm in the "
+            "link, or -mbranch-protection=pac-ret?)\n");
+    } else if (checked != 0 && misses < checked) {
+        printf("PAC: no pac-ret in the property note\n");
+    }
+    if (gcs) {
+        printf("GCS: guarded control stack declared\n");
+    }
+
+out:
+    if (exec_bufs != NULL) {
+        for (uint64_t i = 0; i < shnum; ++i) {
+            free(exec_bufs[i]);
+        }
+    }
+    free(exec_bufs);
+    free(fentry);
+    free(dynstr);
+    free(dynsym);
+    free(shstr);
+    free(targets.v);
+    free(sh);
+    return rc;
+}
+
 // === Symbolization ===
 //
 // Findings are annotated with the containing function
@@ -328,6 +1110,9 @@ static size_t g_restrict_symbols = 0;
 static const char *g_func = NULL;
 static size_t g_func_sites = 0;
 static uint64_t g_func_bytes = 0;
+// -b: verify the ELF binary's BTI landing pads against the targets
+// its own metadata evidences (see check_elf_bti).
+static bool g_bti = false;
 // Non-NULL in -i census mode: scan_code then tallies instead of
 // linting, and main prints the census in place of the findings report.
 static armlint_census *g_census = NULL;
@@ -1554,6 +2339,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
             // Lint just the one function: every site spelling NAME.
             g_func = argv[++i];
+        } else if (strcmp(argv[i], "-b") == 0) {
+            // Also verify the ELF binary's BTI landing pads.
+            g_bti = true;
         } else if (strcmp(argv[i], "-i") == 0) {
             census = true;
         } else if (strcmp(argv[i], "-d") == 0) {
@@ -1631,13 +2419,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 2;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 2;
     }
@@ -1649,10 +2437,10 @@ int main(int argc, char **argv)
         return 2;
     }
     // --json owns stdout: -v would interleave per-finding text with
-    // the document, and -i, -d and -c are other reports.
-    if (g_json && (g_verbose || census || dedup || constants)) {
-        fprintf(stderr, "%s: --json cannot be combined with -v, -i, -d or -c\n",
-            argv[0]);
+    // the document, and -i, -d, -c and -b are other reports.
+    if (g_json && (g_verbose || census || dedup || constants || g_bti)) {
+        fprintf(stderr, "%s: --json cannot be combined with -v, -i, -d, -c "
+            "or -b\n", argv[0]);
         return 2;
     }
     g_json_path = path;
@@ -1739,7 +2527,8 @@ int main(int argc, char **argv)
     }
 
     int errors = -1;
-    if (memcmp(magic, ELFMAG, SELFMAG) == 0) {
+    bool is_elf = memcmp(magic, ELFMAG, SELFMAG) == 0;
+    if (is_elf) {
         errors = scan_elf(f, path, file_size, handle);
     } else {
         // Mach-O magic is stored host-endian (always little on ARM64);
@@ -1769,6 +2558,17 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s: no function symbol named '%s'\n", path, g_func);
         goto out;
     }
+    // The BTI pass is separate from the peephole scan -- its findings
+    // are faults located by virtual address, not encoding
+    // opportunities located by section offset -- so it reports its
+    // own block, after the scan's, and only shares the exit status.
+    // Mach-O has no BTI: arm64e's branch protection is pointer
+    // authentication, which the -a pac audit judges.
+    int bti_errors = 0;
+    if (g_bti && !is_elf) {
+        fprintf(stderr, "%s: -b applies to ELF binaries\n", path);
+        goto out;
+    }
     if (census) {
         armlint_census_print(g_census, g_verbose);
         if (g_func != NULL) {
@@ -1781,7 +2581,13 @@ int main(int argc, char **argv)
         }
         armlint_dedup_print(g_dedup, g_verbose);
         armlint_constants_print(g_constants, g_verbose);
-        rc = 0;
+        if (g_bti) {
+            bti_errors = check_elf_bti(f, path, file_size, g_verbose);
+            if (bti_errors < 0) {
+                goto out;
+            }
+        }
+        rc = bti_errors != 0;
     } else if (g_json) {
         // The totals close the document because the scan only knows
         // them now. A file with no code still gets a complete document
@@ -1809,6 +2615,13 @@ int main(int argc, char **argv)
         armlint_summary_print(g_summary);
         armlint_dedup_print(g_dedup, g_verbose);
         armlint_constants_print(g_constants, g_verbose);
+        if (g_bti) {
+            bti_errors = check_elf_bti(f, path, file_size, g_verbose);
+            if (bti_errors < 0) {
+                goto out;
+            }
+            printf("\n");
+        }
         if (g_func != NULL) {
             printf("scan restricted to function '%s': %zu site%s, "
                 "%" PRIu64 " bytes\n", g_func, g_func_sites,
@@ -1820,7 +2633,7 @@ int main(int argc, char **argv)
         }
         printf("%d optimization opportunities in %zu instructions\n",
             errors, armlint_summary_instructions(g_summary));
-        rc = errors != 0;
+        rc = errors != 0 || bti_errors != 0;
     }
 
 out:
