@@ -464,6 +464,15 @@ two facts about that stream that its checks need -- x28 is the
 Both are knowledge about the scanned code rather than the hardware
 and unsound for arbitrary binaries, so the mode stays opt-in.
 
+`-m spidermonkey` likewise names an input: a SpiderMonkey JIT dump,
+the output of `tools/smdump2elf.py` from the engine's
+`JS_ARMLINT_DISASM` hook. That hook runs when the code is linked,
+before Ion patches its inline-cache pointers over the all-ones
+placeholders each site loads from the constant pool, so the dump
+shows `ldr x16, <literal -1>` where the running code loads a real
+pointer. The mode keeps the literal-load fold from reporting those as
+`mov x16, #-1`; nothing else changes.
+
 `-a <audit>` enables opt-in informational checks whose findings are
 review items rather than missed folds; `pac` audits the binary against
 the arm64e-style full pointer-authentication contract (return

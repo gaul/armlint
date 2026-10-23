@@ -16257,6 +16257,14 @@ bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
         if (!mov_imm_encodable(bits, is_64)) {
             return false;
         }
+        // A SpiderMonkey dump is taken before Ion patches its
+        // inline-cache pointers over the all-ones placeholders they
+        // are loaded from (ARMLINT_FEATURE_SMPATCH); the pooled value
+        // is not what the code runs with, so there is nothing to fold.
+        if ((state->features & ARMLINT_FEATURE_SMPATCH) != 0 && opc == 1u
+                && bits == UINT64_MAX) {
+            return false;
+        }
         snprintf(detail, sizeof(detail), "-> mov %c%u, #0x%" PRIx64,
             is_64 ? 'x' : 'w', rt, bits);
     }

@@ -4269,6 +4269,14 @@ there, so they would want the pool bit alone.
   a legal discarded load followed by real instructions, so it stays
   off by default and arms together with the cage fold under the one
   flag.
+* SpiderMonkey JIT dumps (`tools/smdump2elf.py`): the engine's hook
+  dumps each code object when it is linked, but Ion patches its
+  inline-cache pointers afterwards, over all-ones placeholders loaded
+  from the pool (`movWithPatch` / `pushArgWithPatch` of
+  `ImmWord(-1)`). Under `-m spidermonkey` a 64-bit all-ones literal
+  is left alone: the value in the dump is not the value the code runs
+  with. On a JetStream 3 Ion dump that is every finding of this check
+  (83,561), all of them `mov x16, #-1` suggestions for pointers.
 
 ## ADR + single use of its target foldable to the direct form
 

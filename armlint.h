@@ -171,6 +171,18 @@ void armlint_state_reset(armlint_state *state);
 // carry the pools but allocate x28 like any other register and so
 // want V8POOL alone.
 #define ARMLINT_FEATURE_V8 (ARMLINT_FEATURE_V8CAGE | ARMLINT_FEATURE_V8POOL)
+// SMPATCH is a knowledge bit about SpiderMonkey JIT dumps (the
+// JS_ARMLINT_DISASM hook, converted by tools/smdump2elf.py). The hook
+// runs when the code is linked, but Ion patches its inline-cache
+// pointers afterwards: each site loads an all-ones placeholder from
+// the constant pool (movWithPatch / pushArgWithPatch of ImmWord(-1))
+// that CodeGenerator::link overwrites with the IC's address. Under
+// this bit the literal-load fold leaves a 64-bit all-ones literal
+// alone, since the value in the dump is not the value the code runs
+// with. Unsound elsewhere, where a pooled -1 is a real constant that
+// MOVN materialises in one instruction. The CLI's -m spidermonkey sets
+// it.
+#define ARMLINT_FEATURE_SMPATCH (1u << 9)
 
 // Audit bits, kept in the high half of the same features word. They
 // are different in kind from the ISA bits above: -m asserts what the

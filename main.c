@@ -2381,10 +2381,16 @@ int main(int argc, char **argv)
                 // over -- since neither is useful alone on such a dump
                 // (see ARMLINT_FEATURE_V8).
                 g_features |= ARMLINT_FEATURE_V8;
+            } else if (strcmp(argv[i], "spidermonkey") == 0) {
+                // Likewise an input: a SpiderMonkey JIT dump
+                // (smdump2elf output), taken before Ion patches its
+                // inline-cache pointers over the all-ones literals
+                // they are loaded from (see ARMLINT_FEATURE_SMPATCH).
+                g_features |= ARMLINT_FEATURE_SMPATCH;
             } else {
                 fprintf(stderr, "%s: unknown -m feature '%s' "
                     "(known: cssc, lrcpc2, pauth, lse, cmpbr, "
-                    "sha3, fp16, v8)\n",
+                    "sha3, fp16, v8, spidermonkey)\n",
                     argv[0], argv[i]);
                 return 2;
             }
@@ -2419,13 +2425,13 @@ int main(int argc, char **argv)
         } else if (path == NULL && argv[i][0] != '-') {
             path = argv[i];
         } else {
-            fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+            fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8|spidermonkey]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
                 argv[0]);
             return 2;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
+        fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8|spidermonkey]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
             argv[0]);
         return 2;
     }

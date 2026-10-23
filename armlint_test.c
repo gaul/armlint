@@ -222,6 +222,58 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
     return findings;
 }
 
+// run_buffer_check with the given feature bits set, for the checks
+// that both read the scanned buffer and consult a knowledge bit.
+static int run_features_buffer_check(const uint8_t *code, size_t code_size,
+                                     unsigned features)
+{
+    cs_insn *insn = cs_malloc(g_handle);
+    assert(insn != NULL);
+    armlint_state *state = armlint_state_create();
+    assert(state != NULL);
+    armlint_state_set_buffer(state, code, code_size);
+    armlint_state_set_features(state, features);
+
+    int findings = 0;
+    const uint8_t *p = code;
+    size_t size = code_size;
+    uint64_t address = 0;
+    while (size >= 4) {
+        uint64_t insn_addr = address;
+        if (cs_disasm_iter(g_handle, &p, &size, &address, insn)) {
+            for (size_t k = 0; k < armlint_check_registry_count; k++) {
+                armlint_finding f;
+                if (armlint_check_registry[k](state, insn,
+                                              (size_t)insn_addr, &f)
+                        && !armlint_finding_has_side_entry(state, &f)
+                        && counted(&f)) {
+                    findings++;
+                }
+            }
+        } else {
+            armlint_finding f;
+            if (armlint_flush(state, &f)
+                    && !armlint_finding_has_side_entry(state, &f)
+                    && counted(&f)) {
+                findings++;
+            }
+            p += 4;
+            size -= 4;
+            address += 4;
+        }
+    }
+    armlint_finding f;
+    if (armlint_flush(state, &f)
+            && !armlint_finding_has_side_entry(state, &f)
+            && counted(&f)) {
+        findings++;
+    }
+
+    armlint_state_destroy(state);
+    cs_free(insn, 1);
+    return findings;
+}
+
 // run_buffer_check restricted to one finding name, copying the first
 // matching finding's detail into `detail` when it is not NULL: for
 // the checks whose proofs read the scanned buffer (a branch target's
@@ -13995,6 +14047,30 @@ static void test_v8pool_skip(void)
     assert(run_driver_check(code, 16, ARMLINT_FEATURE_V8POOL) == 3);
 }
 
+static void test_smpatch_placeholder(void)
+{
+    uint8_t code[16];
+
+    // ldr x16, <literal -1>: in a SpiderMonkey dump the all-ones word
+    // is the placeholder Ion later patches with an inline-cache
+    // pointer, so -m spidermonkey leaves it alone. Without the bit it
+    // is a pooled -1 that MOVN materialises in one instruction.
+    ldr_lit(&code[0], 1, 0, 2, 16);
+    ret_(&code[4]);
+    write_le32(&code[8], 0xFFFFFFFFu);
+    write_le32(&code[12], 0xFFFFFFFFu);
+    assert(run_features_buffer_check(code, 16, ARMLINT_FEATURE_SMPATCH) == 0);
+    assert(run_features_buffer_check(code, 16, 0) == 1);
+
+    // Only the 64-bit all-ones value is a placeholder: a W-form -1
+    // and an X-form value one halfword short of all-ones still fold.
+    ldr_lit(&code[0], 0, 0, 2, 16);
+    assert(run_features_buffer_check(code, 16, ARMLINT_FEATURE_SMPATCH) == 1);
+    ldr_lit(&code[0], 1, 0, 2, 16);
+    write_le32(&code[8], 0xFFFF1234u);
+    assert(run_features_buffer_check(code, 16, ARMLINT_FEATURE_SMPATCH) == 1);
+}
+
 // ADR: op(31)=0 immlo(30:29) 10000 immhi(23:5) Rd; disp in bytes.
 static void adr_(uint8_t out[4], unsigned rd, int disp)
 {
@@ -19720,6 +19796,7 @@ int main(void)
     test_add_one_csel_fold();
     test_ldr_literal_const();
     test_v8pool_skip();
+    test_smpatch_placeholder();
     test_adr_fold();
     test_cssc_minmax();
     test_cssc_abs();
