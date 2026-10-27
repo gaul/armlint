@@ -797,6 +797,15 @@ struct armlint_state {
     size_t cbc_last_offset;
     char cbc_disasm[2][ARMLINT_FINDING_LINE_LEN];
 
+    // B.cond over the next instruction alone (imm19 == 2) pending that
+    // instruction, for the conditional-select fold
+    // (check_bcond_over_one): the branch's condition, offset and
+    // rendering.
+    bool hmk_active;
+    unsigned hmk_cond;
+    size_t hmk_offset;
+    char hmk_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Deferred sign-shift finding awaiting proof that NZCV is dead:
     // the LSR/ASR rewrite deletes the compare and sets no flags, the
     // same rule as the CSSC slot above. Dedicated rather than shared
@@ -7316,6 +7325,127 @@ bool check_bcond_cmp_bcond(armlint_state *state, const cs_insn *insn,
     }
     state->cbc_last_op = op;
     state->cbc_last_offset = offset;
+    return found;
+}
+
+// The conditional-select spelling of a branch over OP under COND --
+// the select keeps Rd when COND holds, as the taken branch did, and
+// otherwise produces what OP produced -- rendered into OUT, or false
+// when OP is none of the seven forms. Rd = 31 never folds: a MOV to
+// ZR is a no-op, an ADD to SP has no select. A W-form select writes
+// Wd on the keep path too, zeroing the top half of Xd where the
+// skipped instruction left it alone, so a W form folds only when that
+// half is already known zero (TOP_ZERO, from check_redundant_zext's
+// facts: a W-form write or narrow load of Xd with nothing writing it
+// since).
+static bool bcond_over_one_select(uint32_t op, unsigned cond, bool top_zero,
+                                  char *out, size_t out_len)
+{
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    unsigned rm = (op >> 16) & 0x1Fu;
+    bool is_64 = (op >> 31) != 0;
+    char w = is_64 ? 'x' : 'w';
+    const char *c = a64_cond_names[cond];
+    const char *nc = a64_cond_names[cond ^ 1u];
+    if (rd == 31u || (!is_64 && !top_zero)) {
+        return false;
+    }
+    if ((op & 0x7FE0FFE0u) == 0x2A0003E0u) {          // mov Rd, Rm (orr Rd, zr, Rm)
+        if (rm == rd) {
+            return false;                               // the no-op MOV
+        }
+        if (rm == 31u) {
+            snprintf(out, out_len, "csel %c%u, %c%u, %czr, %s", w, rd, w, rd,
+                     w, c);
+        } else {
+            snprintf(out, out_len, "csel %c%u, %c%u, %c%u, %s", w, rd, w, rd,
+                     w, rm, c);
+        }
+        return true;
+    }
+    if ((op & 0x7F800000u) == 0x52800000u) {          // movz Rd, #imm16, lsl #hw
+        unsigned imm = (op >> 5) & 0xFFFFu;
+        unsigned hw = (op >> 21) & 3u;
+        if (imm == 0) {
+            snprintf(out, out_len, "csel %c%u, %c%u, %czr, %s", w, rd, w, rd,
+                     w, c);
+            return true;
+        }
+        if (imm == 1u && hw == 0) {
+            snprintf(out, out_len, "csinc %c%u, %c%u, %czr, %s", w, rd, w,
+                     rd, w, c);
+            return true;
+        }
+        return false;
+    }
+    if ((op & 0x7F800000u) == 0x12800000u) {          // movn Rd, #imm16, lsl #hw
+        if (((op >> 5) & 0xFFFFu) != 0) {
+            return false;
+        }
+        snprintf(out, out_len, "csinv %c%u, %c%u, %czr, %s", w, rd, w, rd, w,
+                 c);
+        return true;
+    }
+    if ((op & 0x7FFFFC00u) == 0x11000400u && rn == rd) {   // add Rd, Rd, #1
+        snprintf(out, out_len, "cinc %c%u, %c%u, %s", w, rd, w, rd, nc);
+        return true;
+    }
+    if ((op & 0x7FE0FFE0u) == 0x4B0003E0u && rm == rd) {   // neg Rd, Rd
+        snprintf(out, out_len, "cneg %c%u, %c%u, %s", w, rd, w, rd, nc);
+        return true;
+    }
+    if ((op & 0x7FE0FFE0u) == 0x2A2003E0u && rm == rd) {   // mvn Rd, Rd
+        snprintf(out, out_len, "cinv %c%u, %c%u, %s", w, rd, w, rd, nc);
+        return true;
+    }
+    return false;
+}
+
+bool check_bcond_over_one(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->hmk_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    bool found = false;
+
+    // (2) Close: the instruction the pending branch steps over.
+    if (state->hmk_active) {
+        char select[ARMLINT_FINDING_LINE_LEN];
+        unsigned rd = op & 0x1Fu;
+        bool top_zero = rd < 31u && ((state->wzx_valid >> rd) & 1u) != 0
+            && state->wzx_zero_from[rd] <= 32u;
+        if (offset == state->hmk_offset + 4u
+                && bcond_over_one_select(op, state->hmk_cond, top_zero,
+                                         select, sizeof(select))) {
+            out->name = "B.cond over one instruction foldable into a "
+                "conditional select";
+            out->start_offset = state->hmk_offset;
+            out->insn_count = 2;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail), "-> %s", select);
+            snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+                state->hmk_disasm);
+            snprintf(out->lines[1], sizeof(out->lines[1]), "%s %s",
+                insn->mnemonic, insn->op_str);
+            found = true;
+        }
+        state->hmk_active = false;
+    }
+
+    // (1) Open: a B.cond proper (bit 4 = 0 excludes BC.cond) to the
+    //     instruction after next, under a real condition.
+    if ((op & 0xFF000010u) == 0x54000000u && (op & 0xFu) < 14u
+            && ((op >> 5) & 0x7FFFFu) == 2u) {
+        state->hmk_active = true;
+        state->hmk_cond = op & 0xFu;
+        state->hmk_offset = offset;
+        snprintf(state->hmk_disasm, sizeof(state->hmk_disasm), "%s %s",
+            insn->mnemonic, insn->op_str);
+    }
     return found;
 }
 
@@ -24065,6 +24195,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cmpbr_fold,
     check_ccmp_chain,
     check_bcond_cmp_bcond,
+    check_bcond_over_one,
     check_cmp_cmn_w,
     check_aut_ret,
     check_br_x30,

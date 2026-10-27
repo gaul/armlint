@@ -3105,6 +3105,70 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   a sparser equivalence sample, or rendering an inverted alias's
   condition uninverted fail within 3,000 programs.
 
+## B.cond over one instruction foldable into a conditional select
+
+* `cmp x10, x9 ; b.ge L ; mov x10, x9 ; L:` keeps x10 when it is
+  already at least x9 and otherwise copies x9 into it -- a maximum,
+  which `cmp x10, x9 ; csel x10, x10, x9, ge` computes with one
+  instruction and no branch. This is V8 Maglev's return sequence,
+  clamping the argument count to free to the formal parameter count,
+  once per return (Sparkplug's twin has used CSEL since 2024).
+  SpiderMonkey's wasm baseline compiler spells `select` the same way
+  (`cmp ; b.lo L ; mov Rd, Rm ; L:`) and a float compare as
+  `mov w0, #1 ; fcmp ; b.ge L ; mov w0, #0 ; L:`, which is
+  `fcmp ; csel w0, w0, wzr, ge` and, given the preceding MOV, a CSET.
+* The shape: a `B.cond` to the instruction after next (imm19 = 2) and,
+  between them, one of seven instructions a select spells with Rd kept
+  under the branch's condition: `mov Rd, Rm` -> `csel Rd, Rd, Rm,
+  cond`; `mov Rd, #0` (MOVZ, or a MOV from ZR) -> `csel Rd, Rd, zr,
+  cond`; `mov Rd, #1` -> `csinc Rd, Rd, zr, cond`; `mov Rd, #-1` (MOVN
+  #0) -> `csinv Rd, Rd, zr, cond`; `add Rd, Rd, #1` -> `cinc Rd, Rd,
+  !cond`; `neg Rd, Rd` -> `cneg Rd, Rd, !cond`; `mvn Rd, Rd` -> `cinv
+  Rd, Rd, !cond`. The three aliases are CSINC/CSNEG/CSINV of Rd with
+  itself under the inverse condition, which is how a disassembler
+  prints them. Two instructions become one and a branch disappears.
+* Nothing needs proving beyond the gate, with one exception: none of
+  the seven writes NZCV, reads memory or can fault, so the select
+  observes exactly the flags the branch read and leaves everything
+  else as the pair did -- except that a W-form select writes Wd on the
+  keep path too, zeroing the top half of Xd where the skipped
+  instruction left it alone. So a W form folds only when that half is
+  already known zero, by the per-register facts of the [redundant
+  zero-extension
+  check](#redundant-zero-extension-after-a-producer-that-already-zeroed-those-bits):
+  a W-form write or narrow load of Xd with nothing writing it since,
+  which is what precedes the wasm baseline's `mov w0, #1 ; fcmp ; b.ge
+  ; mov w0, #0` and most of its `select`s; `cmp w3, w4 ; b.lo ; mov
+  w2, w1` with w2 last written as x2 stays, since `csel w2, w2, w1, lo`
+  would clear x2's top half on the keep path. The fuzz harness found
+  this one: a build without the rule fails within 3,000 programs.
+  The finding spans the branch and the instruction, so a branch onto
+  the instruction from elsewhere -- a path on which it ran
+  unconditionally -- rejects it at the side-entry gate. Rd = 31 never
+  folds (a MOV to ZR is a no-op, an ADD #1 to SP has no select), nor
+  does `mov Rd, Rd` (the no-op its own check reports), nor any other
+  skipped instruction: a constant no select spells, an ADD to another
+  register, a load, a flag setter. A branch over two or more
+  instructions, BC.cond, and AL/NV are not the shape. A branch that is
+  decided (never or always taken) is reported by that check as well;
+  the select is still correct there.
+* Corpus (JetStream 3 JIT dumps and four static binaries): 65,442
+  findings and no other check moved -- V8 32,824 (32,283 of them
+  Maglev's return clamp), SpiderMonkey 32,120 (32,117 in wasm:
+  `select` and the float compares), go 368 (clamps such as
+  `cmp x6, #0 ; b.gt ; mov x6, xzr`), librustc_driver 58,
+  clang-24 63, uutils 9. LLVM's early if-conversion
+  takes nearly all of its own; what remains in its output is mostly a
+  move its heuristics left behind a predictable branch.
+* Verified by execution (`tools/rwfuzz csel`): 300,000 random programs
+  with planted branches over each of the seven forms and over the
+  shapes the fold refuses; every rewrite armlint reported
+  (724,647, 281,957 through an alias), applied as rendered,
+  ran natively against the original on six random states with
+  identical `x0..x7` and NZCV every time. Applying the select to the
+  303,266 hammocks it refused -- side entries -- changed the result
+  114,655 times.
+
 ## B.cond + CMP + B.cond foldable into CCMP + B.cond
 
 * `b.eq L ; cmp w8, #13 ; b.eq L` goes to L when the flags say equal

@@ -38,6 +38,8 @@ static csh g_handle;
 // and those tests are about the other check.
 static const char *g_uncounted;
 static const char *const kDeadWrite = "register write overwritten unread";
+static const char *const kHammock =
+    "B.cond over one instruction foldable into a conditional select";
 
 // Likewise check_branch_decided's findings, while set: several
 // fragments end in a branch their own instructions decide -- a compare
@@ -2079,8 +2081,10 @@ static void test_cmp_zero_branch(void)
         b_cond(&big[4], 0, 8);
         for (int i = 0; i < 14; i++) {
             // Distinct registers: a MOVZ overwriting the previous one's
-            // register unread would be a dead write, a finding of its own.
-            movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 1));
+            // register unread would be a dead write, a finding of its own;
+            // and no #0 or #1 first, which the branch over it would fold
+            // to a select, another finding of its own.
+            movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 2));
         }
         ret_(&big[8 + 14 * 4]);
         assert(run_zb_check(big, sizeof(big) - 4) == 1);
@@ -2333,8 +2337,9 @@ static void test_cmp_zero_branch(void)
         cmp_w_imm(&big[0], 0, 0);
         b_cond(&big[4], 0, 8);
         for (int i = 0; i < 16; i++) {
-            // Distinct registers, as above: no dead writes of their own.
-            movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 1));
+            // Distinct registers, as above: no dead writes of their own,
+            // and no select fold over the first.
+            movz_w(&big[8 + i * 4], 5u + (unsigned)i, (uint16_t)(i + 2));
         }
         ret_(&big[8 + 16 * 4]);
         assert(run_zb_check(big, sizeof(big) - 4) == 0);
@@ -8569,7 +8574,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 1);
@@ -8579,7 +8584,7 @@ static void test_mov_cmp_branch_bvs(void)
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 1, 8);
     adds_w(&code[12], 3, 4, 5);
-    movz_x(&code[16], 0, 1, 0);
+    movz_x(&code[16], 0, 2, 0);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 1);
 
@@ -8596,7 +8601,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     ret_(&code[16]);
     assert(run_named_check(code, 20, kBvs) == 1);
 
@@ -8604,7 +8609,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 0, 2);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 1);
@@ -8614,7 +8619,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_w_hw(&code[0], 0, 0x8000, 1);
     cmp_w_reg(&code[4], 2, 0);
     b_cond(&code[8], 1, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 1);
@@ -8623,7 +8628,7 @@ static void test_mov_cmp_branch_bvs(void)
     movn_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 1);
@@ -8632,7 +8637,7 @@ static void test_mov_cmp_branch_bvs(void)
     movn_w_hw(&code[0], 0, 0x8000, 1);
     cmp_w_reg(&code[4], 2, 0);
     b_cond(&code[8], 1, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 1);
@@ -8643,7 +8648,7 @@ static void test_mov_cmp_branch_bvs(void)
     movk_w(&code[4], 0, 0x7fff, 1);
     cmp_w_reg(&code[8], 2, 0);
     b_cond(&code[12], 0, 8);
-    movz_x(&code[16], 0, 1, 0);
+    movz_x(&code[16], 0, 2, 0);
     adds_w(&code[20], 3, 4, 5);
     ret_(&code[24]);
     assert(run_named_check(code, 28, kBvs) == 1);
@@ -8672,7 +8677,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 100, 0);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8681,7 +8686,7 @@ static void test_mov_cmp_branch_bvs(void)
     movn_x(&code[0], 0, 4, 0);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8690,7 +8695,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x1234, 0);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8701,7 +8706,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_w(&code[0], 0, 0xffff);
     cmp_w_reg(&code[4], 2, 0);
     b_cond(&code[8], 1, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8709,7 +8714,7 @@ static void test_mov_cmp_branch_bvs(void)
     movk_w(&code[4], 0, 0x3fff, 1);
     cmp_w_reg(&code[8], 2, 0);
     b_cond(&code[12], 0, 8);
-    movz_x(&code[16], 0, 1, 0);
+    movz_x(&code[16], 0, 2, 0);
     adds_w(&code[20], 3, 4, 5);
     ret_(&code[24]);
     assert(run_named_check(code, 28, kBvs) == 0);
@@ -8719,7 +8724,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 1);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8728,7 +8733,7 @@ static void test_mov_cmp_branch_bvs(void)
     movn_x(&code[0], 0, 0, 0);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8739,7 +8744,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 3, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8748,7 +8753,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_w_hw(&code[0], 0, 0x8000, 1);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8757,7 +8762,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 31, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8769,7 +8774,7 @@ static void test_mov_cmp_branch_bvs(void)
     cmp_x_reg(&code[4], 2, 0);
     nop_insn(&code[8]);
     b_cond(&code[12], 0, 8);
-    movz_x(&code[16], 0, 1, 0);
+    movz_x(&code[16], 0, 2, 0);
     adds_w(&code[20], 3, 4, 5);
     ret_(&code[24]);
     assert(run_named_check(code, 28, kBvs) == 0);
@@ -8778,7 +8783,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);
     b_cond(&code[16], 11, 8);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
@@ -8808,7 +8813,7 @@ static void test_mov_cmp_branch_bvs(void)
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
     bl_(&code[12], 0x100);
-    movz_x(&code[16], 0, 1, 0);
+    movz_x(&code[16], 0, 2, 0);
     ret_(&code[20]);
     assert(run_named_check(code, 24, kBvs) == 0);
 
@@ -8818,11 +8823,13 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 2, 0);
     b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 1, 0);
+    movz_x(&code[12], 0, 2, 0);         // a select fold of its own
     adds_w(&code[16], 3, 4, 5);
     cbz_cbnz(&code[20], 1, 0, 9, -4);
     ret_(&code[24]);
+    g_uncounted = kHammock;
     assert(run_buffer_check(code, 28) == 0);
+    g_uncounted = NULL;
     cbz_cbnz(&code[20], 1, 0, 9, -5);
     assert(run_buffer_check(code, 28) == 1);
 
@@ -14424,6 +14431,119 @@ static int cmpbr_range_case(int32_t byte_disp)
     return run_cmpbr_check(code, sizeof(code));
 }
 
+// check_bcond_over_one: a B.cond to the instruction after next over a
+// MOV (register, #0, #1, #-1), an ADD #1 in place, a NEG or an MVN in
+// place folds to one conditional select. The side-entry gate wants the
+// scanned buffer, so the driver loop runs.
+// FIRST, when nonzero, runs ahead of the pair: a producer of the
+// skipped instruction's register.
+static int hmk_case_after(uint32_t first, uint32_t skipped, unsigned cond)
+{
+    uint8_t code[20];
+    size_t n = 0;
+    if (first != 0) {
+        write_le32(&code[n], first);
+        n += 4;
+    }
+    b_cond(&code[n], cond, 8);
+    write_le32(&code[n + 4], skipped);
+    write_le32(&code[n + 8], 0xAB020020u);  // adds x0, x1, x2
+    ret_(&code[n + 12]);
+    return run_buffer_check(code, n + 16);
+}
+
+static int hmk_case(uint32_t skipped, unsigned cond)
+{
+    return hmk_case_after(0, skipped, cond);
+}
+
+// ldr wRD, [sp]: a W load, so the top half of xRD is known zero.
+static uint32_t hmk_w_load(unsigned rd)
+{
+    return 0xB94003E0u | rd;
+}
+
+static void test_bcond_over_one(void)
+{
+    // Each form, X width.
+    assert(hmk_case(0xAA0903EAu, 10) == 1);     // mov x10, x9     -> csel
+    assert(hmk_case(0xAA1F03EAu, 0) == 1);      // mov x10, xzr    -> csel zr
+    assert(hmk_case(0xD2800005u, 0) == 1);      // mov x5, #0      -> csel zr
+    assert(hmk_case(0xD2800025u, 1) == 1);      // mov x5, #1      -> csinc
+    assert(hmk_case(0x92800005u, 1) == 1);      // mov x5, #-1     -> csinv
+    assert(hmk_case(0x910004E7u, 9) == 1);      // add x7, x7, #1  -> cinc
+    assert(hmk_case(0xCB0303E3u, 4) == 1);      // neg x3, x3      -> cneg
+    assert(hmk_case(0xAA2303E3u, 4) == 1);      // mvn x3, x3      -> cinv
+
+    // The W forms write Wd on the keep path too, so they need the top
+    // half of Xd known zero: a W load ahead of the pair gives it.
+    assert(hmk_case_after(hmk_w_load(10), 0x2A0903EAu, 10) == 1);  // mov w10, w9
+    assert(hmk_case_after(hmk_w_load(5), 0x52800005u, 0) == 1);    // mov w5, #0
+    assert(hmk_case_after(hmk_w_load(5), 0x12800005u, 1) == 1);    // mov w5, #-1
+    assert(hmk_case_after(hmk_w_load(7), 0x110004E7u, 9) == 1);    // add w7, w7, #1
+    assert(hmk_case_after(hmk_w_load(8), 0x4B0803E8u, 4) == 1);    // neg w8, w8
+    assert(hmk_case_after(hmk_w_load(3), 0x2A2303E3u, 4) == 1);    // mvn w3, w3
+    assert(hmk_case(0x2A0903EAu, 10) == 0);     // mov w10, w9, nothing known
+    assert(hmk_case(0x52800005u, 0) == 0);      // mov w5, #0
+    assert(hmk_case(0x110004E7u, 9) == 0);      // add w7, w7, #1
+    // Another register's W load says nothing of this one, and an X-form
+    // write after the load forgets the fact.
+    assert(hmk_case_after(hmk_w_load(11), 0x2A0903EAu, 10) == 0);
+    {
+        uint8_t code[24];
+        write_le32(&code[0], hmk_w_load(10));
+        write_le32(&code[4], 0xAA0B03EAu);      // mov x10, x11
+        b_cond(&code[8], 10, 8);
+        write_le32(&code[12], 0x2A0903EAu);     // mov w10, w9
+        write_le32(&code[16], 0xAB020020u);
+        ret_(&code[20]);
+        DEAD_WRITES_UNCOUNTED(assert(run_buffer_check(code, 24) == 0));
+    }
+
+    // Not the forms: another constant, a shifted #1, an ADD to another
+    // register, a NEG or MVN of another register, a flag setter.
+    assert(hmk_case(0xD2800045u, 0) == 0);      // mov x5, #2
+    assert(hmk_case(0xD2A00025u, 0) == 0);      // mov x5, #1, lsl #16
+    assert(hmk_case(0x91000507u, 0) == 0);      // add x7, x8, #1
+    assert(hmk_case(0xCB0403E3u, 0) == 0);      // neg x3, x4
+    assert(hmk_case(0xAA2403E3u, 0) == 0);      // mvn x3, x4
+    assert(hmk_case(0xB10004E7u, 0) == 0);      // adds x7, x7, #1
+
+    // Rd = 31 is a no-op MOV or an ADD to SP; mov Rd, Rd is the no-op
+    // its own check reports.
+    assert(hmk_case(0xAA0903FFu, 0) == 0);      // mov xzr, x9
+    assert(hmk_case(0x910007FFu, 0) == 0);      // add sp, sp, #1
+    g_uncounted = "redundant MOV to self";
+    assert(hmk_case(0xAA0303E3u, 0) == 0);      // mov x3, x3
+    g_uncounted = NULL;
+
+    // The branch must step over exactly one instruction, under a
+    // condition, and be B.cond proper.
+    uint8_t code[20];
+    b_cond(&code[0], 10, 12);                   // over two
+    write_le32(&code[4], 0xAA0903EAu);
+    write_le32(&code[8], 0xAA0B03ECu);          // mov x12, x11
+    write_le32(&code[12], 0xAB020020u);
+    ret_(&code[16]);
+    assert(run_driver_check(code, 20, 0) == 0);
+    assert(hmk_case(0xAA0903EAu, 14) == 0);     // b.al
+    b_cond(&code[0], 10, 8);
+    write_le32(&code[4], 0xAA0903EAu);
+    write_le32(&code[8], 0xAB020020u);
+    ret_(&code[12]);
+    bc_cond(&code[0], 10, 8);
+    assert(run_driver_check(code, 16, 0) == 0);
+
+    // A branch onto the skipped instruction from elsewhere is a side
+    // entry: on that path the MOV ran unconditionally.
+    b_cond(&code[0], 10, 8);
+    write_le32(&code[4], 0xAA0903EAu);
+    write_le32(&code[8], 0xAB020020u);
+    cbz_w(&code[12], 5, -8);                    // cbz w5, 4
+    ret_(&code[16]);
+    assert(run_driver_check(code, 20, 0) == 0);
+}
+
 // check_bcond_cmp_bcond: a B.cond, a CMP/CMN a CCMP can repeat, and a
 // second B.cond that shares the first's target (OR) or sits where the
 // first lands (AND) fold to a CCMP in the first branch's slot. Only the
@@ -19957,6 +20077,7 @@ int main(void)
     test_cmpbr_fold();
     test_ccmp_chain();
     test_bcond_cmp_bcond();
+    test_bcond_over_one();
     test_sha3_fold();
     test_add_sub_imm_chain();
     test_extend_add_sub_fold();

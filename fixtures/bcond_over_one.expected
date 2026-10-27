@@ -1,0 +1,35 @@
+B.cond over one instruction foldable into a conditional select at offset: 0x4 <_main+0x4>: -> csel x10, x10, x9, ge (2 instructions)
+  b.ge #0xc
+  mov x10, x9
+
+B.cond over one instruction foldable into a conditional select at offset: 0x14 <_main+0x14>: -> csel w0, w0, wzr, ge (2 instructions)
+  b.ge #0x1c
+  mov w0, #0
+
+B.cond over one instruction foldable into a conditional select at offset: 0x20 <_main+0x20>: -> csinc x5, x5, xzr, ne (2 instructions)
+  b.ne #0x28
+  mov x5, #1
+
+B.cond over one instruction foldable into a conditional select at offset: 0x2c <_main+0x2c>: -> csinv w6, w6, wzr, eq (2 instructions)
+  b.eq #0x34
+  mov w6, #-1
+
+B.cond over one instruction foldable into a conditional select at offset: 0x34 <_main+0x34>: -> cinc x7, x7, hi (2 instructions)
+  b.ls #0x3c
+  add x7, x7, #1
+
+B.cond over one instruction foldable into a conditional select at offset: 0x40 <_main+0x40>: -> cneg w8, w8, pl (2 instructions)
+  b.mi #0x48
+  neg w8, w8
+
+B.cond over one instruction foldable into a conditional select at offset: 0x48 <_main+0x48>: -> cinv x11, x11, vc (2 instructions)
+  b.vs #0x50
+  mvn x11, x11
+
+Optimization opportunities by type:
+       7  B.cond over one instruction foldable into a conditional select
+
+Optimization opportunities by function:
+       7  _main
+
+7 optimization opportunities in 35 instructions

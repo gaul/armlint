@@ -2228,6 +2228,37 @@ bool armlint_advance_pending_ccc(armlint_state *state,
 // foldable into CCMP + B.cond".
 bool check_bcond_cmp_bcond(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
+// Detect a conditional branch over a single instruction that a
+// conditional select spells in one: B.cond to the instruction after
+// next, then a MOV of a register or of #0, #1 or #-1, an ADD #1 of a
+// register to itself, a NEG or an MVN in place:
+//     cmp x10, x9 ; b.ge L ; mov x10, x9 ; L:
+//         -> cmp x10, x9 ; csel x10, x10, x9, ge
+//     fcmp s1, s0 ; b.ge L ; mov w0, #0 ; L:
+//         -> fcmp s1, s0 ; csel w0, w0, wzr, ge
+//     b.ls L ; add x7, x7, #1 ; L:   -> cinc x7, x7, hi
+// The select keeps Rd under the branch's condition, as the taken branch
+// did, and otherwise produces what the skipped instruction produced:
+// CSEL of the register or ZR, CSINC/CSINV of ZR for #1 and #-1, and the
+// CINC/CNEG/CINV aliases (CSINC/CSNEG/CSINV of Rd with itself) under
+// the inverse condition. Two instructions become one and a branch
+// disappears; nothing else changes, since none of the seven forms
+// writes NZCV or can fault, so no liveness proof is needed -- with one
+// exception: a W-form select writes Wd on the keep path too, zeroing
+// the top half of Xd where the skipped instruction left it alone, so a
+// W form folds only when check_redundant_zext's facts say that half is
+// already zero (a W-form write or narrow load of Xd, nothing writing it
+// since), which is why this check precedes that one in the registry.
+// The finding spans the branch and the instruction, so a branch onto
+// the instruction from elsewhere rejects it at the side-entry gate.
+// Rd = 31 never folds (a MOV to ZR is a no-op, an ADD to SP has no
+// select), nor does `mov Rd, Rd`, nor BC.cond. V8's Maglev return
+// sequence and
+// SpiderMonkey's wasm baseline `select` and float compares are the
+// producers. Reported as "B.cond over one instruction foldable into a
+// conditional select".
+bool check_bcond_over_one(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
 // Detect a 64-bit compare of a value whose top half is known zero
 // against a constant just below 2^32, materialized by the instruction
 // before it -- `(uint64_t)x == UINT32_MAX` and its neighbours:

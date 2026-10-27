@@ -56,6 +56,8 @@
 //   cbc    check_bcond_cmp_bcond: put the CCMP/CCMN the finding renders
 //          in the first branch's slot and delete the compare; the second
 //          branch stays.
+//   hammock check_bcond_over_one: put the select the finding renders in
+//          the branch's slot and delete the instruction it stepped over.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -902,6 +904,43 @@ static void plant_cbc(void)
     body[nbody - 1].aim = or_shape ? reach : 0;
     push(edge_op());
     push(edge_op());
+}
+
+// csel: a B.cond over the next instruction, which is one of the forms a
+// select spells -- a MOV of a register or of #0, #1, #-1, an ADD #1, a
+// NEG or an MVN in place -- or, now and then, one it does not.
+static void plant_hammock(void)
+{
+    if (nbody + 4 > BODY_MAX) {
+        return;
+    }
+    unsigned d = body_reg(), m = body_reg();
+    bool x = rr(2) == 0;
+    // A W form needs the top half of Xd known zero; give it one, now
+    // and then an X write after it that forgets the fact.
+    if (!x && rr(3) != 0) {
+        push(rr(2) == 0 ? mov_w(d, m) : ldr_w(d, rr(64)));
+        if (rr(4) == 0) {
+            push(add_x(d, m, body_reg()));
+        }
+    }
+    push_branch(2, 0, rr(14), 0);
+    body[nbody - 1].aim = 2;
+    switch (rr(11)) {
+    case 0: push(x ? mov_x(d, m) : mov_w(d, m)); break;
+    case 1: push(x ? mov_x(d, 31) : mov_w(d, 31)); break;
+    case 2: push(x ? movz_x(d, 0, 0) : movz_w(d, 0, 0)); break;
+    case 3: push(x ? movz_x(d, 1, 0) : movz_w(d, 1, 0)); break;
+    case 4: push(x ? movn_x(d, 0, 0) : movn_w(d, 0)); break;
+    case 5: push(x ? addi_x(d, d, 1) : addi_w(d, d, 1)); break;
+    case 6: push(x ? neg_x(d, d) : neg_w(d, d)); break;
+    case 7: push(x ? 0xAA2003E0u | d << 16 | d : 0x2A2003E0u | d << 16 | d);
+            break;                                      // mvn Rd, Rd
+    case 8: push(x ? movz_x(d, 2u + rr(100), 0) : movz_w(d, 2u + rr(100), 0));
+            break;
+    case 9: push(x ? addi_x(d, m, 1) : addi_w(d, m, 1)); break;
+    default: push(filler()); break;
+    }
 }
 
 static void gen_body(void (*plant)(void))
@@ -1965,6 +2004,141 @@ static bool cbc_control(int i, uint32_t *alt)
     return true;
 }
 
+// csel: the select a hammock finding renders -- "-> csel x10, x10, x9,
+// ge", "-> csinc x5, x5, xzr, ne", "-> cinc x7, x7, hi" and their kin
+// -- as a word.
+static bool csel_word(const char *detail, uint32_t *w)
+{
+    char text[ARMLINT_FINDING_DETAIL_LEN], mnem[8], w1, w2, w3, cname[4];
+    unsigned d, n, m;
+    snprintf(text, sizeof(text), "%s", detail);
+    for (char *p = strstr(text, "zr,"); p != NULL; p = strstr(p, "zr,")) {
+        memcpy(p, "31,", 3);
+    }
+    if (sscanf(text, "-> %7s %c%u, %c%u, %c%u, %3s", mnem, &w1, &d, &w2, &n,
+               &w3, &m, cname) == 8) {
+        int c = cond_from_name(cname);
+        if (c < 0 || d > 31u || n > 31u || m > 31u || w1 != w2 || w2 != w3) {
+            return false;
+        }
+        uint32_t base;
+        if (strcmp(mnem, "csel") == 0) {
+            base = 0x1A800000u;
+        } else if (strcmp(mnem, "csinc") == 0) {
+            base = 0x1A800400u;
+        } else if (strcmp(mnem, "csinv") == 0) {
+            base = 0x5A800000u;
+        } else {
+            return false;
+        }
+        *w = (w1 == 'x' ? 0x80000000u : 0) | base | m << 16
+            | (unsigned)c << 12 | n << 5 | d;
+        return true;
+    }
+    if (sscanf(text, "-> %7s %c%u, %c%u, %3s", mnem, &w1, &d, &w2, &n, cname)
+            == 6) {
+        int c = cond_from_name(cname);
+        if (c < 0 || d > 31u || n > 31u || w1 != w2) {
+            return false;
+        }
+        uint32_t base;
+        if (strcmp(mnem, "cinc") == 0) {
+            base = 0x1A800400u;
+        } else if (strcmp(mnem, "cneg") == 0) {
+            base = 0x5A800400u;
+        } else if (strcmp(mnem, "cinv") == 0) {
+            base = 0x5A800000u;
+        } else {
+            return false;
+        }
+        // The aliases invert the condition they print.
+        *w = (w1 == 'x' ? 0x80000000u : 0) | base | n << 16
+            | ((unsigned)c ^ 1u) << 12 | n << 5 | d;
+        return true;
+    }
+    return false;
+}
+
+// csel: the select takes the branch's slot and the skipped instruction
+// deletes.
+static bool hammock_apply(const hit_t *h, uint32_t *code)
+{
+    size_t br = h->start;
+    uint32_t w;
+    if (h->count != 2u || !in_body(br, br + 1u)
+            || (code[br] & 0xFF000010u) != 0x54000000u
+            || !csel_word(h->detail, &w)) {
+        return false;
+    }
+    code[br] = w;
+    code[br + 1u] = NOP;
+    return true;
+}
+
+static size_t hammock_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+// Special: the in-place forms (CINC/CNEG/CINV), whose alias prints the
+// inverted condition.
+static bool hammock_special(const hit_t *h)
+{
+    return strncmp(h->detail, "-> ci", 5) == 0 || strncmp(h->detail, "-> cn", 5) == 0;
+}
+
+// The select for a skipped word, as the check spells it, or 0.
+static uint32_t csel_for(uint32_t op, unsigned cond)
+{
+    unsigned d = op & 31u, n = (op >> 5) & 31u, m = (op >> 16) & 31u;
+    uint32_t sf = op & 0x80000000u;
+    if (d == 31u) {
+        return 0;
+    }
+    if ((op & 0x7FE0FFE0u) == 0x2A0003E0u) {
+        return m == d ? 0 : sf | 0x1A800000u | m << 16 | cond << 12 | d << 5 | d;
+    }
+    if ((op & 0x7F800000u) == 0x52800000u) {
+        unsigned imm = (op >> 5) & 0xFFFFu, hw = (op >> 21) & 3u;
+        if (imm == 0) {
+            return sf | 0x1A800000u | 31u << 16 | cond << 12 | d << 5 | d;
+        }
+        return imm == 1u && hw == 0
+            ? sf | 0x1A800400u | 31u << 16 | cond << 12 | d << 5 | d : 0;
+    }
+    if ((op & 0x7F800000u) == 0x12800000u) {
+        return ((op >> 5) & 0xFFFFu) == 0
+            ? sf | 0x5A800000u | 31u << 16 | cond << 12 | d << 5 | d : 0;
+    }
+    if ((op & 0x7FFFFC00u) == 0x11000400u && n == d) {
+        return sf | 0x1A800400u | d << 16 | cond << 12 | d << 5 | d;
+    }
+    if ((op & 0x7FE0FFE0u) == 0x4B0003E0u && m == d) {
+        return sf | 0x5A800400u | d << 16 | cond << 12 | d << 5 | d;
+    }
+    if ((op & 0x7FE0FFE0u) == 0x2A2003E0u && m == d) {
+        return sf | 0x5A800000u | d << 16 | cond << 12 | d << 5 | d;
+    }
+    return 0;
+}
+
+// Control: fold any B.cond over one instruction with a select, side
+// entry or not and whatever the top half of a W form's register holds.
+static bool hammock_control(int i, uint32_t *alt)
+{
+    if (i + 1 >= epi_start || (prog[i] & 0xFF000010u) != 0x54000000u
+            || (prog[i] & 15u) >= 14u || ((prog[i] >> 5) & 0x7FFFFu) != 2u) {
+        return false;
+    }
+    uint32_t w = csel_for(prog[i + 1], prog[i] & 15u);
+    if (w == 0) {
+        return false;
+    }
+    alt[i] = w;
+    alt[i + 1] = NOP;
+    return true;
+}
+
 // split: "-> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8"
 // replaces the chain and its ADD/SUB, the two immediates taking the
 // span's last two words and the chain's other words deleted.
@@ -2128,6 +2302,10 @@ static const mode_t_ modes[] = {
     { "cbc", { "B.cond + CMP + B.cond foldable into CCMP + B.cond", NULL },
       "sharing a target", plant_cbc, cbc_apply, cbc_slot, cbc_special,
       cbc_control },
+    { "hammock", { "B.cond over one instruction foldable into a conditional "
+                   "select", NULL },
+      "through an alias", plant_hammock, hammock_apply, hammock_slot,
+      hammock_special, hammock_control },
 };
 
 static bool wanted(const char *name)
@@ -2143,7 +2321,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz|split|cbc\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz|split|cbc|hammock\n");
 }
 
 int main(int argc, char **argv)
