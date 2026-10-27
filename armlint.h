@@ -2196,6 +2196,38 @@ bool armlint_advance_pending_ccc(armlint_state *state,
                                  const cs_insn *insn,
                                  size_t offset, armlint_finding *out);
 
+// Detect two conditional branches a conditional compare can merge:
+// a B.cond, directly after it a CMP/CMN that a CCMP/CCMN can repeat
+// (an unshifted immediate up to 31, or a plain register), and directly
+// after that a second B.cond, where either both branches go to one
+// place (OR):
+//     b.eq L ; cmp w8, #13 ; b.eq L   -> ccmp w8, #13, #4, ne ; b.eq L
+// or the first skips the second's compare and branch (AND):
+//     b.lt S ; cmp w1, #5 ; b.lt L ; S:
+//         -> ccmp w1, #5, #0, ge ; b.lt L
+// The CCMP takes the first branch's slot and compares under the
+// complement of its condition; when the first branch would have been
+// taken it supplies the flags under which the second branch's condition
+// holds (OR) or fails (AND) instead, so the second branch goes where the
+// first did. One instruction and one branch fewer per link, and a chain
+// of n compares folds link by link: the branch that closes one finding
+// opens the next.
+//
+// Only one exit sees the constant flags where the first branch's own
+// flags used to arrive -- the shared target for OR, the fall-through
+// for AND -- so NZCV must die unread there, by the scan at a target
+// nzcv_dead_at_target runs for the CMPBR fold (the other exit is
+// reached through the real compare alone, whose flags the CCMP
+// reproduces exactly). The finding spans the two branches and the
+// compare, so a branch onto the compare or the second branch rejects
+// it at the side-entry gate; one onto the first branch is harmless,
+// since the CCMP tests what it tested. A zero test in either slot is
+// left to the checks that own it -- the CBZ/CBNZ and TBZ/TBNZ folds,
+// or the decided-branch check -- under every condition but GT and LE.
+// Silent without a scanned buffer. Reported as "B.cond + CMP + B.cond
+// foldable into CCMP + B.cond".
+bool check_bcond_cmp_bcond(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out);
 // Detect a 64-bit compare of a value whose top half is known zero
 // against a constant just below 2^32, materialized by the instruction
 // before it -- `(uint64_t)x == UINT32_MAX` and its neighbours:

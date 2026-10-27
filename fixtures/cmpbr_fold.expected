@@ -2,6 +2,11 @@ CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x0 <_main>: -> c
   cmp x1, x2
   b.gt 0x74
 
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x4 <_main+0x4>: -> ccmp w3, w4, #0x0, le ; b.ls 0x74 (3 instructions)
+  b.gt #0x74
+  cmp w3, w4
+  b.ls #0x74
+
 CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x8 <_main+0x8>: -> cbls w3, w4, 0x74 (2 instructions)
   cmp w3, w4
   b.ls 0x74
@@ -18,9 +23,19 @@ CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x20 <_main+0x20>
   cmp x7, #0x3e
   b.le 0x74
 
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x24 <_main+0x24>: -> ccmp x8, #0x0, #0x0, gt ; b.gt 0x74 (3 instructions)
+  b.le #0x74
+  cmp x8, #0
+  b.gt #0x74
+
 CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x28 <_main+0x28>: -> cbgt x8, #0x0, 0x74 (2 instructions)
   cmp x8, #0
   b.gt 0x74
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x2c <_main+0x2c>: -> ccmp x9, xzr, #0x4, le ; b.le 0x74 (3 instructions)
+  b.gt #0x74
+  cmp x9, xzr
+  b.le #0x74
 
 CMP + B.cond foldable to compare-and-branch (CMPBR) at offset: 0x30 <_main+0x30>: -> cble x9, #0x0, 0x74 (2 instructions)
   cmp x9, xzr
@@ -30,11 +45,27 @@ compare-zero branch foldable into CBZ/CBNZ at offset: 0x38 <_main+0x38>: -> cbz 
   cmp x10, #0
   b.eq 0x74
 
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x3c <_main+0x3c>: -> ccmp x11, x12, #0x8, ne ; b.mi 0x74 (3 instructions)
+  b.eq #0x74
+  cmp x11, x12
+  b.mi #0x74
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x5c <_main+0x5c>: -> ccmn x17, #0x4, #0x0, le ; b.gt 0x74 (3 instructions)
+  b.gt #0x74
+  cmn x17, #4
+  b.gt #0x74
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x64 <_main+0x64>: -> ccmp x18, x19, #0x0, le ; b.gt 0x74 (3 instructions)
+  b.gt #0x74
+  cmp x18, x19
+  b.gt #0x74
+
 Optimization opportunities by type:
        7  CMP + B.cond foldable to compare-and-branch (CMPBR)
+       6  B.cond + CMP + B.cond foldable into CCMP + B.cond
        1  compare-zero branch foldable into CBZ/CBNZ
 
 Optimization opportunities by function:
-       8  _main
+      14  _main
 
-8 optimization opportunities in 37 instructions
+14 optimization opportunities in 37 instructions

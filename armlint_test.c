@@ -14424,6 +14424,158 @@ static int cmpbr_range_case(int32_t byte_disp)
     return run_cmpbr_check(code, sizeof(code));
 }
 
+// check_bcond_cmp_bcond: a B.cond, a CMP/CMN a CCMP can repeat, and a
+// second B.cond that shares the first's target (OR) or sits where the
+// first lands (AND) fold to a CCMP in the first branch's slot. Only the
+// merged exit -- the shared target for OR, the fall-through for AND --
+// must prove NZCV dead, so the driver loop runs (the target scan and
+// the side-entry gate want the scanned buffer).
+static void cbc_kill_w(uint8_t out[4])
+{
+    write_le32(out, 0x2B020020u);           // adds w0, w1, w2
+}
+
+static void cbc_read_w(uint8_t out[4])
+{
+    write_le32(out, 0x1A820023u);           // csel w3, w1, w2, eq
+}
+
+// A reader no zero test of w2 decides (w2 != 0 says nothing of LT);
+// both write w3, which nothing overwrites, so no dead write joins in.
+static void cbc_read_lt_w(uint8_t out[4])
+{
+    write_le32(out, 0x1A82B023u);           // csel w3, w1, w2, lt
+}
+
+// OR: b.eq L ; cmp w2, #imm ; b.eq L, with L at +28 from the start;
+// what sits at the fall-through (16) and the target (28) is the
+// caller's.
+static void cbc_or_frame(uint8_t code[36], unsigned imm, unsigned cond2)
+{
+    cmp_w_imm(&code[0], 1, 3);
+    b_cond(&code[4], 0, 24);                // b.eq 28
+    cmp_w_imm(&code[8], 2, imm);
+    b_cond(&code[12], cond2, 16);           // b.<cond2> 28
+    ret_(&code[16]);
+    write_le32(&code[20], 0xD503201Fu);     // nop
+    write_le32(&code[24], 0xD503201Fu);
+    cbc_kill_w(&code[28]);
+    ret_(&code[32]);
+}
+
+// AND: b.ge S ; cmp x3, x4 ; b.lt L ; S: with S the fall-through at 16
+// and L at 24.
+static void cbc_and_frame(uint8_t code[32])
+{
+    cmp_x_reg(&code[0], 1, 2);
+    b_cond(&code[4], 10, 12);               // b.ge 16
+    cmp_x_reg(&code[8], 3, 4);
+    b_cond(&code[12], 11, 12);              // b.lt 24
+    cbc_kill_w(&code[16]);
+    ret_(&code[20]);
+    cbc_read_w(&code[24]);                  // the target may read: it is
+    ret_(&code[28]);                        // reached through the compare
+}
+
+static void test_bcond_cmp_bcond(void)
+{
+    uint8_t code[48];
+
+    // OR, immediate form: one finding.
+    cbc_or_frame(code, 13, 0);
+    assert(run_driver_check(code, 36, 0) == 1);
+
+    // AND, register form, the target reading the flags: one finding.
+    cbc_and_frame(code);
+    assert(run_driver_check(code, 32, 0) == 1);
+
+    // OR with a reader at the shared target: the constant flags would
+    // reach it.
+    cbc_or_frame(code, 13, 0);
+    cbc_read_w(&code[28]);
+    assert(run_driver_check(code, 36, 0) == 0);
+
+    // AND with a reader at the fall-through: the same.
+    cbc_and_frame(code);
+    cbc_read_w(&code[16]);
+    assert(run_driver_check(code, 32, 0) == 0);
+
+    // The CCMP immediate is five bits: 31 folds, 32 does not.
+    cbc_or_frame(code, 31, 0);
+    assert(run_driver_check(code, 36, 0) == 1);
+    cbc_or_frame(code, 32, 0);
+    assert(run_driver_check(code, 36, 0) == 0);
+
+    // A shifted or extended register has no CCMP spelling.
+    cbc_and_frame(code);
+    write_le32(&code[8], 0xEB040C7Fu);      // cmp x3, x4, lsl #3
+    assert(run_driver_check(code, 32, 0) == 0);
+    cbc_and_frame(code);
+    write_le32(&code[8], 0xEB24407Fu);      // cmp x3, w4, uxtw
+    assert(run_driver_check(code, 32, 0) == 0);
+
+    // SP cannot be a CCMP operand.
+    cbc_or_frame(code, 13, 0);
+    cmp_x_imm(&code[8], 31, 13);            // cmp sp, #13
+    assert(run_driver_check(code, 36, 0) == 0);
+
+    // A zero test under EQ is the CBZ fold's; under GT it is this one's.
+    // A reader at the fall-through keeps the CBZ fold out (it needs
+    // both edges dead) without touching this fold's one proof.
+    cbc_or_frame(code, 0, 0);
+    cbc_read_lt_w(&code[16]);
+    assert(run_driver_check(code, 36, 0) == 0);
+    cbc_or_frame(code, 0, 12);
+    cbc_read_lt_w(&code[16]);
+    assert(run_driver_check(code, 36, 0) == 1);
+
+    // A CMN folds to a CCMN.
+    cbc_or_frame(code, 13, 0);
+    cmn_w_imm(&code[8], 2, 5);
+    assert(run_driver_check(code, 36, 0) == 1);
+
+    // A branch onto the compare is a side entry.
+    cbc_or_frame(code, 13, 0);
+    cbz_w(&code[20], 5, -12);               // cbz w5, 8
+    assert(run_driver_check(code, 36, 0) == 0);
+
+    // The first branch skipping only the compare lands on the second
+    // branch: a side entry too, and not the shape.
+    cbc_or_frame(code, 13, 0);
+    b_cond(&code[4], 0, 8);
+    assert(run_driver_check(code, 36, 0) == 0);
+
+    // BC.cond in either slot is left alone.
+    cbc_or_frame(code, 13, 0);
+    bc_cond(&code[4], 0, 24);
+    assert(run_driver_check(code, 36, 0) == 0);
+    cbc_or_frame(code, 13, 0);
+    bc_cond(&code[12], 0, 16);
+    assert(run_driver_check(code, 36, 0) == 0);
+
+    // Both branches to the next instruction is neither shape: the one
+    // finding is check_branch_to_next's on the second.
+    cbc_or_frame(code, 13, 0);
+    b_cond(&code[4], 0, 12);
+    b_cond(&code[12], 0, 4);
+    assert(run_driver_check(code, 36, 0) == 1);
+
+    // Three compares to one target: two links, the middle branch
+    // closing one finding and opening the next.
+    cmp_w_imm(&code[0], 1, 3);
+    b_cond(&code[4], 0, 32);                // b.eq 36
+    cmp_w_imm(&code[8], 1, 4);
+    b_cond(&code[12], 0, 24);               // b.eq 36
+    cmp_w_imm(&code[16], 1, 5);
+    b_cond(&code[20], 0, 16);               // b.eq 36
+    ret_(&code[24]);
+    write_le32(&code[28], 0xD503201Fu);
+    write_le32(&code[32], 0xD503201Fu);
+    cbc_kill_w(&code[36]);
+    ret_(&code[40]);
+    assert(run_driver_check(code, 44, 0) == 2);
+}
+
 static void test_cmpbr_fold(void)
 {
     uint8_t code[24];
@@ -19804,6 +19956,7 @@ int main(void)
     test_cssc_popcount();
     test_cmpbr_fold();
     test_ccmp_chain();
+    test_bcond_cmp_bcond();
     test_sha3_fold();
     test_add_sub_imm_chain();
     test_extend_add_sub_fold();

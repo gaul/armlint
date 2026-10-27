@@ -91,9 +91,10 @@ the argument against each.
   the target: the compare-and-branch fold (`-m cmpbr`), whose producer
   is a general two-register compare that clang's three-way comparator
   really does read again at the branch target; the `CCMP` chain and
-  `CMP`-to-`CMN` folds; and the zero-compare `CBZ`/`CBNZ` and sign-bit
-  `TBZ`/`TBNZ` folds, since HotSpot's lock fast paths return their
-  result to the branch target in the flags. Unlike the fall-through
+  `CMP`-to-`CMN` folds; the two-branch `CCMP` fold, whose merged exit
+  is where the first branch's flags used to land; and the zero-compare
+  `CBZ`/`CBNZ` and sign-bit `TBZ`/`TBNZ` folds, since HotSpot's lock
+  fast paths return their result to the branch target in the flags. Unlike the fall-through
   scan, the one at the target follows a `B` to its destination and a
   `CBZ`/`CBNZ`/`TBZ`/`TBNZ` down both edges, within fixed bounds.
 
@@ -167,6 +168,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #INT_MIN` or `#INT_MAX` + `cmp` + `b.eq`/`b.ne`](analyses.md#mov--cmp--beqne-against-int_minint_max-foldable-to-bvsbvc) | `cmp xzr, Xn` or `cmn Xn, #1` + `b.vs`/`b.vc` |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` (sign-crossed for `#-C`) |
 | [`cmp`/`cmn` + `ccmp`/`ccmn` on one register + `b.cond`/`csel`, one compare deciding it](analyses.md#cmp--ccmp-chain-decidable-by-one-compare) | that `cmp`/`cmn` (or `cbz`/`cbnz`) with the reader's condition adjusted |
+| [`b.cond` + `cmp`/`cmn` + `b.cond`, sharing a target or the first skipping the pair](analyses.md#bcond--cmp--bcond-foldable-into-ccmp--bcond) | `ccmp`/`ccmn Rn, op, #nzcv, <inverse cond>` in the first branch's slot (one instruction and one branch fewer per link) |
 | [`mov #(2^32-k)` + `cmp Xn` of a zero-extended value, read only through Z and C](analyses.md#mov--cmp-of-a-32-bit-value-against-232-k-foldable-to-w-form-cmn) | `cmn Wn, #k` |
 | [`mov #1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinc Rd, Rn, wzr, cc` (`cset` when the other operand is ZR) |
 | [`mov #-1` + `csel`](analyses.md#mov-1--csel-foldable-to-csinccset) | `csinv Rd, Rn, wzr, cc` (`csetm` when the other operand is ZR) |

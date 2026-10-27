@@ -1,0 +1,42 @@
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x4 <_main+0x4>: -> ccmp w1, #0x4, #0x4, ne ; b.eq 0xf4 (3 instructions)
+  b.eq #0xf4
+  cmp w1, #4
+  b.eq #0xf4
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x18 <_main+0x18>: -> ccmp x3, x4, #0x0, gt ; b.lt 0xec (3 instructions)
+  b.le #0x24
+  cmp x3, x4
+  b.lt #0xec
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x2c <_main+0x2c>: -> ccmp w8, #0x16, #0x4, ne ; b.eq 0xf4 (3 instructions)
+  b.eq #0xf4
+  cmp w8, #0x16
+  b.eq #0xf4
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x34 <_main+0x34>: -> ccmp w8, #0x1d, #0x4, ne ; b.eq 0xf4 (3 instructions)
+  b.eq #0xf4
+  cmp w8, #0x1d
+  b.eq #0xf4
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x48 <_main+0x48>: -> ccmn w9, #0x5, #0x2, ls ; b.hi 0xf4 (3 instructions)
+  b.hi #0xf4
+  cmn w9, #5
+  b.hi #0xf4
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x5c <_main+0x5c>: -> ccmp w12, #0x0, #0x0, ne ; b.gt 0xf4 (3 instructions)
+  b.eq #0xf4
+  cmp w12, #0
+  b.gt #0xf4
+
+compare-zero branch foldable into CBZ/CBNZ at offset: 0xbc <_main+0xbc>: -> cbnz w21, 0xf4 (2 instructions)
+  cmp w21, #0
+  b.ne 0xf4
+
+Optimization opportunities by type:
+       6  B.cond + CMP + B.cond foldable into CCMP + B.cond
+       1  compare-zero branch foldable into CBZ/CBNZ
+
+Optimization opportunities by function:
+       7  _main
+
+7 optimization opportunities in 63 instructions

@@ -780,6 +780,23 @@ struct armlint_state {
     unsigned pending_ccc_window;
     armlint_finding pending_ccc_finding;
 
+    // B.cond pending the CMP/CMN right after it and a second B.cond
+    // right after that, for the conditional-compare fold
+    // (check_bcond_cmp_bcond). cbc_cond and cbc_target are the first
+    // branch's, cbc_cmp_op the compare's word once it has arrived
+    // (cbc_have_cmp), cbc_disasm the two renderings for the finding.
+    // cbc_last_op is the word before the current instruction (at
+    // cbc_last_offset), the flag writer a first branch reads.
+    bool cbc_active;
+    bool cbc_have_cmp;
+    unsigned cbc_cond;
+    int64_t cbc_target;
+    size_t cbc_offset;
+    uint32_t cbc_cmp_op;
+    uint32_t cbc_last_op;
+    size_t cbc_last_offset;
+    char cbc_disasm[2][ARMLINT_FINDING_LINE_LEN];
+
     // Deferred sign-shift finding awaiting proof that NZCV is dead:
     // the LSR/ASR rewrite deletes the compare and sets no flags, the
     // same rule as the CSSC slot above. Dedicated rather than shared
@@ -7133,6 +7150,173 @@ bool check_ccmp_chain(armlint_state *state, const cs_insn *insn,
             "%s %s", insn->mnemonic, insn->op_str);
     }
     return false;
+}
+
+// The NZCV value under which COND holds, for the flags a CCMP supplies
+// when its own condition fails: Z for EQ, C for HS, N for MI, V for VS,
+// C alone for HI (C set, Z clear), N alone for LT (N and V differ), Z
+// for LE, and all clear for each complement and for GE and GT, which
+// hold when N equals V and Z is clear. The flags under which COND fails
+// are those under which its complement holds. AL/NV are not conditions
+// and never reach here.
+static unsigned nzcv_holding(unsigned cond)
+{
+    static const unsigned nzcv[14] = {
+        4, 0, 2, 0, 8, 0, 1, 0, 2, 0, 0, 8, 0, 4,
+    };
+    return cond < 14u ? nzcv[cond] : 0;
+}
+
+// A CMP/CMN a CCMP/CCMN can repeat: the immediate form unshifted with
+// a comparand up to 31 (and Rn not SP, which CCMP cannot name), or the
+// shifted-register form with LSL #0 (CCMP has no shifted or extended
+// operand). TST never: there is no conditional ANDS.
+static bool ccmp_can_repeat(uint32_t op)
+{
+    if ((op & 0x3F80001Fu) == 0x3100001Fu) {          // cmp/cmn Rn, #imm12
+        return ((op >> 22) & 1u) == 0 && ((op >> 10) & 0xFFFu) <= 31u
+            && ((op >> 5) & 0x1Fu) != 31u;
+    }
+    if ((op & 0x3F20001Fu) == 0x2B00001Fu) {          // cmp/cmn Rn, Rm, shift
+        return ((op >> 22) & 3u) == 0 && ((op >> 10) & 0x3Fu) == 0;
+    }
+    return false;
+}
+
+// A zero test -- CMP/CMN of #0 or ZR, TST Rn, Rn -- ahead of a
+// condition other checks own, which this fold leaves to them rather
+// than report twice: EQ/NE and the sign conditions are the CBZ/CBNZ
+// and TBZ/TBNZ folds', HI/LS after a SUBS as well, and the rest (HS/LO
+// and VS/VC, HI/LS after a CMN or TST) are decided by a zero test,
+// check_branch_decided's. GT and LE alone are this fold's.
+static bool zero_test_owned_elsewhere(uint32_t op, unsigned cond)
+{
+    bool zero;
+    if ((op & 0x3F80001Fu) == 0x3100001Fu) {              // cmp/cmn #imm12
+        zero = ((op >> 10) & 0xFFFu) == 0 && ((op >> 22) & 1u) == 0;
+    } else if ((op & 0x3F20001Fu) == 0x2B00001Fu) {       // cmp/cmn Rn, Rm
+        zero = ((op >> 16) & 0x1Fu) == 31u;
+    } else if ((op & 0x7F20001Fu) == 0x6A00001Fu) {       // tst Rn, Rm
+        zero = ((op >> 16) & 0x1Fu) == ((op >> 5) & 0x1Fu);
+    } else {
+        return false;
+    }
+    return zero && cond != 12u && cond != 13u;
+}
+
+bool check_bcond_cmp_bcond(armlint_state *state, const cs_insn *insn,
+                           size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->cbc_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    // B.cond proper: bit 4 = 0 excludes BC.cond, whose consistency hint
+    // a CCMP cannot carry.
+    bool is_bcond = (op & 0xFF000010u) == 0x54000000u;
+    unsigned cond = op & 0xFu;
+    int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+    imm19 = (imm19 ^ 0x40000) - 0x40000;
+    bool found = false;
+
+    if (state->cbc_active && state->cbc_have_cmp) {
+        // (3) Close: the second branch, directly after the compare.
+        int64_t t2 = (int64_t)offset + (int64_t)imm19 * 4;
+        int64_t after = (int64_t)offset + 4;
+        int64_t t1 = state->cbc_target;
+        // OR: both branches go to one place. AND: the first skips the
+        // second's compare and branch, landing where they fall through.
+        // A second branch to the next instruction is neither (it is a
+        // no-op, check_branch_to_next's).
+        bool is_or = t1 == t2 && t2 != after;
+        bool is_and = t1 == after && t2 != after;
+        if (is_bcond && cond < 14u && offset == state->cbc_offset + 8u
+                && (is_or || is_and)
+                && !zero_test_owned_elsewhere(state->cbc_cmp_op, cond)
+                // Only the merged exit sees the CCMP's constant flags
+                // where the first branch's own used to arrive: the
+                // shared target for OR, the fall-through for AND. The
+                // other exit is reached through the real compare alone,
+                // whose flags the CCMP reproduces exactly.
+                && nzcv_dead_at_target(state, is_or ? t2 : after)) {
+            uint32_t c = state->cbc_cmp_op;
+            bool is_64 = (c >> 31) != 0;
+            bool is_cmn = ((c >> 30) & 1u) == 0;
+            bool imm_form = (c & 0x3F80001Fu) == 0x3100001Fu;
+            unsigned rn = (c >> 5) & 0x1Fu;
+            unsigned rm = (c >> 16) & 0x1Fu;
+            unsigned imm = (c >> 10) & 0xFFFu;
+            char w_or_x = is_64 ? 'x' : 'w';
+            // The CCMP compares when the first branch would not have
+            // been taken; otherwise its constant makes the second
+            // branch's condition hold (OR) or fail (AND).
+            unsigned nzcv = nzcv_holding(is_or ? cond : cond ^ 1u);
+            uint64_t taddr = insn->address + (uint64_t)((int64_t)imm19 * 4);
+            char rm_name[8];
+            if (rm == 31u) {
+                snprintf(rm_name, sizeof(rm_name), "%czr", w_or_x);
+            } else {
+                snprintf(rm_name, sizeof(rm_name), "%c%u", w_or_x, rm);
+            }
+
+            out->name = "B.cond + CMP + B.cond foldable into CCMP + B.cond";
+            out->start_offset = state->cbc_offset;
+            out->insn_count = 3;
+            clear_finding_strings(out);
+            if (imm_form) {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, #0x%x, #0x%x, %s ; b.%s 0x%" PRIx64,
+                    is_cmn ? "ccmn" : "ccmp", w_or_x, rn, imm, nzcv,
+                    a64_cond_names[state->cbc_cond ^ 1u],
+                    a64_cond_names[cond], taddr);
+            } else {
+                snprintf(out->detail, sizeof(out->detail),
+                    "-> %s %c%u, %s, #0x%x, %s ; b.%s 0x%" PRIx64,
+                    is_cmn ? "ccmn" : "ccmp", w_or_x, rn, rm_name, nzcv,
+                    a64_cond_names[state->cbc_cond ^ 1u],
+                    a64_cond_names[cond], taddr);
+            }
+            snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+                state->cbc_disasm[0]);
+            snprintf(out->lines[1], sizeof(out->lines[1]), "%s",
+                state->cbc_disasm[1]);
+            snprintf(out->lines[2], sizeof(out->lines[2]), "%s %s",
+                insn->mnemonic, insn->op_str);
+            found = true;
+        }
+        state->cbc_active = false;
+    } else if (state->cbc_active) {
+        // (2) Extend: the compare directly after the first branch.
+        if (offset == state->cbc_offset + 4u && ccmp_can_repeat(op)) {
+            state->cbc_have_cmp = true;
+            state->cbc_cmp_op = op;
+            snprintf(state->cbc_disasm[1], sizeof(state->cbc_disasm[1]),
+                "%s %s", insn->mnemonic, insn->op_str);
+            return false;
+        }
+        state->cbc_active = false;
+    }
+
+    // (1) Open: a B.cond, which may be the one that just closed a
+    //     chain -- each link of a longer chain folds on its own. A
+    //     branch to the next instruction never opens (a no-op), nor
+    //     does AL/NV (not a condition), nor one that reads a zero test
+    //     another check owns, as for the second compare.
+    bool after_zero_test = state->cbc_last_offset + 4u == offset
+        && zero_test_owned_elsewhere(state->cbc_last_op, cond);
+    if (is_bcond && cond < 14u && imm19 != 1 && !after_zero_test) {
+        state->cbc_active = true;
+        state->cbc_have_cmp = false;
+        state->cbc_cond = cond;
+        state->cbc_target = (int64_t)offset + (int64_t)imm19 * 4;
+        state->cbc_offset = offset;
+        snprintf(state->cbc_disasm[0], sizeof(state->cbc_disasm[0]),
+            "%s %s", insn->mnemonic, insn->op_str);
+    }
+    state->cbc_last_op = op;
+    state->cbc_last_offset = offset;
+    return found;
 }
 
 bool check_aut_ret(armlint_state *state, const cs_insn *insn,
@@ -23880,6 +24064,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_cmp_cset_sign,
     check_cmpbr_fold,
     check_ccmp_chain,
+    check_bcond_cmp_bcond,
     check_cmp_cmn_w,
     check_aut_ret,
     check_br_x30,

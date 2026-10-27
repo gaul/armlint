@@ -10,10 +10,21 @@ compare whose flags are overwritten unread at offset: 0x20 <_main+0x20>: -> dele
 compare whose flags are overwritten unread at offset: 0x30 <_main+0x30>: -> delete; NZCV overwritten unread by cmp x4, #7 (1 instructions)
   ccmp x5, #2, #0, eq
 
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x38 <_main+0x38>: -> ccmp x6, #0x1, #0x4, le ; b.eq 0x88 (3 instructions)
+  b.gt #0x88
+  cmp x6, #1
+  b.eq #0x88
+
+B.cond + CMP + B.cond foldable into CCMP + B.cond at offset: 0x40 <_main+0x40>: -> ccmp x6, #0x2, #0x0, ne ; b.ne 0x88 (3 instructions)
+  b.eq #0x88
+  cmp x6, #2
+  b.ne #0x88
+
 Optimization opportunities by type:
        4  compare whose flags are overwritten unread
+       2  B.cond + CMP + B.cond foldable into CCMP + B.cond
 
 Optimization opportunities by function:
-       4  _main
+       6  _main
 
-4 optimization opportunities in 35 instructions
+6 optimization opportunities in 35 instructions

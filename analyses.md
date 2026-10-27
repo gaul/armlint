@@ -3105,6 +3105,79 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   a sparser equivalence sample, or rendering an inverted alias's
   condition uninverted fail within 3,000 programs.
 
+## B.cond + CMP + B.cond foldable into CCMP + B.cond
+
+* `b.eq L ; cmp w8, #13 ; b.eq L` goes to L when the flags say equal
+  and otherwise compares w8 with 13 and goes to L on that.
+  `ccmp w8, #13, #4, ne ; b.eq L` does the same with one instruction
+  and one branch fewer: the CCMP compares when the first branch would
+  not have been taken (NE) and otherwise supplies Z set, so the B.EQ
+  goes where the first branch went. This is the AND/OR idiom of
+  conditional compare -- Raymond Chen's "The AArch64 processor, part
+  16: Conditional execution" walks through it -- formed where a
+  compiler or JIT emitted the two branches instead.
+* The shape: a `B.cond`, directly after it a `CMP`/`CMN` that a
+  `CCMP`/`CCMN` can repeat -- the immediate form unshifted with a
+  comparand up to 31 and Rn not SP, or the shifted-register form with
+  LSL #0; `TST` never, there being no conditional ANDS -- and directly
+  after that a second `B.cond`, in one of two topologies. OR: both
+  branches go to one place, and the CCMP's constant makes the second
+  condition hold. AND: the first branch lands just past the second,
+  skipping its compare and branch, and the constant makes the second
+  condition fail, so the second branch falls through to where the
+  first went. The constant is Z for EQ, C for HS, N for MI, V for VS,
+  C alone for HI, N alone for LT, Z for LE, and zero for each
+  complement and for GE and GT; a condition fails under the constant
+  its complement holds under. BC.cond, AL/NV and a second branch to
+  the next instruction (a no-op) are left alone. A chain of n compares
+  folds link by link, the branch that closes one finding opening the
+  next: `cmp w8, #13 ; b.eq L ; cmp w8, #22 ; b.eq L ; cmp w8, #29 ;
+  b.eq L` reports twice and becomes `cmp w8, #13 ; ccmp w8, #22, #4,
+  ne ; ccmp w8, #29, #4, ne ; b.eq L`.
+* Only one exit sees the CCMP's constant where the first branch's own
+  flags used to arrive: the shared target for OR, the fall-through for
+  AND. The other exit is reached through the real compare alone, whose
+  flags the CCMP reproduces exactly. So NZCV must die unread at the
+  merged exit, proven by the scan at a target the [CMPBR
+  fold](#compare-and-branch-synthesis-feature-gated--m-cmpbr) uses,
+  which follows a B and both edges of a CBZ/CBNZ/TBZ/TBNZ; a reader at
+  the other exit is no objection. The finding spans the two branches
+  and the compare, so a branch onto the compare or the second branch
+  rejects it at the side-entry gate. One onto the first branch is
+  harmless, since the CCMP tests what the branch tested; a first
+  branch that skips only the compare lands on the second branch, which
+  the gate refuses as the side entry it is.
+* A zero test in either slot -- `CMP`/`CMN` of #0 or ZR, `TST Rn, Rn`
+  -- is left to the checks that own it rather than reported twice:
+  EQ/NE and the sign conditions to the CBZ/CBNZ and TBZ/TBNZ folds,
+  HI/LS after a SUBS as well, and the conditions a zero test decides
+  (HS/LO, VS/VC, HI/LS after a CMN or TST) to the decided-branch
+  check. GT and LE alone stay with this fold (`cmp w12, #0 ; b.gt`),
+  as for the CMPBR fold.
+* Corpus (JetStream 3 JIT dumps and four static binaries): 48,883
+  findings and no other check moved -- SpiderMonkey 24,763 (Ion's
+  Value-tag tests, `cmn w16, #10 ; b.eq ; cmn w16, #12 ; b.eq` for
+  undefined-or-null, and the wasm-to-JS stubs' argument coercion), V8
+  7,132 (Irregexp's line-terminator tests `cmp #10 ; b.eq ; cmp #13 ;
+  b.eq` and Maglev's polymorphic map checks), librustc_driver
+  8,742, clang-24 7,435, uutils 662, go 149. In
+  LLVM's output these are the cross-block chains its conditional-
+  compare pass declined on its trace-metrics heuristic (the in-block
+  `a && b` of two setcc forms at selection); the rewrite lengthens the
+  dependency chain by the compare's latency in exchange for a branch,
+  and a chain that mostly exits at its first link may prefer the
+  branch.
+* Verified by execution (`tools/rwfuzz cbc`, the harness described
+  under the redundant zero-extension check): 300,000 random programs
+  with planted branch-compare-branch triples in both topologies --
+  comparands at the five-bit edge and beyond, zero tests, shifted
+  registers, and a reader, a writer or neither at the merged exit --
+  and every rewrite armlint reported (182,747, 84,014 sharing
+  a target), applied as rendered, ran natively against the original on
+  six random states with identical `x0..x7` and NZCV every time.
+  Applying the fold to the 280,944 triples it refused changed the
+  result 86,728 times.
+
 ## MOV + CMP of a 32-bit value against 2^32-k foldable to W-form CMN
 
 * `lsr x1, x0, #32 ; mov w8, #-1 ; cmp x1, x8 ; b.ne L` compares a

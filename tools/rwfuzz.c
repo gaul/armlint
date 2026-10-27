@@ -53,6 +53,9 @@
 //   split  check_mov_add_sub_split: replace a MOV chain and the ADD/SUB
 //          that reads it by the two immediate ADDs or SUBs the finding
 //          renders.
+//   cbc    check_bcond_cmp_bcond: put the CCMP/CCMN the finding renders
+//          in the first branch's slot and delete the compare; the second
+//          branch stays.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -863,6 +866,42 @@ static void plant_split(void)
     case 2: push(add_x(body_reg(), c, body_reg())); break;
     default: break;
     }
+}
+
+// cbc: a flag writer, a B.cond, a CMP/CMN a CCMP can repeat -- now and
+// then one it cannot, or a zero test the CBZ fold takes -- and a second
+// B.cond that shares the first's target (OR) or sits where the first
+// lands (AND); then what the merged exit meets.
+static void plant_cbc(void)
+{
+    if (nbody + 6 > BODY_MAX) {
+        return;
+    }
+    unsigned a = body_reg(), b = body_reg();
+    bool x = rr(2) == 0;
+    switch (rr(3)) {
+    case 0: push(cmp_imm(x, rr(2) == 0, a, rr(4096))); break;
+    case 1: push(x ? cmp_x(a, b) : cmp_w(a, b)); break;
+    default: push(tst_reg(x, a, b)); break;
+    }
+    bool or_shape = rr(2) == 0;
+    int reach = 1 + (int)rr(3);
+    push_branch(2, 0, rr(14), 0);
+    body[nbody - 1].aim = or_shape ? 2 + reach : 3;
+    unsigned n = body_reg(), m = body_reg();
+    x = rr(2) == 0;
+    switch (rr(8)) {
+    case 0: push(cmp_imm(x, false, n, 32u + rr(64))); break;
+    case 1: push(cmp_imm(x, rr(2) == 0, n, 0)); break;
+    case 2: push(addsub_reg(x, true, true, 31, n, m, 1u + rr(8))); break;
+    case 3: push(x ? cmp_x(n, m) : cmp_w(n, m)); break;
+    case 4: push(cmn_reg(x, n, m)); break;
+    default: push(cmp_imm(x, rr(3) == 0, n, rr(32))); break;
+    }
+    push_branch(2, 0, rr(14), 0);
+    body[nbody - 1].aim = or_shape ? reach : 0;
+    push(edge_op());
+    push(edge_op());
 }
 
 static void gen_body(void (*plant)(void))
@@ -1813,6 +1852,119 @@ static bool cbz_control(int i, uint32_t *alt)
     return true;
 }
 
+static uint32_t ccmp_reg_word(bool x, bool ccmn, unsigned n, unsigned m,
+                              unsigned nzcv, unsigned c)
+{
+    return (x ? 0x80000000u : 0) | (ccmn ? 0x3A400000u : 0x7A400000u)
+        | m << 16 | c << 12 | n << 5 | nzcv;
+}
+
+// The CCMP word a chain finding renders: "-> ccmp w9, #0x15, #0x4, ne ;
+// b.eq 0x70" or "-> ccmn x1, x2, #0x0, hi ; b.lo 0x40" (a ZR operand
+// spelled wzr/xzr).
+static bool cbc_word(const char *detail, uint32_t *w)
+{
+    char text[ARMLINT_FINDING_DETAIL_LEN], mnem[8], wx, wx2, cname[4];
+    unsigned n, m, imm, nzcv;
+    snprintf(text, sizeof(text), "%s", detail);
+    for (char *p = strstr(text, "zr,"); p != NULL; p = strstr(p, "zr,")) {
+        memcpy(p, "31,", 3);
+    }
+    if (sscanf(text, "-> %7s %c%u, #0x%x, #0x%x, %3s", mnem, &wx, &n, &imm,
+               &nzcv, cname) == 6) {
+        int c = cond_from_name(cname);
+        if (c < 0 || imm > 31u || n > 31u || nzcv > 15u) {
+            return false;
+        }
+        *w = ccmp_imm(wx == 'x', mnem[3] == 'n', n, imm, nzcv, (unsigned)c);
+        return true;
+    }
+    if (sscanf(text, "-> %7s %c%u, %c%u, #0x%x, %3s", mnem, &wx, &n, &wx2,
+               &m, &nzcv, cname) == 7) {
+        int c = cond_from_name(cname);
+        if (c < 0 || n > 31u || m > 31u || nzcv > 15u || wx != wx2) {
+            return false;
+        }
+        *w = ccmp_reg_word(wx == 'x', mnem[3] == 'n', n, m, nzcv,
+                           (unsigned)c);
+        return true;
+    }
+    return false;
+}
+
+// cbc: the CCMP takes the first branch's slot, the compare deletes, the
+// second branch stays.
+static bool cbc_apply(const hit_t *h, uint32_t *code)
+{
+    size_t b1 = h->start, b2 = h->start + 2u;
+    uint32_t w;
+    if (h->count != 3u || !in_body(b1, b2)
+            || (code[b1] & 0xFF000010u) != 0x54000000u
+            || (code[b2] & 0xFF000010u) != 0x54000000u
+            || !cbc_word(h->detail, &w)) {
+        return false;
+    }
+    code[b1] = w;
+    code[b1 + 1u] = NOP;
+    return true;
+}
+
+static size_t cbc_slot(const hit_t *h)
+{
+    return h->start;
+}
+
+// Special: the two branches share a target (OR); otherwise the first
+// lands past the second (AND).
+static bool cbc_special(const hit_t *h)
+{
+    size_t b1 = h->start, b2 = h->start + 2u;
+    return (int)b1 + branch_disp(prog[b1]) == (int)b2 + branch_disp(prog[b2]);
+}
+
+// The NZCV under which COND holds, as the check tables it.
+static unsigned cbc_nzcv_holding(unsigned cond)
+{
+    static const unsigned nzcv[14] = {
+        4, 0, 2, 0, 8, 0, 1, 0, 2, 0, 0, 8, 0, 4,
+    };
+    return cond < 14u ? nzcv[cond] : 0;
+}
+
+// Control: merge any B.cond + CMP/CMN + B.cond in the OR or AND shape
+// the way the finding would have, with no proof at the merged exit.
+static bool cbc_control(int i, uint32_t *alt)
+{
+    if (i + 2 >= epi_start || (prog[i] & 0xFF000010u) != 0x54000000u
+            || (prog[i + 2] & 0xFF000010u) != 0x54000000u) {
+        return false;
+    }
+    unsigned c1 = prog[i] & 15u, c2 = prog[i + 2] & 15u;
+    uint32_t c = prog[i + 1];
+    bool imm_form = (c & 0x3F80001Fu) == 0x3100001Fu;
+    bool reg_form = (c & 0x3F20001Fu) == 0x2B00001Fu;
+    if (c1 >= 14u || c2 >= 14u
+            || !(imm_form ? ((c >> 22) & 1u) == 0 && ((c >> 10) & 0xFFFu) <= 31u
+                            && ((c >> 5) & 31u) != 31u
+                          : reg_form && ((c >> 22) & 3u) == 0
+                            && ((c >> 10) & 63u) == 0)) {
+        return false;
+    }
+    int t1 = i + branch_disp(prog[i]), t2 = i + 2 + branch_disp(prog[i + 2]);
+    bool is_or = t1 == t2 && t2 != i + 3, is_and = t1 == i + 3 && t2 != i + 3;
+    if (!is_or && !is_and) {
+        return false;
+    }
+    unsigned nzcv = cbc_nzcv_holding(is_or ? c2 : c2 ^ 1u);
+    bool x = (c >> 31) != 0, ccmn = ((c >> 30) & 1u) == 0;
+    unsigned n = (c >> 5) & 31u;
+    alt[i] = imm_form
+        ? ccmp_imm(x, ccmn, n, (c >> 10) & 31u, nzcv, c1 ^ 1u)
+        : ccmp_reg_word(x, ccmn, n, (c >> 16) & 31u, nzcv, c1 ^ 1u);
+    alt[i + 1] = NOP;
+    return true;
+}
+
 // split: "-> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8"
 // replaces the chain and its ADD/SUB, the two immediates taking the
 // span's last two words and the chain's other words deleted.
@@ -1973,6 +2125,9 @@ static const mode_t_ modes[] = {
     { "split", { "MOV + ADD/SUB foldable to two immediate ADD/SUBs", NULL },
       "sign-crossed", plant_split, split_apply, split_slot, split_special,
       split_control },
+    { "cbc", { "B.cond + CMP + B.cond foldable into CCMP + B.cond", NULL },
+      "sharing a target", plant_cbc, cbc_apply, cbc_slot, cbc_special,
+      cbc_control },
 };
 
 static bool wanted(const char *name)
@@ -1988,7 +2143,7 @@ static bool wanted(const char *name)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz|split\n");
+            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz|split|cbc\n");
 }
 
 int main(int argc, char **argv)
