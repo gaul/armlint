@@ -384,15 +384,39 @@ Mach-O, or universal/fat Mach-O) directly:
 ./armlint --json /bin/ls    # the findings as a JSON document keyed by address
 ```
 
+Every option has a long name and a one-letter alias, and `armlint
+--help` prints the table. The letters shared with x86lint (`-v`, `-A`,
+`-f`, `-i`, `-c`, `-m`, `-a` and `--json`) mean the same thing in both
+tools, and so do their long names. A value follows its option as the
+next argument or joined with `=` (`--function=_main`).
+
+| option | effect |
+| --- | --- |
+| `-v`, `--verbose` | print each finding with its one-line summary |
+| `-A`, `--all-bytes` | scan every byte, not only the sized functions |
+| `-f FUNC`, `--function FUNC` | scan only the function named FUNC |
+| `-b`, `--bti` | also verify the BTI landing pads (ELF) |
+| `-i`, `--isa` | an ISA census in place of the lint scan |
+| `-d`, `--duplicates` | also report the functions that copy one another |
+| `-c`, `--constants` | also report the constants MOVZ/MOVK chains build |
+| `--json` | the findings as a JSON document on stdout |
+| `-m FEATURE`, `--assume FEATURE` | the target has FEATURE: `cssc`, `lrcpc2`, `pauth`, `lse`, `cmpbr`, `sha3` or `fp16`; `v8` and `spidermonkey` name a JIT dump |
+| `-a AUDIT`, `--enable AUDIT` | also run the `pac`, `imm` or `const` audit |
+| `-s SLICE`, `--slice SLICE` | the slice of a universal binary: `all`, INDEX or NAME |
+| `-h`, `--help` | print this table |
+
+The sections below name each mode by its letter, which is how the
+examples spell it.
+
 A universal binary can carry more than one ARM64 slice. macOS 27's
 `/bin/bash`, `/usr/bin/ssh` and `/usr/lib/dyld` each hold an `arm64e`
 and an `arm64e.x1` slice, two compilations of the same program, so
 armlint scans one slice by default -- the lowest variant, `arm64`
 before `arm64e` before `arm64e.x1` -- and names the slices it skipped
-on stderr. `-s all` scans every ARM64 slice and adds up their
-findings; `-s NAME` (`-s arm64e.x1`) or `-s INDEX` (the slice's
-position in the fat header, as `otool -f` numbers it) picks one.
-`arm64e.x1` code signs and authenticates return addresses with
+on stderr. `-s all` (`--slice all`) scans every ARM64 slice and adds
+up their findings; `-s NAME` (`-s arm64e.x1`) or `-s INDEX` (the
+slice's position in the fat header, as `otool -f` numbers it) picks
+one. `arm64e.x1` code signs and authenticates return addresses with
 FEAT_PAuth_LR (`pacibsppc`, `retabsppc`), which Capstone 5 does not
 decode: a scan of that slice skips those words as data, and the PAC
 audit and `-m pauth` do not arm themselves there.
@@ -443,20 +467,20 @@ symbol (each fixed entry LDRs its lazy-bind-info offset into `w16`
 from an inline literal), a couple of hundred lines of noise on a
 typical `minos < 12` Mach-O binary.
 
-`-m <feature>` enables checks whose rewrites use ISA-extension
-instructions the target must support: `cssc` (Armv8.9/9.4 Common
-Short Sequence Compression: `smax`/`smin`/`umax`/`umin`, `abs`,
-`ctz`), `lrcpc2` (Armv8.4 unscaled store-release: `stlur`), `pauth`
-(Armv8.3 pointer authentication: `retaa`/`retab`), `lse`
-(Armv8.1 atomics: `ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`), `cmpbr`
-(Armv9.6 compare-and-branch: `cbgt`/`cbeq`/...), `sha3`
-(Armv8.2 three-operand vector logic: `eor3`, `bcax`), and `fp16`
-(FEAT_FP16 half-precision transfers: `fmov Wd, Hn`). `pauth`
-arms automatically on arm64e slices, whose ABI mandates FEAT_PAuth
-(the same auto-arm as the PAC audit); the rest stay opt-in. `cssc`,
-`sha3` and `fp16` name extensions that are never mandatory at any
-architecture version, so those three assert a specific target rather
-than a version floor.
+`-m <feature>` (`--assume <feature>`) enables checks whose rewrites
+use ISA-extension instructions the target must support: `cssc`
+(Armv8.9/9.4 Common Short Sequence Compression:
+`smax`/`smin`/`umax`/`umin`, `abs`, `ctz`), `lrcpc2` (Armv8.4 unscaled
+store-release: `stlur`), `pauth` (Armv8.3 pointer authentication:
+`retaa`/`retab`), `lse` (Armv8.1 atomics:
+`ldadd`/`ldset`/`ldeor`/`ldclr`/`swp`), `cmpbr` (Armv9.6
+compare-and-branch: `cbgt`/`cbeq`/...), `sha3` (Armv8.2 three-operand
+vector logic: `eor3`, `bcax`), and `fp16` (FEAT_FP16 half-precision
+transfers: `fmov Wd, Hn`). `pauth` arms automatically on arm64e
+slices, whose ABI mandates FEAT_PAuth (the same auto-arm as the PAC
+audit); the rest stay opt-in. `cssc`, `sha3` and `fp16` name
+extensions that are never mandatory at any architecture version, so
+those three assert a specific target rather than a version floor.
 
 `-m v8` is V8 the JavaScript engine, not an architecture version. It
 names an input rather than a target: a V8 JIT dump, the output of
@@ -476,30 +500,30 @@ shows `ldr x16, <literal -1>` where the running code loads a real
 pointer. The mode keeps the literal-load fold from reporting those as
 `mov x16, #-1`; nothing else changes.
 
-`-a <audit>` enables opt-in informational checks whose findings are
-review items rather than missed folds; `pac` audits the binary against
-the arm64e-style full pointer-authentication contract (return
-addresses spilled unsigned, unauthenticated `br`/`blr`, and
-zero-discriminator `braaz`/`blraaz` -- authenticated, but against a
-modifier of zero, so any same-key zero-discriminator pointer in the
-process substitutes). Audit findings are review items on a ladder:
-the raw-`br` check recognizes and auto-dismisses the clang jump-table
-idiom, so what remains is BLRs, linker veneers, and genuinely
-unclassified branches; the zero-discriminator rung marks where the
-C-ABI IA+0 signing floor could upgrade to `__ptrauth`-style
-diversified `braa`/`blraa`. The PAC audit arms automatically on
-arm64e slices (whose ABI already assumes full signing), so macOS
-system binaries surface their worklist with no flag; a plain arm64
-slice never opted in, so it stays silent unless you pass `-a pac`
+`-a <audit>` (`--enable <audit>`) enables opt-in informational checks
+whose findings are review items rather than missed folds; `pac` audits
+the binary against the arm64e-style full pointer-authentication
+contract (return addresses spilled unsigned, unauthenticated
+`br`/`blr`, and zero-discriminator `braaz`/`blraaz` -- authenticated,
+but against a modifier of zero, so any same-key zero-discriminator
+pointer in the process substitutes). Audit findings are review items
+on a ladder: the raw-`br` check recognizes and auto-dismisses the
+clang jump-table idiom, so what remains is BLRs, linker veneers, and
+genuinely unclassified branches; the zero-discriminator rung marks
+where the C-ABI IA+0 signing floor could upgrade to `__ptrauth`-style
+diversified `braa`/`blraa`. The PAC audit arms automatically on arm64e
+slices (whose ABI already assumes full signing), so macOS system
+binaries surface their worklist with no flag; a plain arm64 slice
+never opted in, so it stays silent unless you pass `-a pac`
 explicitly. `imm` audits every materialized constant against its
 consumer's immediate encoding and tallies the misses by value, so the
 constants worth renumbering surface; see [Immediate-misfit audit
-(`-a imm`)](#immediate-misfit-audit--a-imm) below. `const` is its twin
-for the constants that encode: every materialized constant whose
-consumer could have taken it as an immediate, counted whether or not
-the constant's register dies and tallied by value, so a compiler that
-materializes what it could have encoded surfaces as its constants; see
-[Constant audit (`-a const`)](#constant-audit--a-const).
+(`-a imm`)](#immediate-misfit-audit--a-imm---enable-imm) below. `const`
+is its twin for the constants that encode: every materialized constant
+whose consumer could have taken it as an immediate, counted whether or
+not the constant's register dies and tallied by value, so a compiler
+that materializes what it could have encoded surfaces as its constants;
+see [Constant audit (`-a const`)](#constant-audit--a-const---enable-const).
 
 By default armlint prints only a summary: the opportunities grouped by
 type and sorted by prevalence, so it is clear which to look at first,
@@ -631,7 +655,7 @@ test suite and CI can tell a dirty scan from a broken run. `-b`
 findings set the exit status like any other; the `-i` census, `-d`
 and `-c` reports are informational and never set it.
 
-## BTI landing-pad verification (`-b`)
+## BTI landing-pad verification (`-b`, `--bti`)
 
 With FEAT_BTI enforced, an indirect `br` or `blr` must land on a
 `bti` whose targets admit it or the CPU raises a Branch Target
@@ -724,7 +748,7 @@ collection lives in the driver, and `scripts/driver_test.sh` checks
 every evidence class and verdict against shared objects it writes
 itself.
 
-## ISA census (`-i`)
+## ISA census (`-i`, `--isa`)
 
 `armlint -i` replaces the lint scan with a census: every instruction in
 the binary's executable sections, attributed to the FEAT_* group it
@@ -788,7 +812,7 @@ signature of never opting in looks entirely different: Homebrew's
 plain-arm64 libcapstone reads `0 of 1441`. The line is omitted when no
 boundary information exists (Go binaries carry neither structure).
 
-## Immediate-misfit audit (`-a imm`)
+## Immediate-misfit audit (`-a imm`, `--enable imm`)
 
 `armlint -a imm` adds an audit to the lint scan that is the complement
 of the `mov` folds. Those report a `movz`/`movn`/`movk` chain whose
@@ -905,7 +929,7 @@ the table opened with a 16 MiB reservation bound one step past
 `0xfff000` at 92,109 sites, since fixed in V8 by comparing against the
 largest encodable bound.
 
-## Constant audit (`-a const`)
+## Constant audit (`-a const`, `--enable const`)
 
 `armlint -a const` is the misfit audit's twin for the constants that
 encode: a `movz`/`movn`/`movk` chain whose consumer has an immediate
@@ -982,7 +1006,7 @@ classes. Like `-a imm`, the findings count toward the total and the
 exit status; the table is for reading.
 [analyses.md](analyses.md#constant-audit--a-const) walks the rules.
 
-## Duplicate code (`-d`)
+## Duplicate code (`-d`, `--duplicates`)
 
 `armlint -d` adds a report on which functions are copies of one
 another, and on which findings are the same advice counted again in
@@ -1101,14 +1125,14 @@ Limitations:
 * Pointers stored as data inside a blob, such as a JIT's absolute
   dispatch table, are not masked.
 
-## Constant chains (`-c`)
+## Constant chains (`-c`, `--constants`)
 
 `armlint -c` adds a report on the constants the code builds with
 `movz`/`movn` + `movk` chains. A chain is a run of two or more of them
 into one register at one width: the runs the "suboptimal MOVZ/MOVK
-sequence" check judges. The [`-a imm` audit](#immediate-misfit-audit--a-imm)
+sequence" check judges. The [`-a imm` audit](#immediate-misfit-audit--a-imm---enable-imm)
 reports a constant that just misses its consumer's immediate form, and
-the [`-a const` audit](#constant-audit--a-const) one that fits it but
+the [`-a const` audit](#constant-audit--a-const---enable-const) one that fits it but
 was materialized anyway. This report is their complement: it counts
 what every constant too wide for one instruction costs. Constants are
 tallied by width and value,

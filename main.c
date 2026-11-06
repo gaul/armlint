@@ -2323,6 +2323,114 @@ static int scan_fat(FILE *f, const char *path, bool is_fat_64,
     return errors;
 }
 
+// The command line. Every option has a long name, which is the
+// documented spelling, and a one-letter alias, kept because the
+// letters predate the names and scripts use them. The letters shared
+// with x86lint (-v, -A, -f, -i, -c, -m, -a and --json) mean the same
+// thing in both tools, so a reader of one report can read the other,
+// and so do the long names. This table is also what --help and a
+// usage error print, so no option can be parsed without being
+// documented.
+enum option_id {
+    OPT_VERBOSE,
+    OPT_ALL_BYTES,
+    OPT_FUNCTION,
+    OPT_BTI,
+    OPT_ISA,
+    OPT_DUPLICATES,
+    OPT_CONSTANTS,
+    OPT_JSON,
+    OPT_ASSUME,
+    OPT_ENABLE,
+    OPT_SLICE,
+    OPT_HELP,
+};
+
+struct option_spec {
+    enum option_id id;
+    const char *shrt;   // the one-letter alias, or NULL
+    const char *lng;    // the long name
+    const char *arg;    // what the help calls the value, or NULL for a switch
+    const char *help;   // wrapped at its newlines
+};
+
+static const struct option_spec options[] = {
+    {OPT_VERBOSE, "-v", "--verbose", NULL,
+     "print each finding with its one-line summary"},
+    {OPT_ALL_BYTES, "-A", "--all-bytes", NULL,
+     "scan every byte, not only the sized functions"},
+    {OPT_FUNCTION, "-f", "--function", "FUNC",
+     "scan only the function named FUNC"},
+    {OPT_BTI, "-b", "--bti", NULL,
+     "also verify the BTI landing pads (ELF)"},
+    {OPT_ISA, "-i", "--isa", NULL,
+     "an ISA census in place of the lint scan"},
+    {OPT_DUPLICATES, "-d", "--duplicates", NULL,
+     "also report the functions that copy one another"},
+    {OPT_CONSTANTS, "-c", "--constants", NULL,
+     "also report the constants MOVZ/MOVK chains build"},
+    {OPT_JSON, NULL, "--json", NULL,
+     "the findings as a JSON document on stdout"},
+    // "assume" rather than "feature" because not every value is one:
+    // v8 and spidermonkey name the JIT whose dump the input is.
+    {OPT_ASSUME, "-m", "--assume", "FEATURE",
+     "the target has FEATURE: cssc, lrcpc2, pauth, lse,\n"
+     "cmpbr, sha3 or fp16; v8 and spidermonkey name a JIT dump"},
+    {OPT_ENABLE, "-a", "--enable", "AUDIT",
+     "also run the pac, imm or const audit"},
+    {OPT_SLICE, "-s", "--slice", "SLICE",
+     "the slice of a universal binary: all, INDEX or NAME"},
+    {OPT_HELP, "-h", "--help", NULL,
+     "print this help"},
+};
+
+static void usage(FILE *to, const char *argv0)
+{
+    fprintf(to, "usage: %s [OPTION]... <FILE>\n", argv0);
+    for (size_t k = 0; k < sizeof options / sizeof options[0]; k++) {
+        const struct option_spec *o = &options[k];
+        char name[32];
+        snprintf(name, sizeof name, "%s%s%s", o->lng,
+            o->arg != NULL ? " " : "", o->arg != NULL ? o->arg : "");
+        fprintf(to, "  %s%s %-18s ", o->shrt != NULL ? o->shrt : "  ",
+            o->shrt != NULL ? "," : " ", name);
+        // A help text wraps at its newlines, continued under itself.
+        for (const char *h = o->help; *h != '\0'; h++) {
+            fputc(*h, to);
+            if (*h == '\n') {
+                fprintf(to, "%25s", "");
+            }
+        }
+        fputc('\n', to);
+    }
+}
+
+// The option argv[i] spells, or NULL for a non-option. A long name may
+// carry its value as --name=VALUE, which *value then points at;
+// otherwise *value is NULL and a valued option takes the next argument.
+static const struct option_spec *option_match(const char *arg,
+    const char **value)
+{
+    *value = NULL;
+    for (size_t k = 0; k < sizeof options / sizeof options[0]; k++) {
+        const struct option_spec *o = &options[k];
+        if (o->shrt != NULL && strcmp(arg, o->shrt) == 0) {
+            return o;
+        }
+        size_t n = strlen(o->lng);
+        if (strncmp(arg, o->lng, n) == 0) {
+            if (arg[n] == '\0') {
+                return o;
+            }
+            if (arg[n] == '=') {
+                *value = arg + n + 1;
+                return o;
+            }
+        }
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     const char *path = NULL;
@@ -2330,49 +2438,85 @@ int main(int argc, char **argv)
     bool dedup = false;
     bool constants = false;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-v") == 0) {
+        const char *value;
+        const struct option_spec *o = option_match(argv[i], &value);
+        if (o == NULL) {
+            if (path == NULL && argv[i][0] != '-') {
+                path = argv[i];
+                continue;
+            }
+            fprintf(stderr, "%s: unexpected argument '%s'\n", argv[0],
+                argv[i]);
+            usage(stderr, argv[0]);
+            return 2;
+        }
+        if (o->arg == NULL && value != NULL) {
+            fprintf(stderr, "%s: %s takes no value\n", argv[0], o->lng);
+            return 2;
+        }
+        if (o->arg != NULL && value == NULL) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: %s needs a value\n", argv[0], o->lng);
+                usage(stderr, argv[0]);
+                return 2;
+            }
+            value = argv[++i];
+        }
+        switch (o->id) {
+        case OPT_VERBOSE:
             g_verbose = true;
-        } else if (strcmp(argv[i], "-A") == 0) {
+            break;
+        case OPT_ALL_BYTES:
             // Scan every byte of every code section, including the
             // bytes the symbol table places outside any function.
             g_scan_all = true;
-        } else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
+            break;
+        case OPT_FUNCTION:
             // Lint just the one function: every site spelling NAME.
-            g_func = argv[++i];
-        } else if (strcmp(argv[i], "-b") == 0) {
+            g_func = value;
+            break;
+        case OPT_BTI:
             // Also verify the ELF binary's BTI landing pads.
             g_bti = true;
-        } else if (strcmp(argv[i], "-i") == 0) {
+            break;
+        case OPT_ISA:
             census = true;
-        } else if (strcmp(argv[i], "-d") == 0) {
+            break;
+        case OPT_DUPLICATES:
             // Report duplicate code: which functions are copies of
             // one another, and which findings repeat across copies.
             dedup = true;
-        } else if (strcmp(argv[i], "-c") == 0) {
+            break;
+        case OPT_CONSTANTS:
             // Report the constants built by MOVZ/MOVN + MOVK chains,
             // and those a function builds more than once.
             constants = true;
-        } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+            break;
+        case OPT_JSON:
+            // The findings as one JSON document on stdout, in place
+            // of the human report (see json_finding).
+            g_json = true;
+            break;
+        case OPT_ASSUME:
             // Enable ISA-extension-gated checks; suggestions may then
             // use instructions the target must support. pauth also
             // arms automatically on arm64e slices (see scan_macho),
             // whose ABI mandates FEAT_PAuth; the rest stay opt-in.
-            i++;
-            if (strcmp(argv[i], "cssc") == 0) {
+            if (strcmp(value, "cssc") == 0) {
                 g_features |= ARMLINT_FEATURE_CSSC;
-            } else if (strcmp(argv[i], "lrcpc2") == 0) {
+            } else if (strcmp(value, "lrcpc2") == 0) {
                 g_features |= ARMLINT_FEATURE_LRCPC2;
-            } else if (strcmp(argv[i], "pauth") == 0) {
+            } else if (strcmp(value, "pauth") == 0) {
                 g_features |= ARMLINT_FEATURE_PAUTH;
-            } else if (strcmp(argv[i], "lse") == 0) {
+            } else if (strcmp(value, "lse") == 0) {
                 g_features |= ARMLINT_FEATURE_LSE;
-            } else if (strcmp(argv[i], "cmpbr") == 0) {
+            } else if (strcmp(value, "cmpbr") == 0) {
                 g_features |= ARMLINT_FEATURE_CMPBR;
-            } else if (strcmp(argv[i], "sha3") == 0) {
+            } else if (strcmp(value, "sha3") == 0) {
                 g_features |= ARMLINT_FEATURE_SHA3;
-            } else if (strcmp(argv[i], "fp16") == 0) {
+            } else if (strcmp(value, "fp16") == 0) {
                 g_features |= ARMLINT_FEATURE_FP16;
-            } else if (strcmp(argv[i], "v8") == 0) {
+            } else if (strcmp(value, "v8") == 0) {
                 // Not an ISA extension but an input: a V8 JIT dump
                 // (v8dump2elf output from a pointer-compressed build).
                 // Asserts both of V8's stream invariants at once --
@@ -2381,72 +2525,68 @@ int main(int argc, char **argv)
                 // over -- since neither is useful alone on such a dump
                 // (see ARMLINT_FEATURE_V8).
                 g_features |= ARMLINT_FEATURE_V8;
-            } else if (strcmp(argv[i], "spidermonkey") == 0) {
+            } else if (strcmp(value, "spidermonkey") == 0) {
                 // Likewise an input: a SpiderMonkey JIT dump
                 // (smdump2elf output), taken before Ion patches its
                 // inline-cache pointers over the all-ones literals
                 // they are loaded from (see ARMLINT_FEATURE_SMPATCH).
                 g_features |= ARMLINT_FEATURE_SMPATCH;
             } else {
-                fprintf(stderr, "%s: unknown -m feature '%s' "
+                fprintf(stderr, "%s: unknown --assume feature '%s' "
                     "(known: cssc, lrcpc2, pauth, lse, cmpbr, "
                     "sha3, fp16, v8, spidermonkey)\n",
-                    argv[0], argv[i]);
+                    argv[0], value);
                 return 2;
             }
-        } else if (strcmp(argv[i], "-a") == 0 && i + 1 < argc) {
+            break;
+        case OPT_ENABLE:
             // Enable opt-in audit checks: informational findings
             // about missing hardening rather than missed folds. The
             // PAC audit also arms automatically on arm64e slices
             // (see scan_macho); passing it here forces it on any
             // slice, e.g. a plain arm64 binary built with pac-ret.
-            i++;
-            if (strcmp(argv[i], "pac") == 0) {
+            if (strcmp(value, "pac") == 0) {
                 g_features |= ARMLINT_AUDIT_PAC;
-            } else if (strcmp(argv[i], "imm") == 0) {
+            } else if (strcmp(value, "imm") == 0) {
                 g_features |= ARMLINT_AUDIT_IMM;
-            } else if (strcmp(argv[i], "const") == 0) {
+            } else if (strcmp(value, "const") == 0) {
                 g_features |= ARMLINT_AUDIT_CONST;
             } else {
-                fprintf(stderr, "%s: unknown -a audit '%s' "
-                    "(known: pac, imm, const)\n", argv[0], argv[i]);
+                fprintf(stderr, "%s: unknown --enable audit '%s' "
+                    "(known: pac, imm, const)\n", argv[0], value);
                 return 2;
             }
-        } else if (strcmp(argv[i], "--json") == 0) {
-            // The findings as one JSON document on stdout, in place
-            // of the human report (see json_finding).
-            g_json = true;
-        } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+            break;
+        case OPT_SLICE:
             // Which ARM64 slice of a universal binary to scan: "all",
             // a fat_arch index, or a variant name such as arm64e.x1.
             // Checked against the file's slices in scan_fat, and
             // ignored for a thin Mach-O or ELF file, which has one.
-            g_slice = argv[++i];
-        } else if (path == NULL && argv[i][0] != '-') {
-            path = argv[i];
-        } else {
-            fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8|spidermonkey]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
-                argv[0]);
-            return 2;
+            g_slice = value;
+            break;
+        case OPT_HELP:
+            usage(stdout, argv[0]);
+            return 0;
         }
     }
     if (path == NULL) {
-        fprintf(stderr, "usage: %s [-v] [-A] [-f FUNC] [-b] [-i] [-d] [-c] [--json] [-m cssc|lrcpc2|pauth|lse|cmpbr|sha3|fp16|v8|spidermonkey]\n            [-a pac|imm|const] [-s all|INDEX|NAME] <FILE>\n",
-            argv[0]);
+        usage(stderr, argv[0]);
         return 2;
     }
 
-    // -A widens the scan to every byte and -f narrows it to one
-    // function; combining them has no coherent meaning.
+    // --all-bytes widens the scan to every byte and --function narrows
+    // it to one function; combining them has no coherent meaning.
     if (g_func != NULL && g_scan_all) {
-        fprintf(stderr, "%s: -A and -f are mutually exclusive\n", argv[0]);
+        fprintf(stderr, "%s: --all-bytes and --function are mutually "
+            "exclusive\n", argv[0]);
         return 2;
     }
-    // --json owns stdout: -v would interleave per-finding text with
-    // the document, and -i, -d, -c and -b are other reports.
+    // --json owns stdout: --verbose would interleave per-finding text
+    // with the document, and the census, --duplicates, --constants and
+    // --bti are other reports.
     if (g_json && (g_verbose || census || dedup || constants || g_bti)) {
-        fprintf(stderr, "%s: --json cannot be combined with -v, -i, -d, -c "
-            "or -b\n", argv[0]);
+        fprintf(stderr, "%s: --json cannot be combined with --verbose, "
+            "--isa, --duplicates, --constants or --bti\n", argv[0]);
         return 2;
     }
     g_json_path = path;

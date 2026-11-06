@@ -187,6 +187,46 @@ run 2 --json -f nosuch two.o
 run 2 -A -f g two.o
 expect_err 'mutually exclusive'
 
+# Every option has a long name, which spells the same run as its
+# letter, with the value as the next argument or joined by '='.
+for pair in -v:--verbose -A:--all-bytes -i:--isa -d:--duplicates \
+        -c:--constants -b:--bti '-f g:--function g' '-f g:--function=g' \
+        '-m cssc:--assume cssc' '-m cssc:--assume=cssc' \
+        '-a imm:--enable imm' '-a imm:--enable=imm' \
+        '-s all:--slice all' '-s all:--slice=all'; do
+    short=${pair%%:*}
+    long=${pair#*:}
+    set +e
+    (cd "$T" && "$ROOT/armlint" $short two.o) >"$T/short.out" 2>&1
+    rc_short=$?
+    (cd "$T" && "$ROOT/armlint" $long two.o) >"$T/long.out" 2>&1
+    rc_long=$?
+    set -e
+    if [ "$rc_short" -ne "$rc_long" ] || \
+            ! cmp -s "$T/short.out" "$T/long.out"; then
+        fail "'$long' does not spell the same run as '$short'"
+    fi
+done
+
+# --help prints the option table and exits 0; a usage error prints it
+# on stderr and exits 2; an unknown value names the known ones.
+run 0 --help
+expect '^  -c, --constants'
+run 0 -h
+expect 'usage:'
+run 2
+expect_err 'usage:'
+run 2 --bogus two.o
+expect_err "unexpected argument '--bogus'"
+run 2 -m nosuch two.o
+expect_err 'unknown --assume feature'
+run 2 --enable nosuch two.o
+expect_err 'unknown --enable audit'
+run 2 --verbose=1 two.o
+expect_err 'takes no value'
+run 2 --function
+expect_err 'needs a value'
+
 # The by-function table: g holds two findings, f one, and under -A
 # the words past sized.o's one function land in no range.
 echo "by-function table:"
