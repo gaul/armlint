@@ -19203,6 +19203,11 @@ static void test_word_reg_liveness_matches_capstone(void)
         { 0xB8687820u, 8, LIV_READ, "ldr w0, [x1, x8, lsl #2] (index)" },
         { 0xB9800028u, 8, LIV_OVERWRITE, "ldrsw x8, [x1]" },
         { 0x385FF028u, 8, LIV_OVERWRITE, "ldurb w8, [x1, #-1]" },
+        // Literal loads read no GPR: PC-relative.
+        { 0x58000008u, 8, LIV_OVERWRITE, "ldr x8, #0" },
+        { 0x18000008u, 8, LIV_OVERWRITE, "ldr w8, #0" },
+        { 0x98000008u, 8, LIV_OVERWRITE, "ldrsw x8, #0" },
+        { 0x58000008u, 9, LIV_UNKNOWN, "ldr x8, #0 (other)" },
         // Stores read what they store.
         { 0xF9000028u, 8, LIV_READ, "str x8, [x1]" },
         { 0xA9BF27E8u, 9, LIV_READ, "stp x8, x9, [sp, #-16]! (Rt2)" },
@@ -19211,6 +19216,8 @@ static void test_word_reg_liveness_matches_capstone(void)
         { 0x3DC00020u, 0, LIV_UNKNOWN, "ldr q0, [x1]" },
         { 0x3DC00020u, 1, LIV_READ, "ldr q0, [x1] (base)" },
         { 0x6D400440u, 1, LIV_UNKNOWN, "ldp d0, d1, [x2]" },
+        { 0xD8000000u, 0, LIV_UNKNOWN, "prfm pldl1keep, #0" },
+        { 0x5C000000u, 0, LIV_UNKNOWN, "ldr d0, #0" },
         // Data processing, as value numbering decodes it.
         { 0xF2800028u, 8, LIV_READ, "movk x8, #1" },
         { 0x91000528u, 8, LIV_OVERWRITE, "add x8, x9, #1" },
@@ -19219,7 +19226,6 @@ static void test_word_reg_liveness_matches_capstone(void)
         // Unmodelled ends the scan, a write among them.
         { 0x14000000u, 8, LIV_READ, "b ." },
         { 0xC8DFFC28u, 8, LIV_READ, "ldar x8, [x1]" },
-        { 0x58000008u, 8, LIV_READ, "ldr x8, #0" },
         { 0xF8200028u, 8, LIV_READ, "ldadd x0, x8, [x1]" },
     };
 

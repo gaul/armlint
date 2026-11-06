@@ -15205,6 +15205,19 @@ static int word_ldst_reg_liveness(uint32_t op, unsigned reg)
     unsigned rt2 = 32u;
     unsigned rm = 32u;
     bool load;
+    if ((op & 0x3B000000u) == 0x18000000u) {
+        // LDR/LDRSW (literal): PC-relative, so no GPR is read. PRFM
+        // (literal) and the SIMD&FP forms write none; V = 1 with
+        // opc = 11 is unallocated.
+        unsigned opc = op >> 30;
+        if (vreg) {
+            return opc == 3u ? -1 : 0;
+        }
+        if (opc == 3u) {
+            return 0;
+        }
+        return rt == reg ? 1 : 0;
+    }
     if ((op & 0x3B000000u) == 0x39000000u
             || (op & 0x3B200000u) == 0x38000000u
             || (op & 0x3B200C00u) == 0x38200800u) {
