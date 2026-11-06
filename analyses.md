@@ -314,20 +314,25 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * What needs proving instead is register liveness: the rewrite
   deletes the producer, so the masked scratch must be dead afterward
   -- on BOTH edges of the branch. The forward register-liveness scan
-  proves the fall-through path (the scratch is overwritten before any
-  read or control transfer); the taken path is covered by
-  containment: the finding is emitted only when the branch target
-  lies within `[fall-through, kill]`, the span the scan just proved
-  free of reads and control transfers, so the taken edge enters that
-  clean span and runs to the same kill. This is the canonical
-  skip-a-small-block shape --
+  proves the fall-through path: the scratch is overwritten before any
+  read, and a direct branch on the way is followed through
+  `reg_dead_at_target` (an unconditional one ends the scan, a
+  conditional one lets it go on), as the dead-MOV deferral does; a
+  call, a return or an indirect branch ends it unproven. The taken
+  path is proven either by `reg_dead_at_target` from the branch
+  target, at the consumer, or by containment: the target lies within
+  the span the scan proved, from the fall-through to the kill or the
+  followed branch, so the taken edge enters that clean span and runs
+  to the same end. The canonical skip-a-small-block shape --
   `and w8, w9, #0x10 ; cbz w8, 1f ; add x1, x2, x3 ; 1: mov w8, #0`
-  folds because both edges reach the `mov` that kills `w8`. Backward
-  targets and targets beyond the kill leave the taken edge unproven
-  and are conservatively dropped. Unlike the NZCV checks, which
-  assume flags are dead at branch targets (block-local by
-  convention), no such assumption is made here: a general-purpose
-  register is routinely live into a branch target.
+  -- folds by containment. Maglev's `Int32ToBoolean` of `x & mask`
+  is a diamond instead -- `and w1, w0, #0x8 ; cbnz w1, 1f ;
+  add x0, x28, #false ; b 2f ; 1: add x0, x28, #true ; 2: ...` -- whose
+  target lies past the fall-through's `b`, so it needs the branch
+  walk on both edges. Unlike the NZCV checks, which assume flags are
+  dead at branch targets (block-local by convention), no such
+  assumption is made here: a general-purpose register is routinely
+  live into a branch target.
 * A W-form `cbz` after a producer isolating bit >= 32 is rejected:
   the zero-extended field sits wholly in the discarded high half,
   making the branch constant -- dead-branch territory, not this
@@ -335,7 +340,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   write; the `Rd = ZR` spelling belongs to the TST check), as are ZR
   sources (constant branches) and ZR destinations. The TBZ
   displacement is range-checked against the signed 14-bit encoding,
-  though the containment gate restricts it far more tightly in
+  though the liveness proof restricts it far more tightly in
   practice.
 * Same win as the TST fold -- one fewer instruction -- plus the
   scratch register is freed.
@@ -408,9 +413,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * The rewrite deletes the CSET, so its temp must be dead afterward.
   For the branch consumer that means dead on BOTH edges, and emission
   defers through the same two-edge scan as the single-bit fold: the
-  forward scan proves the fall-through path, containment in
-  `[fall-through, kill]` covers the taken edge, and backward targets
-  are dropped at the consumer. For EOR/NEG, a consumer that
+  forward scan proves the fall-through path, following direct
+  branches, and `reg_dead_at_target` or containment covers the taken
+  edge. For EOR/NEG, a consumer that
   overwrites the temp itself kills it on the spot and emits
   immediately; otherwise emission defers through the plain forward
   register-liveness scan.

@@ -62,10 +62,11 @@ the argument against each.
   admit consumers that write a register other than the producer's:
   `lsl w8, w1, #3 ; add w9, w2, w8` folds to
   `add w9, w2, w1, lsl #3` under the same proof.
-  The single-bit and CSET branch folds additionally require the folded
-  branch's taken edge to land inside that proven-clean span -- a
-  general-purpose register, unlike NZCV, is routinely live into a
-  branch target, so no block-locality assumption is made for it.
+  The single-bit and CSET branch folds additionally prove the folded
+  branch's taken edge, by walking from its target or by its landing
+  inside that proven-clean span -- a general-purpose register, unlike
+  NZCV, is routinely live into a branch target, so no block-locality
+  assumption is made for it.
 * **MOV-chain folds verify the constant dies.** Folds that absorb a
   materialized constant -- `MUL`/`MNEG`/`UDIV` by a constant, `MOV` +
   `ADD`/`AND`/`ORR`/`EOR`/`CCMP`/`FMOV`, `MOV #0`, the register-offset

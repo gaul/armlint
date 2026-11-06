@@ -325,17 +325,18 @@ struct armlint_state {
     // Deferred single-bit-test TBZ/TBNZ finding awaiting the two-edge
     // register-liveness proof (see armlint_advance_pending_tb): the
     // rewrite deletes the producer, so the masked temp must be dead on
-    // the fall-through path (overwritten before any read or control
-    // transfer -- the usual forward scan) AND on the taken path, which
-    // is covered by containment: emission requires the branch target
-    // to lie within [fall-through, kill], the span the scan just
-    // proved free of reads and control transfers, so the taken edge
-    // enters that clean span and reaches the same kill.
+    // the fall-through path (overwritten before any read, following
+    // direct branches through reg_dead_at_target) AND on the taken
+    // path. The taken path is proven either by reg_dead_at_target at
+    // the consumer, or by containment: the branch target lies within
+    // [fall-through, end of the proven span], so the taken edge enters
+    // that clean span and reaches the same kill or proven branch.
     bool pending_tb_active;
     unsigned pending_tb_window;
     int pending_tb_reg;
     size_t pending_tb_ft;         // fall-through offset (consumer + 4)
     size_t pending_tb_target;     // branch-target offset
+    bool pending_tb_target_dead;  // taken edge proven at the consumer
     armlint_finding pending_tb_finding;
 
     // Downgrade for the CSET+branch fold: when the deleting fold's
@@ -5659,6 +5660,26 @@ static bool emit_pending_tb_fallback(armlint_state *state,
     return true;
 }
 
+// The fall-through path is proven up to `offset`, where it ends in a
+// kill or in an unconditional branch to a proven target. Emit the
+// deleting finding if the taken path is proven too: by the consumer's
+// own walk, or by containment -- a target inside [ft, offset] enters
+// the clean span and runs to the same end. Otherwise downgrade to the
+// branch-only rebind if one is stashed, else discard.
+static bool emit_pending_tb_proven(armlint_state *state, size_t offset,
+                                   armlint_finding *out)
+{
+    state->pending_tb_active = false;
+    if (state->pending_tb_target_dead
+            || (state->pending_tb_target >= state->pending_tb_ft
+                && state->pending_tb_target <= offset)) {
+        state->pending_tb_has_fallback = false;
+        *out = state->pending_tb_finding;
+        return true;
+    }
+    return emit_pending_tb_fallback(state, out);
+}
+
 bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out)
 {
@@ -5669,24 +5690,34 @@ bool armlint_advance_pending_tb(armlint_state *state, const cs_insn *insn,
         state->pending_tb_active = false;
         return emit_pending_tb_fallback(state, out);
     }
+    // A direct branch is followed, as in armlint_advance_pending_mz:
+    // the register must be dead at its target, after which an
+    // unconditional one ends the fall-through proof and a conditional
+    // one leaves the scan to go on. A CBZ/TBZ of the register reads it.
+    uint32_t op = insn_word(insn);
+    int64_t target;
+    bool conditional;
+    if (direct_branch_target(op, offset, &target, &conditional)
+            && !branch_reads_reg(op, state->pending_tb_reg)) {
+        if (!reg_dead_at_target(state, target,
+                                (unsigned)state->pending_tb_reg)) {
+            state->pending_tb_active = false;
+            return emit_pending_tb_fallback(state, out);
+        }
+        if (!conditional) {
+            return emit_pending_tb_proven(state, offset, out);
+        }
+        if (state->pending_tb_window == 0 || --state->pending_tb_window == 0) {
+            state->pending_tb_active = false;
+            return emit_pending_tb_fallback(state, out);
+        }
+        return false;
+    }
     switch (classify_reg_liveness(insn, state->pending_tb_reg)) {
     case LIV_OVERWRITE:
-        state->pending_tb_active = false;
-        // Fall-through path proven: [ft, here) held no read or
-        // control transfer and this instruction kills the register.
-        // The taken path shares the proof only when the branch target
-        // lies inside that clean span (inclusive of the kill itself):
-        // execution entering anywhere in it runs straight to the same
-        // kill. A target before the fall-through (backward) or beyond
-        // the kill leaves the taken path unproven -- downgrade to the
-        // branch-only rebind if one is stashed, else discard.
-        if (state->pending_tb_target >= state->pending_tb_ft
-                && state->pending_tb_target <= offset) {
-            state->pending_tb_has_fallback = false;
-            *out = state->pending_tb_finding;
-            return true;
-        }
-        return emit_pending_tb_fallback(state, out);
+        // Fall-through path proven: [ft, here) held no read and this
+        // instruction kills the register.
+        return emit_pending_tb_proven(state, offset, out);
     case LIV_READ:
     case LIV_TERM_SAFE:
     case LIV_TERM_UNSAFE:
@@ -5770,14 +5801,14 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
             // Range for the deleting grade: the TBZ replaces the
             // producer, 4 bytes before the CBZ, so its displacement is
             // imm19 + 1 instruction units, within TBZ's signed 14
-            // bits. (The containment gate in the pending scan
-            // restricts the target far more tightly; this keeps the
-            // encoding constraint visible.) The target must also lie
-            // at or after the fall-through: a backward target can
-            // never satisfy the containment proof, so it downgrades
-            // at the consumer rather than deferring.
+            // bits. The taken edge needs the temp dead too: proven
+            // here by reg_dead_at_target, or later by containment,
+            // which a backward target can never satisfy -- with
+            // neither, downgrade at the consumer rather than deferring.
+            bool target_dead =
+                reg_dead_at_target(state, t_off, state->tbf_rd);
             if (tbz_disp >= -8192 && tbz_disp <= 8191
-                    && t_off >= (int64_t)(offset + 4u)) {
+                    && (target_dead || t_off >= (int64_t)(offset + 4u))) {
                 armlint_finding *p = &state->pending_tb_finding;
                 p->name =
                     "single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ";
@@ -5800,6 +5831,7 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                 state->pending_tb_reg = (int)state->tbf_rd;
                 state->pending_tb_ft = offset + 4u;
                 state->pending_tb_target = (size_t)t_off;
+                state->pending_tb_target_dead = target_dead;
                 state->pending_tb_has_fallback = fb_ok;
                 if (fb_ok) {
                     state->pending_tb_fallback = fb;
@@ -6119,8 +6151,10 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
             // bytes before the branch, so its displacement is one unit
             // longer -- within B.cond's signed 19 bits except at
             // imm19's positive limit (a TBZ displacement always
-            // fits). Backward targets can never satisfy containment.
-            if (t_off >= (int64_t)(offset + 4u)
+            // fits). The taken edge is proven by reg_dead_at_target
+            // or by containment, which backward targets never satisfy.
+            bool target_dead = reg_dead_at_target(state, t_off, p_rd);
+            if ((target_dead || t_off >= (int64_t)(offset + 4u))
                     && (int64_t)units + 1 <= 262143) {
                 armlint_finding *p = &state->pending_tb_finding;
                 p->name = is_cb
@@ -6143,6 +6177,7 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
                 state->pending_tb_reg = (int)p_rd;
                 state->pending_tb_ft = offset + 4u;
                 state->pending_tb_target = (size_t)t_off;
+                state->pending_tb_target_dead = target_dead;
                 state->pending_tb_has_fallback = true;
                 state->pending_tb_fallback = fb;
                 return false;

@@ -2945,6 +2945,48 @@ static void test_single_bit_cbz(void)
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 1);
 
+    // -- Positive: Maglev's Int32ToBoolean diamond. The fall-through
+    //    ends in a B over the true arm and the target lies past it, so
+    //    containment cannot prove the taken edge; following the
+    //    branches to the kill at the join proves both. --
+    {
+        const char *del = "single-bit test + CBZ/CBNZ foldable into TBZ/TBNZ";
+        const char *live =
+            "CBZ/CBNZ of a live single-bit test foldable to TBZ/TBNZ";
+        char detail[ARMLINT_FINDING_DETAIL_LEN];
+        uint8_t d[24];
+
+        // and w1, w0, #0x8 ; cbnz w1, +12 ; add x0, x2, x3 ; b +8 ;
+        // add x0, x4, x5 ; mov w1, #0.
+        and_w_bit(&d[0], 1, 0, 3);
+        cbz_cbnz(&d[4], 0, 1, 1, 3);
+        add_x(&d[8], 0, 2, 3);
+        b_(&d[12], 8);
+        add_x(&d[16], 0, 4, 5);
+        movz_w(&d[20], 1, 0);
+        assert(run_named_buffer_check(d, 24, del, detail,
+                                      sizeof(detail)) == 1);
+        assert(strcmp(detail, "-> tbnz w0, #3, 0x10") == 0);
+        assert(run_named_buffer_check(d, 24, live, NULL, 0) == 0);
+
+        // The join reads the temp: only the branch rebinds.
+        add_w(&d[20], 2, 1, 3);
+        assert(run_named_buffer_check(d, 24, del, NULL, 0) == 0);
+        assert(run_named_buffer_check(d, 24, live, NULL, 0) == 1);
+
+        // The true arm reads it: the taken edge is unproven.
+        add_w(&d[16], 0, 1, 5);
+        movz_w(&d[20], 1, 0);
+        assert(run_named_buffer_check(d, 24, del, NULL, 0) == 0);
+        assert(run_named_buffer_check(d, 24, live, NULL, 0) == 1);
+
+        // The false arm reads it: the fall-through is unproven.
+        add_x(&d[16], 0, 4, 5);
+        add_w(&d[8], 0, 1, 3);
+        assert(run_named_buffer_check(d, 24, del, NULL, 0) == 0);
+        assert(run_named_buffer_check(d, 24, live, NULL, 0) == 1);
+    }
+
     // -- Negative: a W-form CBZ cannot observe bit 40. --
 
     and_x_bit(&code[0], 8, 9, 40);
@@ -3174,6 +3216,22 @@ static void test_cset_fold(void)
     add_x(&code[8], 1, 2, 3);
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 1);
+
+    // The same diamond as the single-bit fold's: the taken edge is
+    // proven by following the branches, not by containment.
+    {
+        const char *del = "CSET + CBZ/CBNZ foldable into B.cond";
+        uint8_t d[24];
+        cset_(&d[0], 0, 1, 0);
+        cbz_cbnz(&d[4], 0, 1, 1, 3);
+        add_x(&d[8], 0, 2, 3);
+        b_(&d[12], 8);
+        add_x(&d[16], 0, 4, 5);
+        movz_w(&d[20], 1, 0);
+        assert(run_named_buffer_check(d, 24, del, NULL, 0) == 1);
+        add_w(&d[20], 2, 1, 3);             // the join reads the temp
+        assert(run_named_buffer_check(d, 24, del, NULL, 0) == 0);
+    }
 
     // CBZ inverts the condition: cset w8, lt ; cbz w8 -> b.ge.
     cset_(&code[0], 0, 8, 11);

@@ -51,3 +51,15 @@ _main:
     mov     w21, #0
     add     x1, x2, x3
 7:  ret
+
+    // Positive: Maglev's Int32ToBoolean diamond -- the fall-through
+    // branches over the true arm and the target lies past that branch,
+    // so containment does not hold, but both arms reach the overwrite
+    // at the join, which the proof finds by following the branches.
+    and     w23, w24, #0x8
+    cbnz    w23, 8f
+    add     x1, x2, x3
+    b       9f
+8:  add     x1, x4, x5
+9:  mov     w23, #0
+    ret
