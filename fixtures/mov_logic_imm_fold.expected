@@ -151,46 +151,81 @@ MOV + BIC/ORN/EON foldable to bitmask immediate at offset: 0x68 <_main+0x68>: ->
   movz w0, #0x1
   bics wzr, w2, w0
 
-register write overwritten unread at offset: 0x74 <_main+0x74>: -> delete; x3 is overwritten before any read (1 instructions)
+compare whose flags are overwritten unread at offset: 0x6c <_main+0x6c>: -> delete; NZCV overwritten unread by tst w2, w0 (1 instructions)
+  bics wzr, w2, w0
+
+MOV + AND/ORR/EOR foldable to two logical immediates at offset: 0x70 <_main+0x70>: -> and w0, w2, #0x7fff0 ; tst w0, #0xfffc001f (3 instructions)
+  movz w0, #0x10
+  movk w0, #0x4, lsl #16
+  tst w2, w0
+
+MOV + AND/ORR/EOR foldable to two logical immediates at offset: 0x7c <_main+0x7c>: -> orr x3, x2, #0x800000000000 ; orr x3, x3, #0xfffe000000000000 (3 instructions)
+  movz x0, #0x8000, lsl #32
+  movk x0, #0xfffe, lsl #48
+  orr x3, x2, x0
+
+register write overwritten unread at offset: 0x84 <_main+0x84>: -> delete; x3 is overwritten before any read (1 instructions)
+  orr x3, x2, x0
+  ... 2 instructions ...
+  bic x3, x2, x0
+
+MOV + BIC/ORN/EON foldable to two logical immediates at offset: 0x88 <_main+0x88>: -> and x3, x2, #0x1ffffffffff ; and x3, x3, #0xffffff0000000001 (3 instructions)
+  movn x0, #0x1
+  movk x0, #0xfeff, lsl #32
+  bic x3, x2, x0
+
+register write overwritten unread at offset: 0x90 <_main+0x90>: -> delete; x3 is overwritten before any read (1 instructions)
+  bic x3, x2, x0
+  ... 1 instruction ...
   and x3, x2, x0
+
+register write overwritten unread at offset: 0x98 <_main+0x98>: -> delete; x3 is overwritten before any read (1 instructions)
+  and x3, x2, x0
+  ... 2 instructions ...
+  and w3, w2, w0
+
+register write overwritten unread at offset: 0xa4 <_main+0xa4>: -> delete; w3 is overwritten before any read (1 instructions)
+  and w3, w2, w0
   ... 1 instruction ...
   bic w3, w2, w0
 
-register write overwritten unread at offset: 0x7c <_main+0x7c>: -> delete; w3 is overwritten before any read (1 instructions)
+register write overwritten unread at offset: 0xac <_main+0xac>: -> delete; w3 is overwritten before any read (1 instructions)
   bic w3, w2, w0
   ... 1 instruction ...
   and x3, x2, x0, lsl #2
 
-register already holds the recomputed value at offset: 0x88 <_main+0x88>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
+register already holds the recomputed value at offset: 0xb8 <_main+0xb8>: -> delete; x0 already holds this value (set 0x8 bytes back) (1 instructions)
   mov x0, #0xff
   mov x0, #0xff
 
-register write overwritten unread at offset: 0x84 <_main+0x84>: -> delete; x3 is overwritten before any read (1 instructions)
+register write overwritten unread at offset: 0xb4 <_main+0xb4>: -> delete; x3 is overwritten before any read (1 instructions)
   and x3, x2, x0, lsl #2
   ... 1 instruction ...
   bic x3, x0, x2
 
-register already holds the recomputed value at offset: 0x90 <_main+0x90>: -> delete; x0 already holds this value (set 0x10 bytes back) (1 instructions)
+register already holds the recomputed value at offset: 0xc0 <_main+0xc0>: -> delete; x0 already holds this value (set 0x10 bytes back) (1 instructions)
   mov x0, #0xff
   mov x0, #0xff
 
-register write overwritten unread at offset: 0x8c <_main+0x8c>: -> delete; x3 is overwritten before any read (1 instructions)
+register write overwritten unread at offset: 0xbc <_main+0xbc>: -> delete; x3 is overwritten before any read (1 instructions)
   bic x3, x0, x2
   ... 1 instruction ...
   and x3, x0, x0
 
-self-op identity at offset: 0x94 <_main+0x94>: and x3, x0, x0 -> mov x3, x0 (1 instructions)
+self-op identity at offset: 0xc4 <_main+0xc4>: and x3, x0, x0 -> mov x3, x0 (1 instructions)
   and x3, x0, x0
 
 Optimization opportunities by type:
-      14  register write overwritten unread
+      17  register write overwritten unread
       13  register already holds the recomputed value
        9  MOV + AND/ORR/EOR foldable to bitmask immediate
        5  MOV + BIC/ORN/EON foldable to bitmask immediate
-       1  compare whose flags are overwritten unread
+       2  MOV + AND/ORR/EOR foldable to two logical immediates
+       2  compare whose flags are overwritten unread
+       1  MOV + BIC/ORN/EON foldable to two logical immediates
        1  self-op identity
 
 Optimization opportunities by function:
-      43  _main
+      50  _main
 
-43 optimization opportunities in 39 instructions
+50 optimization opportunities in 51 instructions

@@ -12002,10 +12002,51 @@ static bool decode_logic_shifted_lsl0(uint32_t op,
     return true;
 }
 
+// LLVM's AArch64MIPeepholeOpt splits the constant of an AND or ANDS
+// that no one immediate encodes into two masks whose intersection it is
+// (splitBitmaskImm): the run of ones from its lowest set bit to its
+// highest, and the constant with every bit outside that run set. That
+// of an ORR or EOR it splits into two disjoint masks
+// (splitDisjointBitmaskImm): its lowest run of ones, and the rest, whose
+// OR and whose EOR are both the constant. True, with the two masks in
+// application order, when both encode at `width`.
+static bool logic_imm_split(uint64_t imm, unsigned width, bool intersect,
+                            uint64_t *first, uint64_t *second)
+{
+    uint64_t m = width_mask(width);
+    imm &= m;
+    if (imm == 0 || imm == m) {
+        return false;
+    }
+    unsigned lo = (unsigned)__builtin_ctzll(imm);
+    uint64_t a, b;
+    if (intersect) {
+        unsigned hi = 63u - (unsigned)__builtin_clzll(imm);
+        a = ((hi == 63 ? 0 : (uint64_t)2 << hi) - ((uint64_t)1 << lo)) & m;
+        b = (imm | ~a) & m;
+    } else {
+        unsigned end = lo + (unsigned)__builtin_ctzll(~(imm >> lo));
+        if (end >= width) {
+            return false;
+        }
+        a = ((uint64_t)1 << end) - ((uint64_t)1 << lo);
+        b = imm & ~a;
+    }
+    if (!is_bitmask_immediate(a, width) || !is_bitmask_immediate(b, width)) {
+        return false;
+    }
+    *first = a;
+    *second = b;
+    return true;
+}
+
+static bool kb_equivalent_mask(armlint_state *state, const cs_insn *insn,
+                               size_t offset, unsigned other, unsigned sf,
+                               uint64_t imm, uint64_t *best, uint64_t *may);
+
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out)
 {
-    (void)offset;
     if (insn->size != 4) {
         return false;
     }
@@ -12081,8 +12122,29 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     unsigned reg_width = is_64bit ? 64u : 32u;
     uint64_t c = state->mov_value;
     uint64_t imm = inverted ? (~c & width_mask(reg_width)) : c;
+
+    // Where no one immediate encodes it, two may, as LLVM splits it
+    // (logic_imm_split). Not where one instruction builds the constant
+    // -- the MOV and the operation are then two already -- and not where
+    // known bits make one mask equivalent, which is
+    // check_mov_logic_known_bits' one-instruction rewrite.
+    bool split = false;
+    uint64_t second = 0;
     if (!is_bitmask_immediate(imm, reg_width)) {
-        return false;
+        bool intersect = (opc == 0 || opc == 3);
+        mov_plan plan;
+        uint64_t first, best, may;
+        mov_plan_for(c, is_64bit, &plan);
+        if (plan.n < 2
+                || !logic_imm_split(imm, reg_width, intersect, &first,
+                                    &second)
+                || (intersect && kb_equivalent_mask(state, insn, offset,
+                                                    other, sf, imm, &best,
+                                                    &may))) {
+            return false;
+        }
+        imm = first;
+        split = true;
     }
 
     char w_or_x = is_64bit ? 'x' : 'w';
@@ -12098,11 +12160,33 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
     out->name = inverted
         ? "MOV + BIC/ORN/EON foldable to bitmask immediate"
         : "MOV + AND/ORR/EOR foldable to bitmask immediate";
+    if (split) {
+        out->name = inverted
+            ? "MOV + BIC/ORN/EON foldable to two logical immediates"
+            : "MOV + AND/ORR/EOR foldable to two logical immediates";
+    }
     out->start_offset = state->mov_start_offset;
     out->insn_count = state->mov_insn_count + 1;
     clear_finding_strings(out);
 
-    if (alias != NULL) {
+    if (split) {
+        // The first mask goes to Rd, or for TST, which writes no
+        // register, to the constant's register, which the deferral
+        // below proves dead. ANDS sets the flags with the second.
+        unsigned t = rd == 31 ? state->mov_rd : rd;
+        const char *first_mnem = is_ands ? "and" : mnem;
+        if (alias != NULL) {
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, %c%u, #0x%" PRIx64 " ; tst %c%u, #0x%" PRIx64,
+                first_mnem, w_or_x, t, w_or_x, other, imm, w_or_x, t,
+                second);
+        } else {
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %c%u, %c%u, #0x%" PRIx64 " ; %s %c%u, %c%u, #0x%"
+                PRIx64, first_mnem, w_or_x, t, w_or_x, other, imm, mnem,
+                w_or_x, t, w_or_x, t, second);
+        }
+    } else if (alias != NULL) {
         snprintf(out->detail, sizeof(out->detail),
             "-> %s %c%u, #0x%" PRIx64,
             alias, w_or_x, other, imm);
@@ -15551,6 +15635,37 @@ static bool nearest_bitmask_immediate(uint64_t imm, uint64_t care,
     return found;
 }
 
+// The mask check_mov_logic_known_bits rewrites an AND or ANDS of
+// register `other` with `imm` to, in *best, and the bits `other` may
+// have set, in *may: false when nothing known of `other` makes one
+// encodable mask equivalent. A known value is check_const_fold's, and a
+// result that is always zero a MOV #0.
+static bool kb_equivalent_mask(armlint_state *state, const cs_insn *insn,
+                               size_t offset, unsigned other, unsigned sf,
+                               uint64_t imm, uint64_t *best, uint64_t *may)
+{
+    unsigned width = sf ? 64u : 32u;
+    kv_sync(state, insn, offset);
+    if (((state->kv_known >> other) & 1u) == 0) {
+        return false;
+    }
+    const kv_fact *f = &state->kv_facts[other];
+    uint64_t v, lo, hi;
+    int64_t slo, shi;
+    if (kv_fact_exact(f, &v)) {
+        return false;
+    }
+    kv_range(f, sf ? 1u : 0u, &lo, &hi, &slo, &shi);
+    if (lo > hi || (f->k0 & f->k1) != 0) {
+        return false;
+    }
+    *may = ~f->k0 & width_mask(width) & kv_ones(bits_used64(hi));
+    if ((imm & *may) == 0) {
+        return false;
+    }
+    return nearest_bitmask_immediate(imm, *may, width, best);
+}
+
 bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out)
 {
@@ -15606,28 +15721,10 @@ bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
     }
 
     // The input's possible bits: those neither its known-zero bits nor
-    // its range exclude. A known value is check_const_fold's.
-    kv_sync(state, insn, offset);
-    if (((state->kv_known >> other) & 1u) == 0) {
-        return false;
-    }
-    const kv_fact *f = &state->kv_facts[other];
-    uint64_t v, lo, hi;
-    int64_t slo, shi;
-    if (kv_fact_exact(f, &v)) {
-        return false;
-    }
-    kv_range(f, sf ? 1u : 0u, &lo, &hi, &slo, &shi);
-    if (lo > hi || (f->k0 & f->k1) != 0) {
-        return false;
-    }
-    uint64_t may = ~f->k0 & wmask & kv_ones(bits_used64(hi));
-    // A result that is always zero is a MOV #0, not a mask.
-    if ((imm & may) == 0) {
-        return false;
-    }
-    uint64_t best;
-    if (!nearest_bitmask_immediate(imm, may, width, &best)) {
+    // its range exclude.
+    uint64_t best, may;
+    if (!kb_equivalent_mask(state, insn, offset, other, sf, imm, &best,
+                            &may)) {
         return false;
     }
 

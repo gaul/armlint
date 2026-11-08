@@ -1412,6 +1412,17 @@ bool check_mov_add_sub_split(armlint_state *state, const cs_insn *insn,
 // (the rewrite would still read the constant register, so the chain
 // could never be deleted); ZR as the non-MOV operand is excluded
 // (degenerate). The two families report distinct finding names.
+//
+// Where no one immediate encodes the constant, two may, as LLVM's
+// AArch64MIPeepholeOpt splits it: an AND/ANDS/TST constant into two
+// masks whose intersection it is, an ORR/EOR constant into two disjoint
+// runs of ones (~C for the inverting forms).
+//   movz w16, #0x10 ; movk w16, #0x4, lsl #16 ; tst w17, w16
+//       -> and w16, w17, #0x7fff0 ; tst w16, #0xfffc001f
+// TST writes no register, so its first mask goes to the constant's.
+// Not when one instruction builds the constant, nor when known bits
+// make one mask do (check_mov_logic_known_bits). Reported as "... foldable
+// to two logical immediates".
 bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
                               size_t offset, armlint_finding *out);
 

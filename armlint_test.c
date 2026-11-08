@@ -10840,6 +10840,112 @@ static void test_mov_logic_imm_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// A logical shifted-register op (LSL #0): sf | opc | 01010 | 00 | N | Rm
+// | 000000 | Rn | Rd.
+static void logic_reg(uint8_t out[4], unsigned sf, unsigned opc, unsigned n,
+                      unsigned rd, unsigned rn, unsigned rm)
+{
+    write_le32(out, (sf << 31) | (opc << 29) | 0x0A000000u | (n << 21)
+               | ((rm & 0x1Fu) << 16) | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+// Run a check_mov_logic_imm_fold split fragment of `len` bytes, with x0
+// overwritten after it when `kill` (the fold deletes the chain, so it
+// waits for that proof), then a RET; the count and first detail of
+// findings named `name`.
+static int run_logic_split(uint8_t *code, size_t len, bool kill,
+                           const char *name, char *detail)
+{
+    if (kill) {
+        movz_x(&code[len], 0, KILL_IMM, 0);
+        len += 4;
+    }
+    write_le32(&code[len], 0xD65F03C0u);
+    detail[0] = '\0';
+    return run_named_buffer_check(code, len + 4, name, detail,
+                                  ARMLINT_FINDING_DETAIL_LEN);
+}
+
+// The constant no one immediate encodes, split as LLVM's
+// AArch64MIPeepholeOpt splits it: an AND/ANDS/TST's into two masks
+// whose intersection it is, an ORR's or EOR's into two disjoint runs.
+static void test_mov_logic_imm_split(void)
+{
+    static const char *const k_direct =
+        "MOV + AND/ORR/EOR foldable to two logical immediates";
+    static const char *const k_inverted =
+        "MOV + BIC/ORN/EON foldable to two logical immediates";
+    uint8_t code[32];
+    char d[ARMLINT_FINDING_DETAIL_LEN];
+
+    // JavaScriptCore's TST of 0x40010, which writes no register: the
+    // first mask goes to the constant's own register.
+    movz_w(&code[0], 0, 0x10);
+    movk_w(&code[4], 0, 0x4, 1);
+    logic_reg(&code[8], 0, 3, 0, 31, 2, 0);             // tst w2, w0
+    assert(run_logic_split(code, 12, true, k_direct, d) == 1);
+    assert(strcmp(d, "-> and w0, w2, #0x7fff0 ; tst w0, #0xfffc001f") == 0);
+
+    // AND and ANDS of 0x0000010000000001: the run from bit 0 to bit 40,
+    // and the constant with every bit outside it set.
+    movz_x(&code[0], 0, 0x1, 0);
+    movk_x(&code[4], 0, 0x100, 2);
+    logic_reg(&code[8], 1, 0, 0, 3, 2, 0);              // and x3, x2, x0
+    assert(run_logic_split(code, 12, true, k_direct, d) == 1);
+    assert(strcmp(d, "-> and x3, x2, #0x1ffffffffff ; "
+                     "and x3, x3, #0xffffff0000000001") == 0);
+    logic_reg(&code[8], 1, 3, 0, 3, 2, 0);              // ands x3, x2, x0
+    assert(run_logic_split(code, 12, true, k_direct, d) == 1);
+    assert(strcmp(d, "-> and x3, x2, #0x1ffffffffff ; "
+                     "ands x3, x3, #0xffffff0000000001") == 0);
+
+    // ORR and EOR of 0xfffe800000000000, Firefox's: the lowest run, and
+    // the rest.
+    movz_x(&code[0], 0, 0x8000, 2);
+    movk_x(&code[4], 0, 0xfffe, 3);
+    logic_reg(&code[8], 1, 1, 0, 3, 2, 0);              // orr x3, x2, x0
+    assert(run_logic_split(code, 12, true, k_direct, d) == 1);
+    assert(strcmp(d, "-> orr x3, x2, #0x800000000000 ; "
+                     "orr x3, x3, #0xfffe000000000000") == 0);
+    logic_reg(&code[8], 1, 2, 0, 3, 2, 0);              // eor x3, x2, x0
+    assert(run_logic_split(code, 12, true, k_direct, d) == 1);
+    assert(strcmp(d, "-> eor x3, x2, #0x800000000000 ; "
+                     "eor x3, x3, #0xfffe000000000000") == 0);
+
+    // BIC of 0xfffffefffffffffe is an AND of its complement, split the
+    // same way.
+    movn_x(&code[0], 0, 0x1, 0);
+    movk_x(&code[4], 0, 0xfeff, 2);
+    logic_reg(&code[8], 1, 0, 1, 3, 2, 0);              // bic x3, x2, x0
+    assert(run_logic_split(code, 12, true, k_inverted, d) == 1);
+    assert(strcmp(d, "-> and x3, x2, #0x1ffffffffff ; "
+                     "and x3, x3, #0xffffff0000000001") == 0);
+
+    // Not reported: the constant read again; a constant one instruction
+    // builds, padded to two; one that does not split
+    // (0x12345678); and one known bits make a single mask of, which is
+    // check_mov_logic_known_bits' one-instruction rewrite.
+    movz_x(&code[0], 0, 0x1, 0);
+    movk_x(&code[4], 0, 0x100, 2);
+    logic_reg(&code[8], 1, 0, 0, 3, 2, 0);              // and x3, x2, x0
+    write_le32(&code[12], 0x8B0000C5u);                 // add x5, x6, x0
+    assert(run_logic_split(code, 16, false, k_direct, d) == 0);
+    movz_w(&code[0], 0, 0x5);
+    movk_w(&code[4], 0, 0x0, 1);
+    logic_reg(&code[8], 0, 0, 0, 3, 2, 0);              // and w3, w2, w0
+    assert(run_logic_split(code, 12, true, k_direct, d) == 0);
+    movz_w(&code[0], 0, 0x5678);
+    movk_w(&code[4], 0, 0x1234, 1);
+    assert(run_logic_split(code, 12, true, k_direct, d) == 0);
+    and_w_ff(&code[0], 2, 2);                           // and w2, w2, #0xff
+    movz_w(&code[4], 0, 0x10);
+    movk_w(&code[8], 0, 0x4, 1);
+    logic_reg(&code[12], 0, 3, 0, 31, 2, 0);            // tst w2, w0
+    assert(run_logic_split(code, 16, true, k_direct, d) == 0);
+    assert(run_logic_split(code, 16, true,
+        "MOV + AND/TST that known bits make a bitmask immediate", d) == 1);
+}
+
 // Encode STR Xt, [Xn, #imm] (X-form, unsigned offset, imm in 8-byte
 // units). Base 0xF9000000.
 static void str_x_uimm(uint8_t out[4], unsigned rt, unsigned rn, unsigned imm)
@@ -20180,6 +20286,7 @@ int main(void)
     test_mov_add_sub_split();
     test_mov_cmp_branch_bvs();
     test_mov_logic_imm_fold();
+    test_mov_logic_imm_split();
     test_mov_logic_known_bits();
     test_dead_mov_across_branch();
     test_mov_reg_offset_split();

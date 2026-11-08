@@ -167,6 +167,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #C` + `add`/`sub`](analyses.md#mov--addsub-foldable-to-immediate-form) | `add`/`sub Rd, Rn, #C` (sign-crossed `add`↔`sub`, `cmp`↔`cmn` for `#-C`) |
 | [`movz`/`movn` + `movk` of a constant below 2^24 + `add`/`sub`](analyses.md#mov--addsub-foldable-to-two-immediate-addsubs) | `add`/`sub Rd, Rn, #hi, lsl #12` + `add`/`sub Rd, Rd, #lo` (`add`↔`sub` for a negative constant) |
 | [`mov #C` + `and`/`orr`/`eor`/`ands` or `bic`/`orn`/`eon`/`bics`](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-bitmask-immediate) | `and`/`orr`/`eor`/`ands Rd, Rn, #C` (`#~C` for the inverting forms) |
+| [the same with C two logical immediates](analyses.md#mov--andorreorands-or-bicorneonbics-foldable-to-two-logical-immediates) | `and Rd, Rn, #A` + `and Rd, Rd, #B` (`orr`/`eor` of two disjoint runs) |
 | [`mov #INT_MIN` or `#INT_MAX` + `cmp` + `b.eq`/`b.ne`](analyses.md#mov--cmp--beqne-against-int_minint_max-foldable-to-bvsbvc) | `cmp xzr, Xn` or `cmn Xn, #1` + `b.vs`/`b.vc` |
 | [`mov #C` + `ccmp`/`ccmn`](analyses.md#mov--ccmpccmn-foldable-to-immediate-form) | `ccmp`/`ccmn Rn, #C, #nzcv, cond` (sign-crossed for `#-C`) |
 | [`cmp`/`cmn` + `ccmp`/`ccmn` on one register + `b.cond`/`csel`, one compare deciding it](analyses.md#cmp--ccmp-chain-decidable-by-one-compare) | that `cmp`/`cmn` (or `cbz`/`cbnz`) with the reader's condition adjusted |

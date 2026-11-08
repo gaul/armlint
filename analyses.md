@@ -3017,6 +3017,52 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   the rewrite saves nothing. Those shapes are left to the
   self-op identity check.
 
+## MOV + AND/ORR/EOR/ANDS (or BIC/ORN/EON/BICS) foldable to two logical immediates
+
+* The shape above when no one immediate encodes the constant but two
+  do, combined by the operation itself:
+
+  ```
+  movz w16, #0x10            ; JavaScriptCore, 0x40010
+  movk w16, #0x4, lsl #16
+  tst  w17, w16              ->  and w16, w17, #0x7fff0
+                                 tst w16, #0xfffc001f
+  ```
+
+  LLVM's `AArch64MIPeepholeOpt` makes the same rewrite on its MIR,
+  and armlint splits the constant as it does:
+  * AND, ANDS and TST (`splitBitmaskImm`, LLVM since 2021): the run of
+    ones from the constant's lowest set bit to its highest, which
+    always encodes, intersected with the constant plus every bit
+    outside that run. `0x40010` is `0x7fff0 & 0xfffc001f`.
+  * ORR and EOR (`splitDisjointBitmaskImm`, since August 2025): the
+    constant's lowest run of ones and the rest. They are disjoint, so
+    their OR and their EOR are both the constant: `0xfffe800000000000`
+    is `0x800000000000 | 0xfffe000000000000`.
+  * BIC, ORN, EON and BICS split `~C` the same way, as the
+    one-immediate fold complements it.
+* The first operation writes Rd and the second reads it back; ANDS
+  sets the flags with the second. TST writes no register, so the first
+  mask goes to the constant's register, which the deletion has to
+  prove dead anyway.
+* Not where one instruction builds the constant, which is LLVM's
+  condition too: the MOV and the operation are two instructions
+  already. Not where the known-value engine makes one mask equivalent
+  either, which is the next section's one-instruction rewrite.
+* Soundness and the deferral are the one-immediate fold's: the rewrite
+  deletes the chain, so the constant's register must be dead.
+* What it saves: the chain's length less one, and the register.
+* Corpus: over the chain check's corpus (clang-24, librustc_driver,
+  Firefox's `XUL`, go, libcrypto, dyld, bash and ssh, and
+  SpiderMonkey's and JavaScriptCore's JetStream 3 output), 1,900
+  sites, 1,969 instructions, and `llc` splits each of their constants
+  into the same two immediates. JavaScriptCore has 1,250, 991 of them
+  that `tst` of `0x40010`. librustc_driver has 295, 238 of them
+  W ANDs; clang-24 209; `XUL` 107, 48 of them X ORRs; SpiderMonkey
+  29; go 5; dyld and bash 2 each; libcrypto 1. LLVM declines a
+  constant with a second use, and its ORR/EOR split is recent; which
+  of those left each compiled site is not measured.
+
 ## MOV + AND/TST that known bits make a bitmask immediate
 
 * The shape above when the constant is *not* a bitmask immediate but

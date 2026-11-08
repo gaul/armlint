@@ -61,25 +61,50 @@ _main:
     mov     w0, #1
     bics    wzr, w2, w0         // -> tst w2, #0xfffffffe
 
+    // Two logical immediates, where no one encodes the constant, as
+    // LLVM's AArch64MIPeepholeOpt splits it.
+    // 14) TST of 0x40010: the run from bit 4 to bit 18, and the
+    //     constant with every bit outside it set. TST writes no
+    //     register, so the first mask goes to the constant's own.
+    movz    w0, #0x10
+    movk    w0, #0x4, lsl #16
+    tst     w2, w0              // -> and w0, w2, #0x7fff0 ; tst w0, #0xfffc001f
+
+    // 15) ORR of 0xfffe800000000000: the lowest run, then the rest.
+    movz    x0, #0x8000, lsl #32
+    movk    x0, #0xfffe, lsl #48
+    orr     x3, x2, x0          // -> orr x3, x2, #0x800000000000 ; orr ...
+
+    // 16) BIC of 0xfffffefffffffffe, an AND of 0x0000010000000001.
+    movn    x0, #0x1
+    movk    x0, #0xfeff, lsl #32
+    bic     x3, x2, x0          // -> and x3, x2, #0x1ffffffffff ; and ...
+
     // Negatives:
-    // N1) C = 5 is not a bitmask immediate.
+    // N1) C = 5 is not a bitmask immediate, and one MOVZ builds it.
     mov     x0, #5
     and     x3, x2, x0
 
-    // N2) ~C is not a bitmask immediate (C = 0xfffffffa, ~C = 5).
+    // N2) 0x12345678 is two instructions, but no two logical
+    //     immediates make it.
+    movz    w0, #0x5678
+    movk    w0, #0x1234, lsl #16
+    and     w3, w2, w0
+
+    // N3) ~C is not a bitmask immediate (C = 0xfffffffa, ~C = 5).
     mov     w0, #-6
     bic     w3, w2, w0
 
-    // N3) Shifted AND.
+    // N4) Shifted AND.
     mov     x0, #0xFF
     and     x3, x2, x0, lsl #2
 
-    // N4) Constant in BIC's non-inverted slot: C & ~x2 has no
+    // N5) Constant in BIC's non-inverted slot: C & ~x2 has no
     //     immediate form.
     mov     x0, #0xFF
     bic     x3, x0, x2
 
-    // N5) Surviving operand is the constant register itself: the
+    // N6) Surviving operand is the constant register itself: the
     //     immediate rewrite would still read x0, so the MOV could
     //     never be deleted. Silent here; the self-op identity check
     //     flags the AND on its own.
