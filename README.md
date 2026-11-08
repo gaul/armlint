@@ -112,7 +112,7 @@ not yet implemented live in [TODO.md](TODO.md).
 
 | Pattern | Rewrite |
 | --- | --- |
-| [`movz`/`movn` + `movk` (over-long constant)](analyses.md#suboptimal-movzmovk-sequence) | bitmask-immediate `mov`, or minimal `movz`/`movn` + `movk` chain |
+| [`movz`/`movn` + `movk` (over-long constant)](analyses.md#suboptimal-movzmovk-sequence) | what LLVM's `expandMOVImm` builds it with: bitmask-immediate `mov`, minimal `movz`/`movn` + `movk` chain, `orr` + `movk`, two bitmask immediates, or `movn` + `eor`/`eon` |
 | [`lsl`/`lsr`/`asr`/`ror` + `add`/`sub`/`and`/`orr`/`eor`](analyses.md#shift-foldable-into-shifted-register-form) | `add Rd, Rn, Rm, <shift> #n` |
 | [`lsl`/`lsr` + shifted `orr`/`eor`/`add` (funnel/rotate)](analyses.md#funnel-shift-foldable-into-extr-or-ror) | `extr Rd, Rhi, Rlo, #lsb` (or `ror` when both halves match) |
 | [`sxtw`/`uxtb`/`sxtb` + `add`/`sub`](analyses.md#extend-foldable-into-shiftedextended-register-form) | `add Rd, Rn, Wm, sxtw` |

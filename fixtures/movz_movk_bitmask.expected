@@ -22,10 +22,52 @@ suboptimal MOVZ/MOVK sequence at offset: 0x3c <_main+0x3c>: -> movn w6, #0x1234 
   movz w6, #0xedcb
   movk w6, #0xffff, lsl #16
 
+suboptimal MOVZ/MOVK sequence at offset: 0x4c <_main+0x4c>: -> orr x8, xzr, #0xfff8000000000001 ; movk x8, #0x8000, lsl #32 (3 instructions)
+  movz x8, #0x1
+  movk x8, #0x8000, lsl #32
+  movk x8, #0xfff8, lsl #48
+
+suboptimal MOVZ/MOVK sequence at offset: 0x58 <_main+0x58>: -> orr x9, xzr, #0xffff80000000000f ; and x9, x9, #0xfff8fff8fff8fff8 (3 instructions)
+  movz x9, #0x8
+  movk x9, #0x8000, lsl #32
+  movk x9, #0xfff8, lsl #48
+
+suboptimal MOVZ/MOVK sequence at offset: 0x64 <_main+0x64>: -> orr x10, xzr, #0x4000400040004 ; orr x10, x10, #0x1000100010001 (4 instructions)
+  movz x10, #0x5
+  movk x10, #0x5, lsl #16
+  movk x10, #0x5, lsl #32
+  movk x10, #0x5, lsl #48
+
+suboptimal MOVZ/MOVK sequence at offset: 0x74 <_main+0x74>: -> orr x11, xzr, #0x1800000018 ; eor x11, x11, #0x800000000000000f (3 instructions)
+  movz x11, #0x17
+  movk x11, #0x18, lsl #32
+  movk x11, #0x8000, lsl #48
+
+suboptimal MOVZ/MOVK sequence at offset: 0x80 <_main+0x80>: -> movn x12, #0x1d ; eon x12, x12, x12, lsl #46 (3 instructions)
+  movz x12, #0x1d
+  movk x12, #0x8000, lsl #32
+  movk x12, #0xfff8, lsl #48
+
+suboptimal MOVZ/MOVK sequence at offset: 0x8c <_main+0x8c>: -> movn w13, #0x80, lsl #16 (2 instructions)
+  movz x13, #0xffff
+  movk x13, #0xff7f, lsl #16
+
+suboptimal MOVZ/MOVK sequence at offset: 0x94 <_main+0x94>: -> movz x14, #0x1101 ; movk x14, #0x1204, lsl #16 ; orr x14, x14, x14, lsl #32 (4 instructions)
+  movz x14, #0x1101
+  movk x14, #0x1204, lsl #16
+  movk x14, #0x1101, lsl #32
+  movk x14, #0x1204, lsl #48
+
+suboptimal MOVZ/MOVK sequence at offset: 0xa4 <_main+0xa4>: -> movn x15, #0x5678 ; movk x15, #0xedcb, lsl #16 ; eor x15, x15, x15, lsl #32 (4 instructions)
+  movz x15, #0xa987
+  movk x15, #0xedcb, lsl #16
+  movk x15, #0x5678, lsl #32
+  movk x15, #0x1234, lsl #48
+
 Optimization opportunities by type:
-       5  suboptimal MOVZ/MOVK sequence
+      13  suboptimal MOVZ/MOVK sequence
 
 Optimization opportunities by function:
-       5  _main
+      13  _main
 
-5 optimization opportunities in 20 instructions
+13 optimization opportunities in 50 instructions

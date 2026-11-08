@@ -12,31 +12,77 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 * `movz w0, #0x6666 ; movk w0, #0x6666, lsl #16` instead of
   `mov w0, #0x66666666` (single bitmask-immediate ORR)
-* More generally, any MOVZ/MOVN + MOVK chain longer than the minimal
-  move-wide sequence for its final value. The minimal length is one
-  instruction per non-zero halfword for a MOVZ-based chain, one per
-  non-0xFFFF halfword for a MOVN-based chain (each with a floor of
-  one), whichever is smaller. So the four-instruction
-  `movz x0, #0x5678 ; movk x0, #0x1234, lsl #16 ;
-  movk x0, #0xffff, lsl #32 ; movk x0, #0xffff, lsl #48`
-  (0xFFFFFFFF12345678) flags with the two-instruction rewrite
-  `movn x0, #0xa987 ; movk x0, #0x1234, lsl #16`, and a MOVK that
-  rewrites a halfword the base instruction already set (`movk #0`
-  over MOVZ, `movk #0xffff` over MOVN) flags as plainly redundant.
+* More generally, any MOVZ/MOVN + MOVK chain longer than the sequence
+  LLVM's AArch64 backend builds its final value with:
+  `AArch64_IMM::expandMOVImm`, ported strategy for strategy and in
+  LLVM's order. Its forms:
+  * the minimal move-wide chain: one instruction per non-zero halfword
+    for a MOVZ-based chain, one per non-0xFFFF halfword for a
+    MOVN-based chain (each with a floor of one), whichever is smaller.
+    So the four-instruction `movz x0, #0x5678 ; movk x0, #0x1234,
+    lsl #16 ; movk x0, #0xffff, lsl #32 ; movk x0, #0xffff, lsl #48`
+    (0xFFFFFFFF12345678) flags with the two-instruction rewrite
+    `movn x0, #0xa987 ; movk x0, #0x1234, lsl #16`, and a MOVK that
+    rewrites a halfword the base instruction already set (`movk #0`
+    over MOVZ, `movk #0xffff` over MOVN) flags as plainly redundant;
+  * a single bitmask-immediate ORR;
+  * a bitmask ORR, then a MOVK: `orr x0, xzr, #0xfff8000000000001 ;
+    movk x0, #0x8000, lsl #32` is SpiderMonkey's `Int32Value(1)`,
+    0xFFF8800000000001, which the move-wide chain takes three for;
+  * two bitmask immediates combined by ORR, AND or EOR:
+    `orr x0, xzr, #0xffff80000000000f ; and x0, x0,
+    #0xfff8fff8fff8fff8` is 0xFFF8800000000008;
+  * MOVN, then EOR or EON of the register with itself shifted:
+    `movn x0, #0x1d ; eon x0, x0, x0, lsl #46` is 0xFFF880000000001D;
+  * three instructions for four-halfword values: a bitmask ORR of a
+    repeated chunk or of a run of ones, then two MOVKs; MOVN + MOVK,
+    then the EOR or EON; and MOVZ + MOVK, then `orr x0, x0, x0,
+    lsl #32` where the two halves repeat.
+
+  An X chain whose value fits in 32 bits is planned in its W
+  register, as LLVM's instruction selection does for such a value:
+  `movz x0, #0xffff ; movk x0, #0xff7f, lsl #16` is `movn w0, #0x80,
+  lsl #16`, which zero-extends into x0. Where the plan only ties the
+  bitmask or the move-wide form, that form is the rewrite shown.
+* Checked against LLVM itself. Over 1,987,150 values -- every chain
+  value in the corpus below and synthetic sets aimed at each
+  strategy -- the plan matches `llc`'s output instruction for
+  instruction, immediates included, except for zero, which `llc`
+  copies from XZR instead. One choice is armlint's: where two 16-bit
+  chunks each repeat, LLVM's replicated-chunk form takes whichever
+  its hash map yields first, and armlint the lower chunk; the length
+  is the same.
 * The chain is accumulated per register -- a MOVZ or MOVN opens it,
   same-register same-width MOVKs extend it -- and the final value is
   judged when the chain closes (any other instruction, or end of
   region). Judging the net value catches chains whose individual
   steps look necessary but whose result is cheap.
 * Soundness: the rewrite materializes the same constant in the same
-  register; no flags or memory are involved. Like every multi-
-  instruction fold, it assumes control flow does not enter the middle
-  of the chain.
+  register; no flags or memory are involved. A W plan zero-extends
+  into the X register, which leaves the same 64 bits. Like every
+  multi-instruction fold, it assumes control flow does not enter the
+  middle of the chain.
 * What it saves: one to three instructions per constant (4 bytes and
-  a decode slot each). Hybrid constructions (a bitmask-immediate ORR
-  or MOV followed by MOVKs), which beat both pure move-wide forms for
-  some values, are not yet modeled -- the reported minimum is an
-  upper bound on the true one.
+  a decode slot each).
+* Corpus: over clang-24, librustc_driver, Firefox's `XUL`, go,
+  libcrypto, dyld, bash and ssh, and SpiderMonkey's and
+  JavaScriptCore's JetStream 3 JIT output, the move-wide model
+  reported 3,632 chains, all JavaScriptCore's but one; LLVM's plan
+  reports 78,595, saving 75,314 instructions more. SpiderMonkey is
+  61,991 of them: its constant builder, VIXL's `MoveImmediateHelper`,
+  tries a one-instruction form and then the move-wide chain and
+  nothing else, and its boxed values are what the other forms build.
+  `Int32Value(1)` alone is 29,751 Baseline sites, `orr` + `movk`.
+  JavaScriptCore adds 12,829, 8,661 of them one heap address that
+  happened to suit `orr` + `movk` in that run. By form, `orr` +
+  `movk` is 60,742, `orr` + two `movk` 7,322, `orr` + `and` 4,285,
+  `movn` + `eon` 2,081, a W `orr` or `movn` 342, and `orr` + `orr`
+  50 and `orr` + `eor` 34. The compiled binaries have almost none --
+  clang-24 42, librustc_driver 14, libcrypto 1, `XUL` 0 -- since the
+  LLVM that built them already emits these forms. clang's and
+  rustc's are all the `movn` + `movk` + `eor` form LLVM gained in
+  December 2025, libcrypto's a W `movn`. go, whose assembler plans
+  constants its own way, has 87.
 
 ## shift foldable into shifted-register form
 

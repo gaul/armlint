@@ -1741,6 +1741,525 @@ static void render_minimal_mov_wide(char *buf, size_t bufsz,
     }
 }
 
+// ---- LLVM's constant planner ----
+//
+// The shortest sequence LLVM's AArch64 backend builds a constant with:
+// AArch64_IMM::expandMOVImm (llvm/lib/Target/AArch64/AArch64ExpandImm.cpp)
+// ported to plan rather than emit, strategy for strategy and in LLVM's
+// order. Beyond the move-wide chains and the single bitmask ORR it
+// knows two-instruction forms -- a bitmask ORR then one MOVK, two
+// bitmask immediates combined by ORR, AND or EOR, and MOVN (+ MOVK)
+// then EOR/EON of the register with itself shifted -- and three-
+// instruction ones: a bitmask ORR of a repeated or run-of-ones
+// pattern then two MOVKs, and MOVZ + MOVK then ORR of the low half
+// into the high. One choice is not LLVM's: where two 16-bit chunks
+// each repeat, tryToreplicateChunks takes whichever its DenseMap
+// yields first, and this takes the lower chunk. The length is the
+// same either way.
+
+typedef enum {
+    MP_MOVZ,        // movz rd, #imm16, lsl #shift
+    MP_MOVN,        // movn rd, #imm16, lsl #shift
+    MP_MOVK,        // movk rd, #imm16, lsl #shift
+    MP_ORR,         // orr rd, zr, #imm
+    MP_ORR_RD,      // orr rd, rd, #imm
+    MP_AND_RD,      // and rd, rd, #imm
+    MP_EOR_RD,      // eor rd, rd, #imm
+    MP_ORR_LSL,     // orr rd, rd, rd, lsl #shift
+    MP_EOR_LSL,     // eor rd, rd, rd, lsl #shift
+    MP_EON_LSL,     // eon rd, rd, rd, lsl #shift
+} mov_plan_op;
+
+typedef struct {
+    uint8_t op;
+    uint8_t shift;
+    uint64_t imm;
+} mov_plan_step;
+
+// width is the register the plan writes: 32 for a W plan, which
+// zero-extends into the X register.
+typedef struct {
+    unsigned n;
+    unsigned width;
+    mov_plan_step step[4];
+} mov_plan;
+
+static void plan_push(mov_plan *p, mov_plan_op op, uint64_t imm,
+                      unsigned shift)
+{
+    p->step[p->n].op = (uint8_t)op;
+    p->step[p->n].shift = (uint8_t)shift;
+    p->step[p->n].imm = imm;
+    p->n++;
+}
+
+// The bit counts LLVM's MathExtras gives for zero: 64.
+static unsigned ctz64(uint64_t v)
+{
+    return v ? (unsigned)__builtin_ctzll(v) : 64u;
+}
+
+static unsigned clz64(uint64_t v)
+{
+    return v ? (unsigned)__builtin_clzll(v) : 64u;
+}
+
+static unsigned cto64(uint64_t v)
+{
+    return ctz64(~v);
+}
+
+static uint64_t rotl64(uint64_t v, unsigned r)
+{
+    r &= 63u;
+    return r ? (v << r) | (v >> (64u - r)) : v;
+}
+
+static uint64_t rotr64(uint64_t v, unsigned r)
+{
+    r &= 63u;
+    return r ? (v >> r) | (v << (64u - r)) : v;
+}
+
+// isMask_64 and isShiftedMask_64: ones from bit 0, and one run of ones.
+static bool is_mask64(uint64_t v)
+{
+    return v != 0 && ((v + 1) & v) == 0;
+}
+
+static bool is_shifted_mask64(uint64_t v)
+{
+    return v != 0 && is_mask64((v - 1) | v);
+}
+
+static uint64_t chunk16(uint64_t v, unsigned idx)
+{
+    return (v >> (idx * 16u)) & 0xffffu;
+}
+
+// expandMOVImmSimple: MOVZ, or MOVN where more halfwords are all ones
+// than all zeros, for the lowest halfword that needs one, then a MOVK
+// for each later halfword that differs; four instructions whose two
+// halves repeat become three, the last an ORR of the low half into
+// the high.
+static void plan_move_wide(uint64_t imm, unsigned width, unsigned ones,
+                           unsigned zeros, mov_plan *p)
+{
+    bool neg = ones > zeros;
+    uint64_t v = neg ? ~imm : imm;
+    if (width == 32) {
+        v &= 0xffffffffu;
+    }
+    unsigned shift = 0, last = 0;
+    if (v != 0) {
+        shift = (ctz64(v) / 16u) * 16u;
+        last = ((63u - clz64(v)) / 16u) * 16u;
+    }
+    plan_push(p, neg ? MP_MOVN : MP_MOVZ, (v >> shift) & 0xffffu, shift);
+    if (shift == last) {
+        return;
+    }
+    if (neg) {
+        v = ~v;
+    }
+    while (shift < last) {
+        shift += 16u;
+        uint64_t h = (v >> shift) & 0xffffu;
+        if (h == (neg ? 0xffffu : 0u)) {
+            continue;
+        }
+        plan_push(p, MP_MOVK, h, shift);
+    }
+    if (p->n > 2 && (v >> 32) == (v & 0xffffffffu)) {
+        p->n = 2;
+        plan_push(p, MP_ORR_LSL, 0, 32);
+    }
+}
+
+// The 16-bit chunk replicated to 64 bits, which one ORR builds when
+// it is a bitmask immediate.
+static uint64_t replicate16(uint64_t chunk)
+{
+    return chunk | (chunk << 16) | (chunk << 32) | (chunk << 48);
+}
+
+// tryToreplicateChunks: a chunk that appears two or three times and
+// replicates to a bitmask immediate, then a MOVK for each other chunk.
+static bool plan_replicated_chunks(uint64_t v, mov_plan *p)
+{
+    for (unsigned i = 0; i < 4; i++) {
+        uint64_t c = chunk16(v, i);
+        unsigned count = 0;
+        bool seen = false;
+        for (unsigned j = 0; j < 4; j++) {
+            if (chunk16(v, j) == c) {
+                count++;
+                seen |= j < i;
+            }
+        }
+        if (seen || (count != 2 && count != 3)
+                || !is_bitmask_immediate(replicate16(c), 64)) {
+            continue;
+        }
+        plan_push(p, MP_ORR, replicate16(c), 0);
+        for (unsigned j = 0; j < 4; j++) {
+            if (chunk16(v, j) != c) {
+                plan_push(p, MP_MOVK, chunk16(v, j), j * 16u);
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// trySequenceOfOnes: a run of ones, possibly wrapping, broken by one
+// or two chunks; ORR the run, then MOVK the chunks back.
+static bool plan_sequence_of_ones(uint64_t v, mov_plan *p)
+{
+    int start = -1, end = -1;
+    for (int i = 0; i < 4; i++) {
+        // The chunk sign-extended to 64 bits.
+        uint64_t c = chunk16(v, (unsigned)i);
+        if (c & 0x8000u) {
+            c |= ~(uint64_t)0xffffu;
+        }
+        if (c == 0 || c == ~(uint64_t)0) {
+            continue;
+        }
+        if (is_mask64(~c)) {
+            start = i;
+        } else if (is_mask64(c)) {
+            end = i;
+        }
+    }
+    if (start < 0 || end < 0) {
+        return false;
+    }
+    uint64_t outside = 0, inside = 0xffffu;
+    if (start > end) {
+        int t = start;
+        start = end;
+        end = t;
+        outside = 0xffffu;
+        inside = 0;
+    }
+    uint64_t orr = v;
+    int first = -1, second = -1;
+    for (int i = 0; i < 4; i++) {
+        uint64_t c = chunk16(v, (unsigned)i);
+        uint64_t hw = (uint64_t)0xffffu << (i * 16);
+        bool patch = false;
+        if ((i < start || end < i) && c != outside) {
+            orr = outside == 0 ? orr & ~hw : orr | hw;
+            patch = true;
+        } else if (i > start && i < end && c != inside) {
+            orr = inside != 0xffffu ? orr & ~hw : orr | hw;
+            patch = true;
+        }
+        if (patch) {
+            if (first < 0) {
+                first = i;
+            } else {
+                second = i;
+            }
+        }
+    }
+    if (first < 0 || !is_bitmask_immediate(orr, 64)) {
+        return false;
+    }
+    plan_push(p, MP_ORR, orr, 0);
+    plan_push(p, MP_MOVK, chunk16(v, (unsigned)first), (unsigned)first * 16u);
+    if (second >= 0) {
+        plan_push(p, MP_MOVK, chunk16(v, (unsigned)second),
+                  (unsigned)second * 16u);
+    }
+    return true;
+}
+
+// tryCopyWithNegation: a value whose high half is its low half
+// shifted by N in [17, 48), inverted or not, is the low half's MOVN
+// (+ MOVK) and then an EOR or EON of the register with itself.
+static bool plan_copy_with_negation(uint64_t v, bool allow_three,
+                                    mov_plan *p)
+{
+    if (v == 0 || is_shifted_mask64(v)) {
+        return false;
+    }
+    for (unsigned n = 17; n < 48; n++) {
+        for (int eon = 0; eon < 2; eon++) {
+            uint64_t c = eon
+                ? 0xffffffff00000000u | (v ^ ~(~v << n))
+                : 0xffffffff00000000u | (v ^ (v << n));
+            if ((eon ? (c ^ ~(c << n)) : (c ^ (c << n))) != v) {
+                continue;
+            }
+            uint64_t lo = c & 0xffffu, hi = (c >> 16) & 0xffffu;
+            if (lo != 0xffffu && hi != 0xffffu && !allow_three) {
+                continue;
+            }
+            if (lo != 0xffffu) {
+                plan_push(p, MP_MOVN, lo ^ 0xffffu, 0);
+                if (hi != 0xffffu) {
+                    plan_push(p, MP_MOVK, hi, 16);
+                }
+            } else {
+                plan_push(p, MP_MOVN, hi ^ 0xffffu, 16);
+            }
+            plan_push(p, eon ? MP_EON_LSL : MP_EOR_LSL, 0, n);
+            return true;
+        }
+    }
+    return false;
+}
+
+// GetRunOfOnesStartingAt, MaximallyReplicateSubImmediate and
+// maximalLogicalImmWithin: the largest logical immediate inside
+// `original` that covers the lowest set bit of `remaining`.
+static uint64_t maximal_logical_within(uint64_t remaining, uint64_t original)
+{
+    unsigned pos = ctz64(remaining);
+    if (pos >= 64) {
+        return 0;
+    }
+    unsigned ones = cto64(original >> pos);
+    uint64_t run = (ones >= 64 ? ~(uint64_t)0 : ((uint64_t)1 << ones) - 1)
+        << pos;
+    uint64_t result = run;
+    for (unsigned i = 0; i < 6; i++) {
+        uint64_t closure = result | rotl64(result, 1u << (6 - i));
+        if (closure != (closure & original)) {
+            break;
+        }
+        result = closure;
+    }
+    return result;
+}
+
+// decomposeIntoOrrOfLogicalImmediates: two logical immediates whose OR
+// is v, found greedily from the lowest run of ones.
+static bool decompose_orr(uint64_t v, uint64_t *a, uint64_t *b)
+{
+    if (v == 0 || ~v == 0) {
+        return false;
+    }
+    unsigned trailing = cto64(v);
+    uint64_t rotated = rotr64(v, trailing);
+    uint64_t m1 = maximal_logical_within(rotated, rotated);
+    uint64_t remaining = rotated & ~m1;
+    uint64_t m2 = maximal_logical_within(remaining, rotated);
+    if (remaining & ~m2) {
+        return false;
+    }
+    *a = rotl64(m1, trailing);
+    *b = rotl64(m2, trailing);
+    return true;
+}
+
+// tryOrrOfLogicalImmediates and tryAndOfLogicalImmediates, the second
+// by De Morgan: v's complement as an OR, so v as an AND of the
+// complements.
+static bool plan_logical_pair(uint64_t v, bool and_form, mov_plan *p)
+{
+    uint64_t a, b;
+    if (!decompose_orr(and_form ? ~v : v, &a, &b)) {
+        return false;
+    }
+    if (and_form) {
+        a = ~a;
+        b = ~b;
+    }
+    if (!is_bitmask_immediate(a, 64) || !is_bitmask_immediate(b, 64)) {
+        return false;
+    }
+    plan_push(p, MP_ORR, a, 0);
+    plan_push(p, and_form ? MP_AND_RD : MP_ORR_RD, b, 0);
+    return true;
+}
+
+// tryEorOfLogicalImmediates: v as the EOR of a logical immediate of v's
+// own repetition size and one of a power-of-two-smaller size, which the
+// runs of ones in one repetition decide.
+static bool plan_eor_pair(uint64_t v, mov_plan *p)
+{
+    unsigned big = 64;
+    do {
+        big /= 2;
+        uint64_t mask = ((uint64_t)1 << big) - 1;
+        if ((v & mask) != ((v >> big) & mask)) {
+            big *= 2;
+            break;
+        }
+    } while (big > 2);
+    uint64_t big_mask = ~(uint64_t)0 >> (64 - big);
+    uint64_t run_starts = v & ~rotl64(v, 1);
+    unsigned runs = (unsigned)__builtin_popcountll(run_starts & big_mask);
+    static const int8_t big_to_small[32] = {
+        -1, -1, 0,  1,  2,  2,  -1, 3,  3,  3,  -1, -1, -1, -1, -1, 4,
+        4,  4,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 5,
+    };
+    if (runs >= 32 || big_to_small[runs] < 0) {
+        return false;
+    }
+    unsigned small = big >> big_to_small[runs];
+    static const uint64_t repeated_ones[] = {
+        0xffffffffffffffffu, 0x5555555555555555u, 0x1111111111111111u,
+        0x0101010101010101u, 0x0001000100010001u, 0x0000000100000001u,
+        0x0000000000000001u,
+    };
+    uint64_t small_ones = repeated_ones[ctz64(small)];
+    unsigned rotation = ctz64(run_starts);
+    uint64_t rotated = rotr64(v, rotation);
+    for (int attempt = 0; attempt < 3; attempt++) {
+        unsigned run = cto64(rotated);
+        uint64_t small_imm = rotl64(
+            (run >= 64 ? 0 : small_ones << run) - small_ones, rotation);
+        uint64_t big_imm = v ^ small_imm;
+        if (is_bitmask_immediate(big_imm, 64)
+                && is_bitmask_immediate(small_imm, 64)) {
+            plan_push(p, MP_ORR, small_imm, 0);
+            plan_push(p, MP_EOR_RD, big_imm, 0);
+            return true;
+        }
+        rotation += ctz64(rotr64(run_starts, rotation) & ~(uint64_t)1);
+        rotated = rotr64(v, rotation);
+    }
+    return false;
+}
+
+// expandMOVImm at `width`, which is 32 or 64.
+static void plan_expand(uint64_t imm, unsigned width, mov_plan *p)
+{
+    p->n = 0;
+    p->width = width;
+    unsigned halfwords = width / 16u, ones = 0, zeros = 0;
+    for (unsigned i = 0; i < halfwords; i++) {
+        uint64_t c = chunk16(imm, i);
+        if (c == 0xffffu) {
+            ones++;
+        } else if (c == 0) {
+            zeros++;
+        }
+    }
+    if (halfwords - ones <= 1 || halfwords - zeros <= 1) {
+        plan_move_wide(imm, width, ones, zeros, p);
+        return;
+    }
+    uint64_t v = imm & width_mask(width);
+    if (is_bitmask_immediate(v, width)) {
+        plan_push(p, MP_ORR, v, 0);
+        return;
+    }
+    if (ones >= halfwords - 2 || zeros >= halfwords - 2) {
+        plan_move_wide(imm, width, ones, zeros, p);
+        return;
+    }
+    // Only a 64-bit value gets this far.
+    for (unsigned shift = 0; shift < 64; shift += 16) {
+        uint64_t hw = (uint64_t)0xffffu << shift;
+        uint64_t candidates[3] = {
+            v & ~hw, v | hw, (v & ~hw) | (rotl64(v, 32) & hw),
+        };
+        for (unsigned k = 0; k < 3; k++) {
+            if (is_bitmask_immediate(candidates[k], 64)) {
+                plan_push(p, MP_ORR, candidates[k], 0);
+                plan_push(p, MP_MOVK, (v >> shift) & 0xffffu, shift);
+                return;
+            }
+        }
+    }
+    if (plan_logical_pair(v, false, p) || plan_logical_pair(v, true, p)
+            || plan_eor_pair(v, p) || plan_copy_with_negation(v, false, p)) {
+        return;
+    }
+    if (ones != 0 || zeros != 0) {
+        plan_move_wide(imm, width, ones, zeros, p);
+        return;
+    }
+    if (plan_replicated_chunks(v, p) || plan_sequence_of_ones(v, p)
+            || plan_copy_with_negation(v, true, p)) {
+        return;
+    }
+    plan_move_wide(imm, width, ones, zeros, p);
+}
+
+// The plan for a chain's final value. An X chain whose value fits in 32
+// bits gets the W plan, which LLVM's instruction selection uses for
+// such a value (i64imm_32bit): a W write zero-extends into the X
+// register.
+static void mov_plan_for(uint64_t value, bool is_64bit, mov_plan *p)
+{
+    if (!is_64bit || (value >> 32) == 0) {
+        plan_expand(value & 0xffffffffu, 32, p);
+    } else {
+        plan_expand(value, 64, p);
+    }
+}
+
+// Whether check_movz_movk_bitmask reports the open chain: a bitmask
+// immediate, or longer than its value's plan. The folds that consume a
+// chain leave such a chain to it.
+static bool mov_chain_reported(const armlint_state *state)
+{
+    unsigned width = state->mov_is_64bit ? 64u : 32u;
+    if (is_bitmask_immediate(state->mov_value, width)) {
+        return true;
+    }
+    mov_plan plan;
+    mov_plan_for(state->mov_value, state->mov_is_64bit, &plan);
+    return state->mov_insn_count > plan.n;
+}
+
+// Render a plan into buf, instructions separated by " ; ".
+static void render_mov_plan(char *buf, size_t bufsz, const mov_plan *p,
+                            unsigned rd)
+{
+    char r = p->width == 64 ? 'x' : 'w';
+    const char *zr = p->width == 64 ? "xzr" : "wzr";
+    size_t pos = 0;
+    buf[0] = '\0';
+    for (unsigned i = 0; i < p->n && pos < bufsz; i++) {
+        const mov_plan_step *s = &p->step[i];
+        const char *sep = i ? " ; " : "";
+        static const char *const names[] = {
+            "movz", "movn", "movk", "orr", "orr", "and", "eor",
+            "orr", "eor", "eon",
+        };
+        int n;
+        switch (s->op) {
+        case MP_MOVZ:
+        case MP_MOVN:
+        case MP_MOVK:
+            n = s->shift
+                ? snprintf(buf + pos, bufsz - pos, "%s%s %c%u, #0x%" PRIx64
+                           ", lsl #%u", sep, names[s->op], r, rd, s->imm,
+                           s->shift)
+                : snprintf(buf + pos, bufsz - pos, "%s%s %c%u, #0x%" PRIx64,
+                           sep, names[s->op], r, rd, s->imm);
+            break;
+        case MP_ORR:
+            n = snprintf(buf + pos, bufsz - pos, "%sorr %c%u, %s, #0x%" PRIx64,
+                         sep, r, rd, zr, s->imm);
+            break;
+        case MP_ORR_RD:
+        case MP_AND_RD:
+        case MP_EOR_RD:
+            n = snprintf(buf + pos, bufsz - pos,
+                         "%s%s %c%u, %c%u, #0x%" PRIx64, sep, names[s->op],
+                         r, rd, r, rd, s->imm);
+            break;
+        default:
+            n = snprintf(buf + pos, bufsz - pos,
+                         "%s%s %c%u, %c%u, %c%u, lsl #%u", sep,
+                         names[s->op], r, rd, r, rd, r, rd, s->shift);
+            break;
+        }
+        if (n < 0) {
+            break;
+        }
+        pos += (size_t)n;
+    }
+}
+
 static bool mov_close(armlint_state *state, armlint_finding *out)
 {
     if (!state->mov_active) {
@@ -1753,7 +2272,12 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
         bool bitmask = is_bitmask_immediate(state->mov_value, reg_width);
         unsigned minimal =
             minimal_mov_wide_count(state->mov_value, reg_width);
-        if (bitmask || state->mov_insn_count > minimal) {
+        // LLVM's plan is never longer than the bitmask ORR or the
+        // move-wide minimum; where it ties them, the finding reads as
+        // before.
+        mov_plan plan;
+        mov_plan_for(state->mov_value, state->mov_is_64bit, &plan);
+        if (bitmask || state->mov_insn_count > plan.n) {
             char w_or_x = state->mov_is_64bit ? 'x' : 'w';
 
             out->name = "suboptimal MOVZ/MOVK sequence";
@@ -1761,7 +2285,12 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
             out->insn_count = state->mov_insn_count;
             clear_finding_strings(out);
 
-            if (bitmask) {
+            if (!bitmask && plan.n < minimal) {
+                // A form only the plan knows.
+                char seq[ARMLINT_FINDING_DETAIL_LEN - 4];
+                render_mov_plan(seq, sizeof(seq), &plan, state->mov_rd);
+                snprintf(out->detail, sizeof(out->detail), "-> %s", seq);
+            } else if (bitmask) {
                 // Encodable as a single bitmask-immediate MOV (ORR).
                 snprintf(out->detail, sizeof(out->detail),
                     "%c%u = 0x%" PRIx64,
@@ -11367,10 +11896,7 @@ bool check_mov_add_sub_split(armlint_state *state, const cs_insn *insn,
     // A chain check_movz_movk_bitmask reports -- a bitmask immediate,
     // or longer than its value needs -- is left to that check: a
     // bitmask ORR and the ADD are two instructions as well.
-    unsigned chain_width = state->mov_is_64bit ? 64u : 32u;
-    if (is_bitmask_immediate(state->mov_value, chain_width)
-            || state->mov_insn_count
-                > minimal_mov_wide_count(state->mov_value, chain_width)) {
+    if (mov_chain_reported(state)) {
         return false;
     }
 
@@ -20604,10 +21130,7 @@ bool check_mov_reg_offset_split(armlint_state *state, const cs_insn *insn,
         return false;
     }
     // A chain check_movz_movk_bitmask reports is its.
-    unsigned chain_width = state->mov_is_64bit ? 64u : 32u;
-    if (is_bitmask_immediate(state->mov_value, chain_width)
-            || state->mov_insn_count
-                > minimal_mov_wide_count(state->mov_value, chain_width)) {
+    if (mov_chain_reported(state)) {
         return false;
     }
     // The byte offset: non-negative (a negative X chain is a MOVN of

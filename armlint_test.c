@@ -796,6 +796,87 @@ static void test_movz_movk_sequences(void)
     assert(run_helper_check(code, 16) == 1);
 }
 
+// The chain check measures against LLVM's expandMOVImm, so a chain
+// LLVM builds shorter by a form the move-wide minimum does not know is
+// reported with LLVM's sequence. Each chain is MOVZ x0 then MOVKs,
+// closed by a RET.
+static void test_movz_movk_llvm_plans(void)
+{
+    static const struct {
+        unsigned n;
+        uint16_t imm[4];
+        uint8_t hw[4];
+        const char *detail;   // NULL: not reported
+    } cases[] = {
+        // Int32Value(1): a bitmask ORR, then one MOVK.
+        { 3, { 0x0001, 0x8000, 0xfff8 }, { 0, 2, 3 },
+          "-> orr x0, xzr, #0xfff8000000000001 ; "
+          "movk x0, #0x8000, lsl #32" },
+        // Two bitmask immediates: ANDed, ORed, EORed.
+        { 3, { 0x0008, 0x8000, 0xfff8 }, { 0, 2, 3 },
+          "-> orr x0, xzr, #0xffff80000000000f ; "
+          "and x0, x0, #0xfff8fff8fff8fff8" },
+        { 4, { 0x0005, 0x0005, 0x0005, 0x0005 }, { 0, 1, 2, 3 },
+          "-> orr x0, xzr, #0x4000400040004 ; "
+          "orr x0, x0, #0x1000100010001" },
+        { 3, { 0x0017, 0x0018, 0x8000 }, { 0, 2, 3 },
+          "-> orr x0, xzr, #0x1800000018 ; "
+          "eor x0, x0, #0x800000000000000f" },
+        // MOVN, then EON of the register with itself shifted.
+        { 3, { 0x001d, 0x8000, 0xfff8 }, { 0, 2, 3 },
+          "-> movn x0, #0x1d ; eon x0, x0, x0, lsl #46" },
+        // An X chain of a value that fits in 32 bits: one W MOVN, or one
+        // W bitmask ORR, either zero-extending into x0.
+        { 2, { 0xffff, 0xff7f }, { 0, 1 }, "-> movn w0, #0x80, lsl #16" },
+        { 2, { 0xff00, 0xff00 }, { 0, 1 }, "-> orr w0, wzr, #0xff00ff00" },
+        // Three for four: the low half ORed into the high, a repeated
+        // chunk, a run of ones broken by two chunks, and MOVN + MOVK
+        // then EOR.
+        { 4, { 0x1101, 0x1204, 0x1101, 0x1204 }, { 0, 1, 2, 3 },
+          "-> movz x0, #0x1101 ; movk x0, #0x1204, lsl #16 ; "
+          "orr x0, x0, x0, lsl #32" },
+        { 4, { 0x00ff, 0xbbbb, 0x00ff, 0xcccc }, { 0, 1, 2, 3 },
+          "-> orr x0, xzr, #0xff00ff00ff00ff ; movk x0, #0xbbbb, lsl #16 ; "
+          "movk x0, #0xcccc, lsl #48" },
+        { 4, { 0xff00, 0x5678, 0x1234, 0x00ff }, { 0, 1, 2, 3 },
+          "-> orr x0, xzr, #0xffffffffffff00 ; movk x0, #0x5678, lsl #16 ; "
+          "movk x0, #0x1234, lsl #32" },
+        { 4, { 0xa987, 0xedcb, 0x5678, 0x1234 }, { 0, 1, 2, 3 },
+          "-> movn x0, #0x5678 ; movk x0, #0xedcb, lsl #16 ; "
+          "eor x0, x0, x0, lsl #32" },
+        // Not reported: four halfwords no form beats, and a pair of
+        // bitmask immediates' value already built in two.
+        { 4, { 0xcdef, 0x90ab, 0x5678, 0x1234 }, { 0, 1, 2, 3 }, NULL },
+        { 2, { 0x0008, 0xfff8 }, { 0, 3 }, NULL },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint8_t code[20];
+        for (unsigned k = 0; k < cases[i].n; k++) {
+            if (k == 0) {
+                movz_x(&code[0], 0, cases[i].imm[0], cases[i].hw[0]);
+            } else {
+                movk_x(&code[4 * k], 0, cases[i].imm[k], cases[i].hw[k]);
+            }
+        }
+        size_t len = 4 * cases[i].n;
+        code[len] = 0xC0;           // ret
+        code[len + 1] = 0x03;
+        code[len + 2] = 0x5F;
+        code[len + 3] = 0xD6;
+        char detail[ARMLINT_FINDING_DETAIL_LEN] = "";
+        int got = run_named_buffer_check(code, len + 4,
+                                         "suboptimal MOVZ/MOVK sequence",
+                                         detail, sizeof(detail));
+        int want = cases[i].detail != NULL;
+        if (got != want
+                || (want && strcmp(detail, cases[i].detail) != 0)) {
+            fprintf(stderr, "llvm plan case %zu: %d findings, detail "
+                    "\"%s\"\n", i, got, detail);
+            assert(0);
+        }
+    }
+}
+
 // LSL (immediate) is the UBFM alias with imms = (datasize-1) - shift
 // and immr = (datasize - shift) MOD datasize.
 static void lsl_w(uint8_t out[4], unsigned rd, unsigned rn, unsigned shift)
@@ -8076,12 +8157,14 @@ static void test_mul_strength_reduce(void)
 
     // 2^16 + 1: movz x0, #1, lsl #16 ; movk x0, #1 ; mul x3, x2, x0
     //                              -> add x3, x2, x2, lsl #16.
-    // 0x10001 is not a bitmask immediate, so check_movz_movk_bitmask
-    // produces no finding; only the MUL strength reduction fires.
+    // The MUL strength reduction fires, and so does
+    // check_movz_movk_bitmask: 0x10001 is no 64-bit bitmask immediate,
+    // but it is a 32-bit one, and orr w0, wzr, #0x10001 zero-extends
+    // into x0.
     movz_x(&code[0], 0, 1, 1);
     movk_x(&code[4], 0, 1, 0);
     mul_x(&code[8], 3, 2, 0);
-    assert(run_x0_dead(code, 12) == 1);
+    assert(run_x0_dead(code, 12) == 2);
 
     // Negative: the constant register is live after the MUL, so the fold
     // must not fire -- deleting the MOV would break the later read.
@@ -20051,6 +20134,7 @@ int main(void)
     test_is_bitmask_immediate_32();
     test_is_bitmask_immediate_64();
     test_movz_movk_sequences();
+    test_movz_movk_llvm_plans();
     test_lsl_fold();
     test_funnel_to_extr();
     test_cmp_zero_branch();

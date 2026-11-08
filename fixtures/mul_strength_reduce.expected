@@ -43,6 +43,10 @@ register write overwritten unread at offset: 0x24 <_main+0x24>: -> delete; x3 is
   ... 2 instructions ...
   mul x3, x2, x0
 
+suboptimal MOVZ/MOVK sequence at offset: 0x28 <_main+0x28>: -> orr w0, wzr, #0x10001 (2 instructions)
+  movz x0, #0x1, lsl #16
+  movk x0, #0x1
+
 MUL by constant foldable to shift/add at offset: 0x28 <_main+0x28>: -> add x3, x2, x2, lsl #16 (3 instructions)
   movz x0, #0x1, lsl #16
   movk x0, #0x1
@@ -109,8 +113,9 @@ Optimization opportunities by type:
        3  register already holds the recomputed value
        1  MOV + MADD/MSUB foldable to shifted ADD/SUB
        1  operation on known values foldable to MOV #imm
+       1  suboptimal MOVZ/MOVK sequence
 
 Optimization opportunities by function:
-      23  _main
+      24  _main
 
-23 optimization opportunities in 29 instructions
+24 optimization opportunities in 29 instructions

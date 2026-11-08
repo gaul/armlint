@@ -299,12 +299,20 @@ bool armlint_finding_has_side_entry(const armlint_state *state,
                                     const armlint_finding *finding);
 
 // Track MOVZ/MOVN + MOVK chains and flag one whose final value is
-// reachable more cheaply: either as a single bitmask-immediate MOV
-// (ORR Rd, ZR, #imm), or by a shorter move-wide sequence -- the
-// minimal length is one instruction per non-zero halfword for a
-// MOVZ-based chain and one per non-0xFFFF halfword for a MOVN-based
-// chain (each with a floor of one), whichever is smaller. Despite the
-// name, the bitmask immediate is just one of the two rewrites.
+// reachable more cheaply, measured against LLVM's own constant
+// planner, AArch64_IMM::expandMOVImm, ported. Its forms are a single
+// bitmask-immediate MOV (ORR Rd, ZR, #imm); the minimal move-wide
+// chain -- one instruction per non-zero halfword for a MOVZ-based
+// chain and one per non-0xFFFF halfword for a MOVN-based chain (each
+// with a floor of one), whichever is smaller; and the forms beyond
+// those: a bitmask ORR then MOVKs, two bitmask immediates combined by
+// ORR, AND or EOR, MOVN (+ MOVK) then EOR/EON of the register with
+// itself shifted, and MOVZ + MOVK then an ORR of the low half into
+// the high. An X chain whose value fits in 32 bits is planned in its W
+// register, which zero-extends, as LLVM selects it. Where the plan
+// ties the bitmask or move-wide form, that form is the rewrite shown.
+// Despite the name, the bitmask immediate is just one of the
+// rewrites.
 //
 // May produce a finding when a non-matching instruction closes a
 // previously open sequence, so callers must invoke armlint_flush

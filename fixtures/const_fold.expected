@@ -49,6 +49,10 @@ operation on known values leaves its register unchanged at offset: 0x84 <_main+0
   mov x20, #0
   sub x9, x9, x20
 
+suboptimal MOVZ/MOVK sequence at offset: 0x98 <_main+0x98>: -> orr w9, wzr, #0x10001 (2 instructions)
+  movz x9, #0x1
+  movk x9, #0x1, lsl #16
+
 self-op identity at offset: 0xac <_main+0xac>: eor x10, x9, x9 -> mov x10, xzr (1 instructions)
   eor x10, x9, x9
 
@@ -69,8 +73,9 @@ Optimization opportunities by type:
        1  operation on known values leaves its register unchanged
        1  redundant zero-extension after zeroing op
        1  self-op identity
+       1  suboptimal MOVZ/MOVK sequence
 
 Optimization opportunities by function:
-      16  _main
+      17  _main
 
-16 optimization opportunities in 62 instructions
+17 optimization opportunities in 62 instructions
