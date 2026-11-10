@@ -55,6 +55,84 @@ static bool g_folds_uncounted;
 
 static bool g_selects_uncounted;
 
+// Every finding a harness sees has its rewrite checked here: at most
+// ARMLINT_FINDING_EDITS edits (a poisoned rewrite trips), each on its
+// own word inside the window, and each replacement spelled in the
+// detail or the lines, so the edits are the advice a reader sees --
+// but for the findings that show the advice in another form: a
+// constant the one-instruction MOV of which is the rewrite, and the
+// new address of each access a multi-use ADD fold rebases.
+// Tallied by name for edit_coverage().
+static const char *const kEditsUnshown[] = {
+    "suboptimal MOVZ/MOVK sequence",
+    "ADD foldable into every access it feeds",
+    NULL,
+};
+
+typedef struct {
+    const char *name;
+    unsigned with, without;
+} edit_tally;
+
+#define EDIT_TALLY_MAX 256
+static edit_tally g_edit_tally[EDIT_TALLY_MAX];
+static size_t g_edit_tallies;
+
+static bool observed(const armlint_finding *f)
+{
+    if (f->nedits > ARMLINT_FINDING_EDITS) {
+        fprintf(stderr, "%s at 0x%zx: rewrite poisoned (%s)\n", f->name,
+                f->start_offset, f->detail);
+        abort();
+    }
+    for (unsigned i = 0; i < f->nedits; i++) {
+        const armlint_edit *e = &f->edits[i];
+        bool bad = e->offset < f->start_offset || e->offset % 4u != 0
+            || e->offset >= f->start_offset + 4u * (size_t)f->insn_count;
+        for (unsigned j = 0; j < i; j++) {
+            bad |= f->edits[j].offset == e->offset;
+        }
+        bool shown = e->text[0] == '\0' || strstr(f->detail, e->text) != NULL;
+        for (size_t u = 0; kEditsUnshown[u] != NULL && !shown; u++) {
+            shown = strcmp(kEditsUnshown[u], f->name) == 0;
+        }
+        for (unsigned l = 0; l < ARMLINT_FINDING_LINES && !shown; l++) {
+            shown = strstr(f->lines[l], e->text) != NULL;
+        }
+        if (bad || !shown) {
+            fprintf(stderr, "%s at 0x%zx (%u instructions): edit %u at 0x%zx "
+                    "\"%s\" %s (%s)\n", f->name, f->start_offset,
+                    f->insn_count, i, e->offset, e->text,
+                    bad ? "outside the window or repeated" : "not shown",
+                    f->detail);
+            abort();
+        }
+    }
+    size_t t = 0;
+    while (t < g_edit_tallies && strcmp(g_edit_tally[t].name, f->name) != 0) {
+        t++;
+    }
+    if (t == g_edit_tallies) {
+        assert(g_edit_tallies < EDIT_TALLY_MAX);
+        g_edit_tally[g_edit_tallies++] = (edit_tally){ .name = f->name };
+    }
+    if (f->nedits > 0) {
+        g_edit_tally[t].with++;
+    } else {
+        g_edit_tally[t].without++;
+    }
+    return true;
+}
+
+static void observe_cb(void *ctx, const armlint_finding *f, uint64_t vaddr,
+                       const uint8_t *bytes)
+{
+    (void)ctx;
+    (void)vaddr;
+    (void)bytes;
+    observed(f);
+}
+
 static bool counted(const armlint_finding *f)
 {
     if (g_branches_uncounted
@@ -108,6 +186,7 @@ static int run_check(const uint8_t *code, size_t code_size)
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
             if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && counted(&f)) {
                 findings++;
@@ -117,6 +196,7 @@ static int run_check(const uint8_t *code, size_t code_size)
 
     armlint_finding f;
     if (armlint_flush(state, &f)
+            && observed(&f)
             && !armlint_finding_has_side_entry(state, &f)
             && counted(&f)) {
         findings++;
@@ -157,6 +237,7 @@ static int run_named_check(const uint8_t *code, size_t code_size,
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
             if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && strcmp(f.name, name) == 0) {
                 findings++;
@@ -166,6 +247,7 @@ static int run_named_check(const uint8_t *code, size_t code_size,
 
     armlint_finding f;
     if (armlint_flush(state, &f)
+            && observed(&f)
             && !armlint_finding_has_side_entry(state, &f)
             && strcmp(f.name, name) == 0) {
         findings++;
@@ -195,6 +277,7 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
                 armlint_finding f;
                 if (armlint_check_registry[k](state, insn,
                                               (size_t)insn_addr, &f)
+                        && observed(&f)
                         && !armlint_finding_has_side_entry(state, &f)
                         && counted(&f)) {
                     findings++;
@@ -203,6 +286,7 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
         } else {
             armlint_finding f;
             if (armlint_flush(state, &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && counted(&f)) {
                 findings++;
@@ -214,6 +298,7 @@ static int run_buffer_check(const uint8_t *code, size_t code_size)
     }
     armlint_finding f;
     if (armlint_flush(state, &f)
+            && observed(&f)
             && !armlint_finding_has_side_entry(state, &f)
             && counted(&f)) {
         findings++;
@@ -247,6 +332,7 @@ static int run_features_buffer_check(const uint8_t *code, size_t code_size,
                 armlint_finding f;
                 if (armlint_check_registry[k](state, insn,
                                               (size_t)insn_addr, &f)
+                        && observed(&f)
                         && !armlint_finding_has_side_entry(state, &f)
                         && counted(&f)) {
                     findings++;
@@ -255,6 +341,7 @@ static int run_features_buffer_check(const uint8_t *code, size_t code_size,
         } else {
             armlint_finding f;
             if (armlint_flush(state, &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && counted(&f)) {
                 findings++;
@@ -266,6 +353,7 @@ static int run_features_buffer_check(const uint8_t *code, size_t code_size,
     }
     armlint_finding f;
     if (armlint_flush(state, &f)
+            && observed(&f)
             && !armlint_finding_has_side_entry(state, &f)
             && counted(&f)) {
         findings++;
@@ -306,6 +394,7 @@ static int run_named_buffer_check(const uint8_t *code, size_t code_size,
             armlint_finding f;
             if (armlint_check_registry[k](state, insn, (size_t)insn_addr,
                                           &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && strcmp(f.name, name) == 0) {
                 if (findings == 0 && detail != NULL) {
@@ -343,6 +432,7 @@ static int run_features_check(const uint8_t *code, size_t code_size,
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
             if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && counted(&f)) {
                 findings++;
@@ -352,6 +442,7 @@ static int run_features_check(const uint8_t *code, size_t code_size,
 
     armlint_finding f;
     if (armlint_flush(state, &f)
+            && observed(&f)
             && !armlint_finding_has_side_entry(state, &f)
             && counted(&f)) {
         findings++;
@@ -390,6 +481,7 @@ static int run_named_features_check(const uint8_t *code, size_t code_size,
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
             if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && strcmp(f.name, name) == 0) {
                 findings++;
@@ -399,6 +491,7 @@ static int run_named_features_check(const uint8_t *code, size_t code_size,
 
     armlint_finding f;
     if (armlint_flush(state, &f)
+            && observed(&f)
             && !armlint_finding_has_side_entry(state, &f)
             && strcmp(f.name, name) == 0) {
         findings++;
@@ -413,7 +506,7 @@ static int run_driver_check(const uint8_t *code, size_t code_size,
                             unsigned features)
 {
     return check_instructions(g_handle, code, code_size, 0, false, NULL,
-                              features, NULL, 0, NULL, NULL);
+                              features, NULL, 0, observe_cb, NULL);
 }
 
 static int run_cssc_check(const uint8_t *code, size_t code_size)
@@ -17369,6 +17462,7 @@ static bool first_named_finding(const uint8_t *code, size_t code_size,
         for (size_t k = 0; k < armlint_check_registry_count; k++) {
             armlint_finding f;
             if (armlint_check_registry[k](state, &insns[i], offset, &f)
+                    && observed(&f)
                     && !armlint_finding_has_side_entry(state, &f)
                     && strcmp(f.name, name) == 0) {
                 *out = f;
@@ -20229,6 +20323,43 @@ static void test_finding_callback(void)
     assert(armlint_symbol_lookup(syms, 0, 0x1000) == NULL);
 }
 
+// The findings whose advice is not one concrete rewrite, and so carry
+// no edits: the audits that name a missing immediate form or a missing
+// signature rather than an instruction to put in its place.
+static const char *const kNoRewrite[] = {
+    "LR spill without PACIASP/PACIBSP (PAC audit)",
+    "unauthenticated BR/BLR (PAC audit)",
+    "zero-discriminator authenticated BR/BLR (PAC audit)",
+    "MOV + ADD/SUB/CMP: constant has no add/sub immediate form (imm audit)",
+    "MOV + AND/ORR/EOR/TST: constant is not a bitmask immediate "
+    "(imm audit)",
+    "MOV + CCMP/CCMN: constant is outside imm5 (imm audit)",
+    "MOV + register-offset LDR/STR: constant has no immediate-offset form "
+    "(imm audit)",
+    NULL,
+};
+
+// Every finding the suite saw either always carried a rewrite or is
+// one of kNoRewrite -- so a new check states its rewrite, or says why
+// it has none.
+static void edit_coverage(void)
+{
+    bool ok = true;
+    for (size_t t = 0; t < g_edit_tallies; t++) {
+        const edit_tally *e = &g_edit_tally[t];
+        bool none = false;
+        for (size_t i = 0; kNoRewrite[i] != NULL; i++) {
+            none |= strcmp(kNoRewrite[i], e->name) == 0;
+        }
+        if (none ? e->with != 0 : e->without != 0) {
+            printf("edits: %s: %u with, %u without\n", e->name, e->with,
+                   e->without);
+            ok = false;
+        }
+    }
+    assert(ok);
+}
+
 int main(void)
 {
     if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &g_handle) != CS_ERR_OK) {
@@ -20367,6 +20498,7 @@ int main(void)
     test_bti_landing();
     test_dedup();
     test_constants();
+    edit_coverage();
 
     cs_close(&g_handle);
     printf("all tests passed\n");

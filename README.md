@@ -352,7 +352,9 @@ of a data-laden section is not mistaken for a clean scan.
 
 The optional `on_finding` callback is called once per opportunity,
 with `ctx` as its first argument, the finding itself (its name, the
-rewrite in `detail`, and the instructions it spans in `lines`), the
+rewrite in `detail`, the same rewrite as `edits` -- which words of the
+window become which instruction and which are deleted, for a consumer
+that applies it -- and the instructions it spans in `lines`), the
 absolute address of its first instruction (`base_addr` plus the
 finding's offset), and a pointer to that instruction's bytes inside
 the scanned buffer -- `insn_count * 4` of them, the window the

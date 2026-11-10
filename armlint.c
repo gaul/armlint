@@ -15,6 +15,7 @@
  */
 
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1181,6 +1182,9 @@ struct armlint_state {
     bool mf_src_dead;
     char mf_add_disasm[ARMLINT_FINDING_LINE_LEN];
     char mf_lines[MF_MAX_LINES][ARMLINT_FINDING_LINE_LEN];
+    // Each use rewritten onto the new base, for the finding's edits
+    // (the ADD's deletion takes the first slot).
+    armlint_edit mf_edits[ARMLINT_FINDING_EDITS - 1];
 
     // Pending X-form ADD-immediate (non-S-variant) awaiting an
     // adjacent STLR/STLRB/STLRH consumer whose base register equals
@@ -1643,6 +1647,126 @@ static void clear_finding_strings(armlint_finding *out)
     out->misfit_width = 0;
     out->misfit_fit = 0;
     out->misfit_value = 0;
+    out->nedits = 0;
+}
+
+// The finding's rewrite, one edit at a time (see armlint_edit). An edit
+// that does not fit -- one past ARMLINT_FINDING_EDITS, or a text longer
+// than an edit holds -- poisons the rewrite (nedits past the maximum),
+// so that no consumer applies part of the advice as if it were all of
+// it; the unit tests trip on a poisoned finding.
+static void finding_edit_text(armlint_finding *out, size_t offset,
+                              const char *text)
+{
+    if (out->nedits >= ARMLINT_FINDING_EDITS
+            || strlen(text) >= ARMLINT_FINDING_EDIT_LEN) {
+        out->nedits = ARMLINT_FINDING_EDITS + 1;
+        return;
+    }
+    armlint_edit *e = &out->edits[out->nedits++];
+    e->offset = offset;
+    snprintf(e->text, sizeof(e->text), "%s", text);
+}
+
+// The word at OFFSET becomes the instruction FMT renders.
+static void finding_replace(armlint_finding *out, size_t offset,
+                            const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
+static void finding_replace(armlint_finding *out, size_t offset,
+                            const char *fmt, ...)
+{
+    char text[ARMLINT_FINDING_DETAIL_LEN];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    finding_edit_text(out, offset, text[0] != '\0' ? text : "?");
+}
+
+// The word at OFFSET is deleted.
+static void finding_delete(armlint_finding *out, size_t offset)
+{
+    finding_edit_text(out, offset, "");
+}
+
+// The I-th instruction of the rewrite the detail renders, "-> I0 ; I1
+// ; ...", into buf: each runs to " ; " (another follows), to a ';' with
+// no space before it or " (" (the detail's commentary), or to the end.
+// The arrow opens the detail or follows the instruction it replaces
+// ("eor x10, x9, x9 -> mov x10, xzr"). False when the detail has no
+// I-th instruction.
+static bool detail_insn(const armlint_finding *out, unsigned i, char *buf,
+                        size_t cap)
+{
+    const char *p = out->detail;
+    if (strncmp(p, "-> ", 3) != 0) {
+        p = strstr(p, " -> ");
+        if (p == NULL) {
+            return false;
+        }
+        p++;
+    }
+    p += 3;
+    for (unsigned k = 0;; k++) {
+        const char *e = p;
+        while (*e != '\0' && *e != ';' && !(e[0] == ' ' && e[1] == '(')) {
+            e++;
+        }
+        bool more = e[0] == ';' && e > p && e[-1] == ' ' && e[1] == ' ';
+        const char *end = e;
+        while (end > p && end[-1] == ' ') {
+            end--;
+        }
+        if (k == i) {
+            if (end == p || (size_t)(end - p) >= cap) {
+                return false;
+            }
+            memcpy(buf, p, (size_t)(end - p));
+            buf[end - p] = '\0';
+            return true;
+        }
+        if (!more) {
+            return false;
+        }
+        p = e + 2;
+    }
+}
+
+// The word at OFFSET becomes the detail's I-th instruction.
+static void finding_replace_with_detail(armlint_finding *out, size_t offset,
+                                        unsigned i)
+{
+    char text[ARMLINT_FINDING_DETAIL_LEN];
+    if (!detail_insn(out, i, text, sizeof(text))) {
+        out->nedits = ARMLINT_FINDING_EDITS + 1;
+        return;
+    }
+    finding_edit_text(out, offset, text);
+}
+
+// The common rewrite, for a window with no gap: the detail's k
+// instructions take its last k words, in order, and the words before
+// them are deleted.
+static void finding_rewrite_tail(armlint_finding *out)
+{
+    char text[ARMLINT_FINDING_DETAIL_LEN];
+    unsigned k = 0;
+    while (detail_insn(out, k, text, sizeof(text))) {
+        k++;
+    }
+    if (k == 0 || k > out->insn_count) {
+        out->nedits = ARMLINT_FINDING_EDITS + 1;
+        return;
+    }
+    unsigned head = out->insn_count - k;
+    for (unsigned i = 0; i < head; i++) {
+        finding_delete(out, out->start_offset + 4u * i);
+    }
+    for (unsigned i = 0; i < k; i++) {
+        finding_replace_with_detail(out, out->start_offset + 4u * (head + i),
+                                    i);
+    }
 }
 
 // Assemble the little-endian 4-byte A64 instruction word. Every check
@@ -2290,11 +2414,18 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
                 char seq[ARMLINT_FINDING_DETAIL_LEN - 4];
                 render_mov_plan(seq, sizeof(seq), &plan, state->mov_rd);
                 snprintf(out->detail, sizeof(out->detail), "-> %s", seq);
+                finding_rewrite_tail(out);
             } else if (bitmask) {
                 // Encodable as a single bitmask-immediate MOV (ORR).
                 snprintf(out->detail, sizeof(out->detail),
                     "%c%u = 0x%" PRIx64,
                     w_or_x, state->mov_rd, state->mov_value);
+                finding_replace(out, out->start_offset,
+                    "mov %c%u, #0x%" PRIx64, w_or_x, state->mov_rd,
+                    state->mov_value);
+                for (unsigned i = 1; i < out->insn_count; i++) {
+                    finding_delete(out, out->start_offset + 4u * i);
+                }
             } else {
                 // Not a bitmask immediate, but a shorter MOVZ/MOVN +
                 // MOVK chain reaches the same value.
@@ -2303,6 +2434,7 @@ static bool mov_close(armlint_state *state, armlint_finding *out)
                     state->mov_rd, state->mov_value, reg_width);
                 snprintf(out->detail, sizeof(out->detail),
                     "-> %s", seq);
+                finding_rewrite_tail(out);
             }
 
             unsigned n = state->mov_insn_count;
@@ -2827,6 +2959,7 @@ bool check_lsl_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, state->shf_rn,
                     shift_mnem,
                     state->shf_shift);
+                finding_rewrite_tail(out);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s %c%u, %c%u, #%u",
@@ -3026,6 +3159,7 @@ bool check_funnel_to_extr(armlint_state *state, const cs_insn *insn,
                     "-> extr %c%u, %c%u, %c%u, #%u",
                     wx, c_rd, wx, left_reg, wx, right_reg, lsb);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s %c%u, %c%u, #%u",
                 sh0, wx, state->fnl_rd, wx, state->fnl_rn, state->fnl_shift);
@@ -3192,6 +3326,7 @@ bool check_lsl_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                 "-> %s %c%u, %c%u, #%u, #%u",
                 fold_mnem, w_or_x, c_rd, w_or_x, state->bsx_rn,
                 lsb, width);
+            finding_rewrite_tail(out);
 
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "lsl %c%u, %c%u, #%u",
@@ -3280,6 +3415,7 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
                     w_or_x, c_rd, w_or_x, state->lra_rn,
                     state->lra_shift, ubfx_width);
             }
+            finding_rewrite_tail(out);
 
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s %c%u, %c%u, #%u", shift_mnem,
@@ -3444,6 +3580,7 @@ bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> ubfx %c%u, %c%u, #%u, #%u",
                     w_or_x, c_rd, w_or_x, state->alr_rn, n, width);
+                finding_rewrite_tail(out);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->alr_disasm);
@@ -3597,6 +3734,7 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> ubfiz %c%u, %c%u, #%u, #%u",
                     w_or_x, c_rd, w_or_x, state->aul_rn, n, width);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->aul_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -3620,6 +3758,7 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> and %c%u, %c%u, #0x%" PRIx64,
                     w_or_x, c_rd, w_or_x, state->aul_rn, mask);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->aul_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -5219,6 +5358,7 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
             snprintf(p->detail, sizeof(p->detail),
                 "-> %s %c%u, 0x%" PRIx64,
                 cb_mnem, w_or_x, state->cmp_rn, target);
+            finding_rewrite_tail(p);
 
             snprintf(p->lines[0], sizeof(p->lines[0]),
                 "%s", state->cmp_disasm);
@@ -5261,6 +5401,9 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
                 snprintf(p->detail, sizeof(p->detail),
                     "-> %s %c%u, #%u, 0x%" PRIx64,
                     tb_mnem, w_or_x, state->cmp_rn, bit, target);
+                // In the compare's word, where its reach was measured.
+                finding_replace_with_detail(p, p->start_offset, 0);
+                finding_delete(p, p->start_offset + 4u);
 
                 snprintf(p->lines[0], sizeof(p->lines[0]),
                     "%s", state->cmp_disasm);
@@ -5374,6 +5517,7 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
             snprintf(p->detail, sizeof(p->detail),
                 "drop %s -- Z already set by %s",
                 state->sv_cmp_disasm, state->sv_disasm);
+            finding_delete(p, p->start_offset + 4u);
             snprintf(p->lines[0], sizeof(p->lines[0]),
                 "%s", state->sv_disasm);
             snprintf(p->lines[1], sizeof(p->lines[1]),
@@ -5533,6 +5677,9 @@ bool check_zero_cmp_to_s_variant(armlint_state *state,
             clear_finding_strings(&f);
             snprintf(f.detail, sizeof(f.detail), "-> %s (drop %s %s)",
                 state->zs_sdisasm, insn->mnemonic, insn->op_str);
+            // The ALU becomes its S-variant in place; the gap stays.
+            finding_replace_with_detail(&f, f.start_offset, 0);
+            finding_delete(&f, offset);
             snprintf(f.lines[0], sizeof(f.lines[0]),
                 "%s", state->zs_disasm);
             for (unsigned i = 0; i < state->zs_gap; i++) {
@@ -5737,6 +5884,8 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
             snprintf(out->detail, sizeof(out->detail),
                 "-> %s (drop %s %s)",
                 state->scp_sub_sdisasm, insn->mnemonic, insn->op_str);
+            finding_replace_with_detail(out, out->start_offset, 0);
+            finding_delete(out, offset);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->scp_sub_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -5769,6 +5918,7 @@ bool check_sub_cmp_fold(armlint_state *state, const cs_insn *insn,
             snprintf(out->detail, sizeof(out->detail),
                 "-> %ss %s (drop %s)",
                 insn->mnemonic, insn->op_str, state->scp_cmp_disasm);
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->scp_cmp_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -5848,6 +5998,7 @@ bool check_subs_cmp_redundant(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> drop %s %s (NZCV already set by %s)",
                     insn->mnemonic, insn->op_str, state->rcs_disasm);
+                finding_delete(out, offset);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->rcs_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -5937,6 +6088,7 @@ bool check_dead_compare(armlint_state *state, const cs_insn *insn,
     p->start_offset = offset;
     p->insn_count = 1;
     clear_finding_strings(p);
+    finding_delete(p, offset);
     snprintf(p->lines[0], sizeof(p->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
 
@@ -6027,6 +6179,9 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
                     "-> %s %c%u, #%u, 0x%" PRIx64,
                     tb_mnem, w_or_x, state->tst_rn,
                     state->tst_bit, target);
+                // In the TST's word, where its reach was measured.
+                finding_replace_with_detail(p, p->start_offset, 0);
+                finding_delete(p, p->start_offset + 4u);
 
                 if (state->tst_bit < 32) {
                     snprintf(p->lines[0], sizeof(p->lines[0]),
@@ -6320,6 +6475,7 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                     "-> %s %c%u, #%u, 0x%" PRIx64 " (producer stays)",
                     tb_mnem, s_wx, state->tbf_rs, state->tbf_bit,
                     target);
+                finding_replace_with_detail(&fb, offset, 0);
                 snprintf(fb.lines[0], sizeof(fb.lines[0]),
                     "%s", state->tbf_disasm);
                 snprintf(fb.lines[1], sizeof(fb.lines[1]),
@@ -6349,6 +6505,9 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
                     "-> %s %c%u, #%u, 0x%" PRIx64,
                     tb_mnem, s_wx, state->tbf_rs, state->tbf_bit,
                     target);
+                // In the producer's word, where its reach was measured.
+                finding_replace_with_detail(p, p->start_offset, 0);
+                finding_delete(p, offset);
                 snprintf(p->lines[0], sizeof(p->lines[0]),
                     "%s", state->tbf_disasm);
                 snprintf(p->lines[1], sizeof(p->lines[1]),
@@ -6453,6 +6612,7 @@ bool check_neg_cbz(armlint_state *state, const cs_insn *insn,
             snprintf(out->detail, sizeof(out->detail),
                 "-> %s %c%u, 0x%" PRIx64 " (drop %s)", mnem, wx,
                 state->ncb_rn, target_addr, state->ncb_disasm);
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
                 state->ncb_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]), "%s %s",
@@ -6666,6 +6826,7 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
             snprintf(fb.detail, sizeof(fb.detail),
                 "-> b.%s 0x%" PRIx64 " (CSET stays)",
                 a64_cond_names[bcond], target);
+            finding_replace_with_detail(&fb, offset, 0);
             snprintf(fb.lines[0], sizeof(fb.lines[0]),
                 "%s", state->cset_disasm);
             if (is_cb) {
@@ -6696,6 +6857,9 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
                 snprintf(p->detail, sizeof(p->detail),
                     "-> b.%s 0x%" PRIx64,
                     a64_cond_names[bcond], target);
+                // In the CSET's word, where its reach was measured.
+                finding_replace_with_detail(p, p->start_offset, 0);
+                finding_delete(p, offset);
                 snprintf(p->lines[0], sizeof(p->lines[0]),
                     "%s", fb.lines[0]);
                 snprintf(p->lines[1], sizeof(p->lines[1]),
@@ -6744,6 +6908,7 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
             snprintf(out->detail, sizeof(out->detail),
                 "-> %s %c%u, %s",
                 new_mnem, e_wx, e_rd, a64_cond_names[new_cond]);
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->cset_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -6763,6 +6928,7 @@ bool check_cset_fold(armlint_state *state, const cs_insn *insn,
             snprintf(fb.detail, sizeof(fb.detail),
                 "-> %s %c%u, %s (CSET stays)",
                 new_mnem, e_wx, e_rd, a64_cond_names[new_cond]);
+            finding_replace_with_detail(&fb, offset, 0);
             snprintf(fb.lines[0], sizeof(fb.lines[0]),
                 "%s", out->lines[0]);
             snprintf(fb.lines[1], sizeof(fb.lines[1]),
@@ -6858,6 +7024,11 @@ bool check_cset_recompare(armlint_state *state, const cs_insn *insn,
 
             snprintf(p->detail, sizeof(p->detail),
                 "-> drop the zero-test; %s %c%u, %c%u, %c%u, %s",
+                csel_family_mnem[kind], wx, rd, wx, rn, wx, rm,
+                a64_cond_names[new_cond]);
+            // The zero-test sits just before the consumer.
+            finding_delete(p, offset - 4u);
+            finding_replace(p, offset, "%s %c%u, %c%u, %c%u, %s",
                 csel_family_mnem[kind], wx, rd, wx, rn, wx, rm,
                 a64_cond_names[new_cond]);
             snprintf(p->lines[0], sizeof(p->lines[0]),
@@ -6987,6 +7158,7 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
                 "-> %s %c%u, %c%u, #%u",
                 is_cset ? "lsr" : "asr",
                 w_or_x, c_rd, w_or_x, state->sgn_rn, sign_bit);
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->sgn_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -7313,6 +7485,9 @@ bool check_cmpbr_fold(armlint_state *state, const cs_insn *insn,
                         a64_cond_names[cond], w_or_x, state->cbr_rn,
                         w_or_x, state->cbr_rm, target);
                 }
+                // In the compare's word, where its reach was measured.
+                finding_replace_with_detail(out, out->start_offset, 0);
+                finding_delete(out, offset);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->cbr_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -7697,6 +7872,7 @@ bool check_ccmp_chain(armlint_state *state, const cs_insn *insn,
                     insn->op_str,
                     a64_cond_names[inverted ? new_cond ^ 1u : new_cond]);
             }
+            finding_rewrite_tail(p);
             for (unsigned i = 0; i < state->ccc_links; i++) {
                 snprintf(p->lines[i], sizeof(p->lines[i]), "%s",
                     state->ccc_disasm[i]);
@@ -7850,6 +8026,7 @@ bool check_bcond_cmp_bcond(armlint_state *state, const cs_insn *insn,
                     a64_cond_names[state->cbc_cond ^ 1u],
                     a64_cond_names[cond], taddr);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
                 state->cbc_disasm[0]);
             snprintf(out->lines[1], sizeof(out->lines[1]), "%s",
@@ -7991,6 +8168,7 @@ bool check_bcond_over_one(armlint_state *state, const cs_insn *insn,
             out->insn_count = 2;
             clear_finding_strings(out);
             snprintf(out->detail, sizeof(out->detail), "-> %s", select);
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
                 state->hmk_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]), "%s %s",
@@ -8041,6 +8219,7 @@ bool check_aut_ret(armlint_state *state, const cs_insn *insn,
             clear_finding_strings(out);
             snprintf(out->detail, sizeof(out->detail), "-> %s",
                 state->aut_is_b_key ? "retab" : "retaa");
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->aut_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -8085,6 +8264,7 @@ bool check_br_x30(armlint_state *state, const cs_insn *insn,
     out->insn_count = 1;
     clear_finding_strings(out);
     snprintf(out->detail, sizeof(out->detail), "-> ret");
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -8127,6 +8307,7 @@ bool check_branch_to_next(armlint_state *state, const cs_insn *insn,
     clear_finding_strings(out);
     snprintf(out->detail, sizeof(out->detail),
         "-> delete: control falls through either way");
+    finding_delete(out, offset);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -8398,6 +8579,7 @@ bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
                     break;
                 }
             }
+            finding_rewrite_tail(out);
             for (unsigned i = 0; i < (state->lse_is_swp ? 2u : 3u); i++) {
                 snprintf(out->lines[i], sizeof(out->lines[i]),
                     "%s", state->lse_lines[i]);
@@ -8487,6 +8669,7 @@ bool check_lse_rmw(armlint_state *state, const cs_insn *insn,
                     w, state->lse_rold, exp, ord, w, state->lse_rold,
                     val, state->lse_rn, exp, w, state->lse_rold);
             }
+            finding_rewrite_tail(out);
             for (unsigned i = 0; i < 4; i++) {
                 snprintf(out->lines[i], sizeof(out->lines[i]),
                     "%s", state->lse_lines[i]);
@@ -8835,6 +9018,7 @@ bool check_tst_cset(armlint_state *state, const cs_insn *insn,
     snprintf(p->detail, sizeof(p->detail),
         "-> %s %c%u, %c%u, #%u, #1",
         new_mnem, r_wx, rd, r_wx, state->tst_rn, bit);
+    finding_rewrite_tail(p);
 
     if (bit < 32) {
         snprintf(p->lines[0], sizeof(p->lines[0]),
@@ -9231,6 +9415,7 @@ bool check_redundant_zext(armlint_state *state, const cs_insn *insn,
         snprintf(out->detail, sizeof(out->detail),
             "%s %s is a no-op (bits >= %u already zero)",
             insn->mnemonic, insn->op_str, state->wzx_zero_from[c_rd]);
+        finding_delete(out, offset);
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->wzx_producer_disasm[c_rd]);
         unsigned line = 1;
@@ -9420,6 +9605,7 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
                 "%s %s is a no-op (sign already extended from bit %u)",
                 insn->mnemonic, insn->op_str,
                 state->sxt_signed_from - 1);
+            finding_delete(out, offset);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->sxt_producer_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -9465,6 +9651,7 @@ bool check_redundant_sext(armlint_state *state, const cs_insn *insn,
                     state->sxt_producer_disasm,
                     insn->mnemonic, insn->op_str,
                     z_c, state->sxt_signed_from);
+                finding_delete(out, out->start_offset);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->sxt_producer_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -9794,6 +9981,7 @@ bool check_and_ext_chain(armlint_state *state, const cs_insn *insn,
             out->insn_count = 2;
             clear_finding_strings(out);
             snprintf(out->detail, sizeof(out->detail), "-> %s", rewrite);
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->aec_producer_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -9943,6 +10131,9 @@ bool check_add_sub_imm_chain(armlint_state *state, const cs_insn *insn,
                         sum < 0 ? "sub" : "add", rd_buf, rn_buf,
                         (unsigned long long)(sum < 0 ? -sum : sum));
                 }
+                // The consumer carries the sum; the gap stays.
+                finding_delete(out, out->start_offset);
+                finding_replace_with_detail(out, offset, 0);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->asc_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -10087,10 +10278,13 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
                     snprintf(out->detail, sizeof(out->detail),
                         "%s %c%u, %c%u, #0 is a no-op",
                         mnem, w_or_x, rd, w_or_x, rn);
+                    finding_delete(out, offset);
                 } else {
                     snprintf(out->detail, sizeof(out->detail),
                         "%s %c%u, %c%u, #0 -> mov %c%u, %c%u",
                         mnem, w_or_x, rd, w_or_x, rn,
+                        w_or_x, rd, w_or_x, rn);
+                    finding_replace(out, offset, "mov %c%u, %c%u",
                         w_or_x, rd, w_or_x, rn);
                 }
                 snprintf(out->lines[0], sizeof(out->lines[0]),
@@ -10250,6 +10444,7 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
             w_or_x, rd, w_or_x, rd);
         break;
     }
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -10374,6 +10569,11 @@ bool check_vector_self_op(armlint_state *state, const cs_insn *insn,
         snprintf(out->detail, sizeof(out->detail),
             "-> mov v%u.%s, v%u.%s", rd, arr, rn, arr);
     }
+    if (kind != 0u && in_place) {
+        finding_delete(out, offset);
+    } else {
+        finding_rewrite_tail(out);
+    }
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -10491,6 +10691,7 @@ bool check_zr_operand_alu(armlint_state *state, const cs_insn *insn,
             "-> mvn %c%u, %c%u", wx, rd, wx, rn);
         break;
     }
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -10597,6 +10798,7 @@ bool check_umov_lane0_fmov(armlint_state *state, const cs_insn *insn,
     clear_finding_strings(out);
     snprintf(out->detail, sizeof(out->detail),
         "-> fmov %c%u, %c%u", rd_wx, rd, vt, rn);
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -10671,6 +10873,7 @@ bool check_and_lo32_mov(armlint_state *state, const cs_insn *insn,
     clear_finding_strings(out);
     snprintf(out->detail, sizeof(out->detail),
         "-> mov w%u, w%u", rd, rn);
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -10728,6 +10931,7 @@ bool check_csel_self(armlint_state *state, const cs_insn *insn,
             insn->mnemonic, insn->op_str,
             w_or_x, rd, w_or_x, rn, w_or_x, rn);
     }
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -10778,6 +10982,7 @@ bool check_fcsel_self(armlint_state *state, const cs_insn *insn,
         "%s %s -> fmov %c%u, %c%u (cond irrelevant: both branches = %c%u)",
         insn->mnemonic, insn->op_str,
         sd, rd, sd, rn, sd, rn);
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -10984,6 +11189,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
                         "-> bfi %c%u, %c%u, #%u, #%u",
                         w_or_x, cd, w_or_x, rs, lo, state->bfx_width);
                 }
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->bfx_clear_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -11135,6 +11341,7 @@ bool check_and_orr_shift_bfi(armlint_state *state, const cs_insn *insn,
                     "-> %s %c%u, %c%u, #%u, #%u",
                     is_lsr ? "bfxil" : "bfi", w_or_x, o_rd, w_or_x, o_rm,
                     k, width);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->aos_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -11289,6 +11496,7 @@ bool check_mul_strength_reduce(armlint_state *state, const cs_insn *insn,
             "-> add %c%u, %c%u, %c%u, lsl #%u",
             w_or_x, rd, w_or_x, other, w_or_x, other, n);
     }
+    finding_rewrite_tail(out);
 
     // Render MOV chain, leaving one line for the MUL itself.
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
@@ -11452,6 +11660,7 @@ bool check_mneg_strength_reduce(armlint_state *state, const cs_insn *insn,
             "-> sub %c%u, %c%u, %c%u, lsl #%u",
             w_or_x, rd, w_or_x, other, w_or_x, other, n);
     }
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -11584,6 +11793,7 @@ bool check_udiv_strength_reduce(armlint_state *state, const cs_insn *insn,
     snprintf(out->detail, sizeof(out->detail),
         "-> lsr %c%u, %c%u, #%u",
         w_or_x, rd, w_or_x, rn, n);
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -11812,6 +12022,7 @@ bool check_mov_add_sub_imm_fold(armlint_state *state, const cs_insn *insn,
             "-> %s %c%u, %c%u, #0x%" PRIx64,
             fold_mnem, w_or_x, rd, w_or_x, other, imm);
     }
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -11934,6 +12145,7 @@ bool check_mov_add_sub_split(armlint_state *state, const cs_insn *insn,
         "-> %s %c%u, %c%u, #0x%x, lsl #12 ; %s %c%u, %c%u, #0x%x",
         mnem, w_or_x, rd, w_or_x, other, hi,
         mnem, w_or_x, rd, w_or_x, rd, lo);
+    finding_rewrite_tail(out);
 
     char chain_w_or_x = state->mov_is_64bit ? 'x' : 'w';
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
@@ -12195,6 +12407,7 @@ bool check_mov_logic_imm_fold(armlint_state *state, const cs_insn *insn,
             "-> %s %c%u, %c%u, #0x%" PRIx64,
             mnem, w_or_x, rd, w_or_x, other, imm);
     }
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -12302,6 +12515,7 @@ bool check_mov_cage_orr_add(armlint_state *state, const cs_insn *insn,
 
     snprintf(out->detail, sizeof(out->detail),
         "-> add x%u, x28, #0x%" PRIx64, rd, c);
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -12405,6 +12619,7 @@ bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
 
     snprintf(out->detail, sizeof(out->detail),
         "-> mov %c%u, #0x%" PRIx64, cons_w, rd, value);
+    finding_replace_with_detail(out, offset, 0);
 
     const mov_entry *e = &state->mov_entries[0];
     const char *mov_mnem = (e->opc == 2) ? "movz" : "movn";
@@ -12496,6 +12711,7 @@ bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
             clear_finding_strings(out);
             snprintf(out->detail, sizeof(out->detail),
                 "-> delete: %c%u still holds the copied value", w, rd);
+            finding_delete(out, offset);
             found = true;
         } else if (rd != state->rcc_rn) {
             // Chain: MOV Rb, Ra ; MOV Rc, Rb. The second copy can read
@@ -12513,6 +12729,7 @@ bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
             clear_finding_strings(out);
             snprintf(out->detail, sizeof(out->detail),
                 "-> %s %c%u, %c%u", mnem, w, rd, w, state->rcc_rn);
+            finding_replace_with_detail(out, offset, 0);
             found = true;
         }
         // (A W/S copy-back falls through unflagged: the chain rewrite
@@ -12607,6 +12824,7 @@ bool check_copy_add_sub_fold(armlint_state *state, const cs_insn *insn,
         clear_finding_strings(out);
         snprintf(out->detail, sizeof(out->detail),
             "-> %s %c%u, %s, #0x%x", mnem, w, rd, src, mag);
+        finding_rewrite_tail(out);
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->cpa_disasm);
         snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -12694,6 +12912,7 @@ bool check_sp_mov_overwritten(armlint_state *state, const cs_insn *insn,
         snprintf(out->detail, sizeof(out->detail),
             "-> delete; sp is rewritten unread (the transient is the "
             "runtime's stack contract)");
+        finding_delete(out, out->start_offset);
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->spm_disasm);
         snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -13362,6 +13581,7 @@ bool check_value_recompute(armlint_state *state, const cs_insn *insn,
             out->start_offset = offset;
             out->insn_count = 1;
             clear_finding_strings(out);
+            finding_delete(out, offset);
             size_t back = offset - state->lvn_def_offset[slot];
             if (p.out == LVN_NONE) {
                 snprintf(out->detail, sizeof(out->detail),
@@ -13566,6 +13786,7 @@ bool check_dead_write(armlint_state *state, const cs_insn *insn,
         f->start_offset = state->dw_offset[r];
         f->insn_count = 1;
         clear_finding_strings(f);
+        finding_delete(f, f->start_offset);
         snprintf(f->detail, sizeof(f->detail),
             "-> delete; %c%u is overwritten before any read",
             state->dw_sf[r] ? 'x' : 'w', r);
@@ -15163,9 +15384,11 @@ bool check_branch_decided(armlint_state *state, const cs_insn *insn,
         snprintf(out->detail, sizeof(out->detail),
             "-> b 0x%" PRIx64 "; always taken: %s%s",
             insn->address + (uint64_t)(disp * 4), why, known);
+        finding_rewrite_tail(out);
     } else {
         snprintf(out->detail, sizeof(out->detail),
             "-> delete; never taken: %s%s", why, known);
+        finding_delete(out, offset);
     }
     unsigned line = 0;
     if (src_text != NULL) {
@@ -15288,6 +15511,11 @@ bool check_csel_decided(armlint_state *state, const cs_insn *insn,
     snprintf(out->detail, sizeof(out->detail), "-> %s; %s %s holds: %s%s",
              rewrite, a64_cond_names[cond], taken != 0 ? "always" : "never",
              why, known);
+    if (strncmp(rewrite, "delete", 6) == 0) {
+        finding_delete(out, offset);
+    } else {
+        finding_rewrite_tail(out);
+    }
     unsigned line = 0;
     if (src_text != NULL) {
         snprintf(out->lines[line++], sizeof(out->lines[0]), "%s", src_text);
@@ -15471,12 +15699,14 @@ bool check_const_fold(armlint_state *state, const cs_insn *insn,
             "-> delete; %s already holds 0x%" PRIx64 "%s%s%s", reg, v,
             inputs[0] != '\0' ? " (" : "", inputs,
             inputs[0] != '\0' ? ")" : "");
+        finding_delete(out, offset);
     } else {
         out->name = "operation on known values foldable to MOV #imm";
         snprintf(out->detail, sizeof(out->detail),
             "-> mov %s, #0x%" PRIx64 "%s%s%s", reg, v,
             inputs[0] != '\0' ? " (" : "", inputs,
             inputs[0] != '\0' ? ")" : "");
+        finding_rewrite_tail(out);
     }
     unsigned line = 0;
     for (unsigned i = 0; i < nsrc; i++) {
@@ -15585,11 +15815,13 @@ bool check_and_known_noop(armlint_state *state, const cs_insn *insn,
             "-> delete; %s has no bits outside 0x%" PRIx64 " (known 0x%zx "
             "bytes back)", reg, mask & wmask,
             offset - state->kv_src_offset[rn]);
+        finding_delete(out, offset);
     } else {
         snprintf(out->detail, sizeof(out->detail),
             "-> mov %s, %s; %s has no bits outside 0x%" PRIx64 " (known "
             "0x%zx bytes back)", dst, reg, reg, mask & wmask,
             offset - state->kv_src_offset[rn]);
+        finding_rewrite_tail(out);
     }
     snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
              state->kv_src_text[rn]);
@@ -15747,6 +15979,7 @@ bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
             is_ands ? "ands" : "and", w_or_x, rd, reg, best, reg, may,
             offset - state->kv_src_offset[other]);
     }
+    finding_rewrite_tail(out);
 
     // The instruction that bounded the input first, then the chain and
     // the operation.
@@ -15973,6 +16206,7 @@ bool check_cmp_cmn_w(armlint_state *state, const cs_insn *insn,
                     "-> cmn w%u, #0x%" PRIx64 ", lsl #12 (drop %s)", n,
                     k >> 12, state->cwc_disasm);
             }
+            finding_rewrite_tail(f);
             snprintf(f->lines[0], sizeof(f->lines[0]), "%s",
                 state->cwc_disasm);
             snprintf(f->lines[1], sizeof(f->lines[1]), "%s %s",
@@ -16216,6 +16450,7 @@ bool check_mov_ccmp_imm_fold(armlint_state *state, const cs_insn *insn,
     snprintf(out->detail, sizeof(out->detail),
         "-> %s %c%u, #0x%" PRIx64 ", #0x%x, %s",
         fold_mnem, w_or_x, rn, imm, nzcv, a64_cond_names[cond]);
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -16345,6 +16580,7 @@ bool check_mov_csel_fold(armlint_state *state, const cs_insn *insn,
             w_or_x, rd, surv_buf, w_or_x,
             a64_cond_names[csinc_cond]);
     }
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -16440,6 +16676,7 @@ bool check_mov_shift_fold(armlint_state *state, const cs_insn *insn,
     snprintf(out->detail, sizeof(out->detail),
         "-> %s %c%u, %c%u, #%u",
         insn->mnemonic, w_or_x, rd, w_or_x, rn, amount);
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -16562,6 +16799,7 @@ bool check_mov_madd_fold(armlint_state *state, const cs_insn *insn,
             "-> %s %c%u, %c%u, %c%u, lsl #%u",
             fold_mnem, w_or_x, rd, w_or_x, ra, w_or_x, surviving, n);
     }
+    finding_rewrite_tail(out);
 
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
     unsigned chain_n = state->mov_insn_count;
@@ -16643,6 +16881,7 @@ bool check_udiv_msub_remainder(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> and %c%u, %c%u, #0x%" PRIx64,
                     w_or_x, rd, w_or_x, state->rem_xn, mask);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[state->rem_lines],
                     sizeof(out->lines[state->rem_lines]),
                     "%s %s", insn->mnemonic, insn->op_str);
@@ -16775,6 +17014,7 @@ bool check_fmul_fneg_fold(armlint_state *state, const cs_insn *insn,
                     "-> fnmul %c%u, %c%u, %c%u",
                     sd, rd, sd, state->fmn_rn,
                     sd, state->fmn_rm);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->fmn_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -16882,6 +17122,7 @@ bool check_sha3_fold(armlint_state *state, const cs_insn *insn,
                         "-> eor3 v%u.16b, v%u.16b, v%u.16b, v%u.16b",
                         rd, state->s3_rn, state->s3_rm, other);
                 }
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->s3_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -16981,6 +17222,7 @@ bool check_ldr_cvtf_fold(armlint_state *state, const cs_insn *insn,
                     sd, c_rd, base_buf, byte_off, cvt, sd, c_rd,
                     sd, c_rd);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lcv_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -17265,6 +17507,7 @@ bool check_ldr_literal_const(armlint_state *state, const cs_insn *insn,
     out->insn_count = 1;
     clear_finding_strings(out);
     snprintf(out->detail, sizeof(out->detail), "%s", detail);
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -17349,6 +17592,8 @@ bool check_adr_fold(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> %s %s, #0x%" PRIx64,
                     ld_mnem, rt_buf, (uint64_t)state->adf_target);
+                // In the load's word, where its reach was measured.
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->adf_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -17387,6 +17632,7 @@ bool check_adr_fold(armlint_state *state, const cs_insn *insn,
                 clear_finding_strings(out);
                 snprintf(out->detail, sizeof(out->detail),
                     "-> b #0x%" PRIx64, (uint64_t)state->adf_target);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->adf_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -17490,6 +17736,7 @@ bool check_cssc_minmax(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> %s %c%u, %s, %s",
                     mnem, w_or_x, c_rd, rn_buf, rm_buf);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->cmx_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -17565,6 +17812,7 @@ bool check_cssc_abs(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> abs %c%u, %c%u",
                     w_or_x, c_rd, w_or_x, state->cab_rn);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->cab_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -17634,6 +17882,7 @@ bool check_cssc_ctz(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> ctz %c%u, %c%u",
                     w_or_x, c_rd, w_or_x, state->rbc_rs);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->rbc_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -17728,6 +17977,7 @@ bool check_cssc_popcount(armlint_state *state, const cs_insn *insn,
             snprintf(out->detail, sizeof(out->detail),
                 "-> cnt %c%u, %c%u",
                 w_or_x, rd, w_or_x, state->pcnt_src);
+            finding_rewrite_tail(out);
             for (unsigned i = 0; i < 3; i++) {
                 snprintf(out->lines[i], sizeof(out->lines[i]),
                     "%s", state->pcnt_lines[i]);
@@ -17964,6 +18214,7 @@ bool check_mov_fmov_imm_fold(armlint_state *state, const cs_insn *insn,
 
     snprintf(out->detail, sizeof(out->detail),
         "-> fmov %c%u, #%s", fp_c, rd, val_buf);
+    finding_rewrite_tail(out);
 
     // Chain lines render in the chain's own width; the consumer line
     // in the source width (they differ for a W chain read as X).
@@ -18114,6 +18365,7 @@ bool check_fp_zero_to_movi(armlint_state *state, const cs_insn *insn,
     if (from_zr) {
         out->start_offset = offset;
         out->insn_count = 1;
+        finding_rewrite_tail(out);
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s %s", insn->mnemonic, insn->op_str);
         return true;
@@ -18127,6 +18379,7 @@ bool check_fp_zero_to_movi(armlint_state *state, const cs_insn *insn,
     // provably dies.
     out->start_offset = state->mov_start_offset;
     out->insn_count = state->mov_insn_count + 1;
+    finding_rewrite_tail(out);
 
     char w_or_x = state->mov_is_64bit ? 'x' : 'w';
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
@@ -18197,6 +18450,7 @@ bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
             snprintf(out->detail, sizeof(out->detail),
                 "-> %s %c%u, w%u",
                 new_mnem, fp_c, c_rd, state->xtc_rn);
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->xtc_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -18313,6 +18567,7 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                         "-> mneg %c%u, %c%u, %c%u",
                         w_or_x, rd, w_or_x, state->mul_pending_rn,
                         w_or_x, state->mul_pending_rm);
+                    finding_rewrite_tail(out);
                     snprintf(out->lines[0], sizeof(out->lines[0]),
                         "%s", state->mul_pending_disasm);
                     snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -18334,6 +18589,7 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                         w_or_x, state->mul_pending_rn,
                         w_or_x, state->mul_pending_rm,
                         w_or_x, xc);
+                    finding_rewrite_tail(out);
 
                     snprintf(out->lines[0], sizeof(out->lines[0]),
                         "%s", state->mul_pending_disasm);
@@ -18474,6 +18730,7 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
                         "-> %s x%u, w%u, w%u",
                         sgn ? "smnegl" : "umnegl", rd,
                         state->wmul_pending_rn, state->wmul_pending_rm);
+                    finding_rewrite_tail(out);
                     snprintf(out->lines[0], sizeof(out->lines[0]),
                         "%s", state->wmul_pending_disasm);
                     snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -18498,6 +18755,7 @@ bool check_widening_mul_add_sub_fold(armlint_state *state,
                         fold_mnem, rd,
                         state->wmul_pending_rn, state->wmul_pending_rm,
                         xc);
+                    finding_rewrite_tail(out);
 
                     snprintf(out->lines[0], sizeof(out->lines[0]),
                         "%s", state->wmul_pending_disasm);
@@ -18607,6 +18865,7 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, rd,
                     w_or_x, xc,
                     w_or_x, state->neg_pending_rs);
+                finding_rewrite_tail(out);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->neg_pending_disasm);
@@ -18682,6 +18941,7 @@ bool check_neg_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, c_rd, surv_buf,
                     w_or_x, state->neg_pending_rs,
                     a64_cond_names[new_cond]);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->neg_pending_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -18809,6 +19069,7 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, rd,
                     w_or_x, indep,
                     w_or_x, state->mvn_pending_rs);
+                finding_rewrite_tail(out);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->mvn_pending_disasm);
@@ -18885,6 +19146,7 @@ bool check_mvn_logic_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, c_rd, surv_buf,
                     w_or_x, state->mvn_pending_rs,
                     a64_cond_names[new_cond]);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->mvn_pending_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -18992,6 +19254,7 @@ bool check_add_one_csel_fold(armlint_state *state, const cs_insn *insn,
                     w_or_x, c_rd, surv_buf,
                     w_or_x, state->ao_rs,
                     a64_cond_names[new_cond]);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->ao_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -19175,6 +19438,7 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                         mnem, w_or_x, rd, w_or_x, indep,
                         state->ext_pending_rs, ext, lsl);
                 }
+                finding_rewrite_tail(out);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->ext_pending_disasm);
@@ -19199,6 +19463,7 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     clear_finding_strings(&fb);
                     snprintf(fb.detail, sizeof(fb.detail),
                         "%s (extend stays)", out->detail);
+                    finding_replace_with_detail(&fb, offset, 0);
                     snprintf(fb.lines[0], sizeof(fb.lines[0]),
                         "%s", out->lines[0]);
                     snprintf(fb.lines[1], sizeof(fb.lines[1]),
@@ -19229,6 +19494,7 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     "-> %s %c%u, %c%u, %c%u, lsl #%u",
                     mnem, w_or_x, rd, w_or_x, indep,
                     w_or_x, state->ext_pending_rs, lsl);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->ext_pending_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -19243,6 +19509,8 @@ bool check_extend_add_sub_fold(armlint_state *state, const cs_insn *insn,
                         "-> %s %c%u, %c%u, %c%u, lsl #%u (extend stays)",
                         mnem, w_or_x, rd, w_or_x, indep,
                         w_or_x, state->ext_pending_rs, lsl);
+                    fb.nedits = 0;
+                    finding_replace_with_detail(&fb, offset, 0);
                     defer_dead_mov(state, out, t);
                     state->pending_mz_has_fallback = true;
                     state->pending_mz_fallback = fb;
@@ -19343,8 +19611,11 @@ static void format_reg(char *buf, size_t bufsz, char w_or_x, unsigned reg)
 // instead of emitting it immediately. armlint_advance_pending_mz emits it only
 // once the materialized zero register (state->mov_rd) is shown to be dead after
 // the consumer. Returns false so the driver records no finding at this point.
+// Every branch's rewrite is the same shape: the chain goes, and the consumer
+// becomes the detail's ZR spelling.
 static bool mov_zero_defer(armlint_state *state, armlint_finding *out)
 {
+    finding_rewrite_tail(out);
     return defer_dead_mov(state, out, state->mov_rd);
 }
 
@@ -19989,6 +20260,7 @@ bool check_simd_cmp_zero(armlint_state *state, const cs_insn *insn,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> %s v%u.%s, v%u.%s, %s",
                     mnem, c.vd, arr, x, arr, imm);
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->simd_zero_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -20415,6 +20687,7 @@ bool check_ldp_stp_coalesce(armlint_state *state, const cs_insn *insn,
                     dist, dist == 1u ? "" : "s");
             }
         }
+        finding_rewrite_tail(out);
         snprintf(out->lines[0], sizeof(out->lines[0]),
             "%s", state->lsp_disasm);
         snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -20502,6 +20775,7 @@ bool check_stp_wzr_to_str_xzr(armlint_state *state, const cs_insn *insn,
     clear_finding_strings(out);
     snprintf(out->detail, sizeof(out->detail),
         "-> %s xzr, [%s, #%d]", mnem, rn_buf, byte_off);
+    finding_rewrite_tail(out);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;
@@ -20827,6 +21101,7 @@ bool check_add_ldr_register_offset(armlint_state *state,
                         state->add_pending_rn, state->add_pending_rm,
                         s);
                 }
+                finding_rewrite_tail(out);
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->add_pending_disasm);
                 snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -20980,6 +21255,7 @@ bool check_sxtw_ldr_fold(armlint_state *state, const cs_insn *insn,
                     "%s %s, [%s, x%u, lsl #%u]",
                     ls_mnem, rt_buf, base_buf, rm, size);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->sxl_disasm);
             if (!is_store && rt == state->sxl_rd) {
@@ -21140,6 +21416,7 @@ bool check_mov_reg_offset_fold(armlint_state *state, const cs_insn *insn,
             "-> %s %s, [%s, #0x%" PRIx64 "]",
             new_mnem, rt_buf, base_buf, (uint64_t)byte_off);
     }
+    finding_rewrite_tail(out);
 
     char w_or_x = state->mov_is_64bit ? 'x' : 'w';
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
@@ -21278,6 +21555,7 @@ bool check_mov_reg_offset_split(armlint_state *state, const cs_insn *insn,
             "-> add x%u, %s, #0x%" PRIx64 ", lsl #12 ; %s %s, [x%u, #0x%"
             PRIx64 "]", rc, base_buf, hi, new_mnem, rt_buf, rc, lo);
     }
+    finding_rewrite_tail(out);
 
     char w_or_x = state->mov_is_64bit ? 'x' : 'w';
     unsigned max_mov_lines = ARMLINT_FINDING_LINES - 1u;
@@ -22005,6 +22283,7 @@ bool check_const_audit(armlint_state *state, const cs_insn *insn,
     out->misfit_fit = 1;
     out->misfit_value = s.needed;
     const_audit_render_form(&s, out->detail, sizeof(out->detail));
+    finding_replace_with_detail(out, offset, 0);
     unsigned chain_n = imm_audit_render_chain(state, out);
     snprintf(out->lines[chain_n], sizeof(out->lines[chain_n]),
         "%s %s", insn->mnemonic, insn->op_str);
@@ -22171,6 +22450,7 @@ bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
             if (chain_on) {
                 state->bvs_ccmp_active = true;
             } else {
+                finding_rewrite_tail(p);
                 // Deferred on two proofs (armlint_advance_pending_bvs):
                 // NZCV dead after the consumer, the constant register
                 // dead (a select that writes it has settled that).
@@ -22482,6 +22762,13 @@ bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
             ", lsl #12", w_or_x, rt, w_or_x, rs, tz, len, w_or_x, rt,
             imm >> 12);
     }
+    // The UBFX takes the AND's word and the compare its own; the chain
+    // goes, and the words between, which touch neither register, stay.
+    finding_replace_with_detail(f, and_off, 0);
+    for (size_t l = chain_start; l <= chain_end; l += 4u) {
+        finding_delete(f, l);
+    }
+    finding_replace_with_detail(f, offset, 1);
     unsigned line = 0;
     char chain_w_or_x = mw.is_64bit ? 'x' : 'w';
     bool and_first = and_off < chain_start;
@@ -22674,6 +22961,7 @@ bool check_ldr_sext_fold(armlint_state *state, const cs_insn *insn,
                     "-> %s %c%u, [%s, #0x%x]",
                     mnem, rt_wx, state->lsx_rt, base_buf, bytes);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lsx_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -22955,6 +23243,7 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 }
                 format_mem_off(out->detail, sizeof(out->detail),
                     "-> ", new_mnem, rt_buf, base_buf, combined);
+                finding_rewrite_tail(out);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->addi_pending_disasm);
@@ -23051,6 +23340,7 @@ bool check_add_ldr_imm_offset(armlint_state *state,
                 }
                 format_mem_off(out->detail, sizeof(out->detail),
                     "-> ", mnem, rts, base_buf, combined);
+                finding_rewrite_tail(out);
 
                 snprintf(out->lines[0], sizeof(out->lines[0]),
                     "%s", state->addi_pending_disasm);
@@ -23304,22 +23594,43 @@ static void mf_record_use(armlint_state *state, const cs_insn *insn,
                           size_t offset, int32_t combined)
 {
     state->mf_last_offset = offset;
+    char base_buf[8];
+    char newloc[24];
+    mf_base_name(state, base_buf, sizeof(base_buf));
+    if (combined == 0) {
+        snprintf(newloc, sizeof(newloc), "[%s]", base_buf);
+    } else if (combined < 0) {
+        snprintf(newloc, sizeof(newloc), "[%s, #-0x%x]", base_buf,
+            (unsigned)(-combined));
+    } else {
+        snprintf(newloc, sizeof(newloc), "[%s, #0x%x]", base_buf,
+            (unsigned)combined);
+    }
     if (state->mf_uses < MF_MAX_LINES) {
-        char base_buf[8];
-        char newloc[24];
-        mf_base_name(state, base_buf, sizeof(base_buf));
-        if (combined == 0) {
-            snprintf(newloc, sizeof(newloc), "[%s]", base_buf);
-        } else if (combined < 0) {
-            snprintf(newloc, sizeof(newloc), "[%s, #-0x%x]", base_buf,
-                (unsigned)(-combined));
-        } else {
-            snprintf(newloc, sizeof(newloc), "[%s, #0x%x]", base_buf,
-                (unsigned)combined);
-        }
         snprintf(state->mf_lines[state->mf_uses],
             sizeof(state->mf_lines[0]), "%s %s  -> %s",
             insn->mnemonic, insn->op_str, newloc);
+    }
+    // The edit: the access as it stands with the new address. The
+    // unscaled spellings drop their 'u' (ldur -> ldr), since the sum
+    // may need the scaled form -- the assembler picks the encoding
+    // for the plain mnemonic either way.
+    if (state->mf_uses < ARMLINT_FINDING_EDITS - 1) {
+        char mnem[16];
+        snprintf(mnem, sizeof(mnem), "%s", insn->mnemonic);
+        if (strncmp(mnem, "ldur", 4) == 0 || strncmp(mnem, "stur", 4) == 0) {
+            memmove(mnem + 2, mnem + 3, strlen(mnem + 3) + 1);
+        }
+        const char *open = strchr(insn->op_str, '[');
+        const char *close = open != NULL ? strchr(open, ']') : NULL;
+        armlint_edit *e = &state->mf_edits[state->mf_uses];
+        e->offset = offset;
+        if (close != NULL) {
+            snprintf(e->text, sizeof(e->text), "%s %.*s%s%s", mnem,
+                (int)(open - insn->op_str), insn->op_str, newloc, close + 1);
+        } else {
+            e->text[0] = '\0';
+        }
     }
     state->mf_uses++;
 }
@@ -23378,6 +23689,19 @@ static bool mf_finish(armlint_state *state, armlint_finding *out)
     }
     snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
         state->mf_add_disasm);
+    // The ADD goes and every use moves onto its source -- when the uses
+    // fit the edits; past that the advice still stands, unapplied.
+    if (state->mf_uses < ARMLINT_FINDING_EDITS) {
+        finding_delete(out, out->start_offset);
+        for (unsigned i = 0; i < state->mf_uses; i++) {
+            const armlint_edit *e = &state->mf_edits[i];
+            if (e->text[0] == '\0') {
+                out->nedits = ARMLINT_FINDING_EDITS + 1;
+                break;
+            }
+            finding_replace(out, e->offset, "%s", e->text);
+        }
+    }
 
     unsigned shown = state->mf_uses;
     if (shown > MF_MAX_LINES) {
@@ -23584,6 +23908,7 @@ bool check_add_stlr_fold(armlint_state *state,
                     stlur_mnem[size], rt_buf,
                     state->asl_pending_rn, state->asl_pending_imm);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->asl_pending_disasm);
             snprintf(out->lines[1], sizeof(out->lines[1]),
@@ -23752,6 +24077,7 @@ bool check_ldr_str_add_post_indexed(armlint_state *state,
                     "-> %s %s, [x%u], #%s0x%x",
                     mnem, rts, state->lspi_pending_rn, idx_sign, a_imm);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lspi_pending_disasm);
             if (a_rn == 31) {
@@ -24008,6 +24334,7 @@ bool check_add_ldr_str_pre_indexed(armlint_state *state,
                 snprintf(out->detail, sizeof(out->detail),
                     "-> %s %s, [x%u, #%s0x%x]!", mnem, rts, rn, idx_sign, imm);
             }
+            finding_rewrite_tail(out);
             snprintf(out->lines[0], sizeof(out->lines[0]),
                 "%s", state->lspr_pending_disasm);
             if (rn == 31) {
@@ -24116,6 +24443,7 @@ bool check_mov_reg_self(armlint_state *state, const cs_insn *insn,
 
     snprintf(out->detail, sizeof(out->detail),
         "%s %s is a no-op", insn->mnemonic, insn->op_str);
+    finding_delete(out, offset);
     snprintf(out->lines[0], sizeof(out->lines[0]),
         "%s %s", insn->mnemonic, insn->op_str);
     return true;

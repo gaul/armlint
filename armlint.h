@@ -239,6 +239,25 @@ void armlint_state_set_buffer(armlint_state *state, const uint8_t *buf,
 #define ARMLINT_FINDING_LINE_LEN   96
 #define ARMLINT_FINDING_DETAIL_LEN 128
 
+// The rewrite a finding suggests, as edits to the words of its window:
+// what a tool applying the advice would change (tools/rwfuzz runs the
+// original and the edited code side by side). Each edit names one word
+// by its offset, in start_offset's terms, and replaces it with the one
+// A64 instruction in text -- or deletes it, when text is empty. Words
+// of the window that no edit names stay as they are. The text is
+// spelled the way the detail spells it: a PC-relative operand (a
+// branch target, a literal's address) is the absolute offset the
+// detail shows, not a displacement. A finding whose advice is not one
+// concrete rewrite -- an audit, a count, a choice left to the reader --
+// carries no edits.
+#define ARMLINT_FINDING_EDITS      8
+#define ARMLINT_FINDING_EDIT_LEN   48
+
+typedef struct {
+    size_t offset;
+    char text[ARMLINT_FINDING_EDIT_LEN];
+} armlint_edit;
+
 // Consumer classes of the immediate-misfit audit, carried on its
 // findings so the driver's summary can tally misfits by constant.
 enum {
@@ -255,6 +274,9 @@ typedef struct {
     unsigned insn_count;
     char detail[ARMLINT_FINDING_DETAIL_LEN];
     char lines[ARMLINT_FINDING_LINES][ARMLINT_FINDING_LINE_LEN];
+    // The rewrite as edits, nedits of them (see armlint_edit).
+    unsigned nedits;
+    armlint_edit edits[ARMLINT_FINDING_EDITS];
     // Set only by the two constant audits (zero for every other
     // check; clear_finding_strings resets them with the text): the
     // consumer class, its operation width (32 or 64; for a load/store
