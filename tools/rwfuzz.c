@@ -67,9 +67,10 @@
 //          UMOV of lane 0, vector self-ops, compares with zero, EOR3 and
 //          BCAX, extends and loads before a conversion
 //   lse    exclusive-access loops: fetch-and-op, swap, compare-and-swap
-// and all plants any of them and tests every finding with a rewrite,
-// reporting by finding name. A finding whose edits touch the harness's
-// own code is left alone and counted apart.
+// and all plants any shape of any of them -- the 74 equally likely, a
+// family's shapes counted one by one -- and tests every finding with a
+// rewrite, reporting by finding name. A finding whose edits touch the
+// harness's own code is left alone and counted apart.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -1169,20 +1170,28 @@ static unsigned base_step(const access_kind *k)
     return k->size * (1u + rr(16));
 }
 
-static void plant_mem_shape(void);
+static void plant_mem_shape(unsigned shape);
 
 // mem: the accesses go through registers the plant itself sets up, so
 // its slots past the first are no landing place for a branch.
-static void plant_mem(void)
+// plant_mem_shape's shape 13 is its default.
+#define MEM_SHAPES 16u
+
+static void plant_mem_at(unsigned shape)
 {
     if (nbody + 8 > BODY_MAX) {
         return;
     }
     int first = nbody;
-    plant_mem_shape();
+    plant_mem_shape(shape);
     for (int i = first + 1; i < nbody; i++) {
         body[i].interior = true;
     }
+}
+
+static void plant_mem(void)
+{
+    plant_mem_at(rr(MEM_SHAPES));
 }
 
 // An instruction between a base's set-up and its use that leaves the
@@ -1195,16 +1204,15 @@ static void push_gap_besides(unsigned b)
     push_text("eor x%u, x%u, x%u", d, m, n);
 }
 
-static void plant_mem_shape(void)
+static void plant_mem_shape(unsigned shape)
 {
     unsigned b = body_reg();
     unsigned t = reg_besides(b, b);
     unsigned i = reg_besides(b, t);
     const access_kind *k = &access_kinds[rr(ACCESS_KINDS)];
     bool load = rr(2) == 0;
-    switch (rr(17)) {
-    case 0:
-    case 1: {
+    switch (shape) {
+    case 0: {
         // An address computed once and used once or more, adjacent or
         // not: the immediate-offset folds and the multi-use rebase.
         push_base(b);
@@ -1219,7 +1227,7 @@ static void plant_mem_shape(void)
         maybe_kill(b);
         break;
     }
-    case 2: {
+    case 1: {
         // An access and then its base moved: post-indexing.
         bool sub = rr(3) == 0;
         unsigned step = base_step(k);
@@ -1228,7 +1236,7 @@ static void plant_mem_shape(void)
         push_text("%s x%u, x%u, #%u", sub ? "sub" : "add", b, b, step);
         break;
     }
-    case 3: {
+    case 2: {
         // The base moved and then accessed: pre-indexing.
         bool sub = rr(3) == 0;
         unsigned step = base_step(k);
@@ -1237,7 +1245,7 @@ static void plant_mem_shape(void)
         push_access_as(k, load, t, b, 0);
         break;
     }
-    case 4: {
+    case 3: {
         // An index added to the base, scaled or not: register offset.
         unsigned s = rr(5);
         unsigned v = 8u * rr(32);
@@ -1251,7 +1259,7 @@ static void plant_mem_shape(void)
         maybe_kill(b);
         break;
     }
-    case 5: {
+    case 4: {
         // A constant index in a register: an immediate offset.
         int c;
         if (rr(4) == 0) {
@@ -1265,7 +1273,7 @@ static void plant_mem_shape(void)
         maybe_kill(i);
         break;
     }
-    case 6: {
+    case 5: {
         // A constant past one MOV in the index, the base moved down by
         // as much: an ADD of its high part and an immediate offset.
         unsigned c = 0x10000u + 8u * rr(0x8000);
@@ -1278,7 +1286,7 @@ static void plant_mem_shape(void)
         maybe_kill(i);
         break;
     }
-    case 7: {
+    case 6: {
         // Two accesses to neighbouring slots: a pair, or one zero store.
         static const struct { const char *mnem; const char *reg; unsigned size; }
             pk[] = {
@@ -1310,7 +1318,7 @@ static void plant_mem_shape(void)
         }
         break;
     }
-    case 8: {
+    case 7: {
         // A zero made for a store alone.
         bool x = rr(2) == 0;
         int off = 4 * (int)rr(64);
@@ -1320,7 +1328,7 @@ static void plant_mem_shape(void)
         maybe_kill(t);
         break;
     }
-    case 9: {
+    case 8: {
         // A load and its sign extension.
         static const char *const lx[][2] = {
             { "ldrb w%u, [x%u, #%u]", "sxtb w%u, w%u" },
@@ -1338,7 +1346,7 @@ static void plant_mem_shape(void)
         push_text(lx[j][1], d, t);
         break;
     }
-    case 10: {
+    case 9: {
         // A sign-extended index: the extend folded into the access.
         int c = (int)rr(64) - 32;
         unsigned x = rr(4) == 0 ? t : i;
@@ -1355,7 +1363,7 @@ static void plant_mem_shape(void)
         maybe_kill(x);
         break;
     }
-    case 11: {
+    case 10: {
         // A store-release through a moved base (LRCPC2), at an address
         // aligned for it: a store-release faults on one that is not.
         unsigned kind = rr(3);
@@ -1366,7 +1374,7 @@ static void plant_mem_shape(void)
         maybe_kill(b);
         break;
     }
-    case 12: {
+    case 11: {
         // The literal pool: an LDR (literal), or an ADR and a load.
         static const char *const lit[] = {
             "ldr x%u, #%u", "ldr w%u, #%u", "ldrsw x%u, #%u",
@@ -1384,7 +1392,7 @@ static void plant_mem_shape(void)
         }
         break;
     }
-    case 13: {
+    case 12: {
         // A pair and its base: moved after (post-indexing), moved
         // before (pre-indexing), or a new base added once for an
         // offset (immediate).
@@ -1410,7 +1418,7 @@ static void plant_mem_shape(void)
         }
         break;
     }
-    case 15: {
+    case 14: {
         // An ADR of the word after a BR through it: a direct branch.
         unsigned at = (unsigned)(body_start + nbody) * 4u;
         bool x17 = rr(2) == 0;
@@ -1418,7 +1426,7 @@ static void plant_mem_shape(void)
         push_text("br x%u", x17 ? 17u : 16u);
         break;
     }
-    case 16: {
+    case 15: {
         // The same address made twice: the second ADR is a recompute.
         unsigned p = rr(8);
         push_text("adr x%u, #%u", b, pool_off(p));
@@ -1478,7 +1486,10 @@ static void push_chain(char w, unsigned r, uint64_t v)
     }
 }
 
-static void plant_arith(void)
+// arith's shapes: cases 0..30, and its default.
+#define ARITH_SHAPES 32u
+
+static void plant_arith_at(unsigned shape)
 {
     if (nbody + 8 > BODY_MAX) {
         return;
@@ -1492,7 +1503,7 @@ static void plant_arith(void)
     unsigned width = x ? 64u : 32u;
     unsigned cond = rr(14);
     const char *cc = cond_text[cond];
-    switch (rr(40)) {
+    switch (shape) {
     case 0: {
         // MUL, MNEG, MADD or MSUB by a constant.
         static const char *const op[] = { "mul", "mneg", "madd", "msub" };
@@ -2028,7 +2039,15 @@ static void plant_arith(void)
     }
 }
 
-static void plant_fp(void)
+static void plant_arith(void)
+{
+    plant_arith_at(rr(ARITH_SHAPES));
+}
+
+// fp's shapes: cases 0..8, and its default.
+#define FP_SHAPES 10u
+
+static void plant_fp_at(unsigned shape)
 {
     if (nbody + 6 > BODY_MAX) {
         return;
@@ -2044,7 +2063,7 @@ static void plant_fp(void)
     const char *cc = cond_text[cond];
     static const char *const arr[] = { "16b", "8b" };
     const char *ar = arr[rr(2)];
-    switch (rr(10)) {
+    switch (shape) {
     case 0:
         // FMUL and an FNEG of the product: FNMUL.
         push_text("fmul %c%u, %c%u, %c%u", f, a, f, b, f, c);
@@ -2162,7 +2181,12 @@ static void plant_fp(void)
     }
 }
 
-static void plant_lse_loop(void);
+static void plant_fp(void)
+{
+    plant_fp_at(rr(FP_SHAPES));
+}
+
+static void plant_lse_loop(unsigned shape);
 
 // An exclusive-access loop on the scratch buffer: a fetch-and-op, a
 // swap, or a compare-and-swap with its early exit -- what LSE does in
@@ -2170,20 +2194,27 @@ static void plant_lse_loop(void);
 // program has. Its slots past the load-exclusive are no landing place
 // for a branch: a store-exclusive reached without its load is not code
 // the rewrite has to agree with (a failed CAS leaves the monitor armed
-// for one).
-static void plant_lse(void)
+// for one). Its shapes: the fetch-and-op, the swap, the CAS.
+#define LSE_SHAPES 3u
+
+static void plant_lse_at(unsigned shape)
 {
     if (nbody + 6 > BODY_MAX) {
         return;
     }
     int first = nbody;
-    plant_lse_loop();
+    plant_lse_loop(shape);
     for (int i = first + 1; i < nbody; i++) {
         body[i].interior = true;
     }
 }
 
-static void plant_lse_loop(void)
+static void plant_lse(void)
+{
+    plant_lse_at(rr(LSE_SHAPES));
+}
+
+static void plant_lse_loop(unsigned shape)
 {
     unsigned old = body_reg();
     unsigned val = reg_besides(old, old);
@@ -2200,9 +2231,8 @@ static void plant_lse_loop(void)
     bool acq = rr(2) == 0;
     bool rel = rr(2) == 0;
     unsigned at = (unsigned)(body_start + nbody) * 4u;
-    switch (rr(4)) {
-    case 0:
-    case 1: {
+    switch (shape) {
+    case 0: {
         static const char *const op[] = { "add", "orr", "eor", "bic", "and",
                                           "sub" };
         unsigned j = rr(7);
@@ -2217,7 +2247,7 @@ static void plant_lse_loop(void)
         push_text("cbnz w%u, #%u", st, at);
         break;
     }
-    case 2:
+    case 1:
         push_text("ld%sxr%s %c%u, [x28]", acq ? "a" : "", sz, w, old);
         push_text("st%sxr%s w%u, %c%u, [x28]", rel ? "l" : "", sz, st, w, val);
         push_text("cbnz w%u, #%u", st, at);
@@ -3769,6 +3799,8 @@ struct mode {
     void (*plant)(void);
     bool (*is_special)(const hit_t *);
     bool (*control)(int, uint32_t *);
+    void (*plant_at)(unsigned);     // a family's: plants the shape given
+    unsigned shapes;                // ... of this many (none: one shape)
 };
 
 static void plant_any(void);
@@ -3776,53 +3808,83 @@ static bool control_any(int i, uint32_t *alt);
 
 static const mode_t_ modes[] = {
     { "zext", { "redundant zero-extension after zeroing op", NULL },
-      "across a gap", plant_zext, zext_special, zext_control },
+      "across a gap", plant_zext, zext_special, zext_control, NULL, 0 },
     { "ubfx", { "LSR+AND foldable into UBFX", "ASR+AND foldable into UBFX" },
-      "out of place", plant_shift_and, ubfx_special, ubfx_control },
+      "out of place", plant_shift_and, ubfx_special, ubfx_control, NULL, 0 },
     { "ccmp", { "CMP + CCMP chain decidable by one compare", NULL },
-      "with a branch reader", plant_ccmp_chain, ccmp_special, ccmp_control },
+      "with a branch reader", plant_ccmp_chain, ccmp_special, ccmp_control, NULL, 0 },
     { "lvn", { "register already holds the recomputed value",
                "ADR/ADRP of an address its register already holds" },
-      "not adjacent", plant_recompute, lvn_special, lvn_control },
+      "not adjacent", plant_recompute, lvn_special, lvn_control, NULL, 0 },
     { "dead", { "register write overwritten unread", NULL },
-      "across a gap", plant_dead_write, dead_special, dead_control },
+      "across a gap", plant_dead_write, dead_special, dead_control, NULL, 0 },
     { "cmn", { "MOV + CMP of a 32-bit value against 2^32-k foldable to "
                "W-form CMN", NULL },
-      "with a branch reader", plant_cmp_cmn, cmn_special, cmn_control },
+      "with a branch reader", plant_cmp_cmn, cmn_special, cmn_control, NULL, 0 },
     { "branch", { "conditional branch that is never taken",
                   "conditional branch that is always taken" },
-      "always taken", plant_decided, branch_special, branch_control },
+      "always taken", plant_decided, branch_special, branch_control, NULL, 0 },
     { "fold", { "operation on known values foldable to MOV #imm",
                 "operation on known values leaves its register unchanged" },
-      "deleted", plant_fold, fold_special, fold_control },
+      "deleted", plant_fold, fold_special, fold_control, NULL, 0 },
     { "and", { "AND/UBFX that known bits make a no-op", NULL },
-      "deleted", plant_and, and_special, and_control },
+      "deleted", plant_and, and_special, and_control, NULL, 0 },
     { "cbz", { "compare-zero branch foldable into CBZ/CBNZ",
                "compare-zero signed-branch foldable into TBZ/TBNZ" },
       "through a branch at the target", plant_cbz, cbz_special,
-      cbz_control },
+      cbz_control, NULL, 0 },
     { "split", { "MOV + ADD/SUB foldable to two immediate ADD/SUBs", NULL },
-      "sign-crossed", plant_split, split_special, split_control },
+      "sign-crossed", plant_split, split_special, split_control, NULL, 0 },
     { "cbc", { "B.cond + CMP + B.cond foldable into CCMP + B.cond", NULL },
-      "sharing a target", plant_cbc, cbc_special, cbc_control },
+      "sharing a target", plant_cbc, cbc_special, cbc_control, NULL, 0 },
     { "hammock", { "B.cond over one instruction foldable into a conditional "
                    "select", NULL },
-      "through an alias", plant_hammock, hammock_special, hammock_control },
+      "through an alias", plant_hammock, hammock_special, hammock_control, NULL, 0 },
     // Plants of a family of shapes rather than one check's: every
     // finding with a rewrite in their programs is tested.
-    { "mem", { NULL, NULL }, NULL, plant_mem, NULL, NULL },
-    { "arith", { NULL, NULL }, NULL, plant_arith, NULL, NULL },
-    { "fp", { NULL, NULL }, NULL, plant_fp, NULL, NULL },
-    { "lse", { NULL, NULL }, NULL, plant_lse, NULL, NULL },
-    { "all", { NULL, NULL }, NULL, plant_any, NULL, control_any },
+    { "mem", { NULL, NULL }, NULL, plant_mem, NULL, NULL, plant_mem_at,
+      MEM_SHAPES },
+    { "arith", { NULL, NULL }, NULL, plant_arith, NULL, NULL,
+      plant_arith_at, ARITH_SHAPES },
+    { "fp", { NULL, NULL }, NULL, plant_fp, NULL, NULL, plant_fp_at,
+      FP_SHAPES },
+    { "lse", { NULL, NULL }, NULL, plant_lse, NULL, NULL, plant_lse_at,
+      LSE_SHAPES },
+    { "all", { NULL, NULL }, NULL, plant_any, NULL, control_any, NULL, 0 },
 };
 
 #define NMODES (sizeof(modes) / sizeof(modes[0]))
 
-// all: any mode's plant, and any mode's control that takes the slot.
+// all: any shape any mode plants, each as likely as the next -- a
+// family's shapes one by one, not the family as one. Drawn by mode,
+// each one-shape mode had 1 plant in 17 and an arith shape 1 in 680.
+// And any mode's control that takes the slot.
+static unsigned shapes_of(const mode_t_ *m)
+{
+    return m->shapes != 0 ? m->shapes : 1u;
+}
+
 static void plant_any(void)
 {
-    modes[rr(NMODES - 1u)].plant();
+    static unsigned total;
+    if (total == 0) {
+        for (size_t i = 0; i + 1u < NMODES; i++) {
+            total += shapes_of(&modes[i]);
+        }
+    }
+    unsigned k = rr(total);
+    for (size_t i = 0; i + 1u < NMODES; i++) {
+        const mode_t_ *m = &modes[i];
+        if (k < shapes_of(m)) {
+            if (m->shapes != 0) {
+                m->plant_at(k);
+            } else {
+                m->plant();
+            }
+            return;
+        }
+        k -= shapes_of(m);
+    }
 }
 
 static bool control_any(int i, uint32_t *alt)
