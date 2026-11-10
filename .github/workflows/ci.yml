@@ -136,6 +136,85 @@ jobs:
           make CAPSTONE_CFLAGS="$CAPSTONE6_CFLAGS"
           CAPSTONE_LIBS="$CAPSTONE6_LIBS" test
 
+  rwfuzz:
+    # tools/rwfuzz runs every finding's rewrite against the original on
+    # random programs (scripts/rwfuzz_test.sh). The programs run
+    # natively, which every runner here can: they are all AArch64. The
+    # default seed, so a failure here reproduces with the same command
+    # anywhere; rwfuzz-long draws fresh programs. Linux runs it under
+    # both assemblers: Ubuntu's cc is gcc, and GNU as must take every
+    # rewrite armlint prints just as clang's integrated assembler does.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            cc: cc
+          - os: ubuntu-26.04-arm
+            cc: gcc
+          - os: ubuntu-26.04-arm
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      RWFUZZ_CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install capstone (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcapstone-dev pkg-config gcc clang
+
+      - name: Install capstone (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install capstone pkg-config
+
+      - name: Build
+        run: make tools/rwfuzz
+
+      - name: Run rwfuzz
+        run: make rwfuzz-test
+
+  rwfuzz-long:
+    # rwfuzz again on programs no run has drawn before: the seed is this
+    # run's id, which the log prints with the command that replays a
+    # failure, and ten times the programs. Like the liveness sweeps it
+    # runs on pushes to master, weekly and on demand, not on every pull
+    # request.
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            cc: cc
+          - os: ubuntu-26.04-arm
+            cc: gcc
+    runs-on: ${{ matrix.os }}
+    env:
+      RWFUZZ_CC: ${{ matrix.cc }}
+      RWFUZZ_SEED: ${{ github.run_id }}
+      RWFUZZ_PROGRAMS: 200000
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install capstone (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcapstone-dev pkg-config gcc
+
+      - name: Install capstone (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install capstone pkg-config
+
+      - name: Build
+        run: make tools/rwfuzz
+
+      - name: Run rwfuzz
+        run: make rwfuzz-test
+
   liveness-sweep:
     # Exhaustive liveness-vs-Capstone cross-check over the entire
     # 2^32 encoding space -- both the NZCV classifier and its

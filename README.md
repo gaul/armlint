@@ -253,6 +253,18 @@ regenerate the
 snapshots with `make integration-test-regen` and review the diff
 before committing.
 
+On an AArch64 host, `make rwfuzz-test` runs armlint's advice:
+`tools/rwfuzz` (see [Mining tools](#mining-tools)) applies every
+finding's rewrite to random programs and runs original and rewrite
+natively, in each of its modes. It fails on a difference, on a rewrite
+it cannot apply, on a control arm that never saw a refused rewrite
+change a result, or when `all` runs fewer finding kinds than
+`RWFUZZ_MIN_KINDS` (150). `RWFUZZ_PROGRAMS` (20000) and `RWFUZZ_SEED`
+size and vary the run. CI runs it on every PR with the default seed,
+under gcc's assembler and clang's on Linux, and on pushes to master,
+weekly and on demand with the run's id as the seed and ten times the
+programs.
+
 Setting `ARMLINT_LIVENESS_SWEEP=1` extends the unit tests' liveness
 cross-checks against Capstone to the entire 2^32 encoding space --
 minutes of single-threaded CPU time, so CI runs it on pushes rather

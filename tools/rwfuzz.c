@@ -80,15 +80,18 @@
 // invalidation in check_redundant_zext, say), rebuild libarmlint.a and
 // rwfuzz, and expect mismatches within a few thousand programs.
 //
-// Usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] MODE
+// Usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] [-k KINDS] MODE
 //   -n  programs to generate (default 100000)
 //   -s  seed, mixed into the fixed default one (default 0)
 //   -f  test only the findings whose name contains NAME; the programs
 //       are drawn from a stream of their own, so they stay the same
+//   -k  fail unless findings of at least KINDS names were run, so that a
+//       plant that stops producing its finding does not pass unseen
 // Exit status: 0 when every finding was applied and matched; 1 on a
-// mismatch, or on a finding the harness could not apply (an edit the
-// assembler refuses would otherwise drop out of the test silently); 2 on
-// a usage or environment error, a run that tested no finding included.
+// mismatch, on a finding the harness could not apply (an edit the
+// assembler refuses would otherwise drop out of the test silently), or
+// on fewer kinds run than -k asks for; 2 on a usage or environment
+// error, a run that tested no finding included.
 //
 // The programs run on the host, so rwfuzz needs an AArch64 one: MAP_JIT
 // memory on macOS, plain read-write-execute memory elsewhere. It turns
@@ -3798,7 +3801,8 @@ static void report_mismatch(const hit_t *h, const uint32_t *alt,
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] MODE\n"
+    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] "
+            "[-k KINDS] MODE\n"
             "modes:");
     for (size_t i = 0; i < NMODES; i++) {
         fprintf(stderr, " %s", modes[i].name);
@@ -3810,9 +3814,9 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    long programs = 100000;
+    long programs = 100000, min_kinds = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "n:s:f:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:s:f:k:")) != -1) {
         switch (opt) {
         case 'n':
             programs = atol(optarg);
@@ -3823,6 +3827,9 @@ int main(int argc, char **argv)
             break;
         case 'f':
             only = optarg;
+            break;
+        case 'k':
+            min_kinds = atol(optarg);
             break;
         default:
             usage();
@@ -3956,6 +3963,12 @@ int main(int argc, char **argv)
     }
     asm_close();
 
+    // The kinds a finding of which ran; a kind seen only in the
+    // harness's code, or only unapplied, does not count.
+    size_t kinds = 0;
+    for (size_t i = 0; i < ntallies; i++) {
+        kinds += tallies[i].tested != 0;
+    }
     if (mode->special != NULL) {
         printf("rwfuzz %s: %ld programs, %ld findings run (%ld %s), "
                "%ld mismatches, %ld not applied\n",
@@ -3964,8 +3977,7 @@ int main(int argc, char **argv)
     } else {
         printf("rwfuzz %s: %ld programs, %ld findings of %zu kinds run, "
                "%ld mismatches, %ld not applied\n",
-               mode->name, programs, tested, ntallies, mismatches,
-               unapplied);
+               mode->name, programs, tested, kinds, mismatches, unapplied);
     }
     if (outside != 0) {
         printf("  %ld findings in the harness's own code left alone\n",
@@ -3985,10 +3997,17 @@ int main(int argc, char **argv)
                    t->unapplied, t->outside, t->name);
         }
     }
+    fflush(stdout);
     if (tested == 0) {
         fprintf(stderr, "rwfuzz: no finding was tested -- has the finding "
                 "name or the check changed?\n");
         return 2;
+    }
+    if ((long)kinds < min_kinds) {
+        fprintf(stderr, "rwfuzz: findings of %zu kinds run, fewer than the "
+                "%ld -k asks for -- has a plant stopped producing its "
+                "finding?\n", kinds, min_kinds);
+        return 1;
     }
     return mismatches != 0 || unapplied != 0 ? 1 : 0;
 }

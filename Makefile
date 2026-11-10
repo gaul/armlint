@@ -53,6 +53,12 @@ integration-test: armlint
 integration-test-regen: armlint
 	./scripts/run_fixtures.sh regen
 
+# Runs armlint's advice on random programs and compares the results
+# (tools/rwfuzz, scripts/rwfuzz_test.sh). The programs run natively, so
+# it needs an AArch64 host, and it takes longer than the suites above.
+rwfuzz-test: tools/rwfuzz
+	./scripts/rwfuzz_test.sh
+
 # Corpus-mining research utilities (see "Mining tools" in README.md);
 # not part of the default build or test targets.
 tools: tools/pairscan tools/defuse tools/rwfuzz tools/tblgen_probe
@@ -88,4 +94,5 @@ clean:
 		tools/tblgen_probe \
 		*.o
 
-.PHONY: all build clean lib test integration-test integration-test-regen tools
+.PHONY: all build clean lib test integration-test integration-test-regen \
+	rwfuzz-test tools
