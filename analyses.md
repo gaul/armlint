@@ -3307,7 +3307,7 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   clang-24 63, uutils 9. LLVM's early if-conversion
   takes nearly all of its own; what remains in its output is mostly a
   move its heuristics left behind a predictable branch.
-* Verified by execution (`tools/rwfuzz csel`): 300,000 random programs
+* Verified by execution (`tools/rwfuzz hammock`): 300,000 random programs
   with planted branches over each of the seven forms and over the
   shapes the fold refuses; every rewrite armlint reported
   (724,647, 281,957 through an alias), applied as rendered,

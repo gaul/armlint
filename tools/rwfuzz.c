@@ -4,60 +4,72 @@
 // A check's decision can be right and its advice still wrong -- a proof
 // that misses a write, a rendering that inverts a condition -- and the
 // unit tests and fixtures cover only the cases someone thought to write
-// down. rwfuzz generates random AArch64 programs, lets armlint's check
-// registry find the opportunities of one kind in each, applies every
-// finding's rewrite to a copy of the program, and runs original and
-// rewrite natively from the same random registers, flags and memory.
-// Any difference in x0..x7 or NZCV at the end is a soundness bug in the
-// check -- or in the harness.
+// down. rwfuzz generates random AArch64 programs, runs armlint's check
+// registry over each, applies every finding's rewrite to a copy of the
+// program, and runs original and rewrite natively from the same random
+// registers, flags and memory. Any difference in x0..x7, NZCV, v0..v7 or
+// the scratch memory at the end -- or a rewrite that faults or runs on
+// where the original did not -- is a soundness bug in the check, or in
+// the harness.
 //
-// Each program is a fixed prologue that loads x0..x7, NZCV and a
-// scratch-buffer pointer (x28) from a state block, a random body, and an
-// epilogue that stores x0..x7 and NZCV back; after it sits a stub the
-// body can call, which clobbers x0..x7 and NZCV as a callee may. The
-// body writes only x0..x7: W and X arithmetic, logic, shifts and
-// bitfields, moves, conditional selects, loads off x28 (atomics
-// included), compares, forward CBZ/CBNZ/B.cond, calls to the stub, and
-// the patterns the mode plants for its check to find. Register values
-// lean on the edges -- zero, all ones, the 32-bit boundaries, small
-// constants and their negatives -- so compares and masks meet the values
-// that tell a rewrite from the original.
+// Any check's rewrite applies the same way. A finding carries its
+// rewrite as edits (armlint_edit in armlint.h): which words of its
+// window become which instruction, spelled as the advice spells it, and
+// which go. rwfuzz turns each instruction into its word with the host's
+// own assembler -- once per batch of programs, over every text the batch
+// needs that no batch before it did -- and a deleted word becomes a NOP,
+// so that every branch keeps its target. A PC-relative operand, which a
+// finding gives as an absolute offset, is re-spelled from the word it
+// lands in. So what runs is the advice a reader sees, and a check whose
+// advice the assembler refuses is caught too ("not applied").
 //
-// Modes, one per check:
-//   zext   check_redundant_zext: delete the consumer (a UXT*, a low-mask
-//          AND or MOV Wd, Wd), adjacent to its producer or not.
-//   ubfx   check_lsr_and_to_ubfx: delete the LSR/ASR and turn the AND
-//          into the UBFX, in place or not.
-//   ccmp   check_ccmp_chain: replace the CMP + CCMP chain by the one
-//          compare the finding renders, deleting the other links and
-//          changing the reader's condition, or making the branch the
-//          CBZ/CBNZ it renders.
-//   lvn    check_value_recompute: delete the instruction whose result its
-//          destination (and NZCV) already holds.
-//   dead   check_dead_write: delete the write whose value is overwritten
-//          before anything reads it.
-//   cmn    check_cmp_cmn_w: delete the MOV of 2^32 - k and turn the 64-bit
-//          CMP into the W-form CMN the finding renders.
-//   branch check_branch_decided: delete a conditional branch that is never
-//          taken, or make an always-taken one a B to its target.
-//   fold   check_const_fold: turn an operation on known values into the MOV
-//          the finding renders, or delete one that changes nothing.
-//   and    check_and_known_noop: delete an AND/UBFX whose input the known
-//          bits confine to its mask, or make it the MOV the finding
-//          renders.
-//   cbz    check_cmp_zero_branch: delete the zero test (CMP/CMN #0 or ZR,
-//          TST r, r) and make its B.cond the CBZ/CBNZ or TBZ/TBNZ the
-//          finding renders. It also plants forward Bs, so that the
-//          proof at the branch target has jumps to follow as well as the
-//          CBZ/TBZ forms the body draws.
-//   split  check_mov_add_sub_split: replace a MOV chain and the ADD/SUB
-//          that reads it by the two immediate ADDs or SUBs the finding
-//          renders.
-//   cbc    check_bcond_cmp_bcond: put the CCMP/CCMN the finding renders
-//          in the first branch's slot and delete the compare; the second
-//          branch stays.
-//   hammock check_bcond_over_one: put the select the finding renders in
-//          the branch's slot and delete the instruction it stepped over.
+// Each program is a fixed prologue that loads x0..x7, v0..v7, NZCV and
+// a scratch-buffer pointer (x28) from a state block, a literal pool the
+// prologue branches over, a random body, and an epilogue that stores the
+// registers and NZCV back; after it sits a stub the body can call, which
+// clobbers x0..x7, v0..v7 and NZCV as a callee may. The body writes only
+// x0..x7 and v0..v7 and stores only into the scratch buffer: W and X
+// arithmetic, logic, shifts and bitfields, moves, conditional selects,
+// loads off x28 (atomics included), compares, forward CBZ/CBNZ/B.cond,
+// calls to the stub, and the shapes the mode plants for checks to find.
+// Register values lean on the edges -- zero, all ones, the 32-bit
+// boundaries, small constants and their negatives, and for vectors the
+// floats an FP fold must keep exact -- so compares and masks meet the
+// values that tell a rewrite from the original.
+//
+// Modes plant shapes. The first thirteen plant one check's shape each,
+// test its findings alone, count a special case of them, and run a
+// control arm for it:
+//   zext   check_redundant_zext (special: across a gap)
+//   ubfx   check_lsr_and_to_ubfx (out of place)
+//   ccmp   check_ccmp_chain (with a branch reader)
+//   lvn    check_value_recompute (not adjacent)
+//   dead   check_dead_write (across a gap)
+//   cmn    check_cmp_cmn_w (with a branch reader)
+//   branch check_branch_decided (always taken)
+//   fold   check_const_fold (deleted)
+//   and    check_and_known_noop (deleted)
+//   cbz    check_cmp_zero_branch (through a branch at the target)
+//   split  check_mov_add_sub_split (sign-crossed)
+//   cbc    check_bcond_cmp_bcond (sharing a target)
+//   hammock check_bcond_over_one (through an alias)
+// The next four plant a family of shapes, written as assembly text, and
+// test every finding with a rewrite in their programs:
+//   mem    address arithmetic and the accesses it feeds: immediate,
+//          unscaled and register offsets, pre- and post-indexing,
+//          pairs, zero stores, extends after loads, store-releases,
+//          literal loads from the pool
+//   arith  multiplies, divides and shifts by constants, NEG/MVN and
+//          their consumers, CSET/CSETM and theirs, bitfield pairs,
+//          funnels, BFI/BFXIL synthesis, MOV chains feeding logic and
+//          compares, identities, copy chains
+//   fp     FMUL + FNEG, constants through general registers, FCSEL,
+//          UMOV of lane 0, vector self-ops, compares with zero, EOR3 and
+//          BCAX, extends and loads before a conversion
+//   lse    exclusive-access loops: fetch-and-op, swap, compare-and-swap
+// and all plants any of them and tests every finding with a rewrite,
+// reporting by finding name. A finding whose edits touch the harness's
+// own code is left alone and counted apart.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -68,17 +80,21 @@
 // invalidation in check_redundant_zext, say), rebuild libarmlint.a and
 // rwfuzz, and expect mismatches within a few thousand programs.
 //
-// Usage: rwfuzz [-n PROGRAMS] [-s SEED] MODE
+// Usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] MODE
 //   -n  programs to generate (default 100000)
 //   -s  seed, mixed into the fixed default one (default 0)
+//   -f  test only the findings whose name contains NAME; the programs
+//       are drawn from a stream of their own, so they stay the same
 // Exit status: 0 when every finding was applied and matched; 1 on a
-// mismatch, or on a finding the harness could not apply (a rendering it
-// no longer parses would otherwise drop out of the test silently); 2 on
+// mismatch, or on a finding the harness could not apply (an edit the
+// assembler refuses would otherwise drop out of the test silently); 2 on
 // a usage or environment error, a run that tested no finding included.
 //
 // The programs run on the host, so rwfuzz needs an AArch64 one: MAP_JIT
-// memory on macOS, plain read-write-execute memory elsewhere. Built by
-// `make tools`; it links libarmlint.a.
+// memory on macOS, plain read-write-execute memory elsewhere. It turns
+// on the armlint features whose instructions the host runs (LSE, SHA3,
+// LRCPC2, FP16, CSSC, CMPBR) and assembles with RWFUZZ_CC (default cc)
+// under a matching -march. Built by `make tools`; it links libarmlint.a.
 
 #define _GNU_SOURCE
 #define _DARWIN_C_SOURCE
@@ -97,31 +113,46 @@ int main(void)
 #else
 
 #include <inttypes.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
 #include <pthread.h>
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
 #endif
 
 #include "armlint.h"
 
 // === Randomness ===
 
-static uint64_t rng_state = 0x9E3779B97F4A7C15ull;
+// Two streams: one draws the programs, the other the states they run
+// from and the control arm's choices, so that which findings a run
+// tests (-f) does not change the programs it draws.
+static uint64_t gen_rng = 0x9E3779B97F4A7C15ull;
+static uint64_t run_rng = 0xD1B54A32D192ED03ull;
+static uint64_t *rng = &gen_rng;
 
 // xorshift64*: fast, and reproducible from the seed.
 static uint64_t rnd(void)
 {
-    rng_state ^= rng_state >> 12;
-    rng_state ^= rng_state << 25;
-    rng_state ^= rng_state >> 27;
-    return rng_state * 0x2545F4914F6CDD1Dull;
+    *rng ^= *rng >> 12;
+    *rng ^= *rng << 25;
+    *rng ^= *rng >> 27;
+    return *rng * 0x2545F4914F6CDD1Dull;
 }
 
 static unsigned rr(unsigned n)
@@ -219,35 +250,43 @@ static uint32_t tst_reg(bool x, unsigned n, unsigned m) { return (x ? 0xEA00001F
 // === Programs ===
 
 // stp x29, x30, [sp, #-96]! ; mov x29, sp ; stp x19..x28 at [sp, #16..80]
-// mov x15, x0 ; ldp x0..x7 from [x15] ; ldr x28, [x15, #64]
-// ldr x16, [x15, #72] ; msr nzcv, x16
+// mov x15, x0 ; ldp x0..x7 from [x15] ; ldp x28, x16, [x15, #64] ;
+// ldp q0..q7 from [x15, #80] ; msr nzcv, x16 ; clrex -- every run starts
+// with the exclusive monitor clear, whatever the last one left it.
 static const uint32_t prologue[] = {
     0xA9BA7BFDu, 0x910003FDu, 0xA90153F3u, 0xA9025BF5u, 0xA90363F7u,
     0xA9046BF9u, 0xA90573FBu, 0xAA0003EFu, 0xA94005E0u, 0xA9410DE2u,
-    0xA94215E4u, 0xA9431DE6u, 0xF94021FCu, 0xF94025F0u, 0xD51B4210u,
+    0xA94215E4u, 0xA9431DE6u, 0xA94441FCu, 0xAD4285E0u, 0xAD438DE2u,
+    0xAD4495E4u, 0xAD459DE6u, 0xD51B4210u, 0xD503305Fu,
 };
-// stp x0..x7 to [x15] ; mrs x16, nzcv ; str x16, [x15, #72]
-// ldp x19..x28 ; ldp x29, x30, [sp], #96 ; ret
+// stp x0..x7 to [x15] ; stp q0..q7 to [x15, #80] ; mrs x16, nzcv ;
+// str x16, [x15, #72] ; ldp x19..x28 ; ldp x29, x30, [sp], #96 ; ret
 static const uint32_t epilogue[] = {
-    0xA90005E0u, 0xA9010DE2u, 0xA90215E4u, 0xA9031DE6u, 0xD53B4210u,
-    0xF90025F0u, 0xA94153F3u, 0xA9425BF5u, 0xA94363F7u, 0xA9446BF9u,
-    0xA94573FBu, 0xA8C67BFDu, RET,
+    0xA90005E0u, 0xA9010DE2u, 0xA90215E4u, 0xA9031DE6u, 0xAD0285E0u,
+    0xAD038DE2u, 0xAD0495E4u, 0xAD059DE6u, 0xD53B4210u, 0xF90025F0u,
+    0xA94153F3u, 0xA9425BF5u, 0xA94363F7u, 0xA9446BF9u, 0xA94573FBu,
+    0xA8C67BFDu, RET,
 };
 
-// The state block the prologue loads and the epilogue stores.
+// The state block the prologue loads and the epilogue stores: x0..x7,
+// the scratch pointer for x28, NZCV, and v0..v7 whole.
 typedef struct {
     uint64_t x[8];
     uint64_t buf;
     uint64_t nzcv;
+    uint8_t q[8][16];
 } regs_t;
 
-// A body slot: a finished word, or a control transfer whose word is
-// fixed up once the layout is known.
-enum { SLOT_PLAIN, SLOT_BRANCH, SLOT_READER, SLOT_CALL, SLOT_JUMP };
+// A body slot: a finished word, an instruction in assembly text the
+// batch's assembler run turns into one, or a control transfer whose word
+// is fixed up once the layout is known.
+enum { SLOT_PLAIN, SLOT_TEXT, SLOT_BRANCH, SLOT_READER, SLOT_CALL,
+       SLOT_JUMP };
 
 typedef struct {
     int kind;
     uint32_t word;      // SLOT_PLAIN
+    const char *text;   // SLOT_TEXT: the assembler's text, as cached
     int target;         // SLOT_BRANCH/SLOT_READER/SLOT_JUMP: body index,
                         // or the end
     unsigned reg;       // SLOT_BRANCH: the CBZ/CBNZ/TBZ/TBNZ register
@@ -257,6 +296,8 @@ typedef struct {
     unsigned bit;       // SLOT_BRANCH: the TBZ/TBNZ bit
     int aim;            // a transfer's target this many slots on, when
                         // nonzero; otherwise gen_body draws it
+    bool interior;      // no branch may land here: past the start of a
+                        // plant whose accesses need its base set up
 } slot_t;
 
 #define BODY_MAX 40
@@ -265,13 +306,52 @@ typedef struct {
 static slot_t body[BODY_MAX];
 static int nbody;
 static uint32_t prog[PROG_MAX];
-static int nprog, body_start, epi_start, stub_start;
+static int nprog, epi_start, stub_start;
+
+// A literal pool the plants load from (LDR literal, ADR + load): eight
+// doublewords between the prologue and the body, which a B steps over.
+// Some fold to a MOV, MOVN, ORR or MOVI and some to nothing; 1.0f and
+// 2.0 to an FMOV.
+static const uint64_t pool[8] = {
+    0x2Aull, 0xFFFFFFFFFFFFFFF0ull, 0x3F800000ull, 0x4000000000000000ull,
+    0x0000FFFF0000FFFFull, 0x123456789ABCDEF0ull, 0x2A2A2A2A2A2A2A2Aull,
+    0x2A2A2A2A2A2A2A2Aull,
+};
+
+#define POOL_AT 20      // the pool's first word: the prologue, the B, a pad
+static const int body_start = POOL_AT + 16;
 
 static void push(uint32_t word)
 {
     if (nbody < BODY_MAX) {
         body[nbody++] = (slot_t){ .kind = SLOT_PLAIN, .word = word };
     }
+}
+
+static const char *asm_intern(const char *text, size_t at);
+
+// An instruction in assembly text, for the batch's assembler run. A
+// PC-relative operand is an absolute offset, as in a finding's edits.
+static void push_text(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
+
+static void push_text(const char *fmt, ...)
+{
+    char text[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    if (nbody < BODY_MAX) {
+        const char *key = asm_intern(text, (size_t)(body_start + nbody));
+        body[nbody++] = (slot_t){ .kind = SLOT_TEXT, .text = key };
+    }
+}
+
+// The pool's i-th doubleword, as an absolute offset.
+static unsigned pool_off(unsigned i)
+{
+    return 4u * POOL_AT + 8u * i;
 }
 
 static void push_transfer(int kind)
@@ -943,6 +1023,1187 @@ static void plant_hammock(void)
     }
 }
 
+// === Text plants ===
+//
+// The shapes the hand-encoded plants above do not reach, written as
+// assembly text for the batch's assembler run: address arithmetic and
+// the accesses it feeds, integer idioms with a constant or a second
+// operation to fold, FP and vector code, and exclusive-access loops.
+// Each draws its registers from x0..x7 (v0..v7), its bases from x28,
+// and its constants from the edges the folds turn on. Every draw is a
+// statement of its own, as above: arguments are evaluated in an
+// unspecified order, and a seed should give the same program whichever
+// compiler built this.
+
+static const char *const cond_text[14] = {
+    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
+    "hi", "ls", "ge", "lt", "gt", "le",
+};
+
+// A body register other than a and b.
+static unsigned reg_besides(unsigned a, unsigned b)
+{
+    unsigned r = body_reg();
+    while (r == a || r == b) {
+        r = (r + 1u) % 8u;
+    }
+    return r;
+}
+
+// An access through base b at byte offset off: a load into a data
+// register or a store from one (now and then the zero register), of any
+// size and either register file. The assembler picks the scaled or the
+// unscaled encoding by the offset.
+typedef struct {
+    const char *ld, *st;    // st NULL: no store of this kind
+    char reg;               // x, w, s, d, q
+    unsigned size;
+} access_kind;
+
+static const access_kind access_kinds[] = {
+    { "ldr", "str", 'x', 8 }, { "ldr", "str", 'w', 4 },
+    { "ldrh", "strh", 'w', 2 }, { "ldrb", "strb", 'w', 1 },
+    { "ldrsw", NULL, 'x', 4 }, { "ldrsh", NULL, 'w', 2 },
+    { "ldrsb", NULL, 'x', 1 }, { "ldr", "str", 's', 4 },
+    { "ldr", "str", 'd', 8 }, { "ldr", "str", 'q', 16 },
+};
+
+#define ACCESS_KINDS (sizeof(access_kinds) / sizeof(access_kinds[0]))
+
+// A scaled offset for the kind, now and then an unscaled one.
+static int access_off(const access_kind *k)
+{
+    if (rr(4) == 0) {
+        return (int)rr(96) - 48;
+    }
+    return (int)(k->size * rr(24));
+}
+
+static void push_access_as(const access_kind *k, bool load, unsigned t,
+                           unsigned b, int off)
+{
+    if (!load && k->st == NULL) {
+        k = &access_kinds[0];
+    }
+    bool fp = k->reg != 'x' && k->reg != 'w';
+    char rt[8];
+    if (!fp && !load && rr(6) == 0) {
+        snprintf(rt, sizeof(rt), "%czr", k->reg);
+    } else {
+        snprintf(rt, sizeof(rt), "%c%u", k->reg, t);
+    }
+    const char *mnem = load ? k->ld : k->st;
+    if (off == 0) {
+        push_text("%s %s, [x%u]", mnem, rt, b);
+    } else {
+        push_text("%s %s, [x%u, #%d]", mnem, rt, b, off);
+    }
+}
+
+// A random access through b: a load into a register other than b, now
+// and then -- when it is the base's last use -- into b itself.
+static void push_access(unsigned b, int off, bool last)
+{
+    const access_kind *k = &access_kinds[rr(ACCESS_KINDS)];
+    unsigned t = last && rr(6) == 0 ? b : reg_besides(b, b);
+    bool load = rr(3) != 0;
+    push_access_as(k, load, t, b, off);
+}
+
+// A base inside the scratch buffer: x28 moved by an ADD or a SUB of an
+// immediate, or a copy of it, into b.
+static void push_base(unsigned b)
+{
+    unsigned how = rr(5);
+    unsigned k = rr(4) == 0 ? rr(512) : 8u * rr(128);
+    switch (how) {
+    case 0: push_text("sub x%u, x28, #%u", b, k & ~7u); break;
+    case 1: push_text("mov x%u, x28", b); break;
+    default: push_text("add x%u, x28, #%u", b, k); break;
+    }
+}
+
+// Overwrite r, now and then: the end of a value a fold must prove dead.
+static void maybe_kill(unsigned r)
+{
+    if (rr(2) == 0) {
+        unsigned v = 0xD1Eu + rr(16);
+        push_text("mov x%u, #%u", r, v);
+    }
+}
+
+// An immediate to move a base by, sized for the access or not.
+static unsigned base_step(const access_kind *k)
+{
+    if (rr(3) == 0) {
+        return rr(300);
+    }
+    return k->size * (1u + rr(16));
+}
+
+static void plant_mem_shape(void);
+
+// mem: the accesses go through registers the plant itself sets up, so
+// its slots past the first are no landing place for a branch.
+static void plant_mem(void)
+{
+    if (nbody + 8 > BODY_MAX) {
+        return;
+    }
+    int first = nbody;
+    plant_mem_shape();
+    for (int i = first + 1; i < nbody; i++) {
+        body[i].interior = true;
+    }
+}
+
+// An instruction between a base's set-up and its use that leaves the
+// base alone.
+static void push_gap_besides(unsigned b)
+{
+    unsigned d = reg_besides(b, b);
+    unsigned m = body_reg();
+    unsigned n = body_reg();
+    push_text("eor x%u, x%u, x%u", d, m, n);
+}
+
+static void plant_mem_shape(void)
+{
+    unsigned b = body_reg();
+    unsigned t = reg_besides(b, b);
+    unsigned i = reg_besides(b, t);
+    const access_kind *k = &access_kinds[rr(ACCESS_KINDS)];
+    bool load = rr(2) == 0;
+    switch (rr(17)) {
+    case 0:
+    case 1: {
+        // An address computed once and used once or more, adjacent or
+        // not: the immediate-offset folds and the multi-use rebase.
+        push_base(b);
+        unsigned uses = 1u + rr(3);
+        for (unsigned u = 0; u < uses; u++) {
+            if (rr(3) == 0) {
+                push_gap_besides(b);
+            }
+            int off = access_off(k);
+            push_access(b, off, u + 1u == uses);
+        }
+        maybe_kill(b);
+        break;
+    }
+    case 2: {
+        // An access and then its base moved: post-indexing.
+        bool sub = rr(3) == 0;
+        unsigned step = base_step(k);
+        push_base(b);
+        push_access_as(k, load, t, b, 0);
+        push_text("%s x%u, x%u, #%u", sub ? "sub" : "add", b, b, step);
+        break;
+    }
+    case 3: {
+        // The base moved and then accessed: pre-indexing.
+        bool sub = rr(3) == 0;
+        unsigned step = base_step(k);
+        push_base(b);
+        push_text("%s x%u, x%u, #%u", sub ? "sub" : "add", b, b, step);
+        push_access_as(k, load, t, b, 0);
+        break;
+    }
+    case 4: {
+        // An index added to the base, scaled or not: register offset.
+        unsigned s = rr(5);
+        unsigned v = 8u * rr(32);
+        push_text("mov x%u, #%u", i, v);
+        if (s == 4) {
+            push_text("add x%u, x28, x%u", b, i);
+        } else {
+            push_text("add x%u, x28, x%u, lsl #%u", b, i, s);
+        }
+        push_access_as(k, rr(3) != 0, t, b, 0);
+        maybe_kill(b);
+        break;
+    }
+    case 5: {
+        // A constant index in a register: an immediate offset.
+        int c;
+        if (rr(4) == 0) {
+            c = -(int)(1u + rr(256));
+        } else {
+            c = (int)(k->size * rr(512));
+        }
+        push_text("mov x%u, #%d", i, c);
+        const char *mnem = load || k->st == NULL ? k->ld : k->st;
+        push_text("%s %c%u, [x28, x%u]", mnem, k->reg, t, i);
+        maybe_kill(i);
+        break;
+    }
+    case 6: {
+        // A constant past one MOV in the index, the base moved down by
+        // as much: an ADD of its high part and an immediate offset.
+        unsigned c = 0x10000u + 8u * rr(0x8000);
+        push_text("mov x%u, #%u", b, c & 0xFFFFu);
+        push_text("movk x%u, #%u, lsl #16", b, c >> 16);
+        push_text("sub x%u, x28, x%u", b, b);
+        push_text("mov x%u, #%u", i, c & 0xFFFFu);
+        push_text("movk x%u, #%u, lsl #16", i, c >> 16);
+        push_text("ldr x%u, [x%u, x%u]", t, b, i);
+        maybe_kill(i);
+        break;
+    }
+    case 7: {
+        // Two accesses to neighbouring slots: a pair, or one zero store.
+        static const struct { const char *mnem; const char *reg; unsigned size; }
+            pk[] = {
+            { "ldr", "x", 8 }, { "ldr", "w", 4 }, { "str", "x", 8 },
+            { "str", "w", 4 }, { "ldrsw", "x", 4 }, { "str", "wzr", 4 },
+            { "ldr", "d", 8 }, { "str", "q", 16 },
+        };
+        unsigned j = rr(8);
+        int off = (int)(pk[j].size * rr(16));
+        if (rr(4) == 0) {
+            off -= 4 * (int)pk[j].size;
+        }
+        bool reverse = rr(3) == 0;
+        bool stp_wzr = rr(4) == 0;
+        unsigned t2 = reg_besides(b, t);
+        unsigned zoff = 4u * rr(32);
+        push_base(b);
+        for (unsigned n = 0; n < 2; n++) {
+            int o = off + (int)((reverse ? 1u - n : n) * pk[j].size);
+            if (strcmp(pk[j].reg, "wzr") == 0) {
+                push_text("str wzr, [x%u, #%d]", b, o);
+            } else {
+                push_text("%s %s%u, [x%u, #%d]", pk[j].mnem, pk[j].reg,
+                          n == 0 ? t : t2, b, o);
+            }
+        }
+        if (stp_wzr) {
+            push_text("stp wzr, wzr, [x%u, #%u]", b, zoff);
+        }
+        break;
+    }
+    case 8: {
+        // A zero made for a store alone.
+        bool x = rr(2) == 0;
+        int off = 4 * (int)rr(64);
+        push_base(b);
+        push_text("mov %c%u, #0", x ? 'x' : 'w', t);
+        push_text("str %c%u, [x%u, #%d]", x ? 'x' : 'w', t, b, off);
+        maybe_kill(t);
+        break;
+    }
+    case 9: {
+        // A load and its sign extension.
+        static const char *const lx[][2] = {
+            { "ldrb w%u, [x%u, #%u]", "sxtb w%u, w%u" },
+            { "ldrb w%u, [x%u, #%u]", "sxtb x%u, w%u" },
+            { "ldrh w%u, [x%u, #%u]", "sxth w%u, w%u" },
+            { "ldrh w%u, [x%u, #%u]", "sxth x%u, w%u" },
+            { "ldr w%u, [x%u, #%u]", "sxtw x%u, w%u" },
+            { "ldrsb w%u, [x%u, #%u]", "sxtb x%u, w%u" },
+        };
+        unsigned j = rr(6);
+        unsigned off = 4u * rr(32);
+        unsigned d = rr(5) == 0 ? i : t;
+        push_base(b);
+        push_text(lx[j][0], t, b, off);
+        push_text(lx[j][1], d, t);
+        break;
+    }
+    case 10: {
+        // A sign-extended index: the extend folded into the access.
+        int c = (int)rr(64) - 32;
+        unsigned x = rr(4) == 0 ? t : i;
+        bool scaled = rr(2) == 0;
+        bool byte = rr(2) == 0;
+        unsigned d = reg_besides(i, x);
+        push_text("mov w%u, #%d", i, c);
+        push_text("sxtw x%u, w%u", x, i);
+        if (scaled) {
+            push_text("ldr x%u, [x28, x%u, lsl #3]", d, x);
+        } else {
+            push_text("%s w%u, [x28, x%u]", byte ? "ldrb" : "str", d, x);
+        }
+        maybe_kill(x);
+        break;
+    }
+    case 11: {
+        // A store-release through a moved base (LRCPC2), at an address
+        // aligned for it: a store-release faults on one that is not.
+        unsigned kind = rr(3);
+        unsigned imm = rr(256) & (kind == 0 ? ~0u : kind == 1 ? ~1u : ~3u);
+        push_text("add x%u, x28, #%u", b, imm);
+        push_text("%s w%u, [x%u]",
+                  kind == 0 ? "stlrb" : kind == 1 ? "stlrh" : "stlr", t, b);
+        maybe_kill(b);
+        break;
+    }
+    case 12: {
+        // The literal pool: an LDR (literal), or an ADR and a load.
+        static const char *const lit[] = {
+            "ldr x%u, #%u", "ldr w%u, #%u", "ldrsw x%u, #%u",
+            "ldr d%u, #%u", "ldr s%u, #%u", "ldr q%u, #%u",
+        };
+        unsigned p = rr(7);
+        unsigned j = rr(6);
+        if (rr(3) == 0) {
+            bool sw = rr(2) == 0;
+            push_text("adr x%u, #%u", b, pool_off(p & 6u));
+            push_text("%s x%u, [x%u]", sw ? "ldrsw" : "ldr", t, b);
+            maybe_kill(b);
+        } else {
+            push_text(lit[j], t, pool_off(j == 5u ? 6u : p));
+        }
+        break;
+    }
+    case 13: {
+        // A pair and its base: moved after (post-indexing), moved
+        // before (pre-indexing), or a new base added once for an
+        // offset (immediate).
+        bool ldp = rr(2) == 0;
+        unsigned how = rr(3);
+        bool sub = rr(2) == 0;
+        unsigned step = 16u * (1u + rr(4));
+        int off = 8 * ((int)rr(16) - 4);
+        unsigned t2 = reg_besides(b, t);
+        unsigned t3 = reg_besides(i, t);
+        const char *op = ldp ? "ldp" : "stp";
+        push_base(b);
+        if (how == 0) {
+            push_text("%s x%u, x%u, [x%u]", op, t, t2, b);
+            push_text("%s x%u, x%u, #%u", sub ? "sub" : "add", b, b, step);
+        } else if (how == 1) {
+            push_text("%s x%u, x%u, #%u", sub ? "sub" : "add", b, b, step);
+            push_text("%s x%u, x%u, [x%u]", op, t, t2, b);
+        } else {
+            push_text("add x%u, x%u, #%u", i, b, step);
+            push_text("%s x%u, x%u, [x%u, #%d]", op, t, t3, i, off);
+            maybe_kill(i);
+        }
+        break;
+    }
+    case 15: {
+        // An ADR of the word after a BR through it: a direct branch.
+        unsigned at = (unsigned)(body_start + nbody) * 4u;
+        bool x17 = rr(2) == 0;
+        push_text("adr x%u, #%u", x17 ? 17u : 16u, at + 8u);
+        push_text("br x%u", x17 ? 17u : 16u);
+        break;
+    }
+    case 16: {
+        // The same address made twice: the second ADR is a recompute.
+        unsigned p = rr(8);
+        push_text("adr x%u, #%u", b, pool_off(p));
+        if (rr(2) == 0) {
+            push_gap_besides(b);
+        }
+        push_text("adr x%u, #%u", b, pool_off(p));
+        break;
+    }
+    default: {
+        // A word loaded and converted through a general register.
+        bool wide = rr(2) == 0;
+        bool cross = rr(4) == 0;
+        bool sgn = rr(2) == 0;
+        unsigned v = rr(8);
+        unsigned off = 8u * rr(16);
+        push_base(b);
+        push_text("ldr %c%u, [x%u, #%u]", wide ? 'x' : 'w', t, b, off);
+        push_text("%s %c%u, %c%u", sgn ? "scvtf" : "ucvtf",
+                  wide != cross ? 'd' : 's', v, wide ? 'x' : 'w', t);
+        maybe_kill(t);
+        break;
+    }
+    }
+}
+
+// A constant for a multiply, a divide or a shift to fold: a power of
+// two, one either side of one, or anything.
+static uint64_t mul_const(unsigned width)
+{
+    unsigned n = 1u + rr(width - 2u);
+    switch (rr(5)) {
+    case 0: return (1ull << n) + 1u;
+    case 1: return (1ull << n) - 1u;
+    case 2: return 2u + rr(30);
+    default: return 1ull << n;
+    }
+}
+
+// A MOVZ/MOVK chain of value v into r at the width: as short as the
+// halfwords need, now and then a halfword longer.
+static void push_chain(char w, unsigned r, uint64_t v)
+{
+    unsigned halves = w == 'x' ? 4u : 2u;
+    bool first = true;
+    for (unsigned h = 0; h < halves; h++) {
+        unsigned part = (unsigned)(v >> (16u * h)) & 0xFFFFu;
+        if (part == 0 && !(first && h + 1u == halves)) {
+            continue;
+        }
+        if (first) {
+            push_text("movz %c%u, #%u, lsl #%u", w, r, part, 16u * h);
+            first = false;
+        } else {
+            push_text("movk %c%u, #%u, lsl #%u", w, r, part, 16u * h);
+        }
+    }
+}
+
+static void plant_arith(void)
+{
+    if (nbody + 8 > BODY_MAX) {
+        return;
+    }
+    unsigned a = body_reg();
+    unsigned b = reg_besides(a, a);
+    unsigned c = reg_besides(a, b);
+    unsigned d = rr(3) == 0 ? a : reg_besides(b, c);
+    bool x = rr(2) == 0;
+    char w = x ? 'x' : 'w';
+    unsigned width = x ? 64u : 32u;
+    unsigned cond = rr(14);
+    const char *cc = cond_text[cond];
+    switch (rr(40)) {
+    case 0: {
+        // MUL, MNEG, MADD or MSUB by a constant.
+        static const char *const op[] = { "mul", "mneg", "madd", "msub" };
+        unsigned j = rr(4);
+        bool swap = rr(2) == 0;
+        push_chain(w, a, mul_const(width));
+        if (j < 2) {
+            push_text("%s %c%u, %c%u, %c%u", op[j], w, d, w, swap ? a : b, w,
+                      swap ? b : a);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u, %c%u", op[j], w, d, w,
+                      swap ? a : b, w, swap ? b : a, w, c);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 1: {
+        // UDIV by a constant, and the remainder after it.
+        uint64_t k = rr(4) == 0 ? mul_const(width) : 1ull << (1u + rr(8));
+        bool rem = rr(2) == 0;
+        unsigned r = rr(2) == 0 ? c : a;
+        push_chain(w, a, k);
+        push_text("udiv %c%u, %c%u, %c%u", w, c, w, b, w, a);
+        if (rem) {
+            push_text("msub %c%u, %c%u, %c%u, %c%u", w, r, w, c, w, a, w, b);
+        }
+        break;
+    }
+    case 2: {
+        // A MUL and the ADD, SUB or NEG of its product.
+        unsigned j = rr(3);
+        push_text("mul %c%u, %c%u, %c%u", w, a, w, b, w, c);
+        if (j == 0) {
+            push_text("add %c%u, %c%u, %c%u", w, d, w, a, w, c);
+        } else if (j == 1) {
+            push_text("sub %c%u, %c%u, %c%u", w, d, w, b, w, a);
+        } else {
+            push_text("neg %c%u, %c%u", w, d, w, a);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 3: {
+        // A widening multiply and the ADD, SUB or NEG of it.
+        bool sgn = rr(2) == 0;
+        unsigned j = rr(3);
+        push_text("%s x%u, w%u, w%u", sgn ? "smull" : "umull", a, b, c);
+        if (j == 0) {
+            push_text("add x%u, x%u, x%u", d, a, b);
+        } else if (j == 1) {
+            push_text("sub x%u, x%u, x%u", d, c, a);
+        } else {
+            push_text("neg x%u, x%u", d, a);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 4: {
+        // NEG or MVN, then a consumer that has the inverted form.
+        static const char *const neg_use[] = { "add", "sub", "csel" };
+        static const char *const mvn_use[] = { "and", "orr", "eor", "ands",
+                                               "csel" };
+        bool neg = rr(2) == 0;
+        unsigned j = neg ? rr(3) : rr(5);
+        const char *use = neg ? neg_use[j] : mvn_use[j];
+        push_text("%s %c%u, %c%u", neg ? "neg" : "mvn", w, a, w, b);
+        if (strcmp(use, "csel") == 0) {
+            push_text("csel %c%u, %c%u, %c%u, %s", w, d, w, c, w, a, cc);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u", use, w, d, w, c, w, a);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 5: {
+        // ADD #1, MOV #1 or MOV #-1, then a CSEL of it: CSINC, CSINV.
+        unsigned j = rr(3);
+        bool then_slot = rr(2) == 0;
+        if (j == 0) {
+            push_text("add %c%u, %c%u, #1", w, a, w, b);
+        } else {
+            push_text("mov %c%u, #%d", w, a, j == 1 ? 1 : -1);
+        }
+        if (then_slot) {
+            push_text("csel %c%u, %c%u, %c%u, %s", w, d, w, a, w, c, cc);
+        } else {
+            push_text("csel %c%u, %c%u, %c%u, %s", w, d, w, c, w, a, cc);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 6: {
+        // A MOV of a small constant and a CCMP/CCMN of it.
+        int k = (int)rr(70) - 35;
+        unsigned nzcv = rr(16);
+        bool ccmn = rr(3) == 0;
+        push_text("cmp %c%u, %c%u", w, b, w, c);
+        push_text("mov %c%u, #%d", w, a, k);
+        push_text("%s %c%u, %c%u, #%u, %s", ccmn ? "ccmn" : "ccmp", w, b, w,
+                  a, nzcv, cc);
+        maybe_kill(a);
+        break;
+    }
+    case 7: {
+        // A MOV and a shift by it.
+        static const char *const sh[] = { "lsl", "lsr", "asr", "ror" };
+        unsigned j = rr(4);
+        unsigned k = rr(2 * width);
+        push_text("mov %c%u, #%u", w, a, k);
+        push_text("%s %c%u, %c%u, %c%u", sh[j], w, d, w, b, w, a);
+        maybe_kill(a);
+        break;
+    }
+    case 8: {
+        // An extend and an ADD/SUB of it.
+        static const char *const ext[] = { "sxtw x", "sxth x", "sxtb x",
+                                           "uxth w", "uxtb w", "mov w" };
+        unsigned j = rr(6);
+        unsigned sh = rr(5);
+        bool sub = rr(3) == 0;
+        bool xa = ext[j][5] == 'x';
+        push_text("%s%u, w%u", ext[j], a, b);
+        if (sh == 0) {
+            push_text("%s %c%u, %c%u, %c%u", sub ? "sub" : "add",
+                      xa ? 'x' : w, d, xa ? 'x' : w, c, xa ? 'x' : w, a);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u, lsl #%u", sub ? "sub" : "add",
+                      xa ? 'x' : w, d, xa ? 'x' : w, c, xa ? 'x' : w, a, sh);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 9: {
+        // CSET or CSETM, then EOR #1, NEG, or a branch on it.
+        unsigned j = rr(4);
+        push_text("cmp %c%u, %c%u", w, b, w, c);
+        push_text("cset w%u, %s", a, cc);
+        if (j == 0) {
+            push_text("eor w%u, w%u, #1", d, a);
+        } else if (j == 1) {
+            push_text("neg w%u, w%u", d, a);
+        } else {
+            unsigned form = j == 2 ? 3u + 2u * rr(2) : 6u;
+            push_branch(form, a, 0, 0);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 10: {
+        // A single-bit TST and a CSET/CSETM or a B.EQ/NE on it, or a
+        // CMP #0 and a sign CSET.
+        unsigned bit = rr(width);
+        unsigned j = rr(4);
+        bool m = rr(2) == 0;
+        bool lt = rr(2) == 0;
+        if (j == 3) {
+            push_text("cmp %c%u, #0", w, b);
+            push_text("%s %c%u, %s", m ? "csetm" : "cset", w, d,
+                      lt ? "lt" : "mi");
+            break;
+        }
+        push_text("tst %c%u, #0x%llx", w, b, 1ull << bit);
+        if (j == 0) {
+            push_text("cset w%u, ne", d);
+        } else if (j == 1) {
+            push_text("csetm %c%u, %s", w, d, bit == width - 1u ? "mi" : "ne");
+        } else {
+            unsigned eq = rr(2);
+            push_branch(2, 0, eq, 0);
+        }
+        break;
+    }
+    case 11: {
+        // Bitfield pairs: AND/UXT + LSL, LSL + LSR/ASR, LSR + LSL,
+        // AND + LSR.
+        unsigned k1 = 1u + rr(width - 1u);
+        unsigned k2 = 1u + rr(width - 1u);
+        unsigned m = 1u + rr(width - 1u);
+        bool h = rr(2) == 0;
+        bool asr = rr(2) == 0;
+        unsigned pick = rr(width);
+        switch (rr(5)) {
+        case 0:
+            push_text("and %c%u, %c%u, #0x%llx", w, a, w, b,
+                      (1ull << m) - 1u);
+            push_text("lsl %c%u, %c%u, #%u", w, a, w, a, k1);
+            break;
+        case 1:
+            push_text("%s w%u, w%u", h ? "uxth" : "uxtb", a, b);
+            push_text("lsl w%u, w%u, #%u", a, a, k1 % 32u);
+            break;
+        case 2:
+            push_text("lsl %c%u, %c%u, #%u", w, a, w, b, k1);
+            push_text("%s %c%u, %c%u, #%u", asr ? "asr" : "lsr", w, a, w, a,
+                      k2);
+            break;
+        case 3:
+            push_text("lsr %c%u, %c%u, #%u", w, a, w, b, k1);
+            push_text("lsl %c%u, %c%u, #%u", w, a, w, a, k1);
+            break;
+        default: {
+            unsigned lo = pick % (width - 1u);
+            unsigned hi = lo + (k2 % (width - lo));
+            uint64_t mask = (hi - lo + 1u >= 64u ? ~0ull
+                             : ((1ull << (hi - lo + 1u)) - 1u)) << lo;
+            if (mask == (x ? ~0ull : 0xFFFFFFFFull)) {
+                mask >>= 1;
+            }
+            push_text("and %c%u, %c%u, #0x%llx", w, a, w, b,
+                      (unsigned long long)mask);
+            push_text("lsr %c%u, %c%u, #%u", w, a, w, a,
+                      lo + k1 % (hi - lo + 1u));
+            break;
+        }
+        }
+        break;
+    }
+    case 12: {
+        // A funnel: two shifts of opposite ways ORed or added: EXTR,
+        // or ROR when one register feeds both.
+        unsigned k = 1u + rr(width - 1u);
+        bool rot = rr(3) == 0;
+        static const char *const comb[] = { "orr", "add", "eor" };
+        unsigned j = rr(3);
+        push_text("lsl %c%u, %c%u, #%u", w, a, w, b, k);
+        push_text("%s %c%u, %c%u, %c%u, lsr #%u", comb[j], w, d, w, a, w,
+                  rot ? b : c, width - k);
+        maybe_kill(a);
+        break;
+    }
+    case 13: {
+        // BFI/BFXIL synthesized: clear a field, isolate one, OR them.
+        unsigned lsb = rr(width / 2u);
+        unsigned len = 1u + rr(width / 2u - 1u);
+        uint64_t field = ((1ull << len) - 1u) << lsb;
+        uint64_t keep = ~field & (x ? ~0ull : 0xFFFFFFFFull);
+        unsigned j = rr(3);
+        if (j == 2) {
+            push_text("and %c%u, %c%u, #0x%llx", w, d, w, d,
+                      (unsigned long long)((1ull << lsb) - 1u | (lsb == 0 ? 1u : 0u)));
+            push_text("orr %c%u, %c%u, %c%u, lsl #%u", w, d, w, d, w, b,
+                      lsb == 0 ? 1u : lsb);
+            break;
+        }
+        push_text("and %c%u, %c%u, #0x%llx", w, d, w, d,
+                  (unsigned long long)keep);
+        if (lsb == 0 || j == 0) {
+            push_text("and %c%u, %c%u, #0x%llx", w, a, w, b,
+                      (unsigned long long)((1ull << len) - 1u));
+        } else {
+            push_text("ubfiz %c%u, %c%u, #%u, #%u", w, a, w, b, lsb, len);
+        }
+        push_text("orr %c%u, %c%u, %c%u", w, d, w, d, w, a);
+        maybe_kill(a);
+        break;
+    }
+    case 14: {
+        // A shift and a consumer with a shifted-register form.
+        static const char *const sh[] = { "lsl", "lsr", "asr" };
+        static const char *const use[] = { "add", "sub", "and", "orr",
+                                           "eor", "bic" };
+        unsigned j = rr(3);
+        unsigned u = rr(6);
+        unsigned k = 1u + rr(width - 1u);
+        push_text("%s %c%u, %c%u, #%u", sh[j], w, a, w, b, k);
+        push_text("%s %c%u, %c%u, %c%u", use[u], w, d, w, c, w, a);
+        maybe_kill(a);
+        break;
+    }
+    case 15: {
+        // A MOV chain and a logical operation of it: a bitmask
+        // immediate, two of them, or neither.
+        static const char *const op[] = { "and", "orr", "eor", "ands",
+                                          "bic", "orn", "eon", "tst" };
+        unsigned j = rr(8);
+        unsigned lo = rr(width - 1u);
+        unsigned len = 1u + rr(width - lo - 1u);
+        uint64_t v = ((len >= 64u ? ~0ull : (1ull << len) - 1u) << lo);
+        unsigned flip = rr(width);
+        if (rr(3) == 0) {
+            v ^= 1ull << flip;          // two runs now and then
+        }
+        if (!x) {
+            v &= 0xFFFFFFFFull;
+        }
+        push_chain(w, a, v);
+        if (j == 7) {
+            push_text("tst %c%u, %c%u", w, b, w, a);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u", op[j], w, d, w, b, w, a);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 16: {
+        // A compare against INT_MIN or INT_MAX and a branch on equality.
+        bool min = rr(2) == 0;
+        push_text("mov %c%u, #%s", w, a,
+                  x ? (min ? "0x8000000000000000" : "0x7fffffffffffffff")
+                    : (min ? "0x80000000" : "0x7fffffff"));
+        push_text("cmp %c%u, %c%u", w, b, w, a);
+        push_branch(2, 0, rr(2), 0);
+        maybe_kill(a);
+        break;
+    }
+    case 17: {
+        // A masked field compared with a constant that fits shifted.
+        unsigned lo = 4u + rr(7);
+        unsigned len = 2u + rr(5);
+        uint64_t mask = ((1ull << len) - 1u) << lo;
+        uint64_t k = (1u + rr((1u << len) - 1u)) << lo;
+        unsigned m = reg_besides(a, c);
+        unsigned eq = rr(2);
+        push_text("and w%u, w%u, #0x%llx", a, b, (unsigned long long)mask);
+        push_text("mov w%u, #0x%llx", c, (unsigned long long)k);
+        push_text("cmp w%u, w%u", a, c);
+        // To a block that kills the field, the constant and the flags,
+        // which the fall-through runs into too: the fold changes all
+        // three, so both edges must prove them dead.
+        push_branch(2, 0, eq, 0);
+        body[nbody - 1].aim = 2;
+        push_text("eor x%u, x%u, x%u", m, m, b);
+        push_text("mov w%u, #2", a);
+        push_text("mov w%u, #3", c);
+        push_text("cmp x%u, x%u", m, b);
+        break;
+    }
+    case 18: {
+        // An ADD/SUB and a compare of its operands, either order; a
+        // flag-setting one and its redundant compare.
+        bool sub = rr(2) == 0;
+        unsigned j = rr(3);
+        if (j == 0) {
+            push_text("%s %c%u, %c%u, %c%u", sub ? "sub" : "add", w, a, w, b,
+                      w, c);
+            push_text("%s %c%u, %c%u", sub ? "cmp" : "cmn", w, b, w, c);
+        } else if (j == 1) {
+            push_text("%s %c%u, %c%u", sub ? "cmp" : "cmn", w, b, w, c);
+            push_text("%s %c%u, %c%u, %c%u", sub ? "sub" : "add", w, a, w, b,
+                      w, c);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u", sub ? "subs" : "adds", w, a, w,
+                      b, w, c);
+            push_text("%s %c%u, %c%u", sub ? "cmp" : "cmn", w, b, w, c);
+        }
+        break;
+    }
+    case 19: {
+        // An ALU result and its zero test: the S-variant fold.
+        static const char *const op[] = { "add", "sub", "and", "bic" };
+        unsigned j = rr(4);
+        bool tst = rr(3) == 0;
+        push_text("%s %c%u, %c%u, %c%u", op[j], w, a, w, b, w, c);
+        if (tst) {
+            push_text("tst %c%u, %c%u", w, a, w, a);
+        } else {
+            push_text("cmp %c%u, #0", w, a);
+        }
+        push_branch(2, 0, rr(14), 0);
+        break;
+    }
+    case 20: {
+        // NEG and a CBZ/CBNZ of it.
+        unsigned src = rr(3) == 0 ? a : b;
+        bool nz = rr(2) == 0;
+        push_text("neg %c%u, %c%u", w, a, w, src);
+        push_branch(x ? (nz ? 4u : 0u) : (nz ? 1u : 3u), a, 0, 0);
+        break;
+    }
+    case 21: {
+        // A single-bit AND and a CBZ/CBNZ of it.
+        unsigned bit = rr(32);
+        bool nz = rr(2) == 0;
+        push_text("and w%u, w%u, #0x%x", a, b, 1u << bit);
+        push_branch(nz ? 1u : 3u, a, 0, 0);
+        break;
+    }
+    case 22: {
+        // Identities: ADD/SUB #0, a self-op, a ZR operand, a CSEL of
+        // one register, a low-32 mask, a MOV to self.
+        unsigned j = rr(9);
+        unsigned s = rr(2) == 0 ? d : b;
+        static const char *const self[] = { "and", "orr", "eor", "bic",
+                                            "orn", "eon", "sub" };
+        unsigned k = rr(7);
+        bool sub = rr(2) == 0;
+        switch (j) {
+        case 0: push_text("%s %c%u, %c%u, #0", sub ? "sub" : "add", w, d, w,
+                          s); break;
+        case 1: push_text("%s %c%u, %c%u, %c%u", self[k], w, d, w, b, w, b);
+                break;
+        case 2: push_text("%s %c%u, %c%u, %czr", self[k], w, d, w, b, w);
+                break;
+        case 3: push_text("csel %c%u, %c%u, %c%u, %s", w, d, w, s, w, s, cc);
+                break;
+        case 4: push_text("and x%u, x%u, #0xffffffff", d, b); break;
+        case 5: push_text("ubfx x%u, x%u, #0, #32", d, b); break;
+        case 6: push_text("mov x%u, x%u", d, d); break;
+        case 7: push_text("madd %c%u, %c%u, %czr, %c%u", w, d, w, b, w, w, c);
+                break;
+        default: push_text("mul %c%u, %c%u, %czr", w, d, w, b, w); break;
+        }
+        break;
+    }
+    case 23: {
+        // ADD/SUB immediate chains, adjacent or not.
+        unsigned k1 = rr(4096);
+        unsigned k2 = rr(4096);
+        bool s1 = rr(2) == 0;
+        bool s2 = rr(2) == 0;
+        push_text("%s %c%u, %c%u, #%u", s1 ? "sub" : "add", w, a, w, b, k1);
+        if (rr(2) == 0) {
+            push(filler());
+        }
+        push_text("%s %c%u, %c%u, #%u", s2 ? "sub" : "add", w, d, w, a, k2);
+        break;
+    }
+    case 24: {
+        // Copies: a copy then an in-place ADD/SUB, a copy of a copy, a
+        // copy back.
+        unsigned j = rr(3);
+        bool sub = rr(2) == 0;
+        unsigned k = 1u + rr(4095);
+        push_text("mov %c%u, %c%u", w, a, w, b);
+        if (j == 0) {
+            push_text("%s %c%u, %c%u, #%u", sub ? "sub" : "add", w, a, w, a,
+                      k);
+        } else if (j == 1) {
+            push_text("mov %c%u, %c%u", w, d == a ? c : d, w, a);
+        } else {
+            push_text("mov %c%u, %c%u", w, b, w, a);
+        }
+        break;
+    }
+    case 25: {
+        // A one-instruction constant and a copy of it; a chain longer
+        // than its value needs.
+        uint64_t v = rr(2) == 0 ? rr(0x10000) : 0x55555555u;
+        bool copy = rr(2) == 0;
+        if (copy) {
+            push_chain(w, a, v);
+            push_text("mov %c%u, %c%u", w, d == a ? c : d, w, a);
+        } else {
+            push_text("movz %c%u, #%u", w, a, (unsigned)(v & 0xFFFFu));
+            push_text("movk %c%u, #%u, lsl #16", w, a,
+                      (unsigned)((v >> 16) & 0xFFFFu));
+        }
+        break;
+    }
+    case 26: {
+        // A MOV chain and an ADD/SUB/CMP of it: one immediate, two, or
+        // the other sign.
+        uint64_t v;
+        switch (rr(4)) {
+        case 0: v = rr(4096); break;
+        case 1: v = (uint64_t)rr(4096) << 12; break;
+        case 2: v = (uint64_t)(1u + rr(4095)) << 12 | (1u + rr(4095)); break;
+        default: v = 0 - (uint64_t)(1u + rr(4096)); break;
+        }
+        if (!x) {
+            v &= 0xFFFFFFFFull;
+        }
+        unsigned j = rr(4);
+        push_chain(w, a, v);
+        if (j == 3) {
+            push_text("cmp %c%u, %c%u", w, b, w, a);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u", j == 0 ? "add" : j == 1 ? "sub"
+                                                                     : "adds",
+                      w, d, w, b, w, a);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 27: {
+        // A MOV #0 and a use the zero register can take.
+        static const char *const use[] = { "add", "orr", "eor", "and" };
+        unsigned j = rr(4);
+        push_text("mov %c%u, #0", w, a);
+        if (rr(3) == 0) {
+            push_text("csel %c%u, %c%u, %c%u, %s", w, d, w, b, w, a, cc);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u", use[j], w, d, w, b, w, a);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 28: {
+        // A CSET re-compared against zero for an EQ/NE select.
+        bool ne = rr(2) == 0;
+        unsigned e = reg_besides(a, d);
+        push_text("cmp %c%u, %c%u", w, b, w, c);
+        push_text("cset w%u, %s", a, cc);
+        push_text("cmp w%u, #0", a);
+        push_text("csel x%u, x%u, x%u, %s", d, e, b, ne ? "ne" : "eq");
+        push_text("cmp x%u, x%u", e, b);
+        maybe_kill(a);
+        break;
+    }
+    case 29: {
+        // A flag-setting ALU and a zero test it already made.
+        static const char *const op[] = { "adds", "subs", "ands", "bics" };
+        unsigned j = rr(4);
+        unsigned eq = rr(2);
+        push_text("%s %c%u, %c%u, %c%u", op[j], w, a, w, b, w, c);
+        push_text("cmp %c%u, #0", w, a);
+        push_branch(2, 0, eq, 0);
+        break;
+    }
+    case 30: {
+        // BFXIL synthesized: the top bits kept, an ORR of a register
+        // shifted down into the rest.
+        unsigned k = 1u + rr(width - 1u);
+        uint64_t top = (x ? ~0ull : 0xFFFFFFFFull) << (width - k);
+        if (!x) {
+            top &= 0xFFFFFFFFull;
+        }
+        push_text("and %c%u, %c%u, #0x%llx", w, d, w, d,
+                  (unsigned long long)top);
+        push_text("orr %c%u, %c%u, %c%u, lsr #%u", w, d, w, d, w, b, k);
+        break;
+    }
+    default: {
+        // A MOV of 2^32 - k and a 64-bit compare of a 32-bit value.
+        unsigned k = 1u + rr(4096);
+        push_text("mov w%u, w%u", b, c);
+        push_text("mov w%u, #%d", a, -(int)k);
+        push_text("cmp x%u, x%u", b, a);
+        push_branch(2, 0, rr(14), 0);
+        maybe_kill(a);
+        break;
+    }
+    }
+}
+
+static void plant_fp(void)
+{
+    if (nbody + 6 > BODY_MAX) {
+        return;
+    }
+    unsigned a = body_reg();
+    unsigned b = reg_besides(a, a);
+    unsigned c = reg_besides(a, b);
+    unsigned d = rr(3) == 0 ? a : reg_besides(b, c);
+    bool dbl = rr(2) == 0;
+    char f = dbl ? 'd' : 's';
+    char g = dbl ? 'x' : 'w';
+    unsigned cond = rr(14);
+    const char *cc = cond_text[cond];
+    static const char *const arr[] = { "16b", "8b" };
+    const char *ar = arr[rr(2)];
+    switch (rr(10)) {
+    case 0:
+        // FMUL and an FNEG of the product: FNMUL.
+        push_text("fmul %c%u, %c%u, %c%u", f, a, f, b, f, c);
+        push_text("fneg %c%u, %c%u", f, d, f, a);
+        break;
+    case 1: {
+        // A constant moved through a general register: FMOV immediate,
+        // or MOVI for zero.
+        static const char *const k32[] = { "0x3f800000", "0x40000000",
+                                           "0xbf800000", "0x3e000000", "0" };
+        static const char *const k64[] = { "0x3ff0000000000000",
+                                           "0x4000000000000000",
+                                           "0xbfc0000000000000", "0" };
+        unsigned j = dbl ? rr(4) : rr(5);
+        unsigned how = rr(4);
+        unsigned small = rr(8);
+        if (how == 0) {
+            push_text("mov w%u, #%u", a, small);
+            push_text("%s %c%u, w%u", rr(2) == 0 ? "scvtf" : "ucvtf", f, d,
+                      a);
+        } else if (how == 1) {
+            push_text("fmov %c%u, %czr", f, d, g);
+        } else {
+            push_text("mov %c%u, #%s", g, a, dbl ? k64[j] : k32[j]);
+            push_text("fmov %c%u, %c%u", f, d, g, a);
+        }
+        maybe_kill(a);
+        break;
+    }
+    case 2:
+        // An FCSEL of one register.
+        push_text("fcsel %c%u, %c%u, %c%u, %s", f, d, f, b, f, b, cc);
+        break;
+    case 3: {
+        // UMOV of lane 0, and of another lane.
+        static const char *const um[] = { "umov w%u, v%u.s[0]",
+                                          "umov x%u, v%u.d[0]",
+                                          "umov w%u, v%u.h[0]",
+                                          "umov w%u, v%u.s[1]" };
+        push_text(um[rr(4)], d, b);
+        break;
+    }
+    case 4: {
+        // Vector logic of one register: zero, a copy, or itself.
+        static const char *const op[] = { "and", "orr", "eor", "bic", "sub" };
+        unsigned j = rr(5);
+        bool in_place = rr(2) == 0;
+        if (j == 4) {
+            push_text("sub v%u.4s, v%u.4s, v%u.4s", d, b, b);
+        } else if (in_place) {
+            push_text("%s v%u.%s, v%u.%s, v%u.%s", op[j], d, ar, d, ar, d, ar);
+        } else {
+            push_text("%s v%u.%s, v%u.%s, v%u.%s", op[j], d, ar, b, ar, b, ar);
+        }
+        break;
+    }
+    case 5: {
+        // MOVI #0 and a compare against it: compare-with-zero.
+        static const char *const cmp[] = { "cmeq", "cmge", "cmgt", "fcmeq",
+                                           "fcmge", "fcmgt" };
+        unsigned j = rr(6);
+        bool left = rr(2) == 0;
+        push_text("movi v%u.2d, #0", a);
+        if (left) {
+            push_text("%s v%u.4s, v%u.4s, v%u.4s", cmp[j], a, a, b);
+        } else {
+            push_text("%s v%u.4s, v%u.4s, v%u.4s", cmp[j], a, b, a);
+        }
+        break;
+    }
+    case 6: {
+        // Two EORs, or a BIC and an EOR: EOR3, BCAX (SHA3).
+        bool bic = rr(2) == 0;
+        bool first = rr(2) == 0;
+        unsigned e = rr(2) == 0 ? c : reg_besides(a, b);
+        push_text("%s v%u.16b, v%u.16b, v%u.16b", bic ? "bic" : "eor", a, b,
+                  c);
+        if (first) {
+            push_text("eor v%u.16b, v%u.16b, v%u.16b", d, a, e);
+        } else {
+            push_text("eor v%u.16b, v%u.16b, v%u.16b", d, e, a);
+        }
+        break;
+    }
+    case 7: {
+        // A widening extend and an SCVTF/UCVTF of it.
+        bool sx = rr(2) == 0;
+        bool sgn = rr(2) == 0;
+        if (sx) {
+            push_text("sxtw x%u, w%u", a, b);
+        } else {
+            push_text("mov w%u, w%u", a, b);
+        }
+        push_text("%s %c%u, x%u", sgn ? "scvtf" : "ucvtf", f, d, a);
+        maybe_kill(a);
+        break;
+    }
+    case 8: {
+        // FMOV copies: a chain, and a copy back.
+        bool back = rr(2) == 0;
+        push_text("fmov %c%u, %c%u", f, a, f, b);
+        push_text("fmov %c%u, %c%u", f, back ? b : d, f, a);
+        break;
+    }
+    default: {
+        // Zero broadcast or converted from ZR.
+        bool dup = rr(2) == 0;
+        if (dup) {
+            push_text("dup v%u.4s, wzr", d);
+        } else {
+            push_text("scvtf %c%u, %czr", f, d, g);
+        }
+        break;
+    }
+    }
+}
+
+static void plant_lse_loop(void);
+
+// An exclusive-access loop on the scratch buffer: a fetch-and-op, a
+// swap, or a compare-and-swap with its early exit -- what LSE does in
+// one instruction. The loop's back edge is the only backward branch a
+// program has. Its slots past the load-exclusive are no landing place
+// for a branch: a store-exclusive reached without its load is not code
+// the rewrite has to agree with (a failed CAS leaves the monitor armed
+// for one).
+static void plant_lse(void)
+{
+    if (nbody + 6 > BODY_MAX) {
+        return;
+    }
+    int first = nbody;
+    plant_lse_loop();
+    for (int i = first + 1; i < nbody; i++) {
+        body[i].interior = true;
+    }
+}
+
+static void plant_lse_loop(void)
+{
+    unsigned old = body_reg();
+    unsigned val = reg_besides(old, old);
+    unsigned nv = reg_besides(old, val);
+    unsigned st = reg_besides(nv, val);
+    while (st == old) {
+        st = reg_besides(nv, val);
+    }
+    static const char *const sizes[] = { "", "b", "h" };
+    unsigned size = rr(4);          // 3: X
+    bool x = size == 3;
+    char w = x ? 'x' : 'w';
+    const char *sz = size == 3 ? "" : sizes[size];
+    bool acq = rr(2) == 0;
+    bool rel = rr(2) == 0;
+    unsigned at = (unsigned)(body_start + nbody) * 4u;
+    switch (rr(4)) {
+    case 0:
+    case 1: {
+        static const char *const op[] = { "add", "orr", "eor", "bic", "and",
+                                          "sub" };
+        unsigned j = rr(7);
+        unsigned imm = 1u + rr(4095);
+        push_text("ld%sxr%s %c%u, [x28]", acq ? "a" : "", sz, w, old);
+        if (j == 6) {
+            push_text("add %c%u, %c%u, #%u", w, nv, w, old, imm);
+        } else {
+            push_text("%s %c%u, %c%u, %c%u", op[j], w, nv, w, old, w, val);
+        }
+        push_text("st%sxr%s w%u, %c%u, [x28]", rel ? "l" : "", sz, st, w, nv);
+        push_text("cbnz w%u, #%u", st, at);
+        break;
+    }
+    case 2:
+        push_text("ld%sxr%s %c%u, [x28]", acq ? "a" : "", sz, w, old);
+        push_text("st%sxr%s w%u, %c%u, [x28]", rel ? "l" : "", sz, st, w, val);
+        push_text("cbnz w%u, #%u", st, at);
+        break;
+    default:
+        push_text("ld%sxr %c%u, [x28]", acq ? "a" : "", w, old);
+        push_text("cmp %c%u, %c%u", w, old, w, val);
+        push_text("b.ne #%u", at + 20u);
+        push_text("st%sxr w%u, %c%u, [x28]", rel ? "l" : "", st, w, nv);
+        push_text("cbnz w%u, #%u", st, at);
+        break;
+    }
+}
+
 static void gen_body(void (*plant)(void))
 {
     nbody = 0;
@@ -960,13 +2221,20 @@ static void gen_body(void (*plant)(void))
         }
     }
     // Branches go forward only -- to a later body slot or the epilogue
-    // -- so every program terminates.
+    // -- so every program terminates; and never into a plant's interior,
+    // where an access would go through a base no path set up.
     for (int i = 0; i < nbody; i++) {
-        body[i].target = body[i].aim > 0 && i + body[i].aim <= nbody
+        int t = body[i].aim > 0 && i + body[i].aim <= nbody
             ? i + body[i].aim
             : i + 1 + (int)rr((unsigned)(nbody - i));
+        while (t < nbody && body[t].interior && body[i].aim == 0) {
+            t++;
+        }
+        body[i].target = t;
     }
 }
+
+static bool asm_word(const char *key, uint32_t *word);
 
 static void assemble(void)
 {
@@ -974,17 +2242,27 @@ static void assemble(void)
     for (size_t i = 0; i < sizeof(prologue) / 4u; i++) {
         prog[k++] = prologue[i];
     }
-    body_start = k;
+    prog[k] = b_(POOL_AT + 16 - k);
+    k++;
+    while (k < POOL_AT) {
+        prog[k++] = NOP;
+    }
+    for (unsigned i = 0; i < 8; i++) {
+        prog[k++] = (uint32_t)pool[i];
+        prog[k++] = (uint32_t)(pool[i] >> 32);
+    }
     k += nbody;
     epi_start = k;
     for (size_t i = 0; i < sizeof(epilogue) / 4u; i++) {
         prog[k++] = epilogue[i];
     }
-    // The stub: x0..x7 get top halves set, NZCV a fixed pattern.
+    // The stub: x0..x7 get top halves set, v0..v7 a byte pattern, NZCV
+    // a fixed pattern.
     stub_start = k;
     for (unsigned r = 0; r < 8; r++) {
         prog[k++] = movz_x(r, 0xBEE0u + r, 0);
         prog[k++] = movk_x(r, 0xDEADu, 3);
+        prog[k++] = 0x4F05E600u + 0x21u * r;    // movi vr.16b, #0xb0+r
     }
     prog[k++] = cmp_x(0, 1);
     prog[k++] = RET;
@@ -997,6 +2275,13 @@ static void assemble(void)
         switch (s->kind) {
         case SLOT_PLAIN:
             prog[at] = s->word;
+            break;
+        case SLOT_TEXT:
+            if (!asm_word(s->text, &prog[at])) {
+                fprintf(stderr, "rwfuzz: the assembler refused a plant's "
+                        "\"%s\"\n", s->text);
+                exit(2);
+            }
             break;
         case SLOT_BRANCH:
             switch (s->form) {
@@ -1026,40 +2311,60 @@ static void assemble(void)
 // === armlint ===
 
 static csh cs;
+static unsigned features;       // the extensions the host runs
 
 typedef struct {
+    const char *name;
     size_t start;       // word index of the finding's first instruction
     unsigned count;
     char detail[ARMLINT_FINDING_DETAIL_LEN];
+    unsigned nedits;
+    armlint_edit edits[ARMLINT_FINDING_EDITS];
 } hit_t;
 
 #define HITS_MAX 64
-static hit_t hits[HITS_MAX];
-static int nhits;
+
+// A program and the findings of interest in it: generated and analyzed
+// a batch at a time, so that one run of the assembler serves the batch,
+// and then run.
+typedef struct {
+    slot_t body[BODY_MAX];
+    int nbody;
+    uint32_t prog[PROG_MAX];
+    int nprog, epi_start, stub_start;
+    int nhits;
+    hit_t hits[HITS_MAX];
+} program_t;
+
+static program_t *cur;
 
 typedef struct mode mode_t_;
 static const mode_t_ *mode;
 
-static bool wanted(const char *name);
+static bool wanted(const armlint_finding *f);
 
 static void record(const armlint_finding *f)
 {
-    if (nhits < HITS_MAX && wanted(f->name)) {
-        hits[nhits].start = f->start_offset / 4u;
-        hits[nhits].count = f->insn_count;
-        snprintf(hits[nhits].detail, sizeof(hits[nhits].detail), "%s",
-                 f->detail);
-        nhits++;
+    if (cur->nhits < HITS_MAX && wanted(f)) {
+        hit_t *h = &cur->hits[cur->nhits++];
+        h->name = f->name;
+        h->start = f->start_offset / 4u;
+        h->count = f->insn_count;
+        snprintf(h->detail, sizeof(h->detail), "%s", f->detail);
+        h->nedits = f->nedits;
+        memcpy(h->edits, f->edits, sizeof(h->edits));
     }
 }
 
 // Run the registry over the program the way the driver does -- with the
-// buffer set, so branch targets and target scans work -- and keep the
-// mode's findings.
+// buffer and the host's features set, so branch targets and target
+// scans work and no finding suggests what the host cannot run -- and
+// keep the mode's findings.
 static void analyze(void)
 {
-    nhits = 0;
+    cur->nhits = 0;
     armlint_state *st = armlint_state_create();
+    armlint_state_set_features(st, features);
     armlint_state_set_buffer(st, (const uint8_t *)prog, (size_t)nprog * 4u);
     cs_insn *insn = cs_malloc(cs);
     const uint8_t *p = (const uint8_t *)prog;
@@ -1094,9 +2399,15 @@ static void analyze(void)
 
 // === Execution ===
 
+// The memory the programs load from and store to: x28 points at its
+// middle, so that a base a plant moves down by an ADD's or a SUB's
+// immediate, or an unscaled negative offset, stays inside it. What the
+// original left there is compared with what the rewrite did.
+#define SCRATCH_SIZE 16384u
 static uint32_t *jit;
-static uint8_t scratch[4096] __attribute__((aligned(64)));   // atomics
-static uint8_t scratch_init[4096];
+static uint8_t scratch[SCRATCH_SIZE] __attribute__((aligned(64)));
+static uint8_t scratch_init[SCRATCH_SIZE];
+static uint8_t scratch_after[SCRATCH_SIZE];
 
 static bool jit_open(void)
 {
@@ -1128,13 +2439,74 @@ static void jit_load(const uint32_t *code, size_t words)
 #endif
 }
 
-static void run(const uint32_t *code, const regs_t *in, regs_t *out)
+// A rewrite can fault where the original did not -- an instruction the
+// host lacks, an address the original never formed -- or loop where it
+// branched forward. Either is a difference, so a run ends in the
+// signal that stopped it rather than taking rwfuzz down: faults on an
+// alternate stack (the rewrite may have moved SP), and a 50 ms tick
+// that stops a run still going since the tick before (a run takes
+// microseconds).
+static sigjmp_buf run_env;
+static volatile sig_atomic_t run_active, run_signal;
+static volatile unsigned long run_seq, run_seen;
+
+static void on_signal(int sig)
+{
+    if (sig == SIGALRM) {
+        if (!run_active || run_seq != run_seen) {
+            run_seen = run_seq;
+            return;
+        }
+    }
+    if (run_active) {
+        run_active = 0;
+        run_signal = sig;
+        siglongjmp(run_env, 1);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static bool guard_open(void)
+{
+    static uint8_t altstack[1u << 16];
+    stack_t ss = { .ss_sp = altstack, .ss_size = sizeof(altstack) };
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sa.sa_flags = SA_ONSTACK | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    struct itimerval tick = { { 0, 50000 }, { 0, 50000 } };
+    if (sigaltstack(&ss, NULL) != 0
+            || sigaction(SIGSEGV, &sa, NULL) != 0
+            || sigaction(SIGBUS, &sa, NULL) != 0
+            || sigaction(SIGILL, &sa, NULL) != 0
+            || sigaction(SIGTRAP, &sa, NULL) != 0
+            || sigaction(SIGFPE, &sa, NULL) != 0
+            || sigaction(SIGALRM, &sa, NULL) != 0
+            || setitimer(ITIMER_REAL, &tick, NULL) != 0) {
+        perror("rwfuzz: signals");
+        return false;
+    }
+    return true;
+}
+
+// Run code from *in into *out: 0, or the signal that stopped it
+// (SIGALRM: it ran on past a tick).
+static int run(const uint32_t *code, const regs_t *in, regs_t *out)
 {
     jit_load(code, (size_t)nprog);
     memcpy(scratch, scratch_init, sizeof(scratch));
     *out = *in;
-    out->buf = (uint64_t)(uintptr_t)scratch;
+    out->buf = (uint64_t)(uintptr_t)(scratch + SCRATCH_SIZE / 2u);
+    if (sigsetjmp(run_env, 1) != 0) {
+        return run_signal;
+    }
+    run_seq++;
+    run_active = 1;
     ((void (*)(regs_t *))(void *)jit)(out);
+    run_active = 0;
+    return 0;
 }
 
 static uint64_t edge_value(void)
@@ -1152,31 +2524,92 @@ static uint64_t edge_value(void)
     }
 }
 
+// A vector register's 128 bits: zero, all ones, lanes of small integers
+// or of the floats an FP fold must keep exact -- 1.0, -0.0, an
+// infinity, a NaN -- or random bits.
+static void edge_vector(uint8_t q[16])
+{
+    static const uint32_t floats[] = {
+        0x3F800000u, 0x80000000u, 0x7F800000u, 0x7FC00001u, 0xBF800000u,
+        0x40490FDBu, 0x00000001u,
+    };
+    unsigned kind = rr(6);
+    for (unsigned i = 0; i < 16; i += 4) {
+        uint32_t lane;
+        switch (kind) {
+        case 0: lane = 0; break;
+        case 1: lane = ~0u; break;
+        case 2: lane = rr(8); break;
+        case 3: lane = floats[rr(sizeof(floats) / sizeof(floats[0]))]; break;
+        case 4: lane = (uint32_t)edge_value(); break;
+        default: lane = (uint32_t)rnd(); break;
+        }
+        memcpy(q + i, &lane, 4);
+    }
+}
+
 static void random_state(regs_t *s)
 {
     for (int i = 0; i < 8; i++) {
         s->x[i] = edge_value();
+        edge_vector(s->q[i]);
     }
     s->nzcv = (uint64_t)rr(16) << 28;
-    for (size_t i = 0; i < sizeof(scratch_init); i++) {
-        scratch_init[i] = (uint8_t)rnd();
+    for (size_t i = 0; i < sizeof(scratch_init); i += 8) {
+        uint64_t v = rnd();
+        memcpy(scratch_init + i, &v, 8);
     }
 }
 
+static void dump(const uint32_t *code, const char *heading)
+{
+    printf("---- %s\n", heading);
+    cs_insn *insn = cs_malloc(cs);
+    for (int i = 0; i < nprog; i++) {
+        const uint8_t *p = (const uint8_t *)&code[i];
+        size_t size = 4;
+        uint64_t addr = (uint64_t)i * 4u;
+        if (i >= POOL_AT && i < body_start) {
+            printf("  %4x: %08x  (pool)\n", i * 4, code[i]);
+        } else if (cs_disasm_iter(cs, &p, &size, &addr, insn)) {
+            printf("  %4x: %08x  %s %s\n", i * 4, code[i], insn->mnemonic,
+                   insn->op_str);
+        } else {
+            printf("  %4x: %08x  .word\n", i * 4, code[i]);
+        }
+    }
+    cs_free(insn, 1);
+}
+
 // Run both programs from TRIALS random states; true if all agreed. On a
-// difference, *diff_in gets the state that showed it.
+// difference, *diff_in gets the state that showed it and *sig the
+// signal that stopped the rewrite, or 0. The original only branches
+// forward and only touches the scratch buffer, so its faulting is the
+// harness's bug, and rwfuzz stops there.
 #define TRIALS 6
 
-static bool same_results(const uint32_t *alt, regs_t *diff_in)
+static bool same_results(const uint32_t *alt, regs_t *diff_in, int *sig)
 {
     for (int t = 0; t < TRIALS; t++) {
         regs_t in, a, b;
         random_state(&in);
-        run(prog, &in, &a);
-        run(alt, &in, &b);
-        if (memcmp(a.x, b.x, sizeof(a.x)) != 0 || a.nzcv != b.nzcv) {
+        int sa = run(prog, &in, &a);
+        if (sa != 0) {
+            dump(prog, "the original program");
+            fprintf(stderr, "rwfuzz: the original program stopped on "
+                    "signal %d\n", sa);
+            exit(2);
+        }
+        memcpy(scratch_after, scratch, sizeof(scratch));
+        int sb = run(alt, &in, &b);
+        if (sb != 0 || memcmp(a.x, b.x, sizeof(a.x)) != 0
+                || a.nzcv != b.nzcv || memcmp(a.q, b.q, sizeof(a.q)) != 0
+                || memcmp(scratch_after, scratch, sizeof(scratch)) != 0) {
             if (diff_in != NULL) {
                 *diff_in = in;
+            }
+            if (sig != NULL) {
+                *sig = sb;
             }
             return false;
         }
@@ -1184,42 +2617,475 @@ static bool same_results(const uint32_t *alt, regs_t *diff_in)
     return true;
 }
 
-static void dump(const uint32_t *code, const char *heading)
+
+// === Assembling the rewrites ===
+//
+// A finding carries its rewrite as text, the advice a reader sees, so
+// that what runs here is what the text says: each instruction goes
+// through the host's own assembler. It runs once per batch of programs
+// over every text the batch needs that no batch before it did, and the
+// words are cached by text. RWFUZZ_CC names the compiler driver that
+// assembles (default cc); the -march it is given covers what the host
+// runs.
+
+static char asm_dir[512];       // a private temporary directory
+static char asm_march[128];
+
+typedef struct {
+    char *text;                 // NULL: a free slot
+    uint32_t word;
+    int state;                  // 1 assembled, -1 refused, 0 pending
+} asm_entry;
+
+static asm_entry *asm_tab;
+static size_t asm_cap, asm_used;
+static char **asm_pending;      // texts owned by asm_tab
+static size_t asm_npending, asm_pending_cap;
+
+static uint64_t fnv1a(const char *s)
 {
-    printf("---- %s\n", heading);
-    cs_insn *insn;
-    size_t c = cs_disasm(cs, (const uint8_t *)code, (size_t)nprog * 4u, 0, 0,
-                         &insn);
-    for (size_t i = 0; i < c; i++) {
-        printf("  %4" PRIx64 ": %08x  %s %s\n", insn[i].address,
-               code[insn[i].address / 4u], insn[i].mnemonic, insn[i].op_str);
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (; *s != '\0'; s++) {
+        h = (h ^ (uint8_t)*s) * 0x100000001B3ull;
     }
-    cs_free(insn, c);
+    return h;
 }
 
-// === Modes ===
-
-static bool in_body(size_t first, size_t last)
+static asm_entry *asm_find(const char *text)
 {
-    return first >= (size_t)body_start && last < (size_t)epi_start;
+    size_t i = (size_t)fnv1a(text) & (asm_cap - 1u);
+    while (asm_tab[i].text != NULL && strcmp(asm_tab[i].text, text) != 0) {
+        i = (i + 1u) & (asm_cap - 1u);
+    }
+    return &asm_tab[i];
 }
 
-// zext: the consumer is the span's last instruction; delete it.
-static bool zext_apply(const hit_t *h, uint32_t *code)
+// The entry for TEXT, made pending when it is new.
+static asm_entry *asm_entry_for(const char *text)
 {
-    size_t consumer = h->start + h->count - 1u;
-    if (!in_body(consumer, consumer)) {
+    if (2u * (asm_used + 1u) > asm_cap) {
+        asm_entry *old = asm_tab;
+        size_t old_cap = asm_cap;
+        asm_cap = asm_cap != 0 ? 2u * asm_cap : 4096u;
+        asm_tab = calloc(asm_cap, sizeof(*asm_tab));
+        if (asm_tab == NULL) {
+            perror("rwfuzz: calloc");
+            exit(2);
+        }
+        for (size_t i = 0; i < old_cap; i++) {
+            if (old[i].text != NULL) {
+                *asm_find(old[i].text) = old[i];
+            }
+        }
+        free(old);
+    }
+    asm_entry *e = asm_find(text);
+    if (e->text == NULL) {
+        e->text = strdup(text);
+        e->state = 0;
+        asm_used++;
+        if (asm_npending == asm_pending_cap) {
+            asm_pending_cap = asm_pending_cap != 0 ? 2u * asm_pending_cap
+                                                   : 1024u;
+            asm_pending = realloc(asm_pending,
+                                  asm_pending_cap * sizeof(*asm_pending));
+        }
+        if (e->text == NULL || asm_pending == NULL) {
+            perror("rwfuzz: alloc");
+            exit(2);
+        }
+        asm_pending[asm_npending++] = e->text;
+    }
+    return e;
+}
+
+// An edit's text as the assembler takes it in word AT. A PC-relative
+// operand -- a branch's target, a literal load's address, ADR's -- is
+// the absolute offset the finding shows (the program is analyzed at
+// address 0), and becomes .+N from the word the instruction lands in.
+static bool asm_text(const char *text, size_t at, char *out, size_t cap)
+{
+    const char *sp = strchr(text, ' ');
+    size_t mlen = sp != NULL ? (size_t)(sp - text) : strlen(text);
+    char mnem[16];
+    if (mlen >= sizeof(mnem)) {
         return false;
     }
-    code[consumer] = NOP;
+    memcpy(mnem, text, mlen);
+    mnem[mlen] = '\0';
+    const char *ops = sp != NULL ? sp + 1 : "";
+    bool pcrel = strcmp(mnem, "b") == 0 || strcmp(mnem, "bl") == 0
+        || strncmp(mnem, "b.", 2) == 0 || strncmp(mnem, "bc.", 3) == 0
+        || strncmp(mnem, "cb", 2) == 0              // CBZ/CBNZ and CMPBR
+        || strcmp(mnem, "tbz") == 0 || strcmp(mnem, "tbnz") == 0
+        || strcmp(mnem, "adr") == 0
+        || ((strncmp(mnem, "ldr", 3) == 0 || strcmp(mnem, "prfm") == 0)
+            && strchr(ops, '[') == NULL);
+    if (!pcrel) {
+        return (size_t)snprintf(out, cap, "%s", text) < cap;
+    }
+    const char *opnd = strrchr(ops, ',');
+    opnd = opnd != NULL ? opnd + 1 : ops;
+    while (*opnd == ' ') {
+        opnd++;
+    }
+    const char *num = *opnd == '#' ? opnd + 1 : opnd;
+    char *end;
+    unsigned long long target = strtoull(num, &end, 0);
+    if (end == num || *end != '\0') {
+        return false;
+    }
+    long long rel = (long long)target - (long long)(at * 4u);
+    return (size_t)snprintf(out, cap, "%.*s.%c%lld", (int)(opnd - text),
+                            text, rel < 0 ? '-' : '+',
+                            rel < 0 ? -rel : rel) < cap;
+}
+
+// A plant's text, made pending under the key the assembler takes at
+// word AT; the key, owned by the cache. A text asm_text cannot place is
+// the plant's bug.
+static const char *asm_intern(const char *text, size_t at)
+{
+    char key[160];
+    if (!asm_text(text, at, key, sizeof(key))) {
+        fprintf(stderr, "rwfuzz: a plant's \"%s\" has no assembler text\n",
+                text);
+        exit(2);
+    }
+    return asm_entry_for(key)->text;
+}
+
+// The word for KEY, once the assembler has run over it.
+static bool asm_word(const char *key, uint32_t *word)
+{
+    asm_entry *e = asm_find(key);
+    if (e->text == NULL || e->state != 1) {
+        return false;
+    }
+    *word = e->word;
     return true;
 }
 
-static size_t zext_slot(const hit_t *h)
+static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
+static uint32_t rd32(const uint8_t *p) { return (uint32_t)rd16(p) | (uint32_t)rd16(p + 2) << 16; }
+static uint64_t rd64(const uint8_t *p) { return (uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32; }
+
+// Where the object's text section lies: a Mach-O or ELF 64-bit object.
+static bool text_section(const uint8_t *b, size_t n, size_t *off,
+                         size_t *size)
 {
-    return h->start + h->count - 1u;
+    if (n >= 32 && rd32(b) == 0xFEEDFACFu) {
+        uint32_t ncmds = rd32(b + 16);
+        size_t p = 32;
+        for (uint32_t c = 0; c < ncmds && p + 8 <= n; c++) {
+            uint32_t cmd = rd32(b + p), cmdsize = rd32(b + p + 4);
+            if (cmd == 0x19u && p + 72 <= n) {      // LC_SEGMENT_64
+                uint32_t nsects = rd32(b + p + 64);
+                for (uint32_t k = 0; k < nsects; k++) {
+                    size_t s = p + 72 + 80u * k;
+                    if (s + 80 > n) {
+                        return false;
+                    }
+                    if (strncmp((const char *)b + s, "__text", 16) == 0) {
+                        *size = (size_t)rd64(b + s + 40);
+                        *off = rd32(b + s + 48);
+                        return *off + *size <= n;
+                    }
+                }
+            }
+            if (cmdsize == 0) {
+                return false;
+            }
+            p += cmdsize;
+        }
+        return false;
+    }
+    if (n >= 64 && memcmp(b, "\177ELF", 4) == 0 && b[4] == 2) {
+        uint64_t shoff = rd64(b + 0x28);
+        size_t shentsize = rd16(b + 0x3A), shnum = rd16(b + 0x3C);
+        size_t shstrndx = rd16(b + 0x3E);
+        if (shentsize < 0x28 || shstrndx >= shnum
+                || shoff + shnum * shentsize > n) {
+            return false;
+        }
+        uint64_t strtab = rd64(b + shoff + shstrndx * shentsize + 0x18);
+        for (size_t k = 0; k < shnum; k++) {
+            const uint8_t *sh = b + shoff + k * shentsize;
+            uint64_t name = strtab + rd32(sh);
+            if (name + 6 <= n
+                    && memcmp(b + name, ".text", 6) == 0) {
+                *off = (size_t)rd64(sh + 0x18);
+                *size = (size_t)rd64(sh + 0x20);
+                return *off + *size <= n;
+            }
+        }
+    }
+    return false;
 }
 
+// Assemble the n texts, one per line; true with their words when the
+// assembler took them all. Otherwise the lines it named are marked in
+// bad[] and *named counts them -- zero when it failed some other way,
+// with its output on stderr.
+static bool asm_once(char **texts, size_t n, uint32_t *words, bool *bad,
+                     size_t *named)
+{
+    char src[600], obj[600], cmd[2048];
+    snprintf(src, sizeof(src), "%s/r.s", asm_dir);
+    snprintf(obj, sizeof(obj), "%s/r.o", asm_dir);
+    *named = 0;
+    FILE *f = fopen(src, "w");
+    if (f == NULL) {
+        perror(src);
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        fprintf(f, "%s\n", texts[i]);
+    }
+    fclose(f);
+    const char *cc = getenv("RWFUZZ_CC");
+    snprintf(cmd, sizeof(cmd), "%s -c -x assembler -march=%s -o '%s' '%s' "
+             "2>&1", cc != NULL ? cc : "cc", asm_march, obj, src);
+    FILE *p = popen(cmd, "r");
+    if (p == NULL) {
+        perror("rwfuzz: popen");
+        return false;
+    }
+    char line[1024], first[1024] = "";
+    while (fgets(line, sizeof(line), p) != NULL) {
+        if (first[0] == '\0') {
+            snprintf(first, sizeof(first), "%s", line);
+        }
+        const char *at = strstr(line, "r.s:");
+        char *end = NULL;
+        unsigned long l = at != NULL ? strtoul(at + 4, &end, 10) : 0;
+        if (l >= 1 && l <= n && end != at + 4 && *end == ':' && !bad[l - 1]) {
+            bad[l - 1] = true;
+            (*named)++;
+        }
+    }
+    int status = pclose(p);
+    if (status != 0 || *named != 0) {
+        if (*named == 0) {
+            fprintf(stderr, "rwfuzz: %s\n  %s", cmd, first);
+        }
+        return false;
+    }
+    f = fopen(obj, "rb");
+    if (f == NULL) {
+        perror(obj);
+        return false;
+    }
+    uint8_t *buf = NULL;
+    size_t len = 0, cap = 0, got;
+    do {
+        if (len == cap) {
+            cap = cap != 0 ? 2u * cap : 65536u;
+            uint8_t *nb = realloc(buf, cap);
+            if (nb == NULL) {
+                free(buf);
+                fclose(f);
+                return false;
+            }
+            buf = nb;
+        }
+        got = fread(buf + len, 1, cap - len, f);
+        len += got;
+    } while (got != 0);
+    fclose(f);
+    size_t off, size;
+    bool ok = text_section(buf, len, &off, &size) && size == 4u * n;
+    for (size_t i = 0; ok && i < n; i++) {
+        words[i] = rd32(buf + off + 4u * i);
+    }
+    free(buf);
+    if (!ok) {
+        fprintf(stderr, "rwfuzz: %s: no text section of %zu words\n", obj,
+                n);
+    }
+    return ok;
+}
+
+// Assemble every pending text. False when the assembler cannot be run
+// at all; a text it refuses is only marked, and costs its findings.
+static bool asm_flush(void)
+{
+    while (asm_npending > 0) {
+        size_t n = asm_npending;
+        uint32_t *words = malloc(n * sizeof(*words));
+        bool *bad = calloc(n, sizeof(*bad));
+        if (words == NULL || bad == NULL) {
+            perror("rwfuzz: alloc");
+            exit(2);
+        }
+        size_t named;
+        bool ok = asm_once(asm_pending, n, words, bad, &named);
+        if (ok) {
+            for (size_t i = 0; i < n; i++) {
+                asm_entry *e = asm_find(asm_pending[i]);
+                e->word = words[i];
+                e->state = 1;
+            }
+            asm_npending = 0;
+        } else if (named != 0) {
+            size_t k = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (bad[i]) {
+                    asm_find(asm_pending[i])->state = -1;
+                } else {
+                    asm_pending[k++] = asm_pending[i];
+                }
+            }
+            asm_npending = k;
+        }
+        free(words);
+        free(bad);
+        if (!ok && named == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The extensions the host runs, as armlint's feature bits -- so that no
+// finding suggests an instruction the host would fault on -- and as the
+// assembler's -march.
+#if defined(__APPLE__)
+static bool sysctl_flag(const char *name)
+{
+    int v = 0;
+    size_t len = sizeof(v);
+    return sysctlbyname(name, &v, &len, NULL, 0) == 0 && v != 0;
+}
+#endif
+
+static unsigned host_features(void)
+{
+    bool lse = false, sha3 = false, rcpc2 = false, fp16 = false;
+    bool cssc = false, cmpbr = false;
+#if defined(__APPLE__)
+    lse = sysctl_flag("hw.optional.arm.FEAT_LSE");
+    sha3 = sysctl_flag("hw.optional.arm.FEAT_SHA3");
+    rcpc2 = sysctl_flag("hw.optional.arm.FEAT_LRCPC2");
+    fp16 = sysctl_flag("hw.optional.arm.FEAT_FP16");
+    cssc = sysctl_flag("hw.optional.arm.FEAT_CSSC");
+    cmpbr = sysctl_flag("hw.optional.arm.FEAT_CMPBR");
+#elif defined(__linux__)
+    unsigned long hw = getauxval(AT_HWCAP);
+    lse = (hw & HWCAP_ATOMICS) != 0;
+    sha3 = (hw & HWCAP_SHA3) != 0;
+    rcpc2 = (hw & HWCAP_ILRCPC) != 0;
+    fp16 = (hw & HWCAP_FPHP) != 0 && (hw & HWCAP_ASIMDHP) != 0;
+#if defined(HWCAP2_CSSC)
+    cssc = (getauxval(AT_HWCAP2) & HWCAP2_CSSC) != 0;
+#endif
+#endif
+    snprintf(asm_march, sizeof(asm_march), "armv8.4-a%s%s%s%s",
+             sha3 ? "+sha3" : "", fp16 ? "+fp16" : "", cssc ? "+cssc" : "",
+             cmpbr ? "+cmpbr" : "");
+    return (lse ? ARMLINT_FEATURE_LSE : 0u)
+        | (sha3 ? ARMLINT_FEATURE_SHA3 : 0u)
+        | (rcpc2 ? ARMLINT_FEATURE_LRCPC2 : 0u)
+        | (fp16 ? ARMLINT_FEATURE_FP16 : 0u)
+        | (cssc ? ARMLINT_FEATURE_CSSC : 0u)
+        | (cmpbr ? ARMLINT_FEATURE_CMPBR : 0u);
+}
+
+static bool asm_open(void)
+{
+    const char *tmp = getenv("TMPDIR");
+    snprintf(asm_dir, sizeof(asm_dir), "%s/rwfuzz.XXXXXX",
+             tmp != NULL && tmp[0] != '\0' ? tmp : "/tmp");
+    if (mkdtemp(asm_dir) == NULL) {
+        perror("rwfuzz: mkdtemp");
+        return false;
+    }
+    return true;
+}
+
+static void asm_close(void)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/r.s", asm_dir);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/r.o", asm_dir);
+    unlink(path);
+    rmdir(asm_dir);
+}
+
+// === Applying a finding ===
+
+// What a finding's edits come to in this program.
+enum { EDITS_APPLY, EDITS_OUTSIDE, EDITS_NONE, EDITS_REFUSED };
+
+// Each edit's text as the assembler takes it, into keys; EDITS_OUTSIDE
+// when an edit falls outside the body (the prologue, epilogue and stub
+// are the harness's), EDITS_NONE when the finding names no rewrite.
+static int edit_keys(const hit_t *h,
+                     char keys[][ARMLINT_FINDING_EDIT_LEN + 32])
+{
+    if (h->nedits == 0 || h->nedits > ARMLINT_FINDING_EDITS) {
+        return EDITS_NONE;
+    }
+    for (unsigned i = 0; i < h->nedits; i++) {
+        const armlint_edit *e = &h->edits[i];
+        size_t w = e->offset / 4u;
+        if (e->offset % 4u != 0 || w < (size_t)body_start
+                || w >= (size_t)epi_start) {
+            return EDITS_OUTSIDE;
+        }
+        keys[i][0] = '\0';
+        if (e->text[0] != '\0'
+                && !asm_text(e->text, w, keys[i], sizeof(keys[i]))) {
+            return EDITS_REFUSED;
+        }
+    }
+    return EDITS_APPLY;
+}
+
+// Ask for the words a finding's edits need.
+static void request_edits(const hit_t *h)
+{
+    char keys[ARMLINT_FINDING_EDITS][ARMLINT_FINDING_EDIT_LEN + 32];
+    if (edit_keys(h, keys) == EDITS_APPLY) {
+        for (unsigned i = 0; i < h->nedits; i++) {
+            if (keys[i][0] != '\0') {
+                asm_entry_for(keys[i]);
+            }
+        }
+    }
+}
+
+// Apply a finding's edits to code: a deleted word becomes a NOP, so
+// that every branch keeps its target.
+static int apply_edits(const hit_t *h, uint32_t *code)
+{
+    char keys[ARMLINT_FINDING_EDITS][ARMLINT_FINDING_EDIT_LEN + 32];
+    int r = edit_keys(h, keys);
+    if (r != EDITS_APPLY) {
+        return r;
+    }
+    for (unsigned i = 0; i < h->nedits; i++) {
+        size_t w = h->edits[i].offset / 4u;
+        if (keys[i][0] == '\0') {
+            code[w] = NOP;
+            continue;
+        }
+        asm_entry *e = asm_find(keys[i]);
+        if (e->text == NULL || e->state != 1) {
+            return EDITS_REFUSED;
+        }
+        code[w] = e->word;
+    }
+    return EDITS_APPLY;
+}
+
+// === Modes ===
+//
+// Each per-check mode's special count, and its control arm.
+
+// zext: the consumer is further on than the instruction after its
+// producer.
 static bool zext_special(const hit_t *h)
 {
     return h->count > 2u;
@@ -1265,21 +3131,7 @@ static uint32_t ubfx_of(uint32_t shift, uint32_t and_w)
     return x ? ubfm_x(d, s, n, n + w - 1u) : ubfm_w(d, s, n, n + w - 1u);
 }
 
-static bool ubfx_apply(const hit_t *h, uint32_t *code)
-{
-    if (!in_body(h->start, h->start + 1u)) {
-        return false;
-    }
-    code[h->start + 1u] = ubfx_of(code[h->start], code[h->start + 1u]);
-    code[h->start] = NOP;
-    return true;
-}
-
-static size_t ubfx_slot(const hit_t *h)
-{
-    return h->start;
-}
-
+// ubfx: the AND writes another register than the shift.
 static bool ubfx_special(const hit_t *h)
 {
     return (prog[h->start + 1u] & 31u) != (prog[h->start] & 31u);
@@ -1308,94 +3160,7 @@ static bool ubfx_control(int i, uint32_t *alt)
     return true;
 }
 
-static const char *const cond_names[16] = {
-    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc",
-    "hi", "ls", "ge", "lt", "gt", "le", "al", "nv",
-};
-
-static int cond_from_name(const char *s)
-{
-    for (int i = 0; i < 16; i++) {
-        if (strncmp(s, cond_names[i], 2) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-// ccmp: apply the rewrite as the finding renders it --
-//   "-> cbz wN, 0x..."                          (or cbnz)
-//   "-> cmp|cmn wN, #0xK ; b.cc 0x..."
-//   "-> cmp|cmn wN, #0xK ; <csel-family operands>, cc"
-// A CSEL-family alias prints its condition inverted, so the new field is
-// taken relative to how the original reader printed its own.
-static bool ccmp_apply(const hit_t *h, uint32_t *code)
-{
-    size_t first = h->start, reader = h->start + h->count - 1u;
-    if (!in_body(first, reader)) {
-        return false;
-    }
-    uint32_t rw = code[reader];
-    bool x = (code[first] >> 31) != 0;
-    unsigned rn = (code[first] >> 5) & 31u;
-    char mnem[8];
-    unsigned reg_no;
-    unsigned long long imm;
-    char tail[ARMLINT_FINDING_DETAIL_LEN];
-    if (sscanf(h->detail, "-> %7s %*c%u", mnem, &reg_no) != 2
-            || reg_no != rn) {
-        return false;
-    }
-    if (strcmp(mnem, "cbz") == 0 || strcmp(mnem, "cbnz") == 0) {
-        for (size_t i = first; i < reader; i++) {
-            code[i] = NOP;
-        }
-        code[reader] = cbz(x, mnem[2] == 'n', rn, (int)((rw >> 5) & 0x7FFFFu));
-        return true;
-    }
-    if (sscanf(h->detail, "-> %7s %*c%u, #0x%llx ; %127[^\n]", mnem,
-               &reg_no, &imm, tail) != 4) {
-        return false;
-    }
-    code[first] = cmp_imm(x, strcmp(mnem, "cmn") == 0, rn, (unsigned)imm);
-    for (size_t i = first + 1u; i < reader; i++) {
-        code[i] = NOP;
-    }
-    if (strncmp(tail, "b.", 2) == 0) {
-        int c = cond_from_name(tail + 2);
-        if (c < 0) {
-            return false;
-        }
-        code[reader] = (rw & ~0xFu) | (unsigned)c;
-        return true;
-    }
-    const char *comma = strrchr(tail, ',');
-    int c = comma != NULL ? cond_from_name(comma + 2) : -1;
-    cs_insn *insn;
-    size_t n = cs_disasm(cs, (const uint8_t *)&rw, 4, 0, 1, &insn);
-    if (n != 1 || c < 0) {
-        if (n != 0) {
-            cs_free(insn, n);
-        }
-        return false;
-    }
-    const char *oc = strrchr(insn->op_str, ',');
-    int shown = oc != NULL ? cond_from_name(oc + 2) : -1;
-    cs_free(insn, n);
-    unsigned field = (rw >> 12) & 15u;
-    if (shown < 0) {
-        return false;
-    }
-    unsigned nf = (unsigned)shown == field ? (unsigned)c : (unsigned)c ^ 1u;
-    code[reader] = (rw & ~(15u << 12)) | nf << 12;
-    return true;
-}
-
-static size_t ccmp_slot(const hit_t *h)
-{
-    return h->start;
-}
-
+// ccmp: the chain's reader is a branch.
 static bool ccmp_special(const hit_t *h)
 {
     return (prog[h->start + h->count - 1u] & 0xFF000010u) == 0x54000000u;
@@ -1425,21 +3190,6 @@ static bool ccmp_control(int i, uint32_t *alt)
     return true;
 }
 
-// lvn: the finding's one instruction is deleted.
-static bool lvn_apply(const hit_t *h, uint32_t *code)
-{
-    if (h->count != 1u || !in_body(h->start, h->start)) {
-        return false;
-    }
-    code[h->start] = NOP;
-    return true;
-}
-
-static size_t lvn_slot(const hit_t *h)
-{
-    return h->start;
-}
-
 // The value came from further back than the previous instruction.
 static bool lvn_special(const hit_t *h)
 {
@@ -1463,17 +3213,6 @@ static bool lvn_control(int i, uint32_t *alt)
     }
     alt[i] = NOP;
     return true;
-}
-
-// dead: the finding's one instruction, the dead write, is deleted.
-static bool dead_apply(const hit_t *h, uint32_t *code)
-{
-    return lvn_apply(h, code);
-}
-
-static size_t dead_slot(const hit_t *h)
-{
-    return h->start;
 }
 
 // The overwrite is not the next instruction: some slot between writes
@@ -1509,29 +3248,7 @@ static bool dead_control(int i, uint32_t *alt)
     return false;
 }
 
-// cmn: "-> cmn wN, #0xK[, lsl #12] (drop ...)": NOP the MOV, CMN the CMP.
-static bool cmn_apply(const hit_t *h, uint32_t *code)
-{
-    if (h->count != 2u || !in_body(h->start, h->start + 1u)) {
-        return false;
-    }
-    unsigned n;
-    unsigned long long k;
-    if (sscanf(h->detail, "-> cmn w%u, #0x%llx", &n, &k) != 2 || k > 0xFFFu
-            || n != ((code[h->start + 1u] >> 5) & 31u)) {
-        return false;
-    }
-    code[h->start] = NOP;
-    code[h->start + 1u] = cmn_w_imm(n, (unsigned)k,
-                                    strstr(h->detail, "lsl #12") != NULL);
-    return true;
-}
-
-static size_t cmn_slot(const hit_t *h)
-{
-    return h->start;
-}
-
+// cmn: the compare's reader is a branch.
 static bool cmn_special(const hit_t *h)
 {
     return (prog[h->start + 2u] & 0xFF000010u) == 0x54000000u;
@@ -1566,8 +3283,8 @@ static bool cmn_control(int i, uint32_t *alt)
     return true;
 }
 
-// branch: "-> delete; never taken: ..." deletes the branch, "-> b 0x...;
-// always taken: ..." makes it a B with the same displacement.
+// A conditional branch's displacement in words: TBZ/TBNZ's imm14,
+// CBZ/CBNZ's and B.cond's imm19.
 static int32_t branch_disp(uint32_t w)
 {
     if ((w & 0x7E000000u) == 0x36000000u) {
@@ -1576,140 +3293,28 @@ static int32_t branch_disp(uint32_t w)
     return (int32_t)(((w >> 5) & 0x7FFFFu) << 13) >> 13;
 }
 
-static bool branch_apply(const hit_t *h, uint32_t *code)
-{
-    if (h->count != 1u || !in_body(h->start, h->start)) {
-        return false;
-    }
-    if (strncmp(h->detail, "-> delete; never taken", 22) == 0) {
-        code[h->start] = NOP;
-        return true;
-    }
-    unsigned long long target;
-    if (sscanf(h->detail, "-> b 0x%llx; always taken", &target) != 1
-            || target != h->start * 4u
-                          + (uint64_t)(int64_t)branch_disp(code[h->start]) * 4u) {
-        return false;
-    }
-    code[h->start] = b_(branch_disp(code[h->start]));
-    return true;
-}
-
-static size_t branch_slot(const hit_t *h)
-{
-    return h->start;
-}
-
+// branch: always taken, made a B.
 static bool branch_special(const hit_t *h)
 {
     return strstr(h->detail, "always taken") != NULL;
 }
 
-// Control: delete an unflagged conditional branch, or make it a B.
+// Control: delete an unflagged conditional branch, or make it a B --
+// a forward one: an exclusive loop's back edge made a B would spin.
 static bool branch_control(int i, uint32_t *alt)
 {
     uint32_t w = prog[i];
     bool cond = ((w & 0xFF000010u) == 0x54000000u && (w & 0xFu) < 14u)
         || (w & 0x7E000000u) == 0x34000000u
         || (w & 0x7E000000u) == 0x36000000u;
-    if (!cond || rr(2) != 0) {
+    if (!cond || branch_disp(w) <= 0 || rr(2) != 0) {
         return false;
     }
     alt[i] = rr(2) == 0 ? NOP : b_(branch_disp(w));
     return true;
 }
 
-// fold: "-> mov wN|xN, #0x..." re-materializes the value -- MOVZ, MOVN or
-// ORR from ZR, whichever encodes it -- and "-> delete; ..." deletes.
-static bool bitmask_value(unsigned n, unsigned immr, unsigned imms,
-                          unsigned width, uint64_t *out)
-{
-    unsigned x = (n << 6) | (~imms & 0x3Fu);
-    int len = -1;
-    for (int i = 6; i >= 0; i--) {
-        if ((x >> i) & 1u) {
-            len = i;
-            break;
-        }
-    }
-    if (len < 1 || (1u << len) > width) {
-        return false;
-    }
-    unsigned esize = 1u << len, s = imms & (esize - 1u), r = immr & (esize - 1u);
-    if (s == esize - 1u) {
-        return false;
-    }
-    uint64_t welem = (1ull << (s + 1u)) - 1u;
-    uint64_t emask = esize == 64u ? ~0ull : (1ull << esize) - 1u;
-    uint64_t rot = r == 0 ? welem : ((welem >> r) | (welem << (esize - r))) & emask;
-    uint64_t v = 0;
-    for (unsigned i = 0; i < width; i += esize) {
-        v |= rot << i;
-    }
-    *out = width == 64u ? v : v & 0xFFFFFFFFu;
-    return true;
-}
-
-static bool mov_imm(bool x, unsigned d, uint64_t v, uint32_t *out)
-{
-    unsigned width = x ? 64u : 32u;
-    uint64_t mask = x ? ~0ull : 0xFFFFFFFFull;
-    v &= mask;
-    for (unsigned hw = 0; hw < width / 16u; hw++) {
-        uint64_t half = 0xFFFFull << (16u * hw);
-        if ((v & ~half) == 0) {
-            *out = (x ? 0xD2800000u : 0x52800000u) | hw << 21
-                | (unsigned)((v >> (16u * hw)) & 0xFFFFu) << 5 | d;
-            return true;
-        }
-        if ((~v & mask & ~half) == 0) {
-            *out = (x ? 0x92800000u : 0x12800000u) | hw << 21
-                | (unsigned)((~v >> (16u * hw)) & 0xFFFFu) << 5 | d;
-            return true;
-        }
-    }
-    for (unsigned n = 0; n <= (x ? 1u : 0u); n++) {
-        for (unsigned immr = 0; immr < width; immr++) {
-            for (unsigned imms = 0; imms < 64u; imms++) {
-                uint64_t m;
-                if (bitmask_value(n, immr, imms, width, &m) && m == v) {
-                    *out = (x ? 0xB2000000u : 0x32000000u) | n << 22
-                        | immr << 16 | imms << 10 | 31u << 5 | d;
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-static bool fold_apply(const hit_t *h, uint32_t *code)
-{
-    if (h->count != 1u || !in_body(h->start, h->start)) {
-        return false;
-    }
-    if (strncmp(h->detail, "-> delete;", 10) == 0) {
-        code[h->start] = NOP;
-        return true;
-    }
-    char r;
-    unsigned d;
-    unsigned long long v;
-    uint32_t w;
-    if (sscanf(h->detail, "-> mov %c%u, #0x%llx", &r, &d, &v) != 3
-            || (r != 'w' && r != 'x') || d != (code[h->start] & 31u)
-            || !mov_imm(r == 'x', d, v, &w)) {
-        return false;
-    }
-    code[h->start] = w;
-    return true;
-}
-
-static size_t fold_slot(const hit_t *h)
-{
-    return h->start;
-}
-
+// fold: the operation is deleted rather than made a MOV.
 static bool fold_special(const hit_t *h)
 {
     return strncmp(h->detail, "-> delete;", 10) == 0;
@@ -1732,32 +3337,7 @@ static bool fold_control(int i, uint32_t *alt)
     return true;
 }
 
-// and: "-> delete; ..." deletes, "-> mov Rd, Rn; ..." copies.
-static bool and_apply(const hit_t *h, uint32_t *code)
-{
-    if (h->count != 1u || !in_body(h->start, h->start)) {
-        return false;
-    }
-    if (strncmp(h->detail, "-> delete;", 10) == 0) {
-        code[h->start] = NOP;
-        return true;
-    }
-    char a, b;
-    unsigned d, n;
-    uint32_t w = code[h->start];
-    if (sscanf(h->detail, "-> mov %c%u, %c%u;", &a, &d, &b, &n) != 4
-            || a != b || d != (w & 31u) || n != ((w >> 5) & 31u)) {
-        return false;
-    }
-    code[h->start] = a == 'x' ? mov_x(d, n) : mov_w(d, n);
-    return true;
-}
-
-static size_t and_slot(const hit_t *h)
-{
-    return h->start;
-}
-
+// and: the AND/UBFX is deleted rather than made a MOV.
 static bool and_special(const hit_t *h)
 {
     return strncmp(h->detail, "-> delete;", 10) == 0;
@@ -1777,43 +3357,6 @@ static bool and_control(int i, uint32_t *alt)
     unsigned d = w & 31u, n = (w >> 5) & 31u;
     alt[i] = d == n ? NOP : x ? mov_x(d, n) : mov_w(d, n);
     return true;
-}
-
-// cbz: "-> cbz|cbnz wN, 0x..." or "-> tbz|tbnz xN, #63, 0x...": NOP the
-// zero test and make the B.cond that branch, to the same target.
-static bool cbz_apply(const hit_t *h, uint32_t *code)
-{
-    size_t test = h->start, br = h->start + 1u;
-    if (h->count != 2u || !in_body(test, br)
-            || (code[br] & 0xFF000010u) != 0x54000000u) {
-        return false;
-    }
-    int32_t words = branch_disp(code[br]);
-    unsigned rn = (code[test] >> 5) & 31u;
-    char mnem[8], wx;
-    unsigned reg, bit;
-    if (sscanf(h->detail, "-> %7s %c%u, #%u,", mnem, &wx, &reg, &bit) == 4
-            && mnem[0] == 't') {
-        if (reg != rn || words < -8192 || words > 8191) {
-            return false;
-        }
-        code[br] = tbz(mnem[2] == 'n', reg, bit, words);
-    } else if (sscanf(h->detail, "-> %7s %c%u,", mnem, &wx, &reg) == 3
-               && mnem[0] == 'c') {
-        if (reg != rn) {
-            return false;
-        }
-        code[br] = cbz(wx == 'x', mnem[2] == 'n', reg, words);
-    } else {
-        return false;
-    }
-    code[test] = NOP;
-    return true;
-}
-
-static size_t cbz_slot(const hit_t *h)
-{
-    return h->start + 1u;
 }
 
 // Special: the straight walk from the branch target meets a B, CBZ/CBNZ
@@ -1898,61 +3441,6 @@ static uint32_t ccmp_reg_word(bool x, bool ccmn, unsigned n, unsigned m,
         | m << 16 | c << 12 | n << 5 | nzcv;
 }
 
-// The CCMP word a chain finding renders: "-> ccmp w9, #0x15, #0x4, ne ;
-// b.eq 0x70" or "-> ccmn x1, x2, #0x0, hi ; b.lo 0x40" (a ZR operand
-// spelled wzr/xzr).
-static bool cbc_word(const char *detail, uint32_t *w)
-{
-    char text[ARMLINT_FINDING_DETAIL_LEN], mnem[8], wx, wx2, cname[4];
-    unsigned n, m, imm, nzcv;
-    snprintf(text, sizeof(text), "%s", detail);
-    for (char *p = strstr(text, "zr,"); p != NULL; p = strstr(p, "zr,")) {
-        memcpy(p, "31,", 3);
-    }
-    if (sscanf(text, "-> %7s %c%u, #0x%x, #0x%x, %3s", mnem, &wx, &n, &imm,
-               &nzcv, cname) == 6) {
-        int c = cond_from_name(cname);
-        if (c < 0 || imm > 31u || n > 31u || nzcv > 15u) {
-            return false;
-        }
-        *w = ccmp_imm(wx == 'x', mnem[3] == 'n', n, imm, nzcv, (unsigned)c);
-        return true;
-    }
-    if (sscanf(text, "-> %7s %c%u, %c%u, #0x%x, %3s", mnem, &wx, &n, &wx2,
-               &m, &nzcv, cname) == 7) {
-        int c = cond_from_name(cname);
-        if (c < 0 || n > 31u || m > 31u || nzcv > 15u || wx != wx2) {
-            return false;
-        }
-        *w = ccmp_reg_word(wx == 'x', mnem[3] == 'n', n, m, nzcv,
-                           (unsigned)c);
-        return true;
-    }
-    return false;
-}
-
-// cbc: the CCMP takes the first branch's slot, the compare deletes, the
-// second branch stays.
-static bool cbc_apply(const hit_t *h, uint32_t *code)
-{
-    size_t b1 = h->start, b2 = h->start + 2u;
-    uint32_t w;
-    if (h->count != 3u || !in_body(b1, b2)
-            || (code[b1] & 0xFF000010u) != 0x54000000u
-            || (code[b2] & 0xFF000010u) != 0x54000000u
-            || !cbc_word(h->detail, &w)) {
-        return false;
-    }
-    code[b1] = w;
-    code[b1 + 1u] = NOP;
-    return true;
-}
-
-static size_t cbc_slot(const hit_t *h)
-{
-    return h->start;
-}
-
 // Special: the two branches share a target (OR); otherwise the first
 // lands past the second (AND).
 static bool cbc_special(const hit_t *h)
@@ -2002,82 +3490,6 @@ static bool cbc_control(int i, uint32_t *alt)
         : ccmp_reg_word(x, ccmn, n, (c >> 16) & 31u, nzcv, c1 ^ 1u);
     alt[i + 1] = NOP;
     return true;
-}
-
-// csel: the select a hammock finding renders -- "-> csel x10, x10, x9,
-// ge", "-> csinc x5, x5, xzr, ne", "-> cinc x7, x7, hi" and their kin
-// -- as a word.
-static bool csel_word(const char *detail, uint32_t *w)
-{
-    char text[ARMLINT_FINDING_DETAIL_LEN], mnem[8], w1, w2, w3, cname[4];
-    unsigned d, n, m;
-    snprintf(text, sizeof(text), "%s", detail);
-    for (char *p = strstr(text, "zr,"); p != NULL; p = strstr(p, "zr,")) {
-        memcpy(p, "31,", 3);
-    }
-    if (sscanf(text, "-> %7s %c%u, %c%u, %c%u, %3s", mnem, &w1, &d, &w2, &n,
-               &w3, &m, cname) == 8) {
-        int c = cond_from_name(cname);
-        if (c < 0 || d > 31u || n > 31u || m > 31u || w1 != w2 || w2 != w3) {
-            return false;
-        }
-        uint32_t base;
-        if (strcmp(mnem, "csel") == 0) {
-            base = 0x1A800000u;
-        } else if (strcmp(mnem, "csinc") == 0) {
-            base = 0x1A800400u;
-        } else if (strcmp(mnem, "csinv") == 0) {
-            base = 0x5A800000u;
-        } else {
-            return false;
-        }
-        *w = (w1 == 'x' ? 0x80000000u : 0) | base | m << 16
-            | (unsigned)c << 12 | n << 5 | d;
-        return true;
-    }
-    if (sscanf(text, "-> %7s %c%u, %c%u, %3s", mnem, &w1, &d, &w2, &n, cname)
-            == 6) {
-        int c = cond_from_name(cname);
-        if (c < 0 || d > 31u || n > 31u || w1 != w2) {
-            return false;
-        }
-        uint32_t base;
-        if (strcmp(mnem, "cinc") == 0) {
-            base = 0x1A800400u;
-        } else if (strcmp(mnem, "cneg") == 0) {
-            base = 0x5A800400u;
-        } else if (strcmp(mnem, "cinv") == 0) {
-            base = 0x5A800000u;
-        } else {
-            return false;
-        }
-        // The aliases invert the condition they print.
-        *w = (w1 == 'x' ? 0x80000000u : 0) | base | n << 16
-            | ((unsigned)c ^ 1u) << 12 | n << 5 | d;
-        return true;
-    }
-    return false;
-}
-
-// csel: the select takes the branch's slot and the skipped instruction
-// deletes.
-static bool hammock_apply(const hit_t *h, uint32_t *code)
-{
-    size_t br = h->start;
-    uint32_t w;
-    if (h->count != 2u || !in_body(br, br + 1u)
-            || (code[br] & 0xFF000010u) != 0x54000000u
-            || !csel_word(h->detail, &w)) {
-        return false;
-    }
-    code[br] = w;
-    code[br + 1u] = NOP;
-    return true;
-}
-
-static size_t hammock_slot(const hit_t *h)
-{
-    return h->start;
 }
 
 // Special: the in-place forms (CINC/CNEG/CINV), whose alias prints the
@@ -2137,39 +3549,6 @@ static bool hammock_control(int i, uint32_t *alt)
     alt[i] = w;
     alt[i + 1] = NOP;
     return true;
-}
-
-// split: "-> add x21, x0, #0x1d, lsl #12 ; add x21, x21, #0xeb8"
-// replaces the chain and its ADD/SUB, the two immediates taking the
-// span's last two words and the chain's other words deleted.
-static bool split_apply(const hit_t *h, uint32_t *code)
-{
-    char op1[4], op2[4], w1, w2, w3, w4;
-    unsigned d1, n1, hi, d2, n2, lo;
-    if (sscanf(h->detail, "-> %3s %c%u, %c%u, #0x%x, lsl #12 ; "
-               "%3s %c%u, %c%u, #0x%x", op1, &w1, &d1, &w2, &n1, &hi, op2,
-               &w3, &d2, &w4, &n2, &lo) != 12) {
-        return false;
-    }
-    size_t first = h->start, last = h->start + h->count - 1u;
-    if (h->count < 3u || !in_body(first, last) || strcmp(op1, op2) != 0
-            || (strcmp(op1, "add") != 0 && strcmp(op1, "sub") != 0)
-            || w1 != w2 || w1 != w3 || w1 != w4 || d2 != d1 || n2 != d1
-            || hi > 0xFFFu || lo > 0xFFFu || (code[last] & 31u) != d1) {
-        return false;
-    }
-    bool x = w1 == 'x', sub = strcmp(op1, "sub") == 0;
-    for (size_t k = first; k + 2u <= last; k++) {
-        code[k] = NOP;
-    }
-    code[last - 1u] = addsub_imm(x, sub, d1, n1, hi, true);
-    code[last] = addsub_imm(x, sub, d1, d1, lo, false);
-    return true;
-}
-
-static size_t split_slot(const hit_t *h)
-{
-    return h->start + h->count - 1u;
 }
 
 // Sign-crossed: an ADD split into SUBs or a SUB into ADDs.
@@ -2252,89 +3631,198 @@ static bool split_control(int i, uint32_t *alt)
 
 struct mode {
     const char *name;
-    const char *findings[2];        // the finding names the mode tests
+    const char *findings[2];        // the finding names the mode tests;
+                                    // none for "all", which tests every
+                                    // finding that names a rewrite
     const char *special;            // what the second count counts
     void (*plant)(void);
-    bool (*apply)(const hit_t *, uint32_t *);
-    size_t (*slot)(const hit_t *);  // the word the control arm keys on
     bool (*is_special)(const hit_t *);
     bool (*control)(int, uint32_t *);
 };
 
+static void plant_any(void);
+static bool control_any(int i, uint32_t *alt);
+
 static const mode_t_ modes[] = {
     { "zext", { "redundant zero-extension after zeroing op", NULL },
-      "across a gap", plant_zext, zext_apply, zext_slot, zext_special,
-      zext_control },
+      "across a gap", plant_zext, zext_special, zext_control },
     { "ubfx", { "LSR+AND foldable into UBFX", "ASR+AND foldable into UBFX" },
-      "out of place", plant_shift_and, ubfx_apply, ubfx_slot, ubfx_special,
-      ubfx_control },
+      "out of place", plant_shift_and, ubfx_special, ubfx_control },
     { "ccmp", { "CMP + CCMP chain decidable by one compare", NULL },
-      "with a branch reader", plant_ccmp_chain, ccmp_apply, ccmp_slot,
-      ccmp_special, ccmp_control },
+      "with a branch reader", plant_ccmp_chain, ccmp_special, ccmp_control },
     { "lvn", { "register already holds the recomputed value",
                "ADR/ADRP of an address its register already holds" },
-      "not adjacent", plant_recompute, lvn_apply, lvn_slot, lvn_special,
-      lvn_control },
+      "not adjacent", plant_recompute, lvn_special, lvn_control },
     { "dead", { "register write overwritten unread", NULL },
-      "across a gap", plant_dead_write, dead_apply, dead_slot, dead_special,
-      dead_control },
+      "across a gap", plant_dead_write, dead_special, dead_control },
     { "cmn", { "MOV + CMP of a 32-bit value against 2^32-k foldable to "
                "W-form CMN", NULL },
-      "with a branch reader", plant_cmp_cmn, cmn_apply, cmn_slot,
-      cmn_special, cmn_control },
+      "with a branch reader", plant_cmp_cmn, cmn_special, cmn_control },
     { "branch", { "conditional branch that is never taken",
                   "conditional branch that is always taken" },
-      "always taken", plant_decided, branch_apply, branch_slot,
-      branch_special, branch_control },
+      "always taken", plant_decided, branch_special, branch_control },
     { "fold", { "operation on known values foldable to MOV #imm",
                 "operation on known values leaves its register unchanged" },
-      "deleted", plant_fold, fold_apply, fold_slot, fold_special,
-      fold_control },
+      "deleted", plant_fold, fold_special, fold_control },
     { "and", { "AND/UBFX that known bits make a no-op", NULL },
-      "deleted", plant_and, and_apply, and_slot, and_special, and_control },
+      "deleted", plant_and, and_special, and_control },
     { "cbz", { "compare-zero branch foldable into CBZ/CBNZ",
                "compare-zero signed-branch foldable into TBZ/TBNZ" },
-      "through a branch at the target", plant_cbz, cbz_apply, cbz_slot,
-      cbz_special, cbz_control },
+      "through a branch at the target", plant_cbz, cbz_special,
+      cbz_control },
     { "split", { "MOV + ADD/SUB foldable to two immediate ADD/SUBs", NULL },
-      "sign-crossed", plant_split, split_apply, split_slot, split_special,
-      split_control },
+      "sign-crossed", plant_split, split_special, split_control },
     { "cbc", { "B.cond + CMP + B.cond foldable into CCMP + B.cond", NULL },
-      "sharing a target", plant_cbc, cbc_apply, cbc_slot, cbc_special,
-      cbc_control },
+      "sharing a target", plant_cbc, cbc_special, cbc_control },
     { "hammock", { "B.cond over one instruction foldable into a conditional "
                    "select", NULL },
-      "through an alias", plant_hammock, hammock_apply, hammock_slot,
-      hammock_special, hammock_control },
+      "through an alias", plant_hammock, hammock_special, hammock_control },
+    // Plants of a family of shapes rather than one check's: every
+    // finding with a rewrite in their programs is tested.
+    { "mem", { NULL, NULL }, NULL, plant_mem, NULL, NULL },
+    { "arith", { NULL, NULL }, NULL, plant_arith, NULL, NULL },
+    { "fp", { NULL, NULL }, NULL, plant_fp, NULL, NULL },
+    { "lse", { NULL, NULL }, NULL, plant_lse, NULL, NULL },
+    { "all", { NULL, NULL }, NULL, plant_any, NULL, control_any },
 };
 
-static bool wanted(const char *name)
+#define NMODES (sizeof(modes) / sizeof(modes[0]))
+
+// all: any mode's plant, and any mode's control that takes the slot.
+static void plant_any(void)
 {
-    for (int i = 0; i < 2; i++) {
-        if (mode->findings[i] != NULL && strcmp(name, mode->findings[i]) == 0) {
+    modes[rr(NMODES - 1u)].plant();
+}
+
+static bool control_any(int i, uint32_t *alt)
+{
+    unsigned first = rr(NMODES - 1u);
+    for (unsigned k = 0; k < NMODES - 1u; k++) {
+        const mode_t_ *m = &modes[(first + k) % (NMODES - 1u)];
+        if (m->control != NULL && m->control(i, alt)) {
             return true;
         }
     }
     return false;
 }
 
+static const char *only;        // -f: findings whose name contains it
+
+static bool wanted(const armlint_finding *f)
+{
+    if (only != NULL && strstr(f->name, only) == NULL) {
+        return false;
+    }
+    if (mode->findings[0] == NULL) {
+        return f->nedits != 0;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (mode->findings[i] != NULL && strcmp(f->name, mode->findings[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// === Tallies ===
+
+typedef struct {
+    const char *name;
+    long tested, special, mismatches, unapplied, outside;
+} tally_t;
+
+#define TALLIES_MAX 256
+static tally_t tallies[TALLIES_MAX];
+static size_t ntallies;
+
+static tally_t *tally_for(const char *name)
+{
+    for (size_t i = 0; i < ntallies; i++) {
+        if (tallies[i].name == name || strcmp(tallies[i].name, name) == 0) {
+            return &tallies[i];
+        }
+    }
+    if (ntallies == TALLIES_MAX) {
+        fprintf(stderr, "rwfuzz: more than %d finding names\n", TALLIES_MAX);
+        exit(2);
+    }
+    tallies[ntallies].name = name;
+    return &tallies[ntallies++];
+}
+
+static int by_tested(const void *a, const void *b)
+{
+    const tally_t *x = a, *y = b;
+    if (x->tested != y->tested) {
+        return x->tested < y->tested ? 1 : -1;
+    }
+    return strcmp(x->name, y->name);
+}
+
+static const char *signal_name(int sig)
+{
+    switch (sig) {
+    case SIGSEGV: return "SIGSEGV";
+    case SIGBUS: return "SIGBUS";
+    case SIGILL: return "SIGILL";
+    case SIGTRAP: return "SIGTRAP";
+    case SIGFPE: return "SIGFPE";
+    case SIGALRM: return "a timeout";
+    default: return "a signal";
+    }
+}
+
+// The original program with the finding marked, and its edits.
+static void report_mismatch(const hit_t *h, const uint32_t *alt,
+                            const regs_t *in, int sig)
+{
+    char heading[2 * ARMLINT_FINDING_DETAIL_LEN];
+    snprintf(heading, sizeof(heading), "MISMATCH at word %zu (%u "
+             "instructions): %s: %s", h->start, h->count, h->name,
+             h->detail);
+    dump(prog, heading);
+    for (unsigned i = 0; i < h->nedits; i++) {
+        size_t w = h->edits[i].offset / 4u;
+        printf("  edit %4zx: %08x  %s\n", w * 4u, alt[w],
+               h->edits[i].text[0] != '\0' ? h->edits[i].text : "(delete)");
+    }
+    printf("  from x0..x7 =");
+    for (int r = 0; r < 8; r++) {
+        printf(" %#" PRIx64, in->x[r]);
+    }
+    printf(", nzcv = %#" PRIx64 "\n", in->nzcv);
+    if (sig != 0) {
+        printf("  the rewrite stopped on %s\n", signal_name(sig));
+    }
+}
+
 static void usage(void)
 {
-    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] "
-            "zext|ubfx|ccmp|lvn|dead|cmn|branch|fold|and|cbz|split|cbc|hammock\n");
+    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] MODE\n"
+            "modes:");
+    for (size_t i = 0; i < NMODES; i++) {
+        fprintf(stderr, " %s", modes[i].name);
+    }
+    fprintf(stderr, "\n");
 }
+
+#define BATCH 256
 
 int main(int argc, char **argv)
 {
     long programs = 100000;
     int opt;
-    while ((opt = getopt(argc, argv, "n:s:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:s:f:")) != -1) {
         switch (opt) {
         case 'n':
             programs = atol(optarg);
             break;
         case 's':
-            rng_state ^= strtoull(optarg, NULL, 0);
+            gen_rng ^= strtoull(optarg, NULL, 0);
+            run_rng ^= strtoull(optarg, NULL, 0);
+            break;
+        case 'f':
+            only = optarg;
             break;
         default:
             usage();
@@ -2345,7 +3833,7 @@ int main(int argc, char **argv)
         usage();
         return 2;
     }
-    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+    for (size_t i = 0; i < NMODES; i++) {
         if (strcmp(argv[optind], modes[i].name) == 0) {
             mode = &modes[i];
         }
@@ -2359,63 +3847,144 @@ int main(int argc, char **argv)
         return 2;
     }
     cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
-    if (!jit_open()) {
+    // The const audit's rewrites are as concrete as the folds': the
+    // consumer takes the immediate and the chain stays.
+    features = host_features() | ARMLINT_AUDIT_CONST;
+    program_t *batch = calloc(BATCH, sizeof(*batch));
+    if (batch == NULL || !jit_open() || !guard_open() || !asm_open()) {
         return 2;
     }
 
     long tested = 0, special = 0, mismatches = 0, unapplied = 0;
-    long controls = 0, control_diffs = 0;
+    long outside = 0, controls = 0, control_diffs = 0, shown = 0;
     uint32_t alt[PROG_MAX];
-    for (long it = 0; it < programs; it++) {
-        gen_body(mode->plant);
-        assemble();
-        analyze();
-        bool flagged[PROG_MAX] = { false };
-        for (int h = 0; h < nhits; h++) {
-            memcpy(alt, prog, (size_t)nprog * 4u);
-            if (!mode->apply(&hits[h], alt)) {
-                unapplied++;
-                if (unapplied <= 5) {
-                    printf("could not apply: %s\n", hits[h].detail);
-                }
-                continue;
-            }
-            flagged[mode->slot(&hits[h])] = true;
-            tested++;
-            special += mode->is_special(&hits[h]);
-            regs_t in;
-            if (!same_results(alt, &in)) {
-                mismatches++;
-                if (mismatches <= 5) {
-                    char heading[ARMLINT_FINDING_DETAIL_LEN + 64];
-                    snprintf(heading, sizeof(heading),
-                             "MISMATCH at word %zu (%u instructions): %s",
-                             hits[h].start, hits[h].count, hits[h].detail);
-                    dump(prog, heading);
-                    printf("  from x0..x7 =");
-                    for (int r = 0; r < 8; r++) {
-                        printf(" %#" PRIx64, in.x[r]);
-                    }
-                    printf(", nzcv = %#" PRIx64 "\n", in.nzcv);
-                }
+    for (long done = 0; done < programs; ) {
+        int n = programs - done < BATCH ? (int)(programs - done) : BATCH;
+        // Draw the bodies, assemble the plants' texts, then lay each
+        // program out and analyze it.
+        rng = &gen_rng;
+        for (int k = 0; k < n; k++) {
+            gen_body(mode->plant);
+            memcpy(batch[k].body, body, sizeof(body));
+            batch[k].nbody = nbody;
+        }
+        if (!asm_flush()) {
+            asm_close();
+            return 2;
+        }
+        for (int k = 0; k < n; k++) {
+            cur = &batch[k];
+            memcpy(body, cur->body, sizeof(body));
+            nbody = cur->nbody;
+            assemble();
+            analyze();
+            memcpy(cur->prog, prog, sizeof(prog));
+            cur->nprog = nprog;
+            cur->epi_start = epi_start;
+            cur->stub_start = stub_start;
+            for (int h = 0; h < cur->nhits; h++) {
+                request_edits(&cur->hits[h]);
             }
         }
-        for (int i = body_start; i < epi_start; i++) {
-            memcpy(alt, prog, (size_t)nprog * 4u);
-            if (flagged[i] || !mode->control(i, alt)) {
-                continue;
+        if (!asm_flush()) {
+            asm_close();
+            return 2;
+        }
+        rng = &run_rng;
+        for (int k = 0; k < n; k++) {
+            cur = &batch[k];
+            memcpy(prog, cur->prog, sizeof(prog));
+            nprog = cur->nprog;
+            epi_start = cur->epi_start;
+            stub_start = cur->stub_start;
+            bool flagged[PROG_MAX] = { false };
+            for (int h = 0; h < cur->nhits; h++) {
+                const hit_t *hit = &cur->hits[h];
+                tally_t *t = tally_for(hit->name);
+                memcpy(alt, prog, (size_t)nprog * 4u);
+                int r = apply_edits(hit, alt);
+                if (r == EDITS_OUTSIDE) {
+                    outside++;
+                    t->outside++;
+                    continue;
+                }
+                if (r != EDITS_APPLY) {
+                    unapplied++;
+                    t->unapplied++;
+                    if (unapplied <= 5) {
+                        printf("could not apply: %s: %s\n", hit->name,
+                               hit->detail);
+                        for (unsigned i = 0; i < hit->nedits; i++) {
+                            printf("  edit %4zx: %s\n", hit->edits[i].offset,
+                                   hit->edits[i].text[0] != '\0'
+                                       ? hit->edits[i].text : "(delete)");
+                        }
+                    }
+                    continue;
+                }
+                for (unsigned i = 0; i < hit->nedits; i++) {
+                    flagged[hit->edits[i].offset / 4u] = true;
+                }
+                tested++;
+                t->tested++;
+                if (mode->is_special != NULL && mode->is_special(hit)) {
+                    special++;
+                    t->special++;
+                }
+                regs_t in;
+                int sig = 0;
+                if (!same_results(alt, &in, &sig)) {
+                    mismatches++;
+                    t->mismatches++;
+                    if (t->mismatches <= 3 && shown < 20) {
+                        shown++;
+                        report_mismatch(hit, alt, &in, sig);
+                    }
+                }
             }
-            controls++;
-            control_diffs += !same_results(alt, NULL);
+            for (int i = body_start; i < epi_start && mode->control != NULL;
+                 i++) {
+                memcpy(alt, prog, (size_t)nprog * 4u);
+                if (flagged[i] || !mode->control(i, alt)) {
+                    continue;
+                }
+                controls++;
+                control_diffs += !same_results(alt, NULL, NULL);
+            }
+        }
+        done += n;
+    }
+    asm_close();
+
+    if (mode->special != NULL) {
+        printf("rwfuzz %s: %ld programs, %ld findings run (%ld %s), "
+               "%ld mismatches, %ld not applied\n",
+               mode->name, programs, tested, special, mode->special,
+               mismatches, unapplied);
+    } else {
+        printf("rwfuzz %s: %ld programs, %ld findings of %zu kinds run, "
+               "%ld mismatches, %ld not applied\n",
+               mode->name, programs, tested, ntallies, mismatches,
+               unapplied);
+    }
+    if (outside != 0) {
+        printf("  %ld findings in the harness's own code left alone\n",
+               outside);
+    }
+    if (mode->control != NULL) {
+        printf("  control: %ld refused rewrites applied anyway, %ld changed "
+               "the result\n", controls, control_diffs);
+    }
+    if (mode->findings[0] == NULL || only != NULL) {
+        qsort(tallies, ntallies, sizeof(tallies[0]), by_tested);
+        printf("  %8s %8s %8s %8s  %s\n", "run", "mismatch", "unapplied",
+               "harness", "finding");
+        for (size_t i = 0; i < ntallies; i++) {
+            const tally_t *t = &tallies[i];
+            printf("  %8ld %8ld %8ld %8ld  %s\n", t->tested, t->mismatches,
+                   t->unapplied, t->outside, t->name);
         }
     }
-
-    printf("rwfuzz %s: %ld programs, %ld findings run (%ld %s), "
-           "%ld mismatches, %ld not applied\n",
-           mode->name, programs, tested, special, mode->special,
-           mismatches, unapplied);
-    printf("  control: %ld refused rewrites applied anyway, %ld changed "
-           "the result\n", controls, control_diffs);
     if (tested == 0) {
         fprintf(stderr, "rwfuzz: no finding was tested -- has the finding "
                 "name or the check changed?\n");

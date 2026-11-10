@@ -1289,17 +1289,22 @@ backlog -- and one that checks the checks -- built separately with
   instructions into one, while the half that overflows it can only be
   split into two singles at no size saving. 8,775 against 17,565
   across the corpus. Carries its own `--selftest`; needs numpy.
-* `tools/rwfuzz` checks a shipped check's advice by running it. It
-  generates random AArch64 programs, applies each rewrite armlint
-  suggests for one check to a copy, and runs original and rewrite
-  natively from the same random registers, flags and memory: any
-  difference is a soundness bug. A control arm applies the rewrite
-  where armlint refused to, so a harness that stopped seeing
-  differences would show it. Modes cover the redundant
-  zero-extension, shift + mask, CMP + CCMP chain, value-numbering,
-  dead-write and CMP-to-CMN checks (`tools/rwfuzz -n 100000 zext`);
-  a new rewrite gets a mode of its own. Needs an AArch64 host, since the programs run natively, and
-  links `libarmlint.a`.
+* `tools/rwfuzz` checks armlint's advice by running it. It generates
+  random AArch64 programs, applies the rewrite of every finding in
+  them to a copy, and runs original and rewrite natively from the
+  same random registers, vector registers, flags and memory: any
+  difference is a soundness bug. Every finding states its rewrite as
+  edits to its window (`armlint_edit`), spelled as the advice is, and
+  rwfuzz assembles them with the host's assembler, so any check's
+  advice can be run and what runs is what a reader sees.
+  `tools/rwfuzz all` plants shapes for every check family and reports
+  by finding name; a mode per check (`zext`, `ccmp`, `cbc`, ...) or per
+  family (`mem`, `arith`, `fp`, `lse`) narrows that, and `-f NAME`
+  narrows it to one finding over the same programs. A control arm
+  applies a rewrite where armlint refused to, so a harness that
+  stopped seeing differences would show it. Needs an AArch64 host,
+  since the programs run natively, and a C compiler driver that
+  assembles (`RWFUZZ_CC`, default `cc`); links `libarmlint.a`.
 * `tools/tblgen_audit.py` checks armlint's flag and register model
   against LLVM's own instruction definitions. `llvm-tblgen --dump-json`
   on `AArch64.td` lists every A64 instruction with its encoding and
