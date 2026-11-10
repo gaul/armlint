@@ -7224,6 +7224,10 @@ static void test_fcsel_self(void)
     assert(run_helper_check(code, 4) == 0);
 }
 
+static bool first_named_finding(const uint8_t *code, size_t code_size,
+                                unsigned features, const char *name,
+                                armlint_finding *out);
+
 static void test_bfxil_synth(void)
 {
     uint8_t code[16];
@@ -7263,6 +7267,25 @@ static void test_bfxil_synth(void)
     and_x_lowmask(&code[4], 5, 1, 16);
     orr_x(&code[8], 0, 0, 5);
     assert(run_reg_dead(code, 12, 5) == 1);
+
+    // -- The window is the two words before the ORR. Isolate, clear,
+    //    isolate, ORR folds the last three, not from the first isolate,
+    //    whose word the rewrite would otherwise delete while the ORR
+    //    stayed (tools/rwfuzz ran that): and w6, w2, #0x7f ; and w1,
+    //    w1, #~0x7f ; and w7, w5, #0x7f ; orr w1, w1, w7 ; mov w7, #0. --
+    {
+        uint8_t seq[20];
+        armlint_finding f;
+        and_w_lowmask(&seq[0], 6, 2, 7);
+        and_w_highmask(&seq[4], 1, 1, 7);
+        and_w_lowmask(&seq[8], 7, 5, 7);
+        orr_w(&seq[12], 1, 1, 7);
+        movz_w(&seq[16], 7, 0);
+        assert(first_named_finding(seq, 20, 0,
+                                   "BFXIL synthesis via AND-AND-ORR", &f));
+        assert(f.start_offset == 4 && f.insn_count == 3);
+        assert(strcmp(f.detail, "-> bfxil w1, w5, #0, #7") == 0);
+    }
 
     // -- Negative (the temp-liveness guard): the isolate's temp is live
     //    after the ORR, so the fold must NOT fire -- dropping the isolate

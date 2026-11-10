@@ -1002,7 +1002,8 @@ struct armlint_state {
     unsigned bfx_clear_rd;     // Rd from "AND Rd, Rd, #~(mask<<lsb)"
     unsigned bfx_isolate_rt;   // destination of the isolate (AND/UBFIZ)
     unsigned bfx_isolate_rn;   // Rs (the source of the bitfield)
-    size_t bfx_first_offset;   // offset of whichever op came first
+    size_t bfx_clear_offset;   // where the clear is
+    size_t bfx_isolate_offset; // where the isolate is
     char bfx_clear_disasm[ARMLINT_FINDING_LINE_LEN];
     char bfx_isolate_disasm[ARMLINT_FINDING_LINE_LEN];
 
@@ -11292,10 +11293,22 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
             //     and yields Rt = 0, so the ORR is a no-op and the
             //     net effect is just the clear -- not BFXIL)
             bool alias_ok = tt != cd && tt != rs && rs != cd;
-            if (combo_ok && alias_ok) {
+            // The clear and the isolate must be the two words before
+            // the ORR, the window the rewrite deletes. A role is
+            // refilled in place -- an isolate after a clear replaces an
+            // earlier isolate -- so the first op seen need not be the
+            // window's first: tools/rwfuzz ran isolate, clear, isolate,
+            // ORR, with the window starting at the stale isolate, which
+            // the rewrite deleted while the ORR stayed.
+            bool adjacent = offset >= 8u
+                && ((state->bfx_clear_offset == offset - 8u
+                     && state->bfx_isolate_offset == offset - 4u)
+                    || (state->bfx_isolate_offset == offset - 8u
+                        && state->bfx_clear_offset == offset - 4u));
+            if (combo_ok && alias_ok && adjacent) {
                 char w_or_x = state->bfx_is_64bit ? 'x' : 'w';
                 unsigned lo = state->bfx_lsb;
-                out->start_offset = state->bfx_first_offset;
+                out->start_offset = offset - 8u;
                 out->insn_count = 3;
                 clear_finding_strings(out);
 
@@ -11337,6 +11350,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
                 && state->bfx_lsb == lsb) {
             state->bfx_clear_seen = true;
             state->bfx_clear_rd = and_rd;
+            state->bfx_clear_offset = offset;
             snprintf(state->bfx_clear_disasm,
                 sizeof(state->bfx_clear_disasm),
                 "%s %s", insn->mnemonic, insn->op_str);
@@ -11347,7 +11361,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
             state->bfx_width = width;
             state->bfx_lsb = lsb;
             state->bfx_clear_rd = and_rd;
-            state->bfx_first_offset = offset;
+            state->bfx_clear_offset = offset;
             snprintf(state->bfx_clear_disasm,
                 sizeof(state->bfx_clear_disasm),
                 "%s %s", insn->mnemonic, insn->op_str);
@@ -11360,6 +11374,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
             state->bfx_isolate_seen = true;
             state->bfx_isolate_rt = and_rd;
             state->bfx_isolate_rn = and_rn;
+            state->bfx_isolate_offset = offset;
             snprintf(state->bfx_isolate_disasm,
                 sizeof(state->bfx_isolate_disasm),
                 "%s %s", insn->mnemonic, insn->op_str);
@@ -11371,7 +11386,7 @@ bool check_bfxil_synth(armlint_state *state, const cs_insn *insn,
             state->bfx_lsb = lsb;
             state->bfx_isolate_rt = and_rd;
             state->bfx_isolate_rn = and_rn;
-            state->bfx_first_offset = offset;
+            state->bfx_isolate_offset = offset;
             snprintf(state->bfx_isolate_disasm,
                 sizeof(state->bfx_isolate_disasm),
                 "%s %s", insn->mnemonic, insn->op_str);
