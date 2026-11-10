@@ -80,13 +80,17 @@
 // invalidation in check_redundant_zext, say), rebuild libarmlint.a and
 // rwfuzz, and expect mismatches within a few thousand programs.
 //
-// Usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] [-k KINDS] MODE
+// Usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] [-k KINDS] [-j JOBS] MODE
 //   -n  programs to generate (default 100000)
 //   -s  seed, mixed into the fixed default one (default 0)
 //   -f  test only the findings whose name contains NAME; the programs
 //       are drawn from a stream of their own, so they stay the same
 //   -k  fail unless findings of at least KINDS names were run, so that a
 //       plant that stops producing its finding does not pass unseen
+//   -j  run the programs in JOBS worker processes (default 1), which
+//       take batches of them as they finish the last; each program is
+//       drawn from its own seed, so the programs and all that is printed
+//       are the same for any JOBS
 // Exit status: 0 when every finding was applied and matched; 1 on a
 // mismatch, on a finding the harness could not apply (an edit the
 // assembler refuses would otherwise drop out of the test silently), or
@@ -142,12 +146,32 @@ int main(void)
 
 // === Randomness ===
 
-// Two streams: one draws the programs, the other the states they run
-// from and the control arm's choices, so that which findings a run
-// tests (-f) does not change the programs it draws.
-static uint64_t gen_rng = 0x9E3779B97F4A7C15ull;
-static uint64_t run_rng = 0xD1B54A32D192ED03ull;
+// Two streams for each program: one draws the program, the other the
+// states it runs from and the control arm's choices, so that which
+// findings a run tests (-f) does not change the programs it draws. Both
+// start from the program's index and the seed (-s), so that a program
+// is the same whichever worker runs it, however many run (-j).
+#define STREAM_GEN 0x9E3779B97F4A7C15ull
+#define STREAM_RUN 0xD1B54A32D192ED03ull
+static uint64_t seed;
+static uint64_t gen_rng, run_rng;
 static uint64_t *rng = &gen_rng;
+
+// splitmix64's finalizer.
+static uint64_t mix64(uint64_t z)
+{
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+// Where program INDEX's STREAM starts: never zero, where xorshift would
+// stay.
+static uint64_t stream_start(long index, uint64_t stream)
+{
+    uint64_t z = mix64(mix64(seed ^ stream) + (uint64_t)index);
+    return z != 0 ? z : stream;
+}
 
 // xorshift64*: fast, and reproducible from the seed.
 static uint64_t rnd(void)
@@ -2408,9 +2432,36 @@ static void analyze(void)
 // original left there is compared with what the rewrite did.
 #define SCRATCH_SIZE 16384u
 static uint32_t *jit;
-static uint8_t scratch[SCRATCH_SIZE] __attribute__((aligned(64)));
+static uint8_t *scratch;
 static uint8_t scratch_init[SCRATCH_SIZE];
 static uint8_t scratch_after[SCRATCH_SIZE];
+
+// The code and the scratch memory sit at the same addresses in every
+// run: their addresses reach the registers (x28 plus an offset, an ADR
+// of the pool), so a control arm's outcome -- or a broken rewrite's --
+// can turn on their bits, which ASLR would change from one run, or one
+// worker, to the next. The addresses are hints, which both kernels take
+// when the range is free. macOS scatters malloc's regions at random
+// over 0x7000000000..0x7fffffffff and takes no hint below it, so they
+// sit above, at 1 TB; a Linux kernel with a 39-bit user space cannot
+// place them there. Where one is not taken the run goes on, and says
+// so.
+#define JIT_AT     0x10000000000ull
+#define SCRATCH_AT 0x10100000000ull
+
+static void *map_at(uint64_t at, size_t size, int prot, int flags)
+{
+    void *m = mmap((void *)(uintptr_t)at, size, prot, flags, -1, 0);
+    if (m == MAP_FAILED) {
+        perror("rwfuzz: mmap");
+        return NULL;
+    }
+    if ((uintptr_t)m != at) {
+        fprintf(stderr, "rwfuzz: memory for %#" PRIx64 " landed at %p, so "
+                "runs may differ in what turns on its address\n", at, m);
+    }
+    return m;
+}
 
 static bool jit_open(void)
 {
@@ -2419,14 +2470,11 @@ static bool jit_open(void)
 #else
     int flags = MAP_PRIVATE | MAP_ANON;
 #endif
-    void *m = mmap(NULL, PROG_MAX * 4u, PROT_READ | PROT_WRITE | PROT_EXEC,
-                   flags, -1, 0);
-    if (m == MAP_FAILED) {
-        perror("rwfuzz: mmap");
-        return false;
-    }
-    jit = m;
-    return true;
+    jit = map_at(JIT_AT, PROG_MAX * 4u, PROT_READ | PROT_WRITE | PROT_EXEC,
+                 flags);
+    scratch = map_at(SCRATCH_AT, SCRATCH_SIZE, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON);
+    return jit != NULL && scratch != NULL;
 }
 
 static void jit_load(const uint32_t *code, size_t words)
@@ -2499,7 +2547,7 @@ static bool guard_open(void)
 static int run(const uint32_t *code, const regs_t *in, regs_t *out)
 {
     jit_load(code, (size_t)nprog);
-    memcpy(scratch, scratch_init, sizeof(scratch));
+    memcpy(scratch, scratch_init, SCRATCH_SIZE);
     *out = *in;
     out->buf = (uint64_t)(uintptr_t)(scratch + SCRATCH_SIZE / 2u);
     if (sigsetjmp(run_env, 1) != 0) {
@@ -2564,21 +2612,21 @@ static void random_state(regs_t *s)
     }
 }
 
-static void dump(const uint32_t *code, const char *heading)
+static void dump(FILE *o, const uint32_t *code, const char *heading)
 {
-    printf("---- %s\n", heading);
+    fprintf(o, "---- %s\n", heading);
     cs_insn *insn = cs_malloc(cs);
     for (int i = 0; i < nprog; i++) {
         const uint8_t *p = (const uint8_t *)&code[i];
         size_t size = 4;
         uint64_t addr = (uint64_t)i * 4u;
         if (i >= POOL_AT && i < body_start) {
-            printf("  %4x: %08x  (pool)\n", i * 4, code[i]);
+            fprintf(o, "  %4x: %08x  (pool)\n", i * 4, code[i]);
         } else if (cs_disasm_iter(cs, &p, &size, &addr, insn)) {
-            printf("  %4x: %08x  %s %s\n", i * 4, code[i], insn->mnemonic,
-                   insn->op_str);
+            fprintf(o, "  %4x: %08x  %s %s\n", i * 4, code[i],
+                    insn->mnemonic, insn->op_str);
         } else {
-            printf("  %4x: %08x  .word\n", i * 4, code[i]);
+            fprintf(o, "  %4x: %08x  .word\n", i * 4, code[i]);
         }
     }
     cs_free(insn, 1);
@@ -2598,16 +2646,16 @@ static bool same_results(const uint32_t *alt, regs_t *diff_in, int *sig)
         random_state(&in);
         int sa = run(prog, &in, &a);
         if (sa != 0) {
-            dump(prog, "the original program");
+            dump(stdout, prog, "the original program");
             fprintf(stderr, "rwfuzz: the original program stopped on "
                     "signal %d\n", sa);
             exit(2);
         }
-        memcpy(scratch_after, scratch, sizeof(scratch));
+        memcpy(scratch_after, scratch, SCRATCH_SIZE);
         int sb = run(alt, &in, &b);
         if (sb != 0 || memcmp(a.x, b.x, sizeof(a.x)) != 0
                 || a.nzcv != b.nzcv || memcmp(a.q, b.q, sizeof(a.q)) != 0
-                || memcmp(scratch_after, scratch, sizeof(scratch)) != 0) {
+                || memcmp(scratch_after, scratch, SCRATCH_SIZE) != 0) {
             if (diff_in != NULL) {
                 *diff_in = in;
             }
@@ -3732,6 +3780,7 @@ static bool wanted(const armlint_finding *f)
 typedef struct {
     const char *name;
     long tested, special, mismatches, unapplied, outside;
+    long noted;         // mismatch reports printed (print_notes)
 } tally_t;
 
 #define TALLIES_MAX 256
@@ -3749,7 +3798,12 @@ static tally_t *tally_for(const char *name)
         fprintf(stderr, "rwfuzz: more than %d finding names\n", TALLIES_MAX);
         exit(2);
     }
-    tallies[ntallies].name = name;
+    // A copy: a name a worker sent lives in a line buffer.
+    tallies[ntallies].name = strdup(name);
+    if (tallies[ntallies].name == NULL) {
+        perror("rwfuzz: strdup");
+        exit(2);
+    }
     return &tallies[ntallies++];
 }
 
@@ -3776,101 +3830,111 @@ static const char *signal_name(int sig)
 }
 
 // The original program with the finding marked, and its edits.
-static void report_mismatch(const hit_t *h, const uint32_t *alt,
+static void report_mismatch(FILE *o, const hit_t *h, const uint32_t *alt,
                             const regs_t *in, int sig)
 {
     char heading[2 * ARMLINT_FINDING_DETAIL_LEN];
     snprintf(heading, sizeof(heading), "MISMATCH at word %zu (%u "
              "instructions): %s: %s", h->start, h->count, h->name,
              h->detail);
-    dump(prog, heading);
+    dump(o, prog, heading);
     for (unsigned i = 0; i < h->nedits; i++) {
         size_t w = h->edits[i].offset / 4u;
-        printf("  edit %4zx: %08x  %s\n", w * 4u, alt[w],
-               h->edits[i].text[0] != '\0' ? h->edits[i].text : "(delete)");
+        fprintf(o, "  edit %4zx: %08x  %s\n", w * 4u, alt[w],
+                h->edits[i].text[0] != '\0' ? h->edits[i].text : "(delete)");
     }
-    printf("  from x0..x7 =");
+    fprintf(o, "  from x0..x7 =");
     for (int r = 0; r < 8; r++) {
-        printf(" %#" PRIx64, in->x[r]);
+        fprintf(o, " %#" PRIx64, in->x[r]);
     }
-    printf(", nzcv = %#" PRIx64 "\n", in->nzcv);
+    fprintf(o, ", nzcv = %#" PRIx64 "\n", in->nzcv);
     if (sig != 0) {
-        printf("  the rewrite stopped on %s\n", signal_name(sig));
+        fprintf(o, "  the rewrite stopped on %s\n", signal_name(sig));
     }
 }
 
-static void usage(void)
+static void report_unapplied(FILE *o, const hit_t *h)
 {
-    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] "
-            "[-k KINDS] MODE\n"
-            "modes:");
-    for (size_t i = 0; i < NMODES; i++) {
-        fprintf(stderr, " %s", modes[i].name);
+    fprintf(o, "could not apply: %s: %s\n", h->name, h->detail);
+    for (unsigned i = 0; i < h->nedits; i++) {
+        fprintf(o, "  edit %4zx: %s\n", h->edits[i].offset,
+                h->edits[i].text[0] != '\0' ? h->edits[i].text : "(delete)");
     }
-    fprintf(stderr, "\n");
+}
+
+// === Running the programs ===
+
+// What the summary prints besides the counts -- a mismatch's report or
+// an unapplied finding's notice -- with where it was found, so that the
+// first ones in program order are printed however the programs were
+// shared out.
+typedef struct {
+    long program;
+    int hit;
+    bool mismatch;      // else an unapplied finding's notice
+    const char *name;
+    char *text;
+} note_t;
+
+static note_t *notes;
+static size_t nnotes, notes_cap;
+static long controls, control_diffs;
+
+static void add_note(long program, int hit, bool mismatch, const char *name,
+                     char *text)
+{
+    if (nnotes == notes_cap) {
+        notes_cap = notes_cap != 0 ? 2u * notes_cap : 64u;
+        notes = realloc(notes, notes_cap * sizeof(*notes));
+        if (notes == NULL) {
+            perror("rwfuzz: realloc");
+            exit(2);
+        }
+    }
+    notes[nnotes++] = (note_t){ program, hit, mismatch, name, text };
+}
+
+// A stream that collects what is written to it, as one string.
+static FILE *note_open(char **text, size_t *len)
+{
+    FILE *o = open_memstream(text, len);
+    if (o == NULL) {
+        perror("rwfuzz: open_memstream");
+        exit(2);
+    }
+    return o;
 }
 
 #define BATCH 256
 
-int main(int argc, char **argv)
+// Run batches of programs, BATCH at a time, taking the next batch's
+// number from *next until all PROGRAMS are done, into the tallies and
+// notes. One process does it all, or -j workers share *next. A worker
+// keeps its first three mismatch reports of each kind and its first five
+// unapplied notices, which hold every one the summary prints.
+static int run_programs(long programs, long *next)
 {
-    long programs = 100000, min_kinds = 0;
-    int opt;
-    while ((opt = getopt(argc, argv, "n:s:f:k:")) != -1) {
-        switch (opt) {
-        case 'n':
-            programs = atol(optarg);
-            break;
-        case 's':
-            gen_rng ^= strtoull(optarg, NULL, 0);
-            run_rng ^= strtoull(optarg, NULL, 0);
-            break;
-        case 'f':
-            only = optarg;
-            break;
-        case 'k':
-            min_kinds = atol(optarg);
-            break;
-        default:
-            usage();
-            return 2;
-        }
-    }
-    if (optind + 1 != argc || programs <= 0) {
-        usage();
+    if (!jit_open() || !guard_open() || !asm_open()) {
         return 2;
     }
-    for (size_t i = 0; i < NMODES; i++) {
-        if (strcmp(argv[optind], modes[i].name) == 0) {
-            mode = &modes[i];
-        }
-    }
-    if (mode == NULL) {
-        usage();
-        return 2;
-    }
-    if (cs_open(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, &cs) != CS_ERR_OK) {
-        fprintf(stderr, "rwfuzz: cs_open failed\n");
-        return 2;
-    }
-    cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
-    // The const audit's rewrites are as concrete as the folds': the
-    // consumer takes the immediate and the chain stays.
-    features = host_features() | ARMLINT_AUDIT_CONST;
     program_t *batch = calloc(BATCH, sizeof(*batch));
-    if (batch == NULL || !jit_open() || !guard_open() || !asm_open()) {
+    if (batch == NULL) {
+        perror("rwfuzz: calloc");
         return 2;
     }
-
-    long tested = 0, special = 0, mismatches = 0, unapplied = 0;
-    long outside = 0, controls = 0, control_diffs = 0, shown = 0;
+    long unapplied = 0;
     uint32_t alt[PROG_MAX];
-    for (long done = 0; done < programs; ) {
-        int n = programs - done < BATCH ? (int)(programs - done) : BATCH;
+    for (;;) {
+        long first = __atomic_fetch_add(next, 1, __ATOMIC_RELAXED) * BATCH;
+        if (first >= programs) {
+            break;
+        }
+        int n = programs - first < BATCH ? (int)(programs - first) : BATCH;
         // Draw the bodies, assemble the plants' texts, then lay each
         // program out and analyze it.
         rng = &gen_rng;
         for (int k = 0; k < n; k++) {
+            gen_rng = stream_start(first + k, STREAM_GEN);
             gen_body(mode->plant);
             memcpy(batch[k].body, body, sizeof(body));
             batch[k].nbody = nbody;
@@ -3899,6 +3963,7 @@ int main(int argc, char **argv)
         }
         rng = &run_rng;
         for (int k = 0; k < n; k++) {
+            run_rng = stream_start(first + k, STREAM_RUN);
             cur = &batch[k];
             memcpy(prog, cur->prog, sizeof(prog));
             nprog = cur->nprog;
@@ -3911,41 +3976,37 @@ int main(int argc, char **argv)
                 memcpy(alt, prog, (size_t)nprog * 4u);
                 int r = apply_edits(hit, alt);
                 if (r == EDITS_OUTSIDE) {
-                    outside++;
                     t->outside++;
                     continue;
                 }
+                char *text;
+                size_t len;
                 if (r != EDITS_APPLY) {
-                    unapplied++;
                     t->unapplied++;
-                    if (unapplied <= 5) {
-                        printf("could not apply: %s: %s\n", hit->name,
-                               hit->detail);
-                        for (unsigned i = 0; i < hit->nedits; i++) {
-                            printf("  edit %4zx: %s\n", hit->edits[i].offset,
-                                   hit->edits[i].text[0] != '\0'
-                                       ? hit->edits[i].text : "(delete)");
-                        }
+                    if (++unapplied <= 5) {
+                        FILE *o = note_open(&text, &len);
+                        report_unapplied(o, hit);
+                        fclose(o);
+                        add_note(first + k, h, false, hit->name, text);
                     }
                     continue;
                 }
                 for (unsigned i = 0; i < hit->nedits; i++) {
                     flagged[hit->edits[i].offset / 4u] = true;
                 }
-                tested++;
                 t->tested++;
                 if (mode->is_special != NULL && mode->is_special(hit)) {
-                    special++;
                     t->special++;
                 }
                 regs_t in;
                 int sig = 0;
                 if (!same_results(alt, &in, &sig)) {
-                    mismatches++;
                     t->mismatches++;
-                    if (t->mismatches <= 3 && shown < 20) {
-                        shown++;
-                        report_mismatch(hit, alt, &in, sig);
+                    if (t->mismatches <= 3) {
+                        FILE *o = note_open(&text, &len);
+                        report_mismatch(o, hit, alt, &in, sig);
+                        fclose(o);
+                        add_note(first + k, h, true, hit->name, text);
                     }
                 }
             }
@@ -3959,15 +4020,273 @@ int main(int argc, char **argv)
                 control_diffs += !same_results(alt, NULL, NULL);
             }
         }
-        done += n;
     }
     asm_close();
+    free(batch);
+    return 0;
+}
 
+// A worker's tallies and notes, sent to the process that started it.
+static void send_results(FILE *o)
+{
+    for (size_t i = 0; i < ntallies; i++) {
+        const tally_t *t = &tallies[i];
+        fprintf(o, "T %ld %ld %ld %ld %ld %s\n", t->tested, t->special,
+                t->mismatches, t->unapplied, t->outside, t->name);
+    }
+    fprintf(o, "C %ld %ld\n", controls, control_diffs);
+    for (size_t i = 0; i < nnotes; i++) {
+        const note_t *nt = &notes[i];
+        fprintf(o, "N %ld %d %d %zu %s\n", nt->program, nt->hit,
+                nt->mismatch, strlen(nt->text), nt->name);
+        fputs(nt->text, o);
+    }
+}
+
+// Add what a worker sent to this process's tallies and notes.
+static bool take_results(FILE *in)
+{
+    char line[512];
+    while (fgets(line, sizeof(line), in) != NULL) {
+        line[strcspn(line, "\n")] = '\0';
+        long v[5];
+        int at = -1;
+        if (sscanf(line, "T %ld %ld %ld %ld %ld %n", &v[0], &v[1], &v[2],
+                   &v[3], &v[4], &at) == 5 && at > 0) {
+            tally_t *t = tally_for(line + at);
+            t->tested += v[0];
+            t->special += v[1];
+            t->mismatches += v[2];
+            t->unapplied += v[3];
+            t->outside += v[4];
+        } else if (sscanf(line, "C %ld %ld", &v[0], &v[1]) == 2) {
+            controls += v[0];
+            control_diffs += v[1];
+        } else {
+            int hit, mismatch;
+            size_t len;
+            if (sscanf(line, "N %ld %d %d %zu %n", &v[0], &hit, &mismatch,
+                       &len, &at) != 4 || at <= 0) {
+                return false;
+            }
+            char *text = malloc(len + 1u);
+            if (text == NULL || fread(text, 1, len, in) != len) {
+                free(text);
+                return false;
+            }
+            text[len] = '\0';
+            add_note(v[0], hit, mismatch != 0, tally_for(line + at)->name,
+                     text);
+        }
+    }
+    return true;
+}
+
+// Fork JOBS workers that share *next, and take in their results; false
+// if one could not be started, sent what could not be read, or did not
+// finish (its own message says why).
+static bool run_workers(long programs, long *next, int jobs)
+{
+    FILE **from = calloc((size_t)jobs, sizeof(*from));
+    pid_t *pids = calloc((size_t)jobs, sizeof(*pids));
+    if (from == NULL || pids == NULL) {
+        perror("rwfuzz: calloc");
+        return false;
+    }
+    fflush(stdout);
+    fflush(stderr);
+    int started = 0;
+    bool ok = true;
+    for (; started < jobs; started++) {
+        int fd[2];
+        if (pipe(fd) != 0) {
+            perror("rwfuzz: pipe");
+            ok = false;
+            break;
+        }
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("rwfuzz: fork");
+            close(fd[0]);
+            close(fd[1]);
+            ok = false;
+            break;
+        }
+        if (pid == 0) {
+            // The earlier workers' read ends came along; this one needs
+            // only its own write end.
+            for (int w = 0; w < started; w++) {
+                fclose(from[w]);
+            }
+            close(fd[0]);
+            FILE *o = fdopen(fd[1], "w");
+            int rc = o != NULL ? run_programs(programs, next) : 2;
+            if (rc == 0) {
+                send_results(o);
+            }
+            if (o != NULL && fclose(o) != 0) {
+                rc = 2;
+            }
+            fflush(stdout);
+            _exit(rc);
+        }
+        close(fd[1]);
+        pids[started] = pid;
+        from[started] = fdopen(fd[0], "r");
+        if (from[started] == NULL) {
+            perror("rwfuzz: fdopen");
+            close(fd[0]);
+            started++;
+            ok = false;
+            break;
+        }
+    }
+    if (!ok) {
+        for (int w = 0; w < started; w++) {
+            kill(pids[w], SIGTERM);
+        }
+    }
+    for (int w = 0; w < started; w++) {
+        if (from[w] != NULL) {
+            if (ok && !take_results(from[w])) {
+                fprintf(stderr, "rwfuzz: worker %d sent what could not be "
+                        "read\n", w);
+                ok = false;
+            }
+            fclose(from[w]);
+        }
+        int status;
+        if (waitpid(pids[w], &status, 0) < 0 || !WIFEXITED(status)
+                || WEXITSTATUS(status) != 0) {
+            ok = false;
+        }
+    }
+    free(from);
+    free(pids);
+    return ok;
+}
+
+static int by_place(const void *a, const void *b)
+{
+    const note_t *x = a, *y = b;
+    if (x->program != y->program) {
+        return x->program < y->program ? -1 : 1;
+    }
+    return (x->hit > y->hit) - (x->hit < y->hit);
+}
+
+// The notes one process running the programs in order would print as it
+// went: the first three mismatch reports of each kind, twenty at most,
+// and the first five unapplied notices.
+static void print_notes(void)
+{
+    qsort(notes, nnotes, sizeof(*notes), by_place);
+    long shown = 0, unapplied = 0;
+    for (size_t i = 0; i < nnotes; i++) {
+        const note_t *nt = &notes[i];
+        bool print;
+        if (nt->mismatch) {
+            print = ++tally_for(nt->name)->noted <= 3 && shown < 20;
+            shown += print;
+        } else {
+            print = ++unapplied <= 5;
+        }
+        if (print) {
+            fputs(nt->text, stdout);
+        }
+    }
+}
+
+static void usage(void)
+{
+    fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] "
+            "[-k KINDS] [-j JOBS] MODE\n"
+            "modes:");
+    for (size_t i = 0; i < NMODES; i++) {
+        fprintf(stderr, " %s", modes[i].name);
+    }
+    fprintf(stderr, "\n");
+}
+
+int main(int argc, char **argv)
+{
+    long programs = 100000, min_kinds = 0, jobs = 1;
+    int opt;
+    while ((opt = getopt(argc, argv, "n:s:f:k:j:")) != -1) {
+        switch (opt) {
+        case 'n':
+            programs = atol(optarg);
+            break;
+        case 's':
+            seed = strtoull(optarg, NULL, 0);
+            break;
+        case 'f':
+            only = optarg;
+            break;
+        case 'k':
+            min_kinds = atol(optarg);
+            break;
+        case 'j':
+            jobs = atol(optarg);
+            break;
+        default:
+            usage();
+            return 2;
+        }
+    }
+    if (optind + 1 != argc || programs <= 0 || jobs <= 0 || jobs > 1024) {
+        usage();
+        return 2;
+    }
+    for (size_t i = 0; i < NMODES; i++) {
+        if (strcmp(argv[optind], modes[i].name) == 0) {
+            mode = &modes[i];
+        }
+    }
+    if (mode == NULL) {
+        usage();
+        return 2;
+    }
+    if (cs_open(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, &cs) != CS_ERR_OK) {
+        fprintf(stderr, "rwfuzz: cs_open failed\n");
+        return 2;
+    }
+    cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
+    // The const audit's rewrites are as concrete as the folds': the
+    // consumer takes the immediate and the chain stays.
+    features = host_features() | ARMLINT_AUDIT_CONST;
+
+    // The next batch to run, in memory the workers share.
+    long *next = mmap(NULL, sizeof(*next), PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_ANON, -1, 0);
+    if (next == MAP_FAILED) {
+        perror("rwfuzz: mmap");
+        return 2;
+    }
+    *next = 0;
+    if (jobs == 1) {
+        int rc = run_programs(programs, next);
+        if (rc != 0) {
+            return rc;
+        }
+    } else if (!run_workers(programs, next, (int)jobs)) {
+        return 2;
+    }
+    print_notes();
+
+    long tested = 0, special = 0, mismatches = 0, unapplied = 0;
+    long outside = 0;
     // The kinds a finding of which ran; a kind seen only in the
     // harness's code, or only unapplied, does not count.
     size_t kinds = 0;
     for (size_t i = 0; i < ntallies; i++) {
-        kinds += tallies[i].tested != 0;
+        const tally_t *t = &tallies[i];
+        tested += t->tested;
+        special += t->special;
+        mismatches += t->mismatches;
+        unapplied += t->unapplied;
+        outside += t->outside;
+        kinds += t->tested != 0;
     }
     if (mode->special != NULL) {
         printf("rwfuzz %s: %ld programs, %ld findings run (%ld %s), "

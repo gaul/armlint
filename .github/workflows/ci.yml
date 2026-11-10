@@ -173,8 +173,10 @@ jobs:
       - name: Build
         run: make tools/rwfuzz
 
+      # A worker per CPU; the output does not depend on how many.
+      # getconf rather than nproc, which macOS lacks.
       - name: Run rwfuzz
-        run: make rwfuzz-test
+        run: RWFUZZ_JOBS="$(getconf _NPROCESSORS_ONLN)" make rwfuzz-test
 
   rwfuzz-long:
     # rwfuzz again on programs no run has drawn before: the seed is this
@@ -212,8 +214,10 @@ jobs:
       - name: Build
         run: make tools/rwfuzz
 
+      # A worker per CPU; the output does not depend on how many.
+      # getconf rather than nproc, which macOS lacks.
       - name: Run rwfuzz
-        run: make rwfuzz-test
+        run: RWFUZZ_JOBS="$(getconf _NPROCESSORS_ONLN)" make rwfuzz-test
 
   liveness-sweep:
     # Exhaustive liveness-vs-Capstone cross-check over the entire

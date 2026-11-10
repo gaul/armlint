@@ -12,6 +12,8 @@
 #
 #   RWFUZZ_PROGRAMS   programs for `all` (default 20000)
 #   RWFUZZ_SEED       seed (default 0: the same programs every run)
+#   RWFUZZ_JOBS       worker processes (default 1); what rwfuzz prints
+#                     does not depend on it
 #   RWFUZZ_MIN_KINDS  the floor on the kinds `all` runs (default 150)
 #   RWFUZZ_CC         the compiler driver rwfuzz assembles with
 #                     (default cc)
@@ -35,6 +37,7 @@ fi
 
 PROGRAMS=${RWFUZZ_PROGRAMS:-20000}
 SEED=${RWFUZZ_SEED:-0}
+JOBS=${RWFUZZ_JOBS:-1}
 MIN_KINDS=${RWFUZZ_MIN_KINDS:-150}
 SHORT=$((PROGRAMS / 10 > 0 ? PROGRAMS / 10 : 1))
 MODES=$("$RWFUZZ" 2>&1 | sed -n 's/^modes: //p')
@@ -50,7 +53,7 @@ FAIL=0
 run_mode() {
     local mode=$1
     shift
-    local cmd=("$RWFUZZ" -s "$SEED" "$@" "$mode")
+    local cmd=("$RWFUZZ" -s "$SEED" -j "$JOBS" "$@" "$mode")
     echo "== ${cmd[*]}"
     set +e
     "${cmd[@]}" >"$T/out" 2>&1

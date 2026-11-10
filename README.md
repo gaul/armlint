@@ -260,10 +260,11 @@ natively, in each of its modes. It fails on a difference, on a rewrite
 it cannot apply, on a control arm that never saw a refused rewrite
 change a result, or when `all` runs fewer finding kinds than
 `RWFUZZ_MIN_KINDS` (150). `RWFUZZ_PROGRAMS` (20000) and `RWFUZZ_SEED`
-size and vary the run. CI runs it on every PR with the default seed,
-under gcc's assembler and clang's on Linux, and on pushes to master,
-weekly and on demand with the run's id as the seed and ten times the
-programs.
+size and vary the run, and `RWFUZZ_JOBS` (1) spreads it over worker
+processes without changing what it prints. CI runs it with a worker
+per CPU: on every PR with the default seed, under gcc's assembler and
+clang's on Linux, and on pushes to master, weekly and on demand with
+the run's id as the seed and ten times the programs.
 
 Setting `ARMLINT_LIVENESS_SWEEP=1` extends the unit tests' liveness
 cross-checks against Capstone to the entire 2^32 encoding space --
@@ -1303,20 +1304,23 @@ backlog -- and one that checks the checks -- built separately with
   across the corpus. Carries its own `--selftest`; needs numpy.
 * `tools/rwfuzz` checks armlint's advice by running it. It generates
   random AArch64 programs, applies the rewrite of every finding in
-  them to a copy, and runs original and rewrite natively from the
-  same random registers, vector registers, flags and memory: any
-  difference is a soundness bug. Every finding states its rewrite as
-  edits to its window (`armlint_edit`), spelled as the advice is, and
-  rwfuzz assembles them with the host's assembler, so any check's
-  advice can be run and what runs is what a reader sees.
-  `tools/rwfuzz all` plants shapes for every check family and reports
-  by finding name; a mode per check (`zext`, `ccmp`, `cbc`, ...) or per
-  family (`mem`, `arith`, `fp`, `lse`) narrows that, and `-f NAME`
-  narrows it to one finding over the same programs. A control arm
-  applies a rewrite where armlint refused to, so a harness that
-  stopped seeing differences would show it. Needs an AArch64 host,
-  since the programs run natively, and a C compiler driver that
-  assembles (`RWFUZZ_CC`, default `cc`); links `libarmlint.a`.
+  them to a copy, and runs original and rewrite natively from the same
+  random registers, vector registers, flags and memory: any difference
+  is a soundness bug. Every finding states its rewrite as edits to its
+  window (`armlint_edit`), spelled as the advice is, and rwfuzz
+  assembles them with the host's assembler, so any check's advice can
+  be run and what runs is what a reader sees. `tools/rwfuzz all`
+  plants shapes for every check family and reports by finding name; a
+  mode per check (`zext`, `ccmp`, `cbc`, ...) or per family (`mem`,
+  `arith`, `fp`, `lse`) narrows that, and `-f NAME` narrows it to one
+  finding over the same programs. `-j JOBS` runs the programs in that
+  many worker processes; each program has its own seed and its code
+  and memory fixed addresses, so the output is the same for any JOBS.
+  A control arm applies a rewrite where armlint refused to, so a
+  harness that stopped seeing differences would show it. Needs an
+  AArch64 host, since the programs run natively, and a C compiler
+  driver that assembles (`RWFUZZ_CC`, default `cc`); links
+  `libarmlint.a`.
 * `tools/tblgen_audit.py` checks armlint's flag and register model
   against LLVM's own instruction definitions. `llvm-tblgen --dump-json`
   on `AArch64.td` lists every A64 instruction with its encoding and
