@@ -98,7 +98,8 @@
 // error, a run that tested no finding included.
 //
 // The programs run on the host, so rwfuzz needs an AArch64 one: MAP_JIT
-// memory on macOS, plain read-write-execute memory elsewhere. It turns
+// memory on macOS, and on Linux memory mapped twice, written through one
+// view and run from the other, which is not writable. It turns
 // on the armlint features whose instructions the host runs (LSE, SHA3,
 // LRCPC2, FP16, CSSC, CMPBR) and assembles with RWFUZZ_CC (default cc)
 // under a matching -march. Built by `make tools`; it links libarmlint.a.
@@ -2431,7 +2432,8 @@ static void analyze(void)
 // immediate, or an unscaled negative offset, stays inside it. What the
 // original left there is compared with what the rewrite did.
 #define SCRATCH_SIZE 16384u
-static uint32_t *jit;
+static uint32_t *jit;           // the code as it runs
+static uint32_t *jit_rw;        // ... and as it is written (jit on macOS)
 static uint8_t *scratch;
 static uint8_t scratch_init[SCRATCH_SIZE];
 static uint8_t scratch_after[SCRATCH_SIZE];
@@ -2446,17 +2448,24 @@ static uint8_t scratch_after[SCRATCH_SIZE];
 // sit above, at 1 TB; a Linux kernel with a 39-bit user space cannot
 // place them there. Where one is not taken the run goes on, and says
 // so.
-#define JIT_AT     0x10000000000ull
+//
+// The code sits 3 GB below x28: off the multiples of 2 GB that the
+// edge values move a base by (0x80000000, 1 << 32, a top half of ones),
+// so that a base a refused rewrite left off by one of them meets
+// unmapped memory rather than the program. At 4 GB below, the control
+// arm reached into the code.
+#define JIT_AT     0x10040000000ull
 #define SCRATCH_AT 0x10100000000ull
 
-static void *map_at(uint64_t at, size_t size, int prot, int flags)
+// Map SIZE bytes at AT (none in particular when 0), of FD or anonymous.
+static void *map_at(uint64_t at, size_t size, int prot, int flags, int fd)
 {
-    void *m = mmap((void *)(uintptr_t)at, size, prot, flags, -1, 0);
+    void *m = mmap((void *)(uintptr_t)at, size, prot, flags, fd, 0);
     if (m == MAP_FAILED) {
         perror("rwfuzz: mmap");
         return NULL;
     }
-    if ((uintptr_t)m != at) {
+    if (at != 0 && (uintptr_t)m != at) {
         fprintf(stderr, "rwfuzz: memory for %#" PRIx64 " landed at %p, so "
                 "runs may differ in what turns on its address\n", at, m);
     }
@@ -2465,16 +2474,39 @@ static void *map_at(uint64_t at, size_t size, int prot, int flags)
 
 static bool jit_open(void)
 {
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t size = (PROG_MAX * 4u + page - 1u) / page * page;
 #if defined(__APPLE__)
-    int flags = MAP_PRIVATE | MAP_ANON | MAP_JIT;
+    jit = map_at(JIT_AT, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                 MAP_PRIVATE | MAP_ANON | MAP_JIT, -1);
+    jit_rw = jit;
 #else
-    int flags = MAP_PRIVATE | MAP_ANON;
+    // Two views of one memory, the way a JIT keeps W^X: the code is
+    // written through one and runs from the other, which the program
+    // cannot write. A store a refused rewrite aims into the code then
+    // faults, as macOS's write protection makes it there, rather than
+    // changing the program under it.
+    int fd = -1;
+#if defined(MFD_EXEC)
+    // Executable by request: since Linux 6.3, vm.memfd_noexec can make
+    // a memfd that asks for nothing unexecutable. A kernel from before
+    // knows no MFD_EXEC, and refuses it.
+    fd = memfd_create("rwfuzz", MFD_CLOEXEC | MFD_EXEC);
 #endif
-    jit = map_at(JIT_AT, PROG_MAX * 4u, PROT_READ | PROT_WRITE | PROT_EXEC,
-                 flags);
+    if (fd < 0) {
+        fd = memfd_create("rwfuzz", MFD_CLOEXEC);
+    }
+    if (fd < 0 || ftruncate(fd, (off_t)size) != 0) {
+        perror("rwfuzz: memfd_create");
+        return false;
+    }
+    jit_rw = map_at(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd);
+    jit = map_at(JIT_AT, size, PROT_READ | PROT_EXEC, MAP_SHARED, fd);
+    close(fd);
+#endif
     scratch = map_at(SCRATCH_AT, SCRATCH_SIZE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANON);
-    return jit != NULL && scratch != NULL;
+                     MAP_PRIVATE | MAP_ANON, -1);
+    return jit != NULL && jit_rw != NULL && scratch != NULL;
 }
 
 static void jit_load(const uint32_t *code, size_t words)
@@ -2485,7 +2517,10 @@ static void jit_load(const uint32_t *code, size_t words)
     pthread_jit_write_protect_np(1);
     sys_icache_invalidate(jit, words * 4u);
 #else
-    memcpy(jit, code, words * 4u);
+    memcpy(jit_rw, code, words * 4u);
+    // Cleaned to the point of unification through the view written,
+    // and invalidated in the instruction cache through the view run.
+    __builtin___clear_cache((char *)jit_rw, (char *)(jit_rw + words));
     __builtin___clear_cache((char *)jit, (char *)(jit + words));
 #endif
 }
@@ -2501,6 +2536,50 @@ static sigjmp_buf run_env;
 static volatile sig_atomic_t run_active, run_signal;
 static volatile unsigned long run_seq, run_seen;
 
+// Where rwfuzz is, for a fault outside a run: that one is rwfuzz's own
+// (or a run's that corrupted it), and kills it, so the handler says
+// where before it does -- what is printed at the end never will be.
+static const char *volatile at_phase = "starting";
+static volatile long at_program = -1;
+
+static const char *signal_name(int sig);
+
+// Append S to the message in BUF at *N, as far as CAP allows; a signal
+// handler cannot call printf.
+static void note_str(char *buf, size_t cap, size_t *n, const char *s)
+{
+    for (; *s != '\0' && *n + 1u < cap; s++) {
+        buf[(*n)++] = *s;
+    }
+}
+
+static void note_crash(int sig)
+{
+    char buf[160], digits[24];
+    size_t n = 0, d = 0;
+    unsigned long v = at_program < 0 ? 0 : (unsigned long)at_program;
+    do {
+        digits[d++] = (char)('0' + v % 10u);
+        v /= 10u;
+    } while (v != 0 && d < sizeof(digits));
+    char num[24];
+    for (size_t i = 0; i < d; i++) {
+        num[i] = digits[d - 1u - i];
+    }
+    num[d] = '\0';
+    note_str(buf, sizeof(buf), &n, "rwfuzz: ");
+    note_str(buf, sizeof(buf), &n, signal_name(sig));
+    note_str(buf, sizeof(buf), &n, " outside a run, ");
+    note_str(buf, sizeof(buf), &n, at_phase);
+    if (at_program >= 0) {
+        note_str(buf, sizeof(buf), &n, " program ");
+        note_str(buf, sizeof(buf), &n, num);
+    }
+    note_str(buf, sizeof(buf), &n, "\n");
+    ssize_t w = write(2, buf, n);
+    (void)w;
+}
+
 static void on_signal(int sig)
 {
     if (sig == SIGALRM) {
@@ -2514,6 +2593,7 @@ static void on_signal(int sig)
         run_signal = sig;
         siglongjmp(run_env, 1);
     }
+    note_crash(sig);
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -3824,6 +3904,9 @@ static const char *signal_name(int sig)
     case SIGILL: return "SIGILL";
     case SIGTRAP: return "SIGTRAP";
     case SIGFPE: return "SIGFPE";
+    case SIGABRT: return "SIGABRT";
+    case SIGKILL: return "SIGKILL";
+    case SIGTERM: return "SIGTERM";
     case SIGALRM: return "a timeout";
     default: return "a signal";
     }
@@ -3933,17 +4016,23 @@ static int run_programs(long programs, long *next)
         // Draw the bodies, assemble the plants' texts, then lay each
         // program out and analyze it.
         rng = &gen_rng;
+        at_phase = "drawing";
         for (int k = 0; k < n; k++) {
+            at_program = first + k;
             gen_rng = stream_start(first + k, STREAM_GEN);
             gen_body(mode->plant);
             memcpy(batch[k].body, body, sizeof(body));
             batch[k].nbody = nbody;
         }
+        at_phase = "assembling the batch from";
+        at_program = first;
         if (!asm_flush()) {
             asm_close();
             return 2;
         }
+        at_phase = "analyzing";
         for (int k = 0; k < n; k++) {
+            at_program = first + k;
             cur = &batch[k];
             memcpy(body, cur->body, sizeof(body));
             nbody = cur->nbody;
@@ -3957,12 +4046,16 @@ static int run_programs(long programs, long *next)
                 request_edits(&cur->hits[h]);
             }
         }
+        at_phase = "assembling the batch from";
+        at_program = first;
         if (!asm_flush()) {
             asm_close();
             return 2;
         }
         rng = &run_rng;
+        at_phase = "running";
         for (int k = 0; k < n; k++) {
+            at_program = first + k;
             run_rng = stream_start(first + k, STREAM_RUN);
             cur = &batch[k];
             memcpy(prog, cur->prog, sizeof(prog));
@@ -4141,14 +4234,18 @@ static bool run_workers(long programs, long *next, int jobs)
             break;
         }
     }
-    if (!ok) {
+    // The workers started are stopped if not all could be. Otherwise
+    // each is read to the end even after another has failed, so that no
+    // closed pipe kills it.
+    bool stopped = !ok;
+    if (stopped) {
         for (int w = 0; w < started; w++) {
             kill(pids[w], SIGTERM);
         }
     }
     for (int w = 0; w < started; w++) {
         if (from[w] != NULL) {
-            if (ok && !take_results(from[w])) {
+            if (!take_results(from[w])) {
                 fprintf(stderr, "rwfuzz: worker %d sent what could not be "
                         "read\n", w);
                 ok = false;
@@ -4156,8 +4253,18 @@ static bool run_workers(long programs, long *next, int jobs)
             fclose(from[w]);
         }
         int status;
-        if (waitpid(pids[w], &status, 0) < 0 || !WIFEXITED(status)
-                || WEXITSTATUS(status) != 0) {
+        if (waitpid(pids[w], &status, 0) < 0) {
+            perror("rwfuzz: waitpid");
+            ok = false;
+        } else if (WIFSIGNALED(status)) {
+            if (!stopped || WTERMSIG(status) != SIGTERM) {
+                fprintf(stderr, "rwfuzz: worker %d died on %s (signal %d)\n",
+                        w, signal_name(WTERMSIG(status)), WTERMSIG(status));
+            }
+            ok = false;
+        } else if (WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "rwfuzz: worker %d exited with status %d\n", w,
+                    WEXITSTATUS(status));
             ok = false;
         }
     }
