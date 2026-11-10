@@ -1164,6 +1164,16 @@ static void maybe_kill(unsigned r)
     }
 }
 
+// The same, seven times in eight: for a plant whose finding needs the
+// temp dead, so that most of them make it.
+static void mostly_kill(unsigned r)
+{
+    if (rr(8) != 0) {
+        unsigned v = 0xD1Eu + rr(16);
+        push_text("mov x%u, #%u", r, v);
+    }
+}
+
 // An immediate to move a base by, sized for the access or not.
 static unsigned base_step(const access_kind *k)
 {
@@ -1640,7 +1650,13 @@ static void plant_arith_at(unsigned shape)
         break;
     }
     case 9: {
-        // CSET or CSETM, then EOR #1, NEG, or a branch on it.
+        // CSET or CSETM, then EOR #1, NEG, or a branch on it: CBZ or
+        // CBNZ at either width, or TBZ or TBNZ of bit 0. Deleting the
+        // CSET needs its register dead on both edges, which a branch to
+        // a random target and a kill half the time rarely gave (1.9% of
+        // these plants); so half the branches go to a kill one
+        // instruction past the fall-through, which both edges reach.
+        static const unsigned forms[] = { 0, 1, 3, 4, 5, 6 };
         unsigned j = rr(4);
         push_text("cmp %c%u, %c%u", w, b, w, c);
         push_text("cset w%u, %s", a, cc);
@@ -1649,8 +1665,16 @@ static void plant_arith_at(unsigned shape)
         } else if (j == 1) {
             push_text("neg w%u, w%u", d, a);
         } else {
-            unsigned form = j == 2 ? 3u + 2u * rr(2) : 6u;
-            push_branch(form, a, 0, 0);
+            push_branch(forms[rr(6)], a, 0, 0);
+            if (rr(2) == 0) {
+                body[nbody - 1].aim = 2;
+                unsigned g = reg_besides(a, a);
+                unsigned m = reg_besides(a, g);
+                unsigned n = reg_besides(a, m);
+                push_text("eor x%u, x%u, x%u", g, m, n);
+                push_text("mov x%u, #%u", a, 0xD1Eu + rr(16));
+                break;
+            }
         }
         maybe_kill(a);
         break;
@@ -1739,11 +1763,14 @@ static void plant_arith_at(unsigned shape)
     }
     case 13: {
         // BFI/BFXIL synthesized: clear a field, isolate one, OR them.
-        unsigned lsb = rr(width / 2u);
+        // BFXIL wants the field at bit 0, which a uniform lsb gave 1
+        // time in 16 or 32, so half the clear-and-isolate draws put it
+        // there; the others are BFI's, by UBFIZ.
+        unsigned j = rr(3);
+        unsigned lsb = j != 2 && rr(2) == 0 ? 0 : rr(width / 2u);
         unsigned len = 1u + rr(width / 2u - 1u);
         uint64_t field = ((1ull << len) - 1u) << lsb;
         uint64_t keep = ~field & (x ? ~0ull : 0xFFFFFFFFull);
-        unsigned j = rr(3);
         if (j == 2) {
             push_text("and %c%u, %c%u, #0x%llx", w, d, w, d,
                       (unsigned long long)((1ull << lsb) - 1u | (lsb == 0 ? 1u : 0u)));
@@ -1760,7 +1787,7 @@ static void plant_arith_at(unsigned shape)
             push_text("ubfiz %c%u, %c%u, #%u, #%u", w, a, w, b, lsb, len);
         }
         push_text("orr %c%u, %c%u, %c%u", w, d, w, d, w, a);
-        maybe_kill(a);
+        mostly_kill(a);
         break;
     }
     case 14: {
@@ -1781,6 +1808,31 @@ static void plant_arith_at(unsigned shape)
         // immediate, two of them, or neither.
         static const char *const op[] = { "and", "orr", "eor", "ands",
                                           "bic", "orn", "eon", "tst" };
+        uint64_t m = x ? ~0ull : 0xFFFFFFFFull;
+        if (rr(4) == 0) {
+            // The operand narrowed to its low k bits first, then a
+            // constant whose low k bits are a run -- an immediate there
+            // -- and which is not one, for a bit past a gap above:
+            // known bits make the run do.
+            static const char *const kop[] = { "and", "ands", "tst" };
+            unsigned k = 4u + rr(width - 12u);
+            unsigned plen = 2u + rr(k - 2u);
+            unsigned plo = rr(k - plen + 1u);
+            uint64_t v = ((1ull << plen) - 1u) << plo
+                | 1ull << (k + 1u + rr(width - k - 1u));
+            unsigned o = rr(3);
+            push_text("and %c%u, %c%u, #0x%llx", w, b, w, c,
+                      (unsigned long long)((1ull << k) - 1u));
+            push_chain(w, a, v);
+            if (o == 2) {
+                push_text("tst %c%u, %c%u", w, b, w, a);
+            } else {
+                push_text("%s %c%u, %c%u, %c%u", kop[o], w, d, w, b, w,
+                          a);
+            }
+            mostly_kill(a);
+            break;
+        }
         unsigned j = rr(8);
         unsigned lo = rr(width - 1u);
         unsigned len = 1u + rr(width - lo - 1u);
@@ -1789,9 +1841,24 @@ static void plant_arith_at(unsigned shape)
         if (rr(3) == 0) {
             v ^= 1ull << flip;          // two runs now and then
         }
-        if (!x) {
-            v &= 0xFFFFFFFFull;
+        if (j >= 4u && j <= 6u && rr(2) == 0) {
+            // For BIC, ORN and EON, half the time a constant whose
+            // inverse -- the immediate they need -- splits into two, as
+            // their constants inverted from the draw above rarely did: a
+            // run of ones with a gap in it, the run and all but the gap
+            // for an AND, the two pieces for an ORR or EOR. It spans
+            // more than a halfword, so no one MOV builds the constant.
+            unsigned span = 17u + rr(width - 17u);
+            unsigned rlo = rr(width - span + 1u);
+            unsigned rhi = rlo + span - 1u;
+            unsigned g0 = rlo + 1u + rr(span - 2u);
+            unsigned g1 = g0 + rr(rhi - g0);
+            uint64_t run = (rhi == 63u ? ~0ull : (2ull << rhi) - 1u)
+                & ~((1ull << rlo) - 1u);
+            uint64_t gap = ((2ull << g1) - 1u) & ~((1ull << g0) - 1u);
+            v = ~(run & ~gap);
         }
+        v &= m;
         push_chain(w, a, v);
         if (j == 7) {
             push_text("tst %c%u, %c%u", w, b, w, a);
