@@ -1313,13 +1313,17 @@ backlog -- and one that checks the checks -- built separately with
   plants shapes for every check family and reports by finding name; a
   mode per check (`zext`, `ccmp`, `cbc`, ...) or per family (`mem`,
   `arith`, `fp`, `lse`) narrows that, and `-f NAME` narrows it to one
-  finding over the same programs. `-j JOBS` runs the programs in that
-  many worker processes; each program has its own seed and its code
-  and memory fixed addresses, so the output is the same for any JOBS.
-  A control arm applies a rewrite where armlint refused to, so a
-  harness that stopped seeing differences would show it. Needs an
-  AArch64 host, since the programs run natively, and a C compiler
-  driver that assembles (`RWFUZZ_CC`, default `cc`); links
+  finding over the same programs. `all` and the family modes run one
+  in 8 of the findings the random filler produces in nearly every
+  program (dead writes, branches to the next instruction, unread
+  flags, constant folds), and `all` one in 8 of its control rewrites,
+  so that the time goes to the rarer kinds. `-j JOBS` runs the
+  programs in that many worker processes; each program has its own
+  seed and its code and memory fixed addresses, so the output is the
+  same for any JOBS. A control arm applies a rewrite where armlint
+  refused to, so a harness that stopped seeing differences would show
+  it. Needs an AArch64 host, since the programs run natively, and a C
+  compiler driver that assembles (`RWFUZZ_CC`, default `cc`); links
   `libarmlint.a`.
 * `tools/tblgen_audit.py` checks armlint's flag and register model
   against LLVM's own instruction definitions. `llvm-tblgen --dump-json`

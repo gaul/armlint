@@ -70,7 +70,10 @@
 // and all plants any shape of any of them -- the 74 equally likely, a
 // family's shapes counted one by one -- and tests every finding with a
 // rewrite, reporting by finding name. A finding whose edits touch the
-// harness's own code is left alone and counted apart.
+// harness's own code is left alone and counted apart. The four kinds the
+// filler produces on its own in nearly every program (filler_kinds)
+// these modes run one in 8 of, and all one in 8 of its control arm's
+// rewrites: they had taken 41% of the time.
 //
 // A control arm applies the same kind of rewrite where armlint REFUSED
 // to -- an unflagged consumer deleted, an unflagged shift + AND folded,
@@ -3919,9 +3922,27 @@ static bool wanted(const armlint_finding *f)
 
 // === Tallies ===
 
+// The kinds the filler between the plants produces on its own, in
+// nearly every program: millions of findings in a long run, which took
+// 22% of its time, and the control arm, which need only show that a
+// difference is seen, 19%. all and the family modes run one in SAMPLE
+// of these findings, and all one in SAMPLE of the control arm's
+// rewrites. The choice is drawn from the program's run stream, so it is
+// the same for any -j; -f, which asks for its findings by name, runs
+// them all.
+static const char *const filler_kinds[] = {
+    "register write overwritten unread",
+    "branch to the next instruction is a no-op",
+    "compare whose flags are overwritten unread",
+    "operation on known values foldable to MOV #imm",
+};
+#define SAMPLE 8u
+
 typedef struct {
     const char *name;
+    bool filler;        // one of filler_kinds
     long tested, special, mismatches, unapplied, outside;
+    long skipped;       // left unrun by the sampling
     long noted;         // mismatch reports printed (print_notes)
 } tally_t;
 
@@ -3945,6 +3966,10 @@ static tally_t *tally_for(const char *name)
     if (tallies[ntallies].name == NULL) {
         perror("rwfuzz: strdup");
         exit(2);
+    }
+    for (size_t i = 0; i < sizeof(filler_kinds) / sizeof(filler_kinds[0]);
+         i++) {
+        tallies[ntallies].filler |= strcmp(filler_kinds[i], name) == 0;
     }
     return &tallies[ntallies++];
 }
@@ -4023,7 +4048,7 @@ typedef struct {
 
 static note_t *notes;
 static size_t nnotes, notes_cap;
-static long controls, control_diffs;
+static long controls, control_diffs, control_skipped;
 
 static void add_note(long program, int hit, bool mismatch, const char *name,
                      char *text)
@@ -4068,6 +4093,7 @@ static int run_programs(long programs, long *next)
         return 2;
     }
     long unapplied = 0;
+    bool sample = mode->findings[0] == NULL;
     uint32_t alt[PROG_MAX];
     for (;;) {
         long first = __atomic_fetch_add(next, 1, __ATOMIC_RELAXED) * BATCH;
@@ -4149,6 +4175,14 @@ static int run_programs(long programs, long *next)
                 for (unsigned i = 0; i < hit->nedits; i++) {
                     flagged[hit->edits[i].offset / 4u] = true;
                 }
+                // Its words stay flagged when it goes unrun, so that the
+                // control arm does not take armlint's own find for one
+                // it refused.
+                if (sample && only == NULL && t->filler
+                        && rr(SAMPLE) != 0) {
+                    t->skipped++;
+                    continue;
+                }
                 t->tested++;
                 if (mode->is_special != NULL && mode->is_special(hit)) {
                     t->special++;
@@ -4171,6 +4205,10 @@ static int run_programs(long programs, long *next)
                 if (flagged[i] || !mode->control(i, alt)) {
                     continue;
                 }
+                if (sample && rr(SAMPLE) != 0) {
+                    control_skipped++;
+                    continue;
+                }
                 controls++;
                 control_diffs += !same_results(alt, NULL, NULL);
             }
@@ -4186,10 +4224,10 @@ static void send_results(FILE *o)
 {
     for (size_t i = 0; i < ntallies; i++) {
         const tally_t *t = &tallies[i];
-        fprintf(o, "T %ld %ld %ld %ld %ld %s\n", t->tested, t->special,
-                t->mismatches, t->unapplied, t->outside, t->name);
+        fprintf(o, "T %ld %ld %ld %ld %ld %ld %s\n", t->tested, t->special,
+                t->mismatches, t->unapplied, t->outside, t->skipped, t->name);
     }
-    fprintf(o, "C %ld %ld\n", controls, control_diffs);
+    fprintf(o, "C %ld %ld %ld\n", controls, control_diffs, control_skipped);
     for (size_t i = 0; i < nnotes; i++) {
         const note_t *nt = &notes[i];
         fprintf(o, "N %ld %d %d %zu %s\n", nt->program, nt->hit,
@@ -4204,19 +4242,21 @@ static bool take_results(FILE *in)
     char line[512];
     while (fgets(line, sizeof(line), in) != NULL) {
         line[strcspn(line, "\n")] = '\0';
-        long v[5];
+        long v[6];
         int at = -1;
-        if (sscanf(line, "T %ld %ld %ld %ld %ld %n", &v[0], &v[1], &v[2],
-                   &v[3], &v[4], &at) == 5 && at > 0) {
+        if (sscanf(line, "T %ld %ld %ld %ld %ld %ld %n", &v[0], &v[1], &v[2],
+                   &v[3], &v[4], &v[5], &at) == 6 && at > 0) {
             tally_t *t = tally_for(line + at);
             t->tested += v[0];
             t->special += v[1];
             t->mismatches += v[2];
             t->unapplied += v[3];
             t->outside += v[4];
-        } else if (sscanf(line, "C %ld %ld", &v[0], &v[1]) == 2) {
+            t->skipped += v[5];
+        } else if (sscanf(line, "C %ld %ld %ld", &v[0], &v[1], &v[2]) == 3) {
             controls += v[0];
             control_diffs += v[1];
+            control_skipped += v[2];
         } else {
             int hit, mismatch;
             size_t len;
@@ -4444,7 +4484,7 @@ int main(int argc, char **argv)
     print_notes();
 
     long tested = 0, special = 0, mismatches = 0, unapplied = 0;
-    long outside = 0;
+    long outside = 0, skipped = 0;
     // The kinds a finding of which ran; a kind seen only in the
     // harness's code, or only unapplied, does not count.
     size_t kinds = 0;
@@ -4455,6 +4495,7 @@ int main(int argc, char **argv)
         mismatches += t->mismatches;
         unapplied += t->unapplied;
         outside += t->outside;
+        skipped += t->skipped;
         kinds += t->tested != 0;
     }
     if (mode->special != NULL) {
@@ -4471,18 +4512,26 @@ int main(int argc, char **argv)
         printf("  %ld findings in the harness's own code left alone\n",
                outside);
     }
-    if (mode->control != NULL) {
+    if (skipped != 0) {
+        printf("  %ld findings of the filler's kinds left unrun: one in %u "
+               "runs\n", skipped, SAMPLE);
+    }
+    if (mode->control != NULL && control_skipped != 0) {
+        printf("  control: %ld refused rewrites applied anyway (one in %u of "
+               "%ld), %ld changed the result\n", controls, SAMPLE,
+               controls + control_skipped, control_diffs);
+    } else if (mode->control != NULL) {
         printf("  control: %ld refused rewrites applied anyway, %ld changed "
                "the result\n", controls, control_diffs);
     }
     if (mode->findings[0] == NULL || only != NULL) {
         qsort(tallies, ntallies, sizeof(tallies[0]), by_tested);
-        printf("  %8s %8s %8s %8s  %s\n", "run", "mismatch", "unapplied",
-               "harness", "finding");
+        printf("  %8s %8s %8s %8s %8s  %s\n", "run", "unrun", "mismatch",
+               "unapplied", "harness", "finding");
         for (size_t i = 0; i < ntallies; i++) {
             const tally_t *t = &tallies[i];
-            printf("  %8ld %8ld %8ld %8ld  %s\n", t->tested, t->mismatches,
-                   t->unapplied, t->outside, t->name);
+            printf("  %8ld %8ld %8ld %8ld %8ld  %s\n", t->tested, t->skipped,
+                   t->mismatches, t->unapplied, t->outside, t->name);
         }
     }
     fflush(stdout);
