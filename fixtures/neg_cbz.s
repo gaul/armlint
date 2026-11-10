@@ -13,8 +13,10 @@ _main:
 1:
     ret
 
-    // Positive: in place with CBNZ -- only the target needs w8 dead;
-    // the fall-through may read it.
+    // Positive: in place with CBNZ -- only the target needs w9 dead;
+    // the fall-through may read it. (At W width that holds because the
+    // load left bits 32..63 zero: the NEG changes nothing where x = 0.)
+    ldr     w9, [x1]
     neg     w9, w9
     cbnz    w9, 2f
     str     w9, [x0]

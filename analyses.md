@@ -310,7 +310,12 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 * Range: `TBZ`/`TBNZ` use a 14-bit signed offset (~32 KB reach),
   much shorter than `B.cond`'s 19-bit (~1 MB). The fold is
   suggested only when the target fits in the TBZ encoding.
-* Soundness: same NZCV-liveness scan as the CMP-branch check.
+* Soundness: same NZCV-liveness scan as the CMP-branch check, on both
+  edges -- the fall-through by the deferred scan, the taken edge by
+  `nzcv_dead_at_target` from the branch target. The taken-edge proof
+  came late: the fold assumed it until `tools/rwfuzz all` ran a
+  rewrite into a target that read the TST's flags (53 of 158 findings
+  in 100,000 programs).
 * Same win as the CMP -> CBZ fold: one fewer instruction, and the
   branch no longer carries an NZCV dependency.
 
@@ -390,6 +395,14 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   practice.
 * Same win as the TST fold -- one fewer instruction -- plus the
   scratch register is freed.
+* Where the deletion cannot be proven, the branch alone is rebound
+  ("CBZ/CBNZ of a live single-bit test foldable to TBZ/TBNZ", the
+  producer stays) to a TBZ of the source bit at the branch. That needs
+  the source to still hold the bit there: an out-of-place producer, or
+  an AND, which leaves the bit where it was. An in-place extract has
+  moved it -- after `lsr x2, x2, #63` the bit is bit 0 -- and
+  `tools/rwfuzz all` ran the rebind past one before the check
+  required it.
 
 ## NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source
 
@@ -413,6 +426,10 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   Rn`) the edge where `x = 0` is exempt -- `-0 = 0`, so the NEG
   changed nothing there -- and a CBZ needs only its fall-through
   proven, a CBNZ only its target; out of place both edges need it.
+  So do both at W width, where the NEG zeroes bits 63:32 on that edge
+  too, unless they were already zero (check_redundant_zext's facts at
+  the NEG); `tools/rwfuzz arith` found the exemption taken for a W
+  NEG whose X register was read at the target.
   The fall-through is the register-liveness scan every
   producer-deleting fold uses (which follows a direct branch to its
   target), the target the word-level `reg_dead_at_target` walk. A
@@ -1005,9 +1022,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   destination, so the two are the same value.
 * No liveness argument, and no side-entry question. The rewrite is
   1-for-1 into the same destination with the same value; nothing is
-  deleted except in the in-place identity case, and no flags, memory or
-  FP exceptions are involved. A branch landing on the instruction is
-  harmless because the semantics do not change.
+  deleted except in the in-place identity case, and no flags, memory
+  or FP exceptions are involved. That case is a no-op only at `16B`:
+  at `8B` the identity zeroes the upper half like every 64-bit
+  arrangement, which deleting it would keep, so it is left alone (it
+  is that zeroing's spelling); `tools/rwfuzz fp` found the deletion. A
+  branch landing on the instruction is harmless because the semantics
+  do not change.
 * **What it saves is issue, not size.** `MOVI` with a zero immediate is
   on Neoverse V2's "Zero Latency MOVs" list (SWOG section 4.12, whose
   members "do not utilize the scheduling and execution resources of the
@@ -1390,10 +1411,13 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
 
 ## ADD/SUB #0 is redundant
 
-* The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a
-  no-op when `Rd == Rn` and is equivalent to `MOV Rd, Rn` when
-  `Rd != Rn`. The explicit `ADD #0` shows up occasionally in real
-  code, notably as a way to set up a function argument from a
+* The non-flag-setting `ADD Rd, Rn, #0` or `SUB Rd, Rn, #0` is a no-op
+  when `Rd == Rn` and is equivalent to `MOV Rd, Rn` when `Rd != Rn`.
+  At W width the in-place form still zeroes bits 63:32, so it is a
+  no-op only where the known-bits engine has them zero already;
+  `tools/rwfuzz all` ran the deletion of `add w6, w6, #0` from an `x6`
+  with its top half set. The explicit `ADD #0` shows up occasionally
+  in real code, notably as a way to set up a function argument from a
   callee-saved register.
 * The `ADDS`/`SUBS` flag-setting variants are not flagged: writing
   `Rd` and setting `Z = (Rn == 0)` may both be wanted. The SP
@@ -1459,6 +1483,14 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   base. When the source is SP the register-liveness scan cannot help --
   `arm64_gpr_num` maps SP to -1 -- so the encodings that write it are
   matched directly, the same recovery the multi-use ADD fold makes.
+  Any other source is watched through `insn_writes_reg`, which errs
+  toward a write (`insn_gpr_write_mask`): it once asked the access
+  model the deadness proofs use, which errs the other way and misses
+  the writes Capstone 5 leaves unflagged, and `tools/rwfuzz arith` ran
+  the fold past an `ldadd x2, x7, [x28]` that wrote the source (a
+  post-index base was missed the same way). The fix reaches every
+  fact the four callers keep: this window, the multi-use ADD's
+  source, the S-variant fold's gap and the CSET recompare's temp.
 * `insn_count` spans producer through consumer rather than a fixed 2,
   so the central side-entry gate covers the gap exactly: a branch
   landing between them reaches the second adjustment on a path that
@@ -1575,7 +1607,9 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   immediately followed by `B.EQ`/`B.NE`. The same forward
   NZCV-liveness scan as the CMP+B.cond check confirms that
   downstream code does not observe N/C/V (which the S-variant sets
-  differently from the `CMP`).
+  differently from the `CMP`), and since 2026-11-10 the same target
+  walk proves the branch's target: `tools/rwfuzz arith` ran the drop
+  into a target that read C.
 * Combines with the CMP+B.cond -> CBZ/CBNZ check above: both fire
   on the matching pattern, giving the user a choice between
   dropping the `CMP` (and keeping the `B.cond`) or folding the
@@ -2141,8 +2175,15 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   site then saves nothing. One instruction may settle both (`adds x8,
   ...` into the constant register) or settle one while breaking the
   other (`cset x8, lo` reads the flags): the break wins. Sixteen
-  undecided instructions expire the scan, and as with the sibling
-  folds the taken path is not scanned.
+  undecided instructions expire the scan. The branch's own target
+  is proven too, by `nzcv_dead_at_target` and `reg_dead_at_target`
+  from it: the fold once left that edge unscanned, as the compare-zero
+  fold first did, and `tools/rwfuzz arith` ran rewrites into targets
+  that read the flags. On 2026-11-10 that proof cost librustc_driver
+  254 -> 115, clang 135 -> 87 and uutils 6 -> 2: the refused sites
+  branch to panic paths that reach a call before the constant
+  register dies, which the register walk, making no PCS assumption,
+  does not see past.
 * Why it helps: one instruction and one register go, and what remains
   is the fusable pair. LLVM (clang 23, and trunk as of September 2026)
   and rustc 1.97 emit the three-instruction form, and when the
@@ -2223,7 +2264,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   register dead, and the masked register dead, since it now holds the
   shifted field. The consumer -- a B.cond, or since 2026-10-04 a
   CSEL-family select that reads neither register (one that writes
-  either settles that proof itself) -- must follow the CMP directly.
+  either settles that proof itself) -- must follow the CMP directly. A
+  B.cond's target needs all three too, as the B.VS fold's does since
+  2026-11-10 (librustc_driver 26 -> 12, clang 64 -> 45, uutils 46 ->
+  35); the fixture's own branches had landed on code reading the
+  constant register.
 * **Corpus, 2026-10-04:** Firefox XUL (30.3M instructions) **90**,
   surrogate tests and other field compares, **117** with the CSEL
   consumers; librustc_driver (26.0M) 10, then 15. A raw scan finds 562
@@ -2749,6 +2794,11 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   tst  w0, #1
   csel w1, w2, w3, hi   ->  mov w1, w3; hi never holds: tst cannot set flags that pass hi
   ```
+
+  A W-form select of its own register (`csinc w8, w8, w9, ne` decided
+  for w8) still zeroes bits 63:32, so it is deleted only where they
+  are known zero already, and otherwise left alone; `tools/rwfuzz
+  all` ran the deletion from registers with their top half set.
 
 * **The decision** is [the decided-branch check's](#conditional-branch-decided-by-known-values),
   by the same three steps on the same engine: the flag setter's
@@ -4564,19 +4614,21 @@ there, so they would want the pool bit alone.
   `-(round(a*b))` under the directed rounding modes (`FPCR.RMode` =
   RP or RM) -- the two agree only under round-to-nearest, and armlint
   cannot know the dynamic mode.
-* Soundness: the `FNEG` must read the `FMUL`'s destination (`Rn` =
-  the product register). An in-place `fneg dd, dd` overwrites the
-  product on the spot -- the same structural argument as the integer
-  producer folds -- and reports immediately; a fresh destination
-  defers through the FP/vector-register liveness scan until the
-  product register provably dies. The scan watches all six views
-  (B/H/S/D/Q/V) of the register and treats written vector operands
-  as read-modify-writes unless their class provably overwrites in
-  full (scalar FP ops, FP loads) -- lane inserts, accumulators and
-  friends can never wrongly commit a finding. No aliasing
-  exclusions are needed: the rewrite reads the multiply's own sources
-  at its position, and even in-place multiplies read before writing
-  in both spellings.
+* Soundness: the `FNEG` must read the `FMUL`'s destination (`Rn` = the
+  product register). An in-place `fneg dd, dd` overwrites the product
+  on the spot -- the same structural argument as the integer producer
+  folds -- and reports immediately; a fresh destination defers through
+  the FP/vector-register liveness scan until the product register
+  provably dies. The scan watches all six views (B/H/S/D/Q/V) of the
+  register and treats written vector operands as read-modify-writes
+  unless their class provably overwrites in full (scalar FP ops, FP
+  loads) -- lane inserts, accumulators and friends can never wrongly
+  commit a finding. An operand Capstone leaves without an access flag
+  counts as read: Capstone 5 gives UMOV's B and H forms (`umov w5,
+  v7.h[0]`) none on either operand, and `tools/rwfuzz fp` ran the fold
+  past such a read of the product. No aliasing exclusions are needed:
+  the rewrite reads the multiply's own sources at its position, and
+  even in-place multiplies read before writing in both spellings.
 * Single and double precision fold; half precision (FEAT_FP16) is
   not matched, consistent with the FMOV folds.
 * What it saves: one instruction, and the dependent `FNEG` leaves

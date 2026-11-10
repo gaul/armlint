@@ -4,51 +4,66 @@
     .globl  _main
     .p2align 2
 _main:
-    // Positives:
+    // Positives. The rewrite changes the masked register, the constant
+    // register and the flags, so each must be dead where the branch
+    // goes as well as on the fall-through: the branches go to blocks
+    // out of line (61..65) that kill all three.
     // 1) The UTF-16 high-surrogate test, the mask first.
     and     w9, w22, #0xfc00
     mov     w11, #0xd800
     cmp     w9, w11
-    b.eq    1f                  // -> ubfx w9, w22, #10, #6 ; cmp w9, #0x36
+    b.eq    61f                 // -> ubfx w9, w22, #10, #6 ; cmp w9, #0x36
     mov     w9, #0              // the masked register dead
     mov     w11, #0             // the constant register dead
     adds    w3, w4, w5          // NZCV dead
-1:
     // 2) The constant first, the registers swapped in the CMP, one
     //    instruction between, and the RET proving NZCV dead last.
     mov     w8, #0xd800
     and     w9, w0, #0xfc00
     add     x1, x1, #1
     cmp     w8, w9
-    b.ne    2f                  // -> ubfx w9, w0, #10, #6 ; cmp w9, #0x36
+    b.ne    62f                 // -> ubfx w9, w0, #10, #6 ; cmp w9, #0x36
     mov     w8, #0
     mov     w9, #0
     ret
-2:
     // 3) X form, a two-link chain, the shifted immediate form.
     and     x8, x0, #0xfffffffff000000
     mov     x9, #0x40000000000
     cmp     x8, x9
-    b.hi    3f                  // -> ubfx x8, x0, #24, #36 ; cmp x8, #0x40, lsl #12
+    b.hi    63f                 // -> ubfx x8, x0, #24, #36 ; cmp x8, #0x40, lsl #12
     adds    x8, x1, x2
     mov     x9, #0
-3:
     // 4) A mask reaching the sign bit: an unsigned condition is fine.
     and     w8, w0, #0xffffc000
     mov     w9, #0x80000000
     cmp     w8, w9
-    b.lo    4f                  // -> ubfx w8, w0, #14, #18 ; cmp w8, #0x20, lsl #12
+    b.lo    64f                 // -> ubfx w8, w0, #14, #18 ; cmp w8, #0x20, lsl #12
     adds    w8, w1, w2
-    mov     w9, #0
-4:
+    add     w9, w1, w3          // unknown, so that 5) starts afresh
     // 5) In place: the masked register is its own source.
     and     w9, w9, #0xfc00
     mov     w11, #0xd800
     cmp     w9, w11
-    b.ne    5f                  // -> ubfx w9, w9, #10, #6 ; cmp w9, #0x36
+    b.ne    65f                 // -> ubfx w9, w9, #10, #6 ; cmp w9, #0x36
     adds    w9, w1, w2
     mov     w11, #0
-5:
+    ret
+61: mov     w9, #1
+    mov     w11, #1
+    adds    w3, w4, w5
+    ret
+62: mov     w8, #1
+    mov     w9, #1
+    adds    w3, w4, w5
+    ret
+63: adds    x8, x1, x2
+    mov     x9, #1
+    ret
+64: adds    w8, w1, w2
+    mov     w9, #1
+    ret
+65: adds    w9, w1, w2
+    mov     w11, #1
     ret
 
     // 6) A CSEL consumer: the condition stays; a CSET that writes the

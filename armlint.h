@@ -418,8 +418,9 @@ bool check_cmp_zero_branch(armlint_state *state, const cs_insn *insn,
 // Detect TST Rn, #(1<<k) (ANDS XZR, Rn, #imm) immediately followed by
 // B.EQ or B.NE; the pair is replaceable by TBZ Rn, #k or TBNZ Rn, #k
 // when the branch target fits in TBZ's shorter (14-bit signed) range.
-// Like check_cmp_zero_branch, emission is deferred until the forward
-// liveness scan confirms NZCV is dead.
+// Like check_cmp_zero_branch, the TST's flags must be dead on both
+// edges: at the branch target (nzcv_dead_at_target) before the
+// deferral opens, then on the fall-through by the forward scan.
 bool check_tst_branch(armlint_state *state, const cs_insn *insn,
                       size_t offset, armlint_finding *out);
 
@@ -476,10 +477,13 @@ bool check_tst_cset(armlint_state *state, const cs_insn *insn,
 // its own position and the producer stays ("CBZ/CBNZ of a live
 // single-bit test foldable to TBZ/TBNZ"). The rebind holds regardless
 // of the producer's liveness (a self-masked AND still carries the
-// isolated bit unchanged), so it needs no proof at all; only the
-// branch's own displacement (imm19 units) must fit the signed 14-bit
-// TBZ encoding. This is the shape a compiler emits for Java-style
-// `(flags & F) == 0` tests whose masked temp it re-tests with CBZ.
+// isolated bit unchanged), so it needs no proof at all -- provided the
+// source still holds the bit there: an in-place extract has moved it
+// (after lsr x2, x2, #63 it is bit 0), so only an AND or an
+// out-of-place producer rebinds. The branch's own displacement (imm19
+// units) must fit the signed 14-bit TBZ encoding. This is the shape a
+// compiler emits for Java-style `(flags & F) == 0` tests whose masked
+// temp it re-tests with CBZ.
 //
 // A W-form CBZ after a producer isolating bit >= 32 is rejected (the
 // branch cannot observe the bit -- degenerate). ANDS producers are
@@ -496,7 +500,8 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
 // x is, so the branch can test Rn and the negation go. Rt must be
 // dead on every edge where it held -x: in place (Rt == Rn) that is
 // only the fall-through of a CBZ or the target of a CBNZ, since NEG
-// changed nothing where x = 0; out of place it is both edges. The
+// changed nothing where x = 0 -- at X width, or at W width where bits
+// 32..63 were already zero (a W NEG zeroes them); otherwise both. The
 // fall-through is proven by the register-liveness scan
 // (defer_dead_mov), the target by reg_dead_at_target. Reported as
 // "NEG + CBZ/CBNZ foldable to CBZ/CBNZ of the source".
@@ -700,8 +705,10 @@ bool check_branch_decided(armlint_state *state, const cs_insn *insn,
 // left alone (kv_nzcv_branched): SpiderMonkey's Spectre string
 // mitigation follows a branch with a CSEL on the same condition,
 // decided on purpose. CSEL Rd, Rn, Rn is check_csel_self's, Rd = ZR a
-// discarded result, AL/NV not conditions. Reported as "conditional
-// select decided by known flags".
+// discarded result, AL/NV not conditions. A W select that picks Rd
+// itself still zeroes bits 32..63, so it is deleted only where they
+// are known zero already. Reported as "conditional select decided by
+// known flags".
 bool check_csel_decided(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out);
 
@@ -1139,8 +1146,9 @@ bool check_self_op(armlint_state *state, const cs_insn *insn,
 // One member must NOT be flagged: `orr Vd, Vn, Vn` with Rd != Rn is the
 // canonical spelling of the vector MOV, emitted for every
 // `mov vd.16b, vn.16b`. Only its in-place form -- writing a register
-// its own value -- is a finding. Counting the copies inflated a first
-// pass over this shape from 353 to 2,158.
+// its own value -- is a finding, and only at 16B: at 8B it zeroes bits
+// 64..127, so deleting it is no rewrite. Counting the copies inflated
+// a first pass over this shape from 353 to 2,158.
 //
 // Like the scalar check this is 1-for-1 with no liveness argument: the
 // destination and its value are unchanged, nothing is deleted except in
@@ -1492,10 +1500,12 @@ bool check_mov_logic_known_bits(armlint_state *state, const cs_insn *insn,
 // constant is refused: the general eor Xc, Xn, #C ; cbz Xc form for
 // any bitmask immediate is a size win that costs an issue slot on
 // fusing cores, and stays a TODO.md candidate for an opt-in class.
-// Emission is deferred on two fall-through proofs at once -- NZCV
-// dead after the branch (the new compare sets N, Z and C from a
-// different subtraction) and the constant register dead (the chain
-// is deleted) -- run by armlint_advance_pending_bvs. Reported as
+// Emission is deferred on two proofs at once -- NZCV dead after the
+// branch (the new compare sets N, Z and C from a different
+// subtraction) and the constant register dead (the chain is deleted)
+// -- on the fall-through by armlint_advance_pending_bvs, and at the
+// branch's target first (nzcv_dead_at_target, reg_dead_at_target).
+// Reported as
 // "MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to
 // B.VS/B.VC". Runs before check_movz_movk_bitmask so the chain state
 // is still active at the CMP.
@@ -1515,9 +1525,10 @@ bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
 // an equality or unsigned condition. The consumer may also be a
 // CSEL-family select (its condition is unchanged) that reads neither
 // register; one that writes either settles that proof itself.
-// Deferred on three fall-through proofs (armlint_advance_pending_bvs):
-// NZCV, the constant register and the masked register (which now
-// holds the shifted field) dead after the consumer. Reported as "AND +
+// Deferred on three proofs (armlint_advance_pending_bvs): NZCV, the
+// constant register and the masked register (which now holds the
+// shifted field) dead after the consumer -- and at a B.cond's target,
+// proven before the deferral opens. Reported as "AND +
 // MOV + CMP of a masked field foldable to UBFX + CMP #imm".
 bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
@@ -1574,11 +1585,12 @@ bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
 // redirects later copies of a fanned-out value at the copy just made.
 // The second copy may read at most the width the first wrote (an X or
 // D read of a W or S copy would observe the zeroed upper half, which
-// the original source does not hold). The full-width copy-back
+// the original source does not hold). The X copy-back
 // MOV Rb, Ra ; MOV Ra, Rb is reported separately as a deletable no-op;
-// its W/S variant is skipped (the second copy also zeroes the upper
-// half, and the chain rewrite degenerates to a self-MOV). A chain of
-// three or more copies reports one finding per rewritable link.
+// its W and FP variants are skipped (the second copy also zeroes the
+// register above what it writes -- FMOV Dd bits 64..127 of Vd -- and
+// the chain rewrite degenerates to a self-MOV). A chain of three or
+// more copies reports one finding per rewritable link.
 bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
@@ -3253,9 +3265,9 @@ bool armlint_advance_pending_dc(armlint_state *state, const cs_insn *insn,
 // followed immediately by a CMP/CMN/TST zero test of Rd (any of the
 // decode_zero_test spellings), followed immediately by B.EQ/B.NE. All
 // S-variants set Z = (Rd == 0), so the zero test is recomputing the
-// same Z bit. The zero test is flagged redundant once the same
-// downstream NZCV-liveness scan as check_cmp_zero_branch confirms
-// dropping it is sound (no N/C/V observation downstream).
+// same Z bit. The zero test is flagged redundant once the same two
+// NZCV proofs as check_cmp_zero_branch confirm dropping it is sound:
+// no N/C/V observation at the branch target or on the fall-through.
 // Combines with the existing CMP+B.cond -> CBZ check: both fire for
 // the matching pattern, presenting alternative rewrites.
 bool check_redundant_cmp_after_s_variant(armlint_state *state,
@@ -3289,10 +3301,9 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 // (it rewrites all of NZCV), and a full flags write or a PCS
 // boundary (BL/BLR/RET) emits. C-condition readers (CS/CC/HI/LS),
 // ADC/SBC, opaque flag readers, other branches, and window expiry
-// discard. A passing B.cond's taken edge technically leaves with the
-// changed bits live; the scan follows the fall-through only, the
-// same exposure this check has always accepted for its branch
-// consumer.
+// discard. A passing B.cond's taken edge leaves with the changed bits
+// live, so they must die there too: nzcv_bits_dead_at_target walks
+// from the target under the same condition-aware rules.
 //
 // The S-variant spelling is the producer's mnemonic plus "s" for
 // every member, including the NEG alias (SUB from ZR), whose twin is

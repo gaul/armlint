@@ -310,11 +310,14 @@ struct armlint_state {
     bool tbf_is_64bit;
     unsigned tbf_rd;
     unsigned tbf_rs;
+    bool tbf_keeps_bit;     // tbf_rs still holds the bit at tbf_bit
+                            // after the producer
     unsigned tbf_bit;
 
     // check_neg_cbz: a NEG Rt, Rn awaiting the adjacent CBZ/CBNZ Rt
     // that can test Rn instead.
     bool ncb_active;
+    bool ncb_top_zero;      // the NEG's register had bits 32..63 zero
     unsigned ncb_sf;
     unsigned ncb_rd;
     unsigned ncb_rn;
@@ -2769,6 +2772,8 @@ static bool decode_fp_ldr_str_uimm(uint32_t op, bool *out_is_load,
                                    unsigned *out_rn, unsigned *out_rt);
 static bool nzcv_dead_at_target(const armlint_state *state,
                                 int64_t target);
+static bool nzcv_bits_dead_at_target(const armlint_state *state,
+                                     int64_t target, unsigned changed);
 static bool reg_dead_at_target(const armlint_state *state, int64_t target,
                                unsigned reg);
 static bool branch_reads_reg(uint32_t op, int reg);
@@ -4253,15 +4258,17 @@ static unsigned cond_nzcv_reads(unsigned cond)
 // MSRs, ADC/SBC and the RMIF/SETF space, MOPS) and unsafe conditions
 // discard through the plain scan's classification as before.
 //
-// A passing B.cond covers the read the branch itself performs, but
-// its taken edge leaves with the altered bits technically live --
-// exactly the exposure this check has always accepted for its
-// B.EQ/B.NE consumer (the scan follows the fall-through only).
-// Compiler output does not read C/V across a conditional edge it did
-// not just establish; hand-written assembly that does would be
-// misflagged, which the advisory framing accepts.
-static bool advance_one_pending_cond(uint32_t op, bool *active,
-                                     unsigned *window, unsigned changed,
+// A passing B.cond covers the read the branch itself performs; its
+// taken edge leaves with the altered bits live, so they must die
+// there too, by the condition-aware walk from the target
+// (nzcv_bits_dead_at_target). This scan once followed the
+// fall-through only, on the view that compiled code does not read C/V
+// across a conditional edge it did not just establish; tools/rwfuzz
+// ran the fold into a target that does.
+static bool advance_one_pending_cond(const armlint_state *state,
+                                     uint32_t op, size_t offset,
+                                     bool *active, unsigned *window,
+                                     unsigned changed,
                                      const armlint_finding *finding,
                                      armlint_finding *out)
 {
@@ -4293,6 +4300,16 @@ static bool advance_one_pending_cond(uint32_t op, bool *active,
         if ((cond_nzcv_reads(cond) & changed) != 0) {
             *active = false;
             return false;
+        }
+        if ((op & 0xFF000000u) == 0x54000000u) {
+            int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+            imm19 = (imm19 ^ 0x40000) - 0x40000;
+            if (!nzcv_bits_dead_at_target(state, (int64_t)offset
+                                                 + (int64_t)imm19 * 4,
+                                          changed)) {
+                *active = false;
+                return false;
+            }
         }
         if (full_rewrite_after_read) {
             *out = *finding;
@@ -4651,11 +4668,19 @@ liveness_t classify_reg_liveness(const cs_insn *insn, int reg)
 // hold a specific earlier result when it is finally consumed -- need
 // the opposite ranking: any write invalidates the tracked value,
 // read or no read.
+static uint32_t insn_gpr_write_mask(const cs_insn *insn);
+
+// Whether the instruction may write GPR reg. Every caller asks so as to
+// drop a fact about the register, where a missed write is the unsound
+// direction, so this errs toward a write (insn_gpr_write_mask): an
+// atomic's flagless destination and a writeback base count. Asking
+// insn_reg_access instead, which errs the other way for its deadness
+// proofs, let tools/rwfuzz run an ADD/SUB chain fold past an LDADD that
+// wrote the source.
 static bool insn_writes_reg(const cs_insn *insn, int reg)
 {
-    bool reads, writes;
-    insn_reg_access(insn, reg, &reads, &writes);
-    return writes;
+    return reg >= 0 && reg < 31
+        && ((insn_gpr_write_mask(insn) >> reg) & 1u) != 0;
 }
 
 // Every GPR the instruction may write, as a mask over the 0..30
@@ -4814,13 +4839,13 @@ bool armlint_advance_pending_sv(armlint_state *state, const cs_insn *insn,
 bool armlint_advance_pending_zs(armlint_state *state, const cs_insn *insn,
                                 size_t offset, armlint_finding *out)
 {
-    (void)offset;
     if (insn->size != 4) {
         state->pending_zs_active = false;
         return false;
     }
     uint32_t op = insn_word(insn);
-    return advance_one_pending_cond(op, &state->pending_zs_active,
+    return advance_one_pending_cond(state, op, offset,
+                                    &state->pending_zs_active,
                                     &state->pending_zs_window,
                                     state->pending_zs_changed,
                                     &state->pending_zs_finding, out);
@@ -5217,6 +5242,14 @@ static void insn_vreg_access(const cs_insn *insn, int reg,
         if (o->access & CS_AC_READ) {
             *reads = true;
         }
+        // An operand Capstone leaves unmodelled reads, as far as the
+        // liveness scans are concerned: Capstone 5 gives UMOV's B and H
+        // forms (umov w5, v7.h[0]) no access on either operand, and
+        // tools/rwfuzz ran an FNMUL fold past such a read of the
+        // deleted product.
+        if (o->access == 0) {
+            *reads = true;
+        }
     }
     for (uint8_t i = 0; i < detail->regs_read_count; i++) {
         if (arm64_vreg_num(detail->regs_read[i]) == reg) {
@@ -5499,11 +5532,17 @@ bool check_redundant_cmp_after_s_variant(armlint_state *state,
 
     uint32_t op = insn_word(insn);
 
-    // (1) Stage 3: B.EQ/B.NE consuming the sv+cmp chain?
+    // (1) Stage 3: B.EQ/B.NE consuming the sv+cmp chain? The dropped
+    //     compare's C and V differ from the flag-setter's, so the flags
+    //     must die unread where the branch goes as well as on the
+    //     fall-through the deferred scan walks (tools/rwfuzz ran the
+    //     drop into a target that read them).
     if (state->sv_cmp_active) {
         bool is_eq;
         int32_t imm19;
-        if (decode_b_eq_or_ne(op, &is_eq, &imm19)) {
+        if (decode_b_eq_or_ne(op, &is_eq, &imm19)
+                && nzcv_dead_at_target(state, (int64_t)offset
+                                              + (int64_t)imm19 * 4)) {
             uint64_t target = insn->address
                 + (uint64_t)((int64_t)imm19 * 4);
             const char *bcond_mnem = is_eq ? "b.eq" : "b.ne";
@@ -6160,9 +6199,15 @@ bool check_tst_branch(armlint_state *state, const cs_insn *insn,
             // The proposed TBZ replaces the TST at the same address,
             // i.e. 4 bytes before the B.cond. Its required imm14 (in
             // instruction units) is therefore imm19 + 1. TBZ's imm14
-            // is signed 14-bit, giving a ~32 KB reach.
+            // is signed 14-bit, giving a ~32 KB reach. The TST goes,
+            // so its flags must die unread on the taken edge as well
+            // as on the fall-through the deferred scan walks -- the
+            // compare-zero fold's proof (check_cmp_zero_branch), which
+            // this fold lacked until tools/rwfuzz ran it.
             int64_t tbz_disp = (int64_t)imm19 + 1;
-            if (tbz_disp >= -8192 && tbz_disp <= 8191) {
+            if (tbz_disp >= -8192 && tbz_disp <= 8191
+                    && nzcv_dead_at_target(state, (int64_t)offset
+                                                  + (int64_t)imm19 * 4)) {
                 uint64_t target = insn->address
                     + (uint64_t)((int64_t)imm19 * 4);
                 char w_or_x = state->tst_is_64bit ? 'x' : 'w';
@@ -6463,7 +6508,11 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
             // isolated bit unchanged -- so it needs no deadness proof;
             // only the branch's own displacement (imm19 units) must
             // fit TBZ's signed 14 bits.
-            bool fb_ok = imm19 >= -8192 && imm19 <= 8191;
+            // The source keeps the bit there unless the producer moved
+            // it in place: an in-place LSR/UBFX leaves it at bit 0
+            // (tools/rwfuzz ran the rebind past `lsr x2, x2, #63`).
+            bool fb_ok = imm19 >= -8192 && imm19 <= 8191
+                && state->tbf_keeps_bit;
             armlint_finding fb;
             if (fb_ok) {
                 fb.name = "CBZ/CBNZ of a live single-bit test "
@@ -6538,10 +6587,11 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
     // register (ZR gives a constant zero -- a degenerate always/never
     // branch) and the destination must not be discarded.
     unsigned p_sf, p_rd, p_rs, p_bit;
-    if ((decode_and_single_bit(op, &p_sf, &p_rd, &p_rs, &p_bit)
-            || decode_bfm_single_bit(op, &p_sf, &p_rd, &p_rs, &p_bit))
+    bool p_and = decode_and_single_bit(op, &p_sf, &p_rd, &p_rs, &p_bit);
+    if ((p_and || decode_bfm_single_bit(op, &p_sf, &p_rd, &p_rs, &p_bit))
             && p_rd != 31 && p_rs != 31) {
         state->tbf_active = true;
+        state->tbf_keeps_bit = p_and || p_rd != p_rs;
         state->tbf_is_64bit = (p_sf != 0);
         state->tbf_rd = p_rd;
         state->tbf_rs = p_rs;
@@ -6572,11 +6622,13 @@ bool check_single_bit_cbz(armlint_state *state, const cs_insn *insn,
 // on each edge where -x is what Rt held. In place (Rt == Rn) the edge
 // where x = 0 is exempt -- NEG changed nothing there, since -0 = 0 --
 // so a CBZ needs only its fall-through proven and a CBNZ only its
-// target; out of place both edges need it. The fall-through is the
-// register-liveness scan (defer_dead_mov), the target the word-level
-// scan reg_dead_at_target. The finding spans both instructions, so a
-// branch onto the CBZ -- a path on which Rt holds something else --
-// fails the central side-entry gate.
+// target; out of place both edges need it. So do both at W width, where
+// the NEG also zeroes bits 32..63 of the register, unless they were
+// already zero (tools/rwfuzz found the exemption taken for a W NEG).
+// The fall-through is the register-liveness scan (defer_dead_mov), the
+// target the word-level scan reg_dead_at_target. The finding spans
+// both instructions, so a branch onto the CBZ -- a path on which Rt
+// holds something else -- fails the central side-entry gate.
 bool check_neg_cbz(armlint_state *state, const cs_insn *insn,
                    size_t offset, armlint_finding *out)
 {
@@ -6593,9 +6645,10 @@ bool check_neg_cbz(armlint_state *state, const cs_insn *insn,
         int32_t imm19;
         if (decode_cbz_cbnz(op, &c_sf, &is_cbnz, &imm19, &rt)
                 && rt == state->ncb_rd && c_sf == state->ncb_sf) {
-            bool in_place = state->ncb_rd == state->ncb_rn;
-            bool need_target = !in_place || is_cbnz;
-            bool need_ft = !in_place || !is_cbnz;
+            bool exempt = state->ncb_rd == state->ncb_rn
+                && (c_sf != 0 || state->ncb_top_zero);
+            bool need_target = !exempt || is_cbnz;
+            bool need_ft = !exempt || !is_cbnz;
             int64_t target = (int64_t)offset + (int64_t)imm19 * 4;
             uint64_t target_addr = insn->address
                 + (uint64_t)((int64_t)imm19 * 4);
@@ -6633,6 +6686,10 @@ bool check_neg_cbz(armlint_state *state, const cs_insn *insn,
         unsigned rm = (op >> 16) & 0x1Fu;
         if (rd != 31u && rm != 31u) {
             state->ncb_active = true;
+            // check_redundant_zext's facts still describe the register
+            // before this NEG: that check runs after this one.
+            state->ncb_top_zero = ((state->wzx_valid >> rm) & 1u) != 0
+                && state->wzx_zero_from[rm] <= 32u;
             state->ncb_sf = (op >> 31) & 1u;
             state->ncb_rd = rd;
             state->ncb_rn = rm;
@@ -7214,11 +7271,26 @@ bool check_cmp_cset_sign(armlint_state *state, const cs_insn *insn,
 // instructions examined. Everything short of the proof refuses: no
 // buffer, a path leaving it or running into a V8 constant pool, a
 // reader, an indirect jump, an expired window or an exhausted bound.
+//
+// nzcv_bits_dead_at_target is the walk for a rewrite that alters only
+// the NZCV bits in `changed` (advance_one_pending_cond's): a reader
+// that names its condition passes when the condition ignores them all
+// -- a B.cond then splits the walk like a CBZ, a CCMP/CCMN/FCCMP
+// rewrites the flags after its read and proves the path -- and only
+// the opaque readers refuse outright. With every bit changed it is
+// nzcv_dead_at_target.
 #define NZCV_TARGET_PATHS 8u
 #define NZCV_TARGET_BUDGET (4u * LIVENESS_WINDOW)
+#define NZCV_ALL (NZCV_N | NZCV_Z | NZCV_C | NZCV_V)
 
 static bool nzcv_dead_at_target(const armlint_state *state,
                                 int64_t target)
+{
+    return nzcv_bits_dead_at_target(state, target, NZCV_ALL);
+}
+
+static bool nzcv_bits_dead_at_target(const armlint_state *state,
+                                     int64_t target, unsigned changed)
 {
     if (state->buf == NULL) {
         return false;
@@ -7263,7 +7335,34 @@ static bool nzcv_dead_at_target(const armlint_state *state,
                 window = LIVENESS_WINDOW;
                 continue;
             }
-            if ((op & 0x7E000000u) == 0x34000000u) {
+            unsigned cond = 16;
+            bool rewrites = false;
+            if (changed != NZCV_ALL) {
+                if ((op & 0xFF000000u) == 0x54000000u) {
+                    cond = op & 0xFu;                   // B.cond/BC.cond
+                } else if ((op & 0x3FE00800u) == 0x1A800000u
+                           || (op & 0xFF200C00u) == 0x1E200C00u) {
+                    cond = (op >> 12) & 0xFu;           // CSEL family, FCSEL
+                } else if ((op & 0x3FE00410u) == 0x3A400000u
+                           || (op & 0xFF200C00u) == 0x1E200400u) {
+                    cond = (op >> 12) & 0xFu;           // CCMP/CCMN, FCCMP
+                    rewrites = true;
+                }
+            }
+            if (cond < 16u) {
+                if ((cond_nzcv_reads(cond) & changed) != 0) {
+                    return false;   // reads an altered bit
+                }
+                if (rewrites) {
+                    break;          // this path is proven
+                }
+                if ((op & 0xFF000000u) != 0x54000000u) {
+                    at += 4;
+                    continue;
+                }
+                words = (int32_t)((op >> 5) & 0x7FFFFu);
+                words = (words ^ 0x40000) - 0x40000;
+            } else if ((op & 0x7E000000u) == 0x34000000u) {
                 // CBZ/CBNZ: imm19.
                 words = (int32_t)((op >> 5) & 0x7FFFFu);
                 words = (words ^ 0x40000) - 0x40000;
@@ -10231,6 +10330,10 @@ bool check_add_sub_imm_chain(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+static void kv_sync(armlint_state *state, const cs_insn *insn,
+                    size_t offset);
+static bool kv_top_half_zero(const armlint_state *state, unsigned r);
+
 bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
                         size_t offset, armlint_finding *out)
 {
@@ -10263,7 +10366,18 @@ bool check_add_sub_zero(armlint_state *state, const cs_insn *insn,
             bool is_adr_pair = state->adr_recent
                 && state->adr_recent_rd == rd
                 && rd == rn;
-            if (rd != 31 && rn != 31 && !is_adr_pair) {
+            // A W-form ADD/SUB #0 in place still zero-extends, so it is a
+            // no-op only where the top half is already known zero
+            // (tools/rwfuzz found the deletion without that proof). The
+            // known-bits engine's facts are the ones still describing
+            // the register before this instruction: check_redundant_zext
+            // has already recorded the W write itself.
+            bool w_extends = ((op >> 31) & 1u) == 0 && rd == rn && rd != 31;
+            if (w_extends) {
+                kv_sync(state, insn, offset);
+                w_extends = !kv_top_half_zero(state, rd);
+            }
+            if (rd != 31 && rn != 31 && !is_adr_pair && !w_extends) {
                 unsigned sf = (op >> 31) & 1u;
                 char w_or_x = sf ? 'x' : 'w';
                 bool is_sub = ((op >> 30) & 1u) != 0;
@@ -10542,6 +10656,13 @@ bool check_vector_self_op(armlint_state *state, const cs_insn *insn,
     bool is_orr = (op & 0x9F20FC00u) == 0x0E201C00u
         && ((op >> 29) & 1u) == 0u && ((op >> 22) & 0x3u) == 2u;
     if (kind == 1u && !in_place && is_orr) {
+        return false;
+    }
+    // An in-place identity at 8B is no no-op: like every 64-bit
+    // arrangement it zeroes bits 64..127 of the register, which deleting
+    // it would keep (tools/rwfuzz found the deletion). It is the
+    // spelling of that zeroing, so there is nothing to suggest.
+    if (kind == 1u && in_place && q == 0u) {
         return false;
     }
 
@@ -12700,11 +12821,14 @@ bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
         char w = is_fp ? (is_64 ? 'd' : 's') : (is_64 ? 'x' : 'w');
         const char *mnem = is_fp ? "fmov" : "mov";
 
-        if (rd == state->rcc_rn && is_64 && state->rcc_is_64bit) {
+        if (rd == state->rcc_rn && is_64 && state->rcc_is_64bit
+                && !is_fp) {
             // Copy-back: MOV Rb, Ra ; MOV Ra, Rb. Ra still holds the
             // value, so the second copy is a no-op -- full width only,
-            // since a W (S) copy-back additionally zeroes the upper
-            // half, which deleting would not preserve.
+            // since a W copy-back additionally zeroes the upper half,
+            // which deleting would not preserve. No FP copy-back is full
+            // width: FMOV Dd zeroes bits 64..127 of Vd as FMOV Sd does
+            // bits 32..127 (tools/rwfuzz found the D deletion).
             out->name = "copy-back register MOV is redundant";
             out->start_offset = state->rcc_offset;
             out->insn_count = 2;
@@ -12732,7 +12856,7 @@ bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
             finding_replace_with_detail(out, offset, 0);
             found = true;
         }
-        // (A W/S copy-back falls through unflagged: the chain rewrite
+        // (A W or FP copy-back falls through unflagged: the chain rewrite
         // would degenerate to a self-MOV and deletion is blocked by
         // the upper-half zeroing.)
         if (found) {
@@ -15398,6 +15522,33 @@ bool check_branch_decided(armlint_state *state, const cs_insn *insn,
     return true;
 }
 
+// Whether the known-bits engine has bits 32..63 of register r zero
+// before the instruction it last synced to.
+static bool kv_top_half_zero(const armlint_state *state, unsigned r)
+{
+    if (r >= 31u) {
+        return false;
+    }
+    kv_fact f;
+    kv_get(state, r, &f);
+    uint64_t lo, hi;
+    int64_t slo, shi;
+    kv_range(&f, 1, &lo, &hi, &slo, &shi);
+    return (f.k0 >> 32) == 0xFFFFFFFFu || (lo <= hi && hi <= 0xFFFFFFFFu);
+}
+
+// Whether bits 32..63 of register r are known zero before the current
+// instruction, for a check that runs before check_redundant_zext has
+// updated its facts with it: by those facts or by the engine's.
+static bool top_half_known_zero(const armlint_state *state, unsigned r)
+{
+    if (r < 31u && ((state->wzx_valid >> r) & 1u) != 0
+            && state->wzx_zero_from[r] <= 32u) {
+        return true;
+    }
+    return kv_top_half_zero(state, r);
+}
+
 // Detect a conditional select whose condition the path to it already
 // decides; see armlint.h.
 bool check_csel_decided(armlint_state *state, const cs_insn *insn,
@@ -15450,6 +15601,16 @@ bool check_csel_decided(armlint_state *state, const cs_insn *insn,
     int taken = kv_decide_cond(state, cond, why, sizeof(why), &src_text,
                                &src_offset);
     if (taken < 0) {
+        return false;
+    }
+
+    // A W select of its own register still zero-extends it, so
+    // deleting one is exact only where the top half is already known
+    // zero (tools/rwfuzz found the deletion without that proof); and
+    // "mov wd, wd" is advice one step from that same miscompile (see
+    // check_and_lo32_mov), so the select is left alone.
+    unsigned kept = taken != 0 ? rn : (kind == 0u ? rm : 32u);
+    if (!sf && kept == rd && !top_half_known_zero(state, rd)) {
         return false;
     }
 
@@ -22392,7 +22553,13 @@ bool check_mov_cmp_branch_bvs(armlint_state *state, const cs_insn *insn,
                      is_eq ? "b.vs" : "b.vc", target);
             snprintf(line_text, sizeof(line_text), "%s 0x%" PRIx64,
                      is_eq ? "b.eq" : "b.ne", target);
-            ok = true;
+            // The rewrite's flags differ but for V, and the constant is
+            // never made: both must be dead where the branch goes, as
+            // on the fall-through the deferral scans (tools/rwfuzz ran
+            // the fold into a target reading the flags).
+            int64_t t_off = (int64_t)offset + (int64_t)imm19 * 4;
+            ok = nzcv_dead_at_target(state, t_off)
+                && reg_dead_at_target(state, t_off, rc);
         } else if (decode_csel_family(op, &sf2, &kind, &cond, &rd, &rn,
                                       &rm)
                    && cond <= 1u && rn != rc && rm != rc) {
@@ -22598,6 +22765,18 @@ bool check_and_mov_cmp_ubfx(armlint_state *state, const cs_insn *insn,
         unsigned csf, ckind, ccond, crd, crn, crm;
         if ((op & 0xFF000010u) == 0x54000000u) {
             cond = op & 0xFu;
+            // The flags differ but for the condition's outcome, the
+            // constant is never made and the field register holds the
+            // UBFX: all three must be dead where the branch goes, as on
+            // the fall-through the deferral scans.
+            int32_t imm19 = (int32_t)((op >> 5) & 0x7FFFFu);
+            imm19 = (imm19 ^ 0x40000) - 0x40000;
+            int64_t t_off = (int64_t)offset + (int64_t)imm19 * 4;
+            if (!nzcv_dead_at_target(state, t_off)
+                    || !reg_dead_at_target(state, t_off, state->umc_rc)
+                    || !reg_dead_at_target(state, t_off, state->umc_rt)) {
+                cond = 16u;
+            }
         } else if (decode_csel_family(op, &csf, &ckind, &ccond, &crd, &crn,
                                       &crm)
                    && crn != state->umc_rc && crm != state->umc_rc

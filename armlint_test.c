@@ -38,8 +38,7 @@ static csh g_handle;
 // and those tests are about the other check.
 static const char *g_uncounted;
 static const char *const kDeadWrite = "register write overwritten unread";
-static const char *const kHammock =
-    "B.cond over one instruction foldable into a conditional select";
+
 
 // Likewise check_branch_decided's findings, while set: several
 // fragments end in a branch their own instructions decide -- a compare
@@ -2820,41 +2819,60 @@ static void test_cmp_zero_branch(void)
     DECIDED_BRANCHES_UNCOUNTED(assert(run_zb_check(code, 12) == 0););
 }
 
+// zb_range_case for the TST + B.EQ fold: the pair parked mid-buffer,
+// a compare killing the flags on the fall-through, a RET at the target.
+static int tst_range_case(int32_t byte_disp)
+{
+    static uint8_t code[80 * 1024];
+    const size_t mid = 40 * 1024;
+    for (size_t i = 0; i < sizeof(code); i += 4) {
+        write_le32(&code[i], 0xD503201Fu);  // nop
+    }
+    tst_w_bit(&code[mid], 0, 0);
+    b_cond(&code[mid + 4], 0, byte_disp);
+    cmp_x_imm(&code[mid + 8], 9, 0);        // fall-through kill
+    ret_(&code[(size_t)((int64_t)mid + 4 + byte_disp)]);
+    return run_buffer_check(code, sizeof(code));
+}
+
 static void test_tst_branch(void)
 {
-    uint8_t code[20];
+    uint8_t code[32];
 
-    // -- Positive: single-bit TST + B.EQ/NE, in range, with stopper. --
+    // -- Positive: single-bit TST + B.EQ/NE, in range, with stopper.
+    //    The fold proves the flags dead at the branch target too, so
+    //    these run with the scanned buffer and a RET planted there
+    //    (run_zb_check). --
 
     // tst w0, #1 ; b.eq +8 ; ret -- bit 0, W register.
     tst_w_bit(&code[0], 0, 0);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst w0, #(1<<5) ; b.ne +8 ; ret -- mid-range bit, NE.
     tst_w_bit(&code[0], 0, 5);
     b_cond(&code[4], 1, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst w0, #(1<<31) ; b.eq -- top bit of W.
     tst_w_bit(&code[0], 0, 31);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst x5, #(1<<40) ; b.eq -- X register, bit > 31.
     tst_x_bit(&code[0], 5, 40);
     b_cond(&code[4], 0, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // tst x0, #(1<<63) ; b.ne -- top bit of X.
     tst_x_bit(&code[0], 0, 63);
     b_cond(&code[4], 1, 8);
     ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
+    assert(run_zb_check(code, 12) == 1);
 
     // -- Negative: multi-bit TST mask -- not a single bit. --
 
@@ -2870,42 +2888,14 @@ static void test_tst_branch(void)
     ret_(&code[8]);
     assert(run_helper_check(code, 12) == 0);
 
-    // -- Negative: range -- target too far for TBZ's 14-bit imm. --
+    // -- Range: TBZ's signed 14-bit imm, counted from the TST's word
+    //    (imm19 + 1). --
 
-    // tst w0, #1 ; b.eq +32 KB (just past TBZ's reach).
-    // imm19 = 8192, tbz disp = 8193, out of range [-8192, 8191].
-    tst_w_bit(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8192 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
-
-    // tst w0, #1 ; b.eq just within range.
-    // imm19 = 8190, tbz disp = 8191, in range.
-    tst_w_bit(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8190 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
-
-    // Exact-boundary negative: imm19 = 8191 -> tbz disp 8192, one
-    // past the top of TBZ's signed 14-bit range.
-    tst_w_bit(&code[0], 0, 0);
-    b_cond(&code[4], 0, 8191 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
-
-    // Bottom-of-range positive: imm19 = -8193 -> tbz disp -8192,
-    // exactly at the bottom of TBZ's range.
-    tst_w_bit(&code[0], 0, 0);
-    b_cond(&code[4], 0, -8193 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 1);
-
-    // Exact-boundary negative below the bottom: imm19 = -8194 ->
-    // tbz disp -8193.
-    tst_w_bit(&code[0], 0, 0);
-    b_cond(&code[4], 0, -8194 * 4);
-    ret_(&code[8]);
-    assert(run_helper_check(code, 12) == 0);
+    assert(tst_range_case(8192 * 4) == 0);      // tbz disp 8193
+    assert(tst_range_case(8190 * 4) == 1);      // 8191, the top
+    assert(tst_range_case(8191 * 4) == 0);      // 8192, one past it
+    assert(tst_range_case(-8193 * 4) == 1);     // -8192, the bottom
+    assert(tst_range_case(-8194 * 4) == 0);     // -8193, one below
 
     // -- Negative: flag liveness same as CMP check. --
 
@@ -2922,6 +2912,23 @@ static void test_tst_branch(void)
     b_cond(&code[8], 11 /* LT */, 8);
     ret_(&code[12]);
     DECIDED_BRANCHES_UNCOUNTED(assert(run_helper_check(code, 16) == 0););
+
+    // -- Negative: the taken edge reads the flags. The TBZ deletes the
+    //    TST, so the flags must die there too, as for the compare-zero
+    //    fold; tools/rwfuzz found the fold without that proof, the
+    //    target's reader seeing the flags from before the TST. --
+    tst_x_bit(&code[0], 10, 3);
+    b_cond(&code[4], 0, 12);            // b.eq L
+    cmp_x_imm(&code[8], 9, 0);          // fall-through kill
+    ret_(&code[12]);
+    str_x(&code[16], 11, 14, 0);        // L: str x11, [x14]
+    b_cond(&code[20], 1, 8);            // b.ne
+    ret_(&code[24]);
+    assert(run_zb_check(code, 28) == 0);
+
+    // Positive control: a compare at the reader's slot kills them.
+    cmp_x_imm(&code[20], 12, 0);
+    assert(run_zb_check(code, 28) == 1);
 
     // -- Negative: not EQ/NE. --
 
@@ -3091,6 +3098,15 @@ static void test_single_bit_cbz(void)
     add_w(&code[8], 1, 8, 2);            // reads w8
     movz_w(&code[12], 8, 0);
     assert(run_helper_check(code, 16) == 1);
+
+    // ... but not past an in-place extract, which has moved the bit:
+    // after lsr x8, x8, #63 it is bit 0 of x8, not bit 63 (tools/rwfuzz
+    // ran the rebind into that).
+    write_le32(&code[0], 0xD37FFD08u);   // lsr x8, x8, #63
+    cbz_cbnz(&code[4], 1, 0, 8, 2);
+    add_w(&code[8], 1, 8, 2);            // reads w8
+    movz_w(&code[12], 8, 0);
+    assert(run_helper_check(code, 16) == 0);
 
     // -- Downgrade: the target lies beyond the kill, so the taken
     //    path's liveness is unproven and only the branch rebinds. --
@@ -3283,36 +3299,54 @@ static void test_neg_cbz(void)
     const uint32_t add_w0_w8_1 = 0x11000500u;   // add w0, w8, #1: reads w8
 
     // In place, CBZ: only the fall-through must kill w8 (on the taken
-    // edge x = 0 and the NEG changed nothing).
-    //   neg w8, w8 ; cbz w8, L ; mov w8, #1 ; L: ret
-    neg_(&code[0], 0, 0, 8, 8);
-    cbz_cbnz(&code[4], 0, 0, 8, 2);
-    movz_w(&code[8], 8, 1);
-    ret_(&code[12]);
-    detail[0] = '\0';
-    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 1);
-    assert(strcmp(detail, "-> cbz w8, 0xc (drop neg w8, w8)") == 0);
-
-    // ... and a read on the fall-through refuses it.
-    write_le32(&code[8], add_w0_w8_1);
-    assert(run_named_buffer_check(code, 16, name, detail, sizeof(detail)) == 0);
-
-    // In place, CBNZ: only the target must kill w8; the fall-through
-    // may read it.
-    //   neg w8, w8 ; cbnz w8, L ; add w0, w8, #1 ; L: mov w8, #1 ; ret
-    neg_(&code[0], 0, 0, 8, 8);
-    cbz_cbnz(&code[4], 0, 1, 8, 2);
-    write_le32(&code[8], add_w0_w8_1);
+    // edge x = 0 and the NEG changed nothing -- at W width only as
+    // bits 32..63 were already zero, which the MOV in front makes so).
+    //   mov w8, w2 ; neg w8, w8 ; cbz w8, L ; mov w8, #1 ; L: ret
+    mov_w_reg(&code[0], 8, 2);
+    neg_(&code[4], 0, 0, 8, 8);
+    cbz_cbnz(&code[8], 0, 0, 8, 2);
     movz_w(&code[12], 8, 1);
     ret_(&code[16]);
     detail[0] = '\0';
     assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 1);
-    assert(strcmp(detail, "-> cbnz w8, 0xc (drop neg w8, w8)") == 0);
+    assert(strcmp(detail, "-> cbz w8, 0x10 (drop neg w8, w8)") == 0);
+
+    // ... and a read on the fall-through refuses it.
+    write_le32(&code[12], add_w0_w8_1);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+
+    // Without the MOV the W NEG's zeroing of bits 32..63 is a write on
+    // the taken edge too, so both edges need w8 dead (tools/rwfuzz ran
+    // the exemption into a read of x8 there): a RET at the target
+    // refuses it, a kill there proves it.
+    //   neg w8, w8 ; cbz w8, L ; mov w8, #1 ; L: ret / mov w8, #2 ; ret
+    neg_(&code[0], 0, 0, 8, 8);
+    cbz_cbnz(&code[4], 0, 0, 8, 2);
+    movz_w(&code[8], 8, 1);
+    ret_(&code[12]);
+    ret_(&code[16]);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+    movz_w(&code[12], 8, 2);
+    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 1);
+
+    // In place, CBNZ: only the target must kill w8; the fall-through
+    // may read it.
+    //   mov w8, w2 ; neg w8, w8 ; cbnz w8, L ; add w0, w8, #1 ;
+    //   L: mov w8, #1 ; ret
+    mov_w_reg(&code[0], 8, 2);
+    neg_(&code[4], 0, 0, 8, 8);
+    cbz_cbnz(&code[8], 0, 1, 8, 2);
+    write_le32(&code[12], add_w0_w8_1);
+    movz_w(&code[16], 8, 1);
+    ret_(&code[20]);
+    detail[0] = '\0';
+    assert(run_named_buffer_check(code, 24, name, detail, sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> cbnz w8, 0x10 (drop neg w8, w8)") == 0);
 
     // ... and a read at the target refuses it.
-    write_le32(&code[12], add_w0_w8_1);
-    movz_w(&code[8], 8, 1);
-    assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
+    write_le32(&code[16], add_w0_w8_1);
+    movz_w(&code[12], 8, 1);
+    assert(run_named_buffer_check(code, 24, name, detail, sizeof(detail)) == 0);
 
     // Out of place: both edges must kill w8.
     //   neg w8, w1 ; cbz w8, L ; mov w8, #1 ; L: mov w8, #2 ; ret
@@ -5958,7 +5992,26 @@ static void test_and_ext_chain(void)
 
 static void test_redundant_cmp_after_s_variant(void)
 {
-    uint8_t code[24];
+    uint8_t code[32];
+
+    // The dropped CMP's C differs from the flag-setter's, so where the
+    // branch goes must not read the flags either (tools/rwfuzz ran the
+    // drop into a target that did): adds w0, w1, w2 ; cmp w0, #0 ;
+    // b.eq L ; cmp x9, #0 ; ret ; L: csel x3, x4, x5, hs ; ret -- then
+    // with a compare at L.
+    {
+        const char *name = "redundant zero-CMP/TST after flag-setting ALU";
+        adds_w(&code[0], 0, 1, 2);
+        cmp_w_imm(&code[4], 0, 0);
+        b_cond(&code[8], 0, 12);
+        cmp_x_imm(&code[12], 9, 0);
+        ret_(&code[16]);
+        csel_x(&code[20], 3, 4, 5, 2);
+        ret_(&code[24]);
+        assert(run_named_zb_check(code, 28, name) == 0);
+        cmp_x_imm(&code[20], 6, 0);
+        assert(run_named_zb_check(code, 28, name) == 1);
+    }
 
     // -- Positive cases: each fires BOTH the new redundant-CMP finding
     //    AND the existing CMP+B.cond -> CBZ finding, so expect 2. --
@@ -6121,7 +6174,7 @@ static void test_redundant_cmp_after_s_variant(void)
 
 static void test_zero_cmp_to_s_variant(void)
 {
-    uint8_t code[24];
+    uint8_t code[32];
 
     // -- Positives: each fires BOTH the S-variant finding AND the
     //    existing CMP/TST + B.cond -> CBZ finding, so expect 2. The
@@ -6239,6 +6292,27 @@ static void test_zero_cmp_to_s_variant(void)
     csel_w(&code[8], 3, 4, 5, 0);
     ret_(&code[12]);
     assert(run_zb_check(code, 16) == 1);
+
+    // A B.cond the scan passes leaves with the altered bits live on its
+    // taken edge, so they must die there too (tools/rwfuzz found the
+    // fold without that proof): add x0, x1, x2 ; cmp x0, #0 ; b.eq L ;
+    // cmp x9, #0 ; ret ; L: csel x3, x4, x5, hs ; ret. The target's
+    // HS reads the C the ADDS would compute: nothing fires (the CBZ
+    // fold, which proves all four flags dead there, refuses too).
+    add_x(&code[0], 0, 1, 2);
+    cmp_x_imm(&code[4], 0, 0);
+    b_cond(&code[8], 0, 12);
+    cmp_x_imm(&code[12], 9, 0);
+    ret_(&code[16]);
+    csel_x(&code[20], 3, 4, 5, 2);
+    ret_(&code[24]);
+    assert(run_zb_check(code, 28) == 0);
+    // An EQ there reads only Z, which the ADDS computes alike: the fold
+    // fires, alone.
+    csel_x(&code[20], 3, 4, 5, 0);
+    assert(run_zb_check(code, 28) == 1);
+    assert(run_named_zb_check(code, 28,
+        "ADD/SUB/AND/BIC + zero-CMP foldable to S-variant") == 1);
 
     // CSEL.HI reads C, which the CMP-to-ANDS rewrite flips: discard.
     and_w(&code[0], 0, 1, 2);
@@ -6747,13 +6821,18 @@ static void test_add_sub_zero(void)
 
     // -- Positive: Rd == Rn, completely no-op. --
 
-    // add w0, w0, #0
-    add_w_imm(&code[0], 0, 0, 0);
-    assert(run_helper_check(code, 4) == 1);
-
     // sub x3, x3, #0
     sub_x_imm(&code[0], 3, 3, 0);
     assert(run_helper_check(code, 4) == 1);
+
+    // add w0, w0, #0 still zeroes bits 32..63, so it is a no-op only
+    // where they are already known zero (tools/rwfuzz ran the deletion
+    // from an x0 with its top half set): mov w0, w1 ; add w0, w0, #0.
+    add_w_imm(&code[0], 0, 0, 0);
+    assert(run_helper_check(code, 4) == 0);
+    mov_w_reg(&code[0], 0, 1);
+    add_w_imm(&code[4], 0, 0, 0);
+    assert(run_named_check(code, 8, "ADD/SUB #0 is redundant") == 1);
 
     // -- Negative: imm != 0. --
 
@@ -8797,9 +8876,28 @@ static void test_mov_cage_orr_add(void)
 static const char *const kBvs =
     "MOV + CMP + B.EQ/NE against INT_MIN/INT_MAX foldable to B.VS/B.VC";
 
+// The B.VS fold proves NZCV and the constant register (x0 in every case
+// here) dead where its branch goes, as well as on the fall-through: so
+// each fragment's B.conds are sent to a block planted past its end that
+// kills both -- adds x0, x1, x2 ; ret -- and the case runs with the
+// scanned buffer. The array needs eight spare bytes.
+static int run_bvs(uint8_t *code, size_t len)
+{
+    for (size_t i = 0; i < len; i += 4) {
+        uint32_t w = (uint32_t)code[i] | (uint32_t)code[i + 1] << 8
+            | (uint32_t)code[i + 2] << 16 | (uint32_t)code[i + 3] << 24;
+        if ((w & 0xFF000010u) == 0x54000000u) {
+            b_cond(&code[i], w & 0xFu, (int32_t)(len - i));
+        }
+    }
+    encode_sr(&code[len], 0xAB000000u, 0, 1, 2);
+    ret_(&code[len + 4]);
+    return run_named_buffer_check(code, len + 8, kBvs, NULL, 0);
+}
+
 static void test_mov_cmp_branch_bvs(void)
 {
-    uint8_t code[32];
+    uint8_t code[40];
 
     // -- Positives: INT64_MIN (movz x0, #0x8000, lsl #48) --
 
@@ -8811,7 +8909,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 1);
+    assert(run_bvs(code, 24) == 1);
 
     // The proofs land in either order; b.ne -> b.vc.
     movz_x(&code[0], 0, 0x8000, 3);
@@ -8820,7 +8918,7 @@ static void test_mov_cmp_branch_bvs(void)
     adds_w(&code[12], 3, 4, 5);
     movz_x(&code[16], 0, 2, 0);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 1);
+    assert(run_bvs(code, 24) == 1);
 
     // One instruction settles both: adds x0, x1, x2 overwrites the
     // constant register and NZCV at once.
@@ -8829,7 +8927,7 @@ static void test_mov_cmp_branch_bvs(void)
     b_cond(&code[8], 0, 8);
     encode_sr(&code[12], 0xAB000000u, 0, 1, 2);
     ret_(&code[16]);
-    assert(run_named_check(code, 20, kBvs) == 1);
+    assert(run_bvs(code, 20) == 1);
 
     // Once the register is dead, RET proves NZCV dead (terminator).
     movz_x(&code[0], 0, 0x8000, 3);
@@ -8837,7 +8935,7 @@ static void test_mov_cmp_branch_bvs(void)
     b_cond(&code[8], 0, 8);
     movz_x(&code[12], 0, 2, 0);
     ret_(&code[16]);
-    assert(run_named_check(code, 20, kBvs) == 1);
+    assert(run_bvs(code, 20) == 1);
 
     // The constant in the Rn slot: equality is symmetric.
     movz_x(&code[0], 0, 0x8000, 3);
@@ -8846,7 +8944,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 1);
+    assert(run_bvs(code, 24) == 1);
 
     // W form: movz w0, #0x8000, lsl #16 (INT32_MIN) ; cmp w2, w0 ;
     // b.ne -> cmp wzr, w2 ; b.vc.
@@ -8856,7 +8954,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 1);
+    assert(run_bvs(code, 24) == 1);
 
     // INT64_MAX (movn x0, #0x8000, lsl #48) -> cmn x2, #1 ; b.vs.
     movn_x(&code[0], 0, 0x8000, 3);
@@ -8865,7 +8963,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 1);
+    assert(run_bvs(code, 24) == 1);
 
     // INT32_MAX (movn w0, #0x8000, lsl #16) -> cmn w2, #1 ; b.vc.
     movn_w_hw(&code[0], 0, 0x8000, 1);
@@ -8874,7 +8972,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 1);
+    assert(run_bvs(code, 24) == 1);
 
     // A two-instruction chain: movz w0, #0xffff ; movk w0, #0x7fff,
     // lsl #16 (INT32_MAX) ; cmp w2, w0 ; b.eq.
@@ -8885,12 +8983,12 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[16], 0, 2, 0);
     adds_w(&code[20], 3, 4, 5);
     ret_(&code[24]);
-    assert(run_named_check(code, 28, kBvs) == 1);
+    assert(run_bvs(code, 28) == 1);
 
     // Fifteen undecided instructions fit the sixteen-instruction
     // window; sixteen expire it.
     for (int fill = 15; fill <= 16; fill++) {
-        uint8_t big[12 + 16 * 4 + 12];
+        uint8_t big[12 + 16 * 4 + 12 + 8];
         movz_x(&big[0], 0, 0x8000, 3);
         cmp_x_reg(&big[4], 2, 0);
         b_cond(&big[8], 0, 8);
@@ -8901,9 +8999,25 @@ static void test_mov_cmp_branch_bvs(void)
         movz_x(&big[at], 0, 1, 0);
         adds_w(&big[at + 4], 3, 4, 5);
         ret_(&big[at + 8]);
-        assert(run_named_check(big, at + 12, kBvs)
+        assert(run_bvs(big, at + 12)
                == (fill == 15 ? 1 : 0));
     }
+
+    // The branch's target reads what the rewrite changes: the flags
+    // (the rewrite agrees on V alone), or the constant it never makes.
+    // tools/rwfuzz ran the fold into the first.
+    movz_x(&code[0], 0, 0x8000, 3);
+    cmp_x_reg(&code[4], 2, 0);
+    b_cond(&code[8], 0, 12);
+    movz_x(&code[12], 0, 2, 0);
+    adds_w(&code[16], 3, 4, 5);
+    csel_x(&code[20], 6, 7, 8, 11);     // L: csel x6, x7, x8, lt
+    ret_(&code[24]);
+    assert(run_named_buffer_check(code, 28, kBvs, NULL, 0) == 0);
+    add_x(&code[20], 6, 0, 7);          // L: add x6, x0, x7
+    assert(run_named_buffer_check(code, 28, kBvs, NULL, 0) == 0);
+    encode_sr(&code[20], 0xAB000000u, 0, 1, 2); // L: adds x0, x1, x2
+    assert(run_named_buffer_check(code, 28, kBvs, NULL, 0) == 1);
 
     // -- Negatives --
 
@@ -8914,7 +9028,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // So is a sign-crossed one: movn x0, #4 is -5, cmn x2, #5.
     movn_x(&code[0], 0, 4, 0);
@@ -8923,7 +9037,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // No immediate form of any kind: 0x1234.
     movz_x(&code[0], 0, 0x1234, 0);
@@ -8932,7 +9046,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // A bitmask immediate that is neither extreme -- the general
     // eor + cbz form, TODO.md's: movz w0, #0xffff, and the chain movz
@@ -8943,7 +9057,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
     movz_w(&code[0], 0, 0xffff);
     movk_w(&code[4], 0, 0x3fff, 1);
     cmp_w_reg(&code[8], 2, 0);
@@ -8951,7 +9065,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[16], 0, 2, 0);
     adds_w(&code[20], 3, 4, 5);
     ret_(&code[24]);
-    assert(run_named_check(code, 28, kBvs) == 0);
+    assert(run_bvs(code, 28) == 0);
 
     // The W sign bit in an X chain (movz x0, #0x8000, lsl #16) is
     // not the X sign bit.
@@ -8961,7 +9075,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // All-ones (movn x0, #0) is cmn #1's; zero is the MOV #0 fold's.
     movn_x(&code[0], 0, 0, 0);
@@ -8970,9 +9084,9 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
     movz_x(&code[0], 0, 0, 0);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // An ordered condition (b.lo) needs the subtraction.
     movz_x(&code[0], 0, 0x8000, 3);
@@ -8981,7 +9095,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // Width mismatch: a W chain (INT32_MIN) feeding an X compare.
     movz_w_hw(&code[0], 0, 0x8000, 1);
@@ -8990,7 +9104,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // The other operand ZR, or the constant register itself.
     movz_x(&code[0], 0, 0x8000, 3);
@@ -8999,9 +9113,9 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
     cmp_x_reg(&code[4], 0, 0);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // Not adjacent: a NOP between the CMP and the branch.
     movz_x(&code[0], 0, 0x8000, 3);
@@ -9011,7 +9125,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[16], 0, 2, 0);
     adds_w(&code[20], 3, 4, 5);
     ret_(&code[24]);
-    assert(run_named_check(code, 28, kBvs) == 0);
+    assert(run_bvs(code, 28) == 0);
 
     // NZCV read after the branch (b.lt), even with the register dead.
     movz_x(&code[0], 0, 0x8000, 3);
@@ -9020,7 +9134,7 @@ static void test_mov_cmp_branch_bvs(void)
     movz_x(&code[12], 0, 2, 0);
     b_cond(&code[16], 11, 8);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // The instruction that kills the register reads NZCV: csel w0,
     // w1, w2, lo. The break wins over the settled proof.
@@ -9030,7 +9144,7 @@ static void test_mov_cmp_branch_bvs(void)
     csel_w(&code[12], 0, 1, 2, 3);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // The constant register read after the branch: add x3, x2, x0.
     movz_x(&code[0], 0, 0x8000, 3);
@@ -9039,7 +9153,7 @@ static void test_mov_cmp_branch_bvs(void)
     add_x(&code[12], 3, 2, 0);
     adds_w(&code[16], 3, 4, 5);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // A call before the register dies discards: NZCV is dead across
     // it, but the register scan makes no PCS assumption.
@@ -9049,23 +9163,22 @@ static void test_mov_cmp_branch_bvs(void)
     bl_(&code[12], 0x100);
     movz_x(&code[16], 0, 2, 0);
     ret_(&code[20]);
-    assert(run_named_check(code, 24, kBvs) == 0);
+    assert(run_bvs(code, 24) == 0);
 
     // Side entry: a branch into the CMP refuses the finding; one to
     // the chain's first instruction is fine (run_buffer_check builds
     // the branch-target map).
     movz_x(&code[0], 0, 0x8000, 3);
     cmp_x_reg(&code[4], 2, 0);
-    b_cond(&code[8], 0, 8);
-    movz_x(&code[12], 0, 2, 0);         // a select fold of its own
+    b_cond(&code[8], 0, 12);            // b.eq L
+    movz_x(&code[12], 0, 2, 0);
     adds_w(&code[16], 3, 4, 5);
-    cbz_cbnz(&code[20], 1, 0, 9, -4);
-    ret_(&code[24]);
-    g_uncounted = kHammock;
-    assert(run_buffer_check(code, 28) == 0);
-    g_uncounted = NULL;
-    cbz_cbnz(&code[20], 1, 0, 9, -5);
-    assert(run_buffer_check(code, 28) == 1);
+    encode_sr(&code[20], 0xAB000000u, 0, 1, 2); // L: adds x0: both die
+    cbz_cbnz(&code[24], 1, 0, 9, -5);   // cbz x9, the CMP
+    ret_(&code[28]);
+    assert(run_named_buffer_check(code, 32, kBvs, NULL, 0) == 0);
+    cbz_cbnz(&code[24], 1, 0, 9, -6);   // cbz x9, the chain's start
+    assert(run_named_buffer_check(code, 32, kBvs, NULL, 0) == 1);
 
     // -- Other consumers, as words with the buffer set. --
     static const struct {
@@ -9082,10 +9195,11 @@ static void test_mov_cmp_branch_bvs(void)
         { { 0xD2F00000u, 0xEB00005Fu, 0x1A9F07E0u, 0x2B0700C5u, 0xD65F03C0u },
           5, 1, "-> cmp xzr, x2 ; cset w0, vc" },
         // A CCMP against the constant register, then its b.eq: Z of the
-        // failure flags (#4) becomes V (#1).
-        { { 0xD2F00000u, 0xEB00005Fu, 0xFA401064u, 0x54000060u, 0xD2800020u,
-            0x2B0700C5u, 0xD65F03C0u }, 7, 1,
-          "-> cmp xzr, x2 ; ccmp xzr, x3, #1, vc ; b.vs 0x18" },
+        // failure flags (#4) becomes V (#1). The branch lands on adds
+        // x0, x1, x2, where the constant and the flags both die.
+        { { 0xD2F00000u, 0xEB00005Fu, 0xFA401064u, 0x54000040u, 0xD2800020u,
+            0xAB020020u, 0xD65F03C0u }, 7, 1,
+          "-> cmp xzr, x2 ; ccmp xzr, x3, #1, vc ; b.vs 0x14" },
         // INT_MAX: the CCMP becomes a CCMN #1, the consumer a CSEL.
         { { 0x92F00000u, 0xEB00005Fu, 0xFA401064u, 0x9A8710C5u, 0xD2800020u,
             0x2B0700C5u, 0xD65F03C0u }, 7, 1,
@@ -9540,6 +9654,13 @@ static void test_reg_copy_chain(void)
     // A D read of an S copy -- upper half not guaranteed; no finding.
     fmov_s_reg(&code[0], 2, 0);
     fmov_d_reg(&code[4], 3, 2);
+    assert(run_helper_check(code, 8) == 0);
+
+    // An FP copy-back is never full width: fmov d0, d1 zeroes bits
+    // 64..127 of v0, which deleting it would keep (tools/rwfuzz found
+    // the deletion) -- no finding.
+    fmov_d_reg(&code[0], 1, 0);
+    fmov_d_reg(&code[4], 0, 1);
     assert(run_helper_check(code, 8) == 0);
 
     // GPR and FP copies do not chain across register files.
@@ -10079,6 +10200,19 @@ static void test_csel_decided(void)
           "-> neg x7, x9; eq never holds: x0 is 0x7 (known 0x8 bytes back)" },
         { { 0xD28000E0u, 0xF100201Fu, 0x1A9F17ECu, 0xD65F03C0u }, 4, 1,
           "-> mov w12, #0; ne always holds: x0 is 0x7 (known 0x8 bytes back)" },
+        // A select of its own register: deleted at X width ...
+        // tst w0, #1 ; csel x1, x2, x1, hi ; ret
+        { { 0x7200001Fu, 0x9A818041u, 0xD65F03C0u }, 3, 1,
+          "-> delete; x1 selects itself; hi never holds: tst cannot set "
+          "flags that pass hi (known 0x4 bytes back)" },
+        // ... but at W width it still zero-extends: left alone unless
+        // the top half is known zero (tools/rwfuzz found the deletion
+        // without that proof) -- tst w0, #1 ; csel w1, w2, w1, hi ; ret,
+        // then with mov w1, w5 in front.
+        { { 0x7200001Fu, 0x1A818041u, 0xD65F03C0u }, 3, 0, NULL },
+        { { 0x2A0503E1u, 0x7200001Fu, 0x1A818041u, 0xD65F03C0u }, 4, 1,
+          "-> delete; w1 selects itself; hi never holds: tst cannot set "
+          "flags that pass hi (known 0x4 bytes back)" },
         // Negatives: open flags; the Spectre shape (a branch tested
         // these flags); check_csel_self's identity; Rd = ZR; a side
         // entry onto the select.
@@ -10489,31 +10623,43 @@ static void test_and_mov_cmp_ubfx(void)
     const char *name =
         "AND + MOV + CMP of a masked field foldable to UBFX + CMP #imm";
     char detail[ARMLINT_FINDING_DETAIL_LEN];
+    // Each branch lands on a block killing the field register, the
+    // constant and the flags: the rewrite changes all three, so they
+    // must be dead where it goes as well as on the fall-through.
     static const struct {
-        uint32_t words[8];
+        uint32_t words[12];
         unsigned n;
         int expect;
         const char *detail;
     } cases[] = {
-        // and w9, w22, #0xfc00 ; mov w11, #0xd800 ; cmp w9, w11 ; b.eq ;
-        // mov w9, #0 ; mov w11, #0 ; adds w3, w4, w5 ; ret
-        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x54000080u, 0x52800009u,
-            0x5280000Bu, 0x2B050083u, 0xD65F03C0u }, 8, 1,
+        // and w9, w22, #0xfc00 ; mov w11, #0xd800 ; cmp w9, w11 ; b.eq L ;
+        // mov w9, #0 ; mov w11, #0 ; adds w3, w4, w5 ; ret ; L: mov w9,
+        // #1 ; mov w11, #1 ; adds w3, w4, w5 ; ret
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x540000A0u, 0x52800009u,
+            0x5280000Bu, 0x2B050083u, 0xD65F03C0u, 0x52800029u, 0x5280002Bu,
+            0x2B050083u, 0xD65F03C0u }, 12, 1,
           "-> ubfx w9, w22, #10, #6 ; cmp w9, #0x36" },
+        // ... and where it goes reads the field: add w3, w9, w4.
+        { { 0x121616C9u, 0x529B000Bu, 0x6B0B013Fu, 0x540000A0u, 0x52800009u,
+            0x5280000Bu, 0x2B050083u, 0xD65F03C0u, 0x0B040123u, 0x5280002Bu,
+            0x2B050083u, 0xD65F03C0u }, 12, 0, NULL },
         // The constant first, the CMP operands swapped, an instruction
         // between, b.ne, and the RET proving NZCV dead last.
-        { { 0x529B0008u, 0x12161409u, 0x91000421u, 0x6B09011Fu, 0x54000061u,
-            0x52800008u, 0x52800009u, 0xD65F03C0u }, 8, 1,
+        { { 0x529B0008u, 0x12161409u, 0x91000421u, 0x6B09011Fu, 0x54000081u,
+            0x52800008u, 0x52800009u, 0xD65F03C0u, 0x52800028u, 0x52800029u,
+            0x2B050083u, 0xD65F03C0u }, 12, 1,
           "-> ubfx w9, w0, #10, #6 ; cmp w9, #0x36" },
         // X form, a two-link chain: and x8, x0, #0xfffffffff000000 ;
         // movz x9, #0x100, lsl #16 ; movk x9, #0x4, lsl #32 ; cmp ; b.eq
-        { { 0x92688C08u, 0xD2A02009u, 0xF2C00089u, 0xEB09011Fu, 0x54000060u,
-            0xAB020028u, 0xD2800009u, 0xD65F03C0u }, 8, 1,
+        { { 0x92688C08u, 0xD2A02009u, 0xF2C00089u, 0xEB09011Fu, 0x54000080u,
+            0xAB020028u, 0xD2800009u, 0xD65F03C0u, 0xAB020028u, 0xD2800009u,
+            0xD65F03C0u }, 11, 1,
           "-> ubfx x8, x0, #24, #36 ; cmp x8, #0x401" },
         // A mask reaching the sign bit with an unsigned condition (b.lo),
         // the shifted-immediate form.
-        { { 0x12124408u, 0x52B00009u, 0x6B09011Fu, 0x54000063u, 0x2B020028u,
-            0x52800009u, 0xD65F03C0u }, 7, 1,
+        { { 0x12124408u, 0x52B00009u, 0x6B09011Fu, 0x54000083u, 0x2B020028u,
+            0x52800009u, 0xD65F03C0u, 0x2B020028u, 0x52800009u,
+            0xD65F03C0u }, 10, 1,
           "-> ubfx w8, w0, #14, #18 ; cmp w8, #0x20, lsl #12" },
         // A CSEL consumer (the condition is unchanged), a CSET that
         // writes the masked register, a CSINC that writes the constant.
@@ -10667,10 +10813,13 @@ static void test_dead_mov_across_branch(void)
             0xD65F03C0u }, 6, NULL, 0 },
         { { 0x5280110Au, 0x72A0002Au, 0x8B0A0129u, 0x94000002u, 0x5280002Au,
             0xD65F03C0u }, 6, NULL, 0 },
-        // B.VS: cmp x2, x0 ; b.eq 1f ; b 2f ; 1: ret ; 2: mov x0, #1 ;
-        // adds ; ret -- the B is followed to both proofs.
-        { { 0xD2F00000u, 0xEB00005Fu, 0x54000040u, 0x14000002u, 0xD65F03C0u,
-            0xD2800020u, 0x2B050083u, 0xD65F03C0u }, 8, kBvs, 1 },
+        // B.VS: cmp x2, x0 ; b.eq 1f ; b 2f ; 1: adds x0, x1, x2 ; ret ;
+        // 2: mov x0, #1 ; adds ; ret -- the B is followed to both
+        // proofs, and the B.EQ's target proves them too (a RET there
+        // would return the constant the rewrite never makes).
+        { { 0xD2F00000u, 0xEB00005Fu, 0x54000040u, 0x14000003u, 0xAB020020u,
+            0xD65F03C0u, 0xD2800020u, 0x2B050083u, 0xD65F03C0u }, 9, kBvs,
+          1 },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         detail[0] = '\0';
@@ -12127,7 +12276,7 @@ static void test_fmul_fneg_fold(void)
     // FNEG into a fresh register defers on the product register; an
     // FP-side overwrite (scalar FP class) commits it.
     {
-        uint8_t buf[12];
+        uint8_t buf[16];
         fmul_scalar(&buf[0], 1, 0, 1, 2);
         fneg_scalar(&buf[4], 1, 5, 0);
         // fmov d0, d3 fully overwrites v0.
@@ -12160,6 +12309,15 @@ static void test_fmul_fneg_fold(void)
         fneg_scalar(&buf[4], 1, 5, 0);
         write_le32(&buf[8], 0x4E0C1C00u | (1u << 5) | 0u);
         assert(run_helper_check(buf, 12) == 0);
+
+        // ...and a UMOV of a halfword lane reads it, though Capstone 5
+        // gives that form no operand access (tools/rwfuzz found the
+        // fold past one): umov w5, v0.h[0] ; fmov d0, d3.
+        fmul_scalar(&buf[0], 1, 0, 1, 2);
+        fneg_scalar(&buf[4], 1, 5, 0);
+        write_le32(&buf[8], 0x0E023C05u);
+        write_le32(&buf[12], 0x1E604000u | (1u << 22) | (3u << 5) | 0u);
+        assert(run_helper_check(buf, 16) == 0);
 
         // A control transfer stops the scan conservatively.
         fmul_scalar(&buf[0], 1, 0, 1, 2);
@@ -15569,6 +15727,11 @@ static void test_vector_self_op(void)
     vec_orr(&code[0], 1, 7, 7, 7);
     assert(run_helper_check(code, 4) == 1);
 
+    // ... at 16B. At 8B the identity still zeroes bits 64..127, which
+    // deleting it would keep (tools/rwfuzz found the deletion).
+    vec_orr(&code[0], 0, 7, 7, 7);
+    assert(run_helper_check(code, 4) == 0);
+
     // N) The one member that must never be flagged: `orr Vd, Vn, Vn`
     //    with Rd != Rn IS the canonical vector MOV, emitted for every
     //    `mov vd.16b, vn.16b`. Counting these inflated a first pass
@@ -15858,6 +16021,14 @@ static void test_add_sub_imm_chain(void)
     addsub_imm(&code[0], 1, false, 8, 9, 4, 0);
     movz_x(&code[4], 9, 7, 0);                  // clobbers x9
     addsub_imm(&code[8], 1, false, 8, 8, 8, 0);
+    assert(run_chain_check(code, 12) == 0);
+
+    // ... however the write is spelled: an atomic's destination, which
+    // Capstone 5 gives no access flag (tools/rwfuzz found the fold
+    // past one), and a load's writeback of its base.
+    write_le32(&code[4], 0xF8220389u);          // ldadd x2, x9, [x28]
+    assert(run_chain_check(code, 12) == 0);
+    write_le32(&code[4], 0xF8408523u);          // ldr x3, [x9], #8
     assert(run_chain_check(code, 12) == 0);
 
     // N) ... nor across a control transfer, where a consumer in the
