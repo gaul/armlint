@@ -31,7 +31,9 @@
 // x0..x7 and v0..v7 and stores only into the scratch buffer: W and X
 // arithmetic, logic, shifts and bitfields, moves, conditional selects,
 // loads off x28 (atomics included), compares, forward CBZ/CBNZ/B.cond,
-// calls to the stub, and the shapes the mode plants for checks to find.
+// calls to the stub, and the shapes the mode plants for checks to find;
+// in a third of the programs, a counted loop around some of it, whose
+// back edge is the one backward branch besides an exclusive loop's.
 // Register values lean on the edges -- zero, all ones, the 32-bit
 // boundaries, small constants and their negatives, and for vectors the
 // floats an FP fold must keep exact -- so compares and masks meet the
@@ -342,7 +344,10 @@ typedef struct {
     int aim;            // a transfer's target this many slots on, when
                         // nonzero; otherwise gen_body draws it
     bool interior;      // no branch may land here: past the start of a
-                        // plant whose accesses need its base set up
+                        // plant whose accesses need its base set up, or
+                        // inside a counted loop
+    bool loop_word;     // a counted loop's own counter or back edge, which
+                        // the control arm leaves alone
     unsigned short shape;   // in all, 1 + the shape whose plant laid it;
                             // 0 for the filler
 } slot_t;
@@ -2347,11 +2352,46 @@ static void plant_lse_loop(unsigned shape)
     }
 }
 
+// A counted loop around a few of the body's steps, so that the branch
+// following armlint's proofs do -- flags or a register dead where a
+// branch goes, the side-entry gate -- meets backward edges, as it does
+// in compiled code. The counter is w9, which nothing else touches, set
+// to 1..3 before the loop and counted down at its foot, where the back
+// edge -- B.NE after SUBS, or CBNZ after SUB -- returns to the top. Its
+// slots are interior, so no branch from elsewhere enters the loop past
+// the counter; a branch inside it may leave it early.
+#define LOOP_REG 9u
+
+static void close_loop(int top)
+{
+    bool flags = rr(2) == 0;
+    if (nbody + 2 > BODY_MAX) {
+        return;
+    }
+    push_text("%s w%u, w%u, #1", flags ? "subs" : "sub", LOOP_REG, LOOP_REG);
+    push_branch(flags ? 2u : 1u, LOOP_REG, 1u, 0);  // B.NE or CBNZ W
+    body[nbody - 1].aim = top - (nbody - 1);
+    for (int i = top; i < nbody; i++) {
+        body[i].interior = true;
+    }
+    body[nbody - 2].loop_word = body[nbody - 1].loop_word = true;
+}
+
 static void gen_body(void (*plant)(void))
 {
     nbody = 0;
     int len = 10 + (int)rr(20);
+    int loop_at = rr(3) == 0 ? (int)rr((unsigned)len) : -1;
+    int loop_top = -1, loop_steps = 0;
     while (nbody < len) {
+        if (loop_at >= 0 && nbody >= loop_at && nbody + 10 < BODY_MAX) {
+            unsigned count = 1u + rr(3);
+            push_text("mov w%u, #%u", LOOP_REG, count);
+            body[nbody - 1].loop_word = true;
+            loop_top = nbody;
+            loop_steps = 2 + (int)rr(4);
+            loop_at = -1;
+        }
         unsigned p = rr(100);
         if (p < 35) {
             plant();
@@ -2362,13 +2402,22 @@ static void gen_body(void (*plant)(void))
         } else {
             push(filler());
         }
+        if (loop_top >= 0 && --loop_steps == 0) {
+            close_loop(loop_top);
+            loop_top = -1;
+        }
     }
-    // Branches go forward only -- to a later body slot or the epilogue
-    // -- so every program terminates; and never into a plant's interior,
-    // where an access would go through a base no path set up.
+    if (loop_top >= 0) {
+        close_loop(loop_top);
+    }
+    // Branches go forward -- to a later body slot or the epilogue -- but
+    // for a counted loop's back edge, so every program terminates; and
+    // never into a plant's interior, where an access would go through a
+    // base no path set up, nor into a loop past its counter.
     for (int i = 0; i < nbody; i++) {
-        int t = body[i].aim > 0 && i + body[i].aim <= nbody
-            ? i + body[i].aim
+        int aimed = i + body[i].aim;
+        int t = body[i].aim != 0 && aimed >= 0 && aimed <= nbody
+            ? aimed
             : i + 1 + (int)rr((unsigned)(nbody - i));
         while (t < nbody && body[t].interior && body[i].aim == 0) {
             t++;
@@ -2829,9 +2878,10 @@ static void dump(FILE *o, const uint32_t *code, const char *heading)
 
 // Run both programs from TRIALS random states; true if all agreed. On a
 // difference, *diff_in gets the state that showed it and *sig the
-// signal that stopped the rewrite, or 0. The original only branches
-// forward and only touches the scratch buffer, so its faulting is the
-// harness's bug, and rwfuzz stops there.
+// signal that stopped the rewrite, or 0. The original's loops all count
+// down or retry an exclusive store, and it only touches the scratch
+// buffer, so its faulting or spinning is the harness's bug, and rwfuzz
+// stops there.
 #define TRIALS 6
 
 static bool same_results(const uint32_t *alt, regs_t *diff_in, int *sig)
@@ -4385,7 +4435,10 @@ static int run_programs(long programs, long *next)
             for (int i = body_start; i < epi_start && mode->control != NULL;
                  i++) {
                 memcpy(alt, prog, (size_t)nprog * 4u);
-                if (flagged[i] || !mode->control(i, alt)) {
+                // Not a counted loop's own words: a refused rewrite that
+                // broke the count would spin until the tick stopped it.
+                if (flagged[i] || cur->body[i - body_start].loop_word
+                        || !mode->control(i, alt)) {
                     continue;
                 }
                 if (sample && rr(SAMPLE) != 0) {
