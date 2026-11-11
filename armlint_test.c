@@ -77,6 +77,22 @@ typedef struct {
 static edit_tally g_edit_tally[EDIT_TALLY_MAX];
 static size_t g_edit_tallies;
 
+// Whether TEXT names general register 31 by number: x31 or w31 as an
+// operand, which is no register in A64 -- it is xzr or sp by context --
+// and which GNU as refuses (clang takes it as zr).
+static bool spells_r31(const char *text)
+{
+    for (const char *p = text; (p = strstr(p, "31")) != NULL; p++) {
+        if (p - text >= 1 && (p[-1] == 'x' || p[-1] == 'w')
+                && (p - text == 1 || p[-2] == ' ' || p[-2] == ','
+                    || p[-2] == '[')
+                && !(p[2] >= '0' && p[2] <= '9')) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool observed(const armlint_finding *f)
 {
     if (f->nedits > ARMLINT_FINDING_EDITS) {
@@ -91,6 +107,7 @@ static bool observed(const armlint_finding *f)
         for (unsigned j = 0; j < i; j++) {
             bad |= f->edits[j].offset == e->offset;
         }
+        bad |= spells_r31(e->text);
         bool shown = e->text[0] == '\0' || strstr(f->detail, e->text) != NULL;
         for (size_t u = 0; kEditsUnshown[u] != NULL && !shown; u++) {
             shown = strcmp(kEditsUnshown[u], f->name) == 0;
@@ -102,7 +119,8 @@ static bool observed(const armlint_finding *f)
             fprintf(stderr, "%s at 0x%zx (%u instructions): edit %u at 0x%zx "
                     "\"%s\" %s (%s)\n", f->name, f->start_offset,
                     f->insn_count, i, e->offset, e->text,
-                    bad ? "outside the window or repeated" : "not shown",
+                    bad ? "outside the window, repeated, or naming x31/w31"
+                        : "not shown",
                     f->detail);
             abort();
         }
@@ -13096,6 +13114,27 @@ static void test_mul_add_sub_fold(void)
     add_x(&code[4], 5, 3, 4);
     add_x(&code[8], 6, 3, 7);
     assert(run_reg_dead(code, 12, 3) == 0);
+
+    // A factor may be ZR, which the rewrite spells xzr: GNU as refuses
+    // x31, which clang takes, and tools/rwfuzz's Linux run found the
+    // fold printing it. mul x3, x5, xzr ; add x3, x3, x7 -> madd x3, x5,
+    // xzr, x7, and mul x3, x4, xzr ; neg x3, x3 -> mneg x3, x4, xzr.
+    {
+        char detail[ARMLINT_FINDING_DETAIL_LEN];
+        mul_x(&code[0], 3, 5, 31);
+        add_x(&code[4], 3, 3, 7);
+        detail[0] = '\0';
+        assert(run_named_buffer_check(code, 8,
+            "MUL + ADD/SUB foldable to MADD/MSUB", detail,
+            sizeof(detail)) == 1);
+        assert(strcmp(detail, "-> madd x3, x5, xzr, x7") == 0);
+        mul_x(&code[0], 3, 4, 31);
+        sub_x(&code[4], 3, 31, 3);
+        detail[0] = '\0';
+        assert(run_named_buffer_check(code, 8, "MUL + NEG foldable to MNEG",
+            detail, sizeof(detail)) == 1);
+        assert(strcmp(detail, "-> mneg x3, x4, xzr") == 0);
+    }
 
     // ADD whose other operand is XZR is MUL + register copy, not an
     // accumulate; a ZR-accumulator MADD would just respell the MUL.

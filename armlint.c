@@ -7080,14 +7080,19 @@ bool check_cset_recompare(armlint_state *state, const cs_insn *insn,
             p->insn_count = (offset - state->crc_offset) / 4u + 1u;
             clear_finding_strings(p);
 
+            // ZR operands (the CSET/CSETM aliases) are spelled wzr/xzr.
+            char fd[8], fn[8], fm[8];
+            format_reg(fd, sizeof(fd), wx, rd);
+            format_reg(fn, sizeof(fn), wx, rn);
+            format_reg(fm, sizeof(fm), wx, rm);
             snprintf(p->detail, sizeof(p->detail),
-                "-> drop the zero-test; %s %c%u, %c%u, %c%u, %s",
-                csel_family_mnem[kind], wx, rd, wx, rn, wx, rm,
+                "-> drop the zero-test; %s %s, %s, %s, %s",
+                csel_family_mnem[kind], fd, fn, fm,
                 a64_cond_names[new_cond]);
             // The zero-test sits just before the consumer.
             finding_delete(p, offset - 4u);
-            finding_replace(p, offset, "%s %c%u, %c%u, %c%u, %s",
-                csel_family_mnem[kind], wx, rd, wx, rn, wx, rm,
+            finding_replace(p, offset, "%s %s, %s, %s, %s",
+                csel_family_mnem[kind], fd, fn, fm,
                 a64_cond_names[new_cond]);
             snprintf(p->lines[0], sizeof(p->lines[0]),
                 "%s", state->crc_cset_disasm);
@@ -18731,6 +18736,12 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
 
             if (valid) {
                 char w_or_x = state->mul_pending_is_64bit ? 'x' : 'w';
+                // A factor may be ZR (the product is then zero, and the
+                // fold still sound): register 31 is spelled xzr, which
+                // GNU as insists on where clang also takes x31.
+                char fn[8], fm[8];
+                format_reg(fn, sizeof(fn), w_or_x, state->mul_pending_rn);
+                format_reg(fm, sizeof(fm), w_or_x, state->mul_pending_rm);
 
                 if (is_sub && xc == 31) {
                     // sub xd, xzr, xt is NEG xd, xt, so the fold is the
@@ -18740,9 +18751,7 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     out->insn_count = 2;
                     clear_finding_strings(out);
                     snprintf(out->detail, sizeof(out->detail),
-                        "-> mneg %c%u, %c%u, %c%u",
-                        w_or_x, rd, w_or_x, state->mul_pending_rn,
-                        w_or_x, state->mul_pending_rm);
+                        "-> mneg %c%u, %s, %s", w_or_x, rd, fn, fm);
                     finding_rewrite_tail(out);
                     snprintf(out->lines[0], sizeof(out->lines[0]),
                         "%s", state->mul_pending_disasm);
@@ -18759,12 +18768,8 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                     clear_finding_strings(out);
 
                     snprintf(out->detail, sizeof(out->detail),
-                        "-> %s %c%u, %c%u, %c%u, %c%u",
-                        fold_mnem,
-                        w_or_x, rd,
-                        w_or_x, state->mul_pending_rn,
-                        w_or_x, state->mul_pending_rm,
-                        w_or_x, xc);
+                        "-> %s %c%u, %s, %s, %c%u",
+                        fold_mnem, w_or_x, rd, fn, fm, w_or_x, xc);
                     finding_rewrite_tail(out);
 
                     snprintf(out->lines[0], sizeof(out->lines[0]),
@@ -18798,10 +18803,12 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
             state->mul_pending_rm = m_rm;
             state->mul_pending_offset = offset;
             char w_or_x = (m_sf != 0) ? 'x' : 'w';
+            char fn[8], fm[8];
+            format_reg(fn, sizeof(fn), w_or_x, m_rn);
+            format_reg(fm, sizeof(fm), w_or_x, m_rm);
             snprintf(state->mul_pending_disasm,
                 sizeof(state->mul_pending_disasm),
-                "mul %c%u, %c%u, %c%u",
-                w_or_x, m_rd, w_or_x, m_rn, w_or_x, m_rm);
+                "mul %c%u, %s, %s", w_or_x, m_rd, fn, fm);
         }
     }
 
