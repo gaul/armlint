@@ -6688,8 +6688,13 @@ bool check_neg_cbz(armlint_state *state, const cs_insn *insn,
         if (rd != 31u && rm != 31u) {
             state->ncb_active = true;
             // check_redundant_zext's facts still describe the register
-            // before this NEG: that check runs after this one.
-            state->ncb_top_zero = ((state->wzx_valid >> rm) & 1u) != 0
+            // before this NEG: that check runs after this one, and so
+            // has not yet ended them if the NEG is a branch target,
+            // where a side entry arrives without them (tools/rwfuzz ran
+            // the exemption for a NEG that a CBNZ reached past the W
+            // write that had zeroed the top half).
+            state->ncb_top_zero = !offset_is_branch_target(state, offset)
+                && ((state->wzx_valid >> rm) & 1u) != 0
                 && state->wzx_zero_from[rm] <= 32u;
             state->ncb_sf = (op >> 31) & 1u;
             state->ncb_rd = rd;
@@ -15557,12 +15562,16 @@ static bool kv_top_half_zero(const armlint_state *state, unsigned r)
     return (f.k0 >> 32) == 0xFFFFFFFFu || (lo <= hi && hi <= 0xFFFFFFFFu);
 }
 
-// Whether bits 32..63 of register r are known zero before the current
-// instruction, for a check that runs before check_redundant_zext has
-// updated its facts with it: by those facts or by the engine's.
-static bool top_half_known_zero(const armlint_state *state, unsigned r)
+// Whether bits 32..63 of register r are known zero before the
+// instruction at OFFSET, for a check that runs before
+// check_redundant_zext has updated its facts with it: by those facts or
+// by the engine's. That check has not yet ended its facts if OFFSET is
+// a branch target, so they count only where it is not.
+static bool top_half_known_zero(const armlint_state *state, unsigned r,
+                                size_t offset)
 {
-    if (r < 31u && ((state->wzx_valid >> r) & 1u) != 0
+    if (r < 31u && !offset_is_branch_target(state, offset)
+            && ((state->wzx_valid >> r) & 1u) != 0
             && state->wzx_zero_from[r] <= 32u) {
         return true;
     }
@@ -15630,7 +15639,7 @@ bool check_csel_decided(armlint_state *state, const cs_insn *insn,
     // "mov wd, wd" is advice one step from that same miscompile (see
     // check_and_lo32_mov), so the select is left alone.
     unsigned kept = taken != 0 ? rn : (kind == 0u ? rm : 32u);
-    if (!sf && kept == rd && !top_half_known_zero(state, rd)) {
+    if (!sf && kept == rd && !top_half_known_zero(state, rd, offset)) {
         return false;
     }
 

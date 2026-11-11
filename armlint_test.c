@@ -3333,6 +3333,20 @@ static void test_neg_cbz(void)
     write_le32(&code[12], add_w0_w8_1);
     assert(run_named_buffer_check(code, 20, name, detail, sizeof(detail)) == 0);
 
+    // ... nor where a branch reaches the NEG past that MOV: the side
+    // entry brings no zero top half, so the exemption does not hold
+    // there and the RET at the target refuses the fold (tools/rwfuzz
+    // ran it so, the facts read before their owner ended them).
+    //   cbnz w0, N ; mov w8, w2 ; N: neg w8, w8 ; cbz w8, L ;
+    //   mov w8, #1 ; L: ret
+    cbz_cbnz(&code[0], 0, 1, 0, 2);
+    mov_w_reg(&code[4], 8, 2);
+    neg_(&code[8], 0, 0, 8, 8);
+    cbz_cbnz(&code[12], 0, 0, 8, 2);
+    movz_w(&code[16], 8, 1);
+    ret_(&code[20]);
+    assert(run_named_buffer_check(code, 24, name, detail, sizeof(detail)) == 0);
+
     // Without the MOV the W NEG's zeroing of bits 32..63 is a write on
     // the taken edge too, so both edges need w8 dead (tools/rwfuzz ran
     // the exemption into a read of x8 there): a RET at the target
