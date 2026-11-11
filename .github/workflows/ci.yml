@@ -48,11 +48,11 @@ jobs:
         run: make integration-test
 
   build-fedora:
-    # Fedora 44 in a container on an arm64 host -- a distinct distro and
+    # Fedora 45 in a container on an arm64 host -- a distinct distro and
     # Capstone build. Dependencies (including git, so actions/checkout can
     # clone) are installed before checkout since the base image is minimal.
     runs-on: ubuntu-24.04-arm
-    container: fedora:44
+    container: fedora:45
     steps:
       - name: Install toolchain and Capstone
         # diffutils: the minimal base image lacks `diff`, which
@@ -238,13 +238,13 @@ jobs:
     # the runner's cores via ARMLINT_LIVENESS_SWEEP_THREADS). Too slow
     # for every PR, so it runs on pushes to master, on a weekly schedule,
     # and on demand; the per-PR `make test` still runs the fast curated
-    # subset of this check. Runs in a Fedora 44 container for its newer
+    # subset of this check. Runs in a Fedora 45 container for its newer
     # Capstone: the cross-check treats Capstone's register-access model
     # as the oracle, so a more complete model makes it more meaningful
     # than Ubuntu 24.04's 4.0.2.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
-    container: fedora:44
+    container: fedora:45
     steps:
       - name: Install toolchain and Capstone
         run: dnf install -y git gcc make capstone-devel pkgconf-pkg-config
