@@ -181,23 +181,35 @@ jobs:
   rwfuzz-long:
     # rwfuzz again on programs no run has drawn before: the seed is this
     # run's id, which the log prints with the command that replays a
-    # failure, and ten times the programs. Like the liveness sweeps it
-    # runs on pushes to master, weekly and on demand, not on every pull
-    # request.
+    # failure. Like the liveness sweeps it runs on pushes to master,
+    # weekly and on demand, not on every pull request -- and long,
+    # because the bugs left are rare: a NEG + CBZ unsoundness showed once
+    # in 2,000,000 programs. `all` gets most of the time, sized to the
+    # runner (the 4-core Linux one runs about 5,300 programs a second,
+    # the 3-core macOS one 1,600): about 15 and 20 minutes on a push,
+    # 40 weekly. Every other mode runs a fixed share.
     if: github.event_name != 'pull_request'
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
             cc: cc
+            programs: 1000000
+            weekly: 3000000
+            mode_programs: 100000
           - os: ubuntu-26.04-arm
             cc: gcc
+            programs: 2000000
+            weekly: 10000000
+            mode_programs: 200000
     runs-on: ${{ matrix.os }}
     env:
       RWFUZZ_CC: ${{ matrix.cc }}
       RWFUZZ_SEED: ${{ github.run_id }}
-      RWFUZZ_PROGRAMS: 200000
+      RWFUZZ_PROGRAMS: ${{ github.event_name == 'schedule' && matrix.weekly || matrix.programs }}
+      RWFUZZ_MODE_PROGRAMS: ${{ matrix.mode_programs }}
     steps:
       - uses: actions/checkout@v7
 

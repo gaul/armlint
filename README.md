@@ -260,11 +260,12 @@ natively, in each of its modes. It fails on a difference, on a rewrite
 it cannot apply, on a control arm that never saw a refused rewrite
 change a result, or when `all` runs fewer finding kinds than
 `RWFUZZ_MIN_KINDS` (150). `RWFUZZ_PROGRAMS` (20000) and `RWFUZZ_SEED`
-size and vary the run, and `RWFUZZ_JOBS` (1) spreads it over worker
-processes without changing what it prints. CI runs it with a worker
-per CPU: on every PR with the default seed, under gcc's assembler and
-clang's on Linux, and on pushes to master, weekly and on demand with
-the run's id as the seed and ten times the programs.
+size and vary the run (`RWFUZZ_MODE_PROGRAMS` sizes the modes besides
+`all`, a tenth of it by default), and `RWFUZZ_JOBS` (1) spreads it
+over worker processes without changing what it prints. CI runs it with
+a worker per CPU: on every PR with the default seed, under gcc's
+assembler and clang's on Linux, and on pushes to master, weekly and on
+demand with the run's id as the seed and millions of programs.
 
 Setting `ARMLINT_LIVENESS_SWEEP=1` extends the unit tests' liveness
 cross-checks against Capstone to the entire 2^32 encoding space --

@@ -3,14 +3,16 @@
 # Run armlint's advice: tools/rwfuzz applies every finding's rewrite to
 # random programs and runs original and rewrite side by side (see its
 # header). `all` plants every family and must run findings of at least
-# RWFUZZ_MIN_KINDS names; every other mode then runs a tenth of the
-# programs, for its own plants and special cases. A mode with a control
+# RWFUZZ_MIN_KINDS names; every other mode then runs RWFUZZ_MODE_PROGRAMS,
+# for its own plants and special cases. A mode with a control
 # arm must also see some rewrite armlint refused change a result: a
 # harness that had stopped seeing differences would pass everything
 # else. Exit status: 0 passed, 1 a check failed, 2 the test could not
 # run (no rwfuzz binary, not an AArch64 host).
 #
 #   RWFUZZ_PROGRAMS   programs for `all` (default 20000)
+#   RWFUZZ_MODE_PROGRAMS  programs for each other mode (default a tenth
+#                     of RWFUZZ_PROGRAMS)
 #   RWFUZZ_SEED       seed (default 0: the same programs every run)
 #   RWFUZZ_JOBS       worker processes (default 1); what rwfuzz prints
 #                     does not depend on it
@@ -39,7 +41,7 @@ PROGRAMS=${RWFUZZ_PROGRAMS:-20000}
 SEED=${RWFUZZ_SEED:-0}
 JOBS=${RWFUZZ_JOBS:-1}
 MIN_KINDS=${RWFUZZ_MIN_KINDS:-150}
-SHORT=$((PROGRAMS / 10 > 0 ? PROGRAMS / 10 : 1))
+SHORT=${RWFUZZ_MODE_PROGRAMS:-$((PROGRAMS / 10 > 0 ? PROGRAMS / 10 : 1))}
 MODES=$("$RWFUZZ" 2>&1 | sed -n 's/^modes: //p')
 if [ -z "$MODES" ]; then
     echo "rwfuzz_test: $RWFUZZ lists no modes" >&2
@@ -81,7 +83,7 @@ for mode in $MODES; do
 done
 
 if [ "$FAIL" -ne 0 ]; then
-    echo "rwfuzz: FAILED (replay: RWFUZZ_SEED=$SEED RWFUZZ_PROGRAMS=$PROGRAMS $0)"
+    echo "rwfuzz: FAILED (replay: RWFUZZ_SEED=$SEED RWFUZZ_PROGRAMS=$PROGRAMS RWFUZZ_MODE_PROGRAMS=$SHORT $0)"
     exit 1
 fi
 echo "rwfuzz: passed"
