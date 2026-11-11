@@ -55,12 +55,12 @@
 //   split  check_mov_add_sub_split (sign-crossed)
 //   cbc    check_bcond_cmp_bcond (sharing a target)
 //   hammock check_bcond_over_one (through an alias)
-// The next four plant a family of shapes, written as assembly text, and
+// The next five plant a family of shapes, written as assembly text, and
 // test every finding with a rewrite in their programs:
 //   mem    address arithmetic and the accesses it feeds: immediate,
 //          unscaled and register offsets, pre- and post-indexing,
 //          pairs, zero stores, extends after loads, store-releases,
-//          literal loads from the pool
+//          literal loads from the pool, V8's cage-base ORR
 //   arith  multiplies, divides and shifts by constants, NEG/MVN and
 //          their consumers, CSET/CSETM and theirs, bitfield pairs,
 //          funnels, BFI/BFXIL synthesis, MOV chains feeding logic and
@@ -69,8 +69,10 @@
 //          UMOV of lane 0, vector self-ops, compares with zero, EOR3 and
 //          BCAX, extends and loads before a conversion
 //   lse    exclusive-access loops: fetch-and-op, swap, compare-and-swap
+//   frame  leaf functions left by BR x30 or signed and authenticated
+//          with PAC, and SP moved and put back
 // and all plants any shape of any of them -- a family's shapes counted
-// one by one, 74 in all, each drawn between half and twice as often as
+// one by one, 81 in all, each drawn between half and twice as often as
 // an equal share would, by a weight table a calibration made to raise
 // the rare kinds (shape_weights) -- and tests every finding with a
 // rewrite, reporting by finding name. A finding whose edits touch the
@@ -118,7 +120,8 @@
 // memory on macOS, and on Linux memory mapped twice, written through one
 // view and run from the other, which is not writable. It turns
 // on the armlint features whose instructions the host runs (LSE, SHA3,
-// LRCPC2, FP16, CSSC, CMPBR) and assembles with RWFUZZ_CC (default cc)
+// LRCPC2, FP16, CSSC, CMPBR, PAuth), and the V8 cage fold, whose base
+// x28 is 4 GB-aligned here, and assembles with RWFUZZ_CC (default cc)
 // under a matching -march. Built by `make tools`; it links libarmlint.a.
 
 #define _GNU_SOURCE
@@ -346,7 +349,9 @@ typedef struct {
     bool interior;      // no branch may land here: past the start of a
                         // plant whose accesses need its base set up, or
                         // inside a counted loop
-    bool loop_word;     // a counted loop's own counter or back edge, which
+    bool structural;    // a word the program's structure rests on -- a
+                        // counted loop's counter or back edge, a leaf
+                        // call's BL, B or return, SP's moves -- which
                         // the control arm leaves alone
     unsigned short shape;   // in all, 1 + the shape whose plant laid it;
                             // 0 for the filler
@@ -1208,7 +1213,7 @@ static void plant_mem_shape(unsigned shape);
 // mem: the accesses go through registers the plant itself sets up, so
 // its slots past the first are no landing place for a branch.
 // plant_mem_shape's shape 13 is its default.
-#define MEM_SHAPES 16u
+#define MEM_SHAPES 17u
 
 static void plant_mem_at(unsigned shape)
 {
@@ -1236,6 +1241,8 @@ static void push_gap_besides(unsigned b)
     unsigned n = body_reg();
     push_text("eor x%u, x%u, x%u", d, m, n);
 }
+
+static void push_chain(char w, unsigned r, uint64_t v);
 
 static void plant_mem_shape(unsigned shape)
 {
@@ -1467,6 +1474,16 @@ static void plant_mem_shape(unsigned shape)
             push_gap_besides(b);
         }
         push_text("adr x%u, #%u", b, pool_off(p));
+        break;
+    }
+    case 16: {
+        // V8's read-only roots: a 32-bit constant merged into the cage
+        // base with ORR, which equals ADD #imm only because the base --
+        // x28, as in V8 -- is 4 GB-aligned (SCRATCH_AT).
+        uint64_t v = rr(2) == 0 ? rr(4096) : (uint64_t)rr(4096) << 12;
+        push_chain('x', t, v);
+        push_text("orr x%u, x28, x%u", i, t);
+        mostly_kill(t);
         break;
     }
     default: {
@@ -2428,6 +2445,75 @@ static void plant_lse_loop(unsigned shape)
     }
 }
 
+// frame: what the harness's own frame would not survive unguarded. A
+// leaf function, called with BL and jumped over with B on the return:
+// left by BR x30 (0), or signed with PACIASP or PACIBSP and left by the
+// matching AUT and RET (1, 2), the PAuth fold's shape. And SP saved in
+// x10, which nothing else touches, moved to it, overwritten unread -- so
+// the move is dead -- and restored (3). No branch lands past the first
+// word, the leaf's filler leaves x30 and SP alone, and the control arm
+// leaves every word but the filler alone. The flags never cross the
+// call: the leaf sets them first, as the stub does, and the caller again
+// where the B lands. armlint's flag proofs end them at a BL and at a
+// RET, as the procedure call standard lets them -- a callee may clobber
+// the caller's flags and leaves none of its own -- so a program that
+// read flags across either would test armlint against code no compiler
+// writes.
+#define FRAME_SHAPES 4u
+
+static void plant_frame_at(unsigned shape)
+{
+    if (nbody + 8 > BODY_MAX) {
+        return;
+    }
+    int first = nbody;
+    unsigned at = (unsigned)(body_start + nbody) * 4u;
+    if (shape == 3) {
+        push_text("mov x10, sp");
+        push_text("mov sp, x10");
+        push_text("sub sp, x10, #%u", 16u * (1u + rr(4)));
+        push_text("mov sp, x10");
+        for (int i = first; i < nbody; i++) {
+            body[i].structural = true;
+        }
+    } else {
+        unsigned fill = 1u + rr(2);
+        bool pac = shape != 0;
+        char key = shape == 2 ? 'b' : 'a';
+        unsigned end = at + 4u * (3u + fill + (pac ? 3u : 1u));
+        push_text("bl #%u", at + 8u);
+        push_text("b #%u", end);
+        if (pac) {
+            push_text("paci%csp", key);
+        }
+        unsigned m = body_reg();
+        unsigned n = body_reg();
+        push_text("cmp x%u, x%u", m, n);
+        int body_at = nbody;
+        for (unsigned f = 0; f < fill; f++) {
+            push(filler());
+        }
+        if (pac) {
+            push_text("auti%csp", key);
+        }
+        push_text(pac && rr(4) != 0 ? "ret" : "br x30");
+        unsigned p = body_reg();
+        unsigned q = body_reg();
+        push_text("cmp x%u, x%u", p, q);
+        for (int i = first; i < nbody; i++) {
+            body[i].structural = i < body_at || i >= body_at + (int)fill;
+        }
+    }
+    for (int i = first + 1; i < nbody; i++) {
+        body[i].interior = true;
+    }
+}
+
+static void plant_frame(void)
+{
+    plant_frame_at(rr(FRAME_SHAPES));
+}
+
 // A counted loop around a few of the body's steps, so that the branch
 // following armlint's proofs do -- flags or a register dead where a
 // branch goes, the side-entry gate -- meets backward edges, as it does
@@ -2450,7 +2536,7 @@ static void close_loop(int top)
     for (int i = top; i < nbody; i++) {
         body[i].interior = true;
     }
-    body[nbody - 2].loop_word = body[nbody - 1].loop_word = true;
+    body[nbody - 2].structural = body[nbody - 1].structural = true;
 }
 
 static void gen_body(void (*plant)(void))
@@ -2463,7 +2549,7 @@ static void gen_body(void (*plant)(void))
         if (loop_at >= 0 && nbody >= loop_at && nbody + 10 < BODY_MAX) {
             unsigned count = 1u + rr(3);
             push_text("mov w%u, #%u", LOOP_REG, count);
-            body[nbody - 1].loop_word = true;
+            body[nbody - 1].structural = true;
             loop_top = nbody;
             loop_steps = 2 + (int)rr(4);
             loop_at = -1;
@@ -2744,8 +2830,19 @@ static bool jit_open(void)
     jit = map_at(JIT_AT, size, PROT_READ | PROT_EXEC, MAP_SHARED, fd);
     close(fd);
 #endif
-    scratch = map_at(SCRATCH_AT, SCRATCH_SIZE, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANON, -1);
+    // x28 points at the middle of the scratch memory, which is
+    // SCRATCH_AT: 4 GB-aligned, as V8's pointer-compression cage base
+    // is, so that the cage fold (ARMLINT_FEATURE_V8CAGE) holds here.
+    // Whole pages either side are mapped: on 16 KB pages that leaves 8
+    // KB past each end of the scratch memory mapped but not compared --
+    // a broken rewrite's store that lands there has missed the place
+    // the original stored to, which the comparison sees, and a load from
+    // there reads zeros where the scratch memory has random bytes.
+    size_t half = SCRATCH_SIZE / 2u > page ? SCRATCH_SIZE / 2u : page;
+    uint8_t *pages = map_at(SCRATCH_AT - half, 2u * half,
+                            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON,
+                            -1);
+    scratch = pages != NULL ? pages + half - SCRATCH_SIZE / 2u : NULL;
     return jit != NULL && jit_rw != NULL && scratch != NULL;
 }
 
@@ -3334,7 +3431,7 @@ static bool sysctl_flag(const char *name)
 static unsigned host_features(void)
 {
     bool lse = false, sha3 = false, rcpc2 = false, fp16 = false;
-    bool cssc = false, cmpbr = false;
+    bool cssc = false, cmpbr = false, pauth = false;
 #if defined(__APPLE__)
     lse = sysctl_flag("hw.optional.arm.FEAT_LSE");
     sha3 = sysctl_flag("hw.optional.arm.FEAT_SHA3");
@@ -3342,12 +3439,16 @@ static unsigned host_features(void)
     fp16 = sysctl_flag("hw.optional.arm.FEAT_FP16");
     cssc = sysctl_flag("hw.optional.arm.FEAT_CSSC");
     cmpbr = sysctl_flag("hw.optional.arm.FEAT_CMPBR");
+    pauth = sysctl_flag("hw.optional.arm.FEAT_PAuth");
 #elif defined(__linux__)
     unsigned long hw = getauxval(AT_HWCAP);
     lse = (hw & HWCAP_ATOMICS) != 0;
     sha3 = (hw & HWCAP_SHA3) != 0;
     rcpc2 = (hw & HWCAP_ILRCPC) != 0;
     fp16 = (hw & HWCAP_FPHP) != 0 && (hw & HWCAP_ASIMDHP) != 0;
+#if defined(HWCAP_PACA)
+    pauth = (hw & HWCAP_PACA) != 0;
+#endif
 #if defined(HWCAP2_CSSC)
     cssc = (getauxval(AT_HWCAP2) & HWCAP2_CSSC) != 0;
 #endif
@@ -3360,7 +3461,8 @@ static unsigned host_features(void)
         | (rcpc2 ? ARMLINT_FEATURE_LRCPC2 : 0u)
         | (fp16 ? ARMLINT_FEATURE_FP16 : 0u)
         | (cssc ? ARMLINT_FEATURE_CSSC : 0u)
-        | (cmpbr ? ARMLINT_FEATURE_CMPBR : 0u);
+        | (cmpbr ? ARMLINT_FEATURE_CMPBR : 0u)
+        | (pauth ? ARMLINT_FEATURE_PAUTH : 0u);
 }
 
 static bool asm_open(void)
@@ -4061,6 +4163,8 @@ static const mode_t_ modes[] = {
       FP_SHAPES },
     { "lse", { NULL, NULL }, NULL, plant_lse, NULL, NULL, plant_lse_at,
       LSE_SHAPES },
+    { "frame", { NULL, NULL }, NULL, plant_frame, NULL, NULL, plant_frame_at,
+      FRAME_SHAPES },
     { "all", { NULL, NULL }, NULL, plant_any, NULL, control_any, NULL, 0 },
 };
 
@@ -4133,18 +4237,20 @@ static void plant_shape(unsigned s)
 // all's shapes is refused.
 static const unsigned short shape_weights[] = {
     // zext ubfx ccmp lvn dead cmn branch fold and cbz split cbc hammock
-    50, 101, 115, 50, 50, 147, 50, 50, 50, 50, 50, 100, 50,
-    // mem 0..15
-    50, 174, 200, 171, 77, 60, 200, 50, 59, 127, 53, 109,
-    200, 63, 50, 50,
+    50, 106, 120, 50, 50, 150, 50, 50, 50, 50, 50, 105, 50,
+    // mem 0..16
+    50, 186, 200, 192, 82, 64, 200, 50, 62, 130, 56, 114,
+    200, 67, 50, 50, 50,
     // arith 0..33
-    188, 200, 98, 97, 200, 141, 119, 50, 96, 200, 200, 200,
-    97, 194, 50, 200, 200, 107, 171, 168, 147, 165, 128, 50,
-    101, 50, 97, 50, 50, 124, 50, 50, 100, 50,
+    198, 200, 101, 104, 200, 148, 125, 50, 100, 200, 200, 200,
+    103, 200, 50, 200, 200, 116, 179, 178, 169, 171, 139, 50,
+    108, 50, 104, 50, 50, 128, 50, 50, 106, 50,
     // fp 0..9
-    60, 71, 50, 95, 50, 50, 120, 61, 50, 50,
+    64, 76, 50, 102, 50, 50, 128, 65, 50, 50,
     // lse 0..2
     50, 50, 50,
+    // frame 0..3
+    50, 50, 50, 50,
 };
 
 // The weights all draws its shapes by, as running totals: shape_weights,
@@ -4431,6 +4537,9 @@ static int run_programs(long programs, long *next)
     if (!jit_open() || !guard_open() || !asm_open()) {
         return 2;
     }
+    if (((uintptr_t)scratch + SCRATCH_SIZE / 2u) % (1ull << 32) != 0) {
+        features &= ~ARMLINT_FEATURE_V8CAGE;    // x28 is not the cage's
+    }
     program_t *batch = calloc(BATCH, sizeof(*batch));
     if (batch == NULL) {
         perror("rwfuzz: calloc");
@@ -4511,9 +4620,10 @@ static int run_programs(long programs, long *next)
             for (int i = body_start; i < epi_start && mode->control != NULL;
                  i++) {
                 memcpy(alt, prog, (size_t)nprog * 4u);
-                // Not a counted loop's own words: a refused rewrite that
-                // broke the count would spin until the tick stopped it.
-                if (flagged[i] || cur->body[i - body_start].loop_word
+                // Not the program's structural words: a refused rewrite
+                // that broke a loop's count would spin until the tick
+                // stopped it, one that broke a call or SP the frame.
+                if (flagged[i] || cur->body[i - body_start].structural
                         || !mode->control(i, alt)) {
                     continue;
                 }
@@ -5204,8 +5314,9 @@ int main(int argc, char **argv)
     }
     cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
     // The const audit's rewrites are as concrete as the folds': the
-    // consumer takes the immediate and the chain stays.
-    features = host_features() | ARMLINT_AUDIT_CONST;
+    // consumer takes the immediate and the chain stays. The V8 cage fold
+    // holds where x28 is 4 GB-aligned, as it is here (jit_open).
+    features = host_features() | ARMLINT_AUDIT_CONST | ARMLINT_FEATURE_V8CAGE;
     if (calibrate_only) {
         if (!calibrate(programs)) {
             return 2;
