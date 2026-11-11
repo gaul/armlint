@@ -71,7 +71,7 @@ tools/defuse: tools/defuse.c
 
 # Drives the check registry itself, so it links the library.
 tools/rwfuzz: tools/rwfuzz.c libarmlint.a armlint.h
-	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -I. $< libarmlint.a $(CAPSTONE_LIBS) -o $@
+	$(CC) $(CFLAGS) $(CAPSTONE_CFLAGS) -I. $< libarmlint.a $(CAPSTONE_LIBS) -lm -o $@
 
 # Prints armlint's classifiers next to Capstone's model for
 # tools/tblgen_audit.py, so it links the library too.

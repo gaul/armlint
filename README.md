@@ -1310,21 +1310,24 @@ backlog -- and one that checks the checks -- built separately with
   window (`armlint_edit`), spelled as the advice is, and rwfuzz
   assembles them with the host's assembler, so any check's advice can
   be run and what runs is what a reader sees. `tools/rwfuzz all`
-  plants shapes for every check family and reports by finding name; a
-  mode per check (`zext`, `ccmp`, `cbc`, ...) or per family (`mem`,
-  `arith`, `fp`, `lse`) narrows that, and `-f NAME` narrows it to one
-  finding over the same programs. `all` and the family modes run one
-  in 8 of the findings the random filler produces in nearly every
-  program (dead writes, branches to the next instruction, unread
-  flags, constant folds), and `all` one in 8 of its control rewrites,
-  so that the time goes to the rarer kinds. `-j JOBS` runs the
-  programs in that many worker processes; each program has its own
-  seed and its code and memory fixed addresses, so the output is the
-  same for any JOBS. A control arm applies a rewrite where armlint
-  refused to, so a harness that stopped seeing differences would show
-  it. Needs an AArch64 host, since the programs run natively, and a C
-  compiler driver that assembles (`RWFUZZ_CC`, default `cc`); links
-  `libarmlint.a`.
+  plants shapes for every check family, weighted to raise the rarely
+  found kinds, and reports by finding name; a mode per check (`zext`,
+  `ccmp`, `cbc`, ...) or per family (`mem`, `arith`, `fp`, `lse`)
+  narrows that, and `-f NAME` narrows it to one finding over the same
+  programs. `-t NAME` instead plants only the shapes that yield NAME,
+  to run one kind hard, and `-C` runs nothing but reports which shape
+  yields which kinds, what wants work, and a new weight table. `all`
+  and the family modes run one in 8 of the findings the random filler
+  produces in nearly every program (dead writes, branches to the next
+  instruction, unread flags, constant folds), and `all` one in 8 of
+  its control rewrites, so that the time goes to the rarer kinds. `-j
+  JOBS` runs the programs in that many worker processes; each program
+  has its own seed and its code and memory fixed addresses, so the
+  output is the same for any JOBS. A control arm applies a rewrite
+  where armlint refused to, so a harness that stopped seeing
+  differences would show it. Needs an AArch64 host, since the programs
+  run natively, and a C compiler driver that assembles (`RWFUZZ_CC`,
+  default `cc`); links `libarmlint.a`.
 * `tools/tblgen_audit.py` checks armlint's flag and register model
   against LLVM's own instruction definitions. `llvm-tblgen --dump-json`
   on `AArch64.td` lists every A64 instruction with its encoding and

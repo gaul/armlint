@@ -67,8 +67,10 @@
 //          UMOV of lane 0, vector self-ops, compares with zero, EOR3 and
 //          BCAX, extends and loads before a conversion
 //   lse    exclusive-access loops: fetch-and-op, swap, compare-and-swap
-// and all plants any shape of any of them -- the 74 equally likely, a
-// family's shapes counted one by one -- and tests every finding with a
+// and all plants any shape of any of them -- a family's shapes counted
+// one by one, 74 in all, each drawn between half and twice as often as
+// an equal share would, by a weight table a calibration made to raise
+// the rare kinds (shape_weights) -- and tests every finding with a
 // rewrite, reporting by finding name. A finding whose edits touch the
 // harness's own code is left alone and counted apart. The four kinds the
 // filler produces on its own in nearly every program (filler_kinds)
@@ -84,7 +86,8 @@
 // invalidation in check_redundant_zext, say), rebuild libarmlint.a and
 // rwfuzz, and expect mismatches within a few thousand programs.
 //
-// Usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] [-k KINDS] [-j JOBS] MODE
+// Usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] [-t NAME] [-k KINDS]
+//               [-j JOBS] [-C] MODE
 //   -n  programs to generate (default 100000)
 //   -s  seed, mixed into the fixed default one (default 0)
 //   -f  test only the findings whose name contains NAME; the programs
@@ -95,6 +98,14 @@
 //       take batches of them as they finish the last; each program is
 //       drawn from its own seed, so the programs and all that is printed
 //       are the same for any JOBS
+//   -t  all only: plant only the shapes that yield findings whose name
+//       contains NAME, each as often as it yields them, and test only
+//       those findings -- a calibration of 4,096 programs finds the
+//       shapes -- to run one rare kind hard
+//   -C  all only: run nothing; calibrate over PROGRAMS programs and
+//       report which shape yields which kinds, per plant, what wants
+//       work (shapes that yield little, kinds no shape yields well), and
+//       the fair weights as a new shape_weights table
 // Exit status: 0 when every finding was applied and matched; 1 on a
 // mismatch, on a finding the harness could not apply (an edit the
 // assembler refuses would otherwise drop out of the test silently), or
@@ -125,6 +136,7 @@ int main(void)
 #else
 
 #include <inttypes.h>
+#include <math.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -158,6 +170,7 @@ int main(void)
 // is the same whichever worker runs it, however many run (-j).
 #define STREAM_GEN 0x9E3779B97F4A7C15ull
 #define STREAM_RUN 0xD1B54A32D192ED03ull
+#define STREAM_CAL 0xA0761D6478BD642Full   // a calibration's (-C, -t)
 static uint64_t seed;
 static uint64_t gen_rng, run_rng;
 static uint64_t *rng = &gen_rng;
@@ -330,6 +343,8 @@ typedef struct {
                         // nonzero; otherwise gen_body draws it
     bool interior;      // no branch may land here: past the start of a
                         // plant whose accesses need its base set up
+    unsigned short shape;   // in all, 1 + the shape whose plant laid it;
+                            // 0 for the filler
 } slot_t;
 
 #define BODY_MAX 40
@@ -3925,16 +3940,20 @@ static const mode_t_ modes[] = {
 
 #define NMODES (sizeof(modes) / sizeof(modes[0]))
 
-// all: any shape any mode plants, each as likely as the next -- a
-// family's shapes one by one, not the family as one. Drawn by mode,
-// each one-shape mode had 1 plant in 17 and an arith shape 1 in 680.
-// And any mode's control that takes the slot.
+// all: any shape any mode plants, a family's shapes one by one rather
+// than the family as one (drawn by mode, each one-shape mode had 1 plant
+// in 17 and an arith shape 1 in 680), weighted by shape_weights. And any
+// mode's control that takes the slot.
 static unsigned shapes_of(const mode_t_ *m)
 {
     return m->shapes != 0 ? m->shapes : 1u;
 }
 
-static void plant_any(void)
+// all's shapes are numbered across the modes in table order: a
+// one-shape mode's is one number, a family's run on from it.
+#define SHAPES_MAX 128
+
+static unsigned shape_count(void)
 {
     static unsigned total;
     if (total == 0) {
@@ -3942,18 +3961,108 @@ static void plant_any(void)
             total += shapes_of(&modes[i]);
         }
     }
-    unsigned k = rr(total);
+    return total;
+}
+
+// The mode shape S is in, and its number there.
+static const mode_t_ *shape_mode(unsigned s, unsigned *k)
+{
     for (size_t i = 0; i + 1u < NMODES; i++) {
-        const mode_t_ *m = &modes[i];
-        if (k < shapes_of(m)) {
-            if (m->shapes != 0) {
-                m->plant_at(k);
-            } else {
-                m->plant();
-            }
-            return;
+        if (s < shapes_of(&modes[i])) {
+            *k = s;
+            return &modes[i];
         }
-        k -= shapes_of(m);
+        s -= shapes_of(&modes[i]);
+    }
+    return NULL;
+}
+
+// "zext" for a one-shape mode's, "arith 13" for a family's.
+static void shape_name(unsigned s, char *buf, size_t cap)
+{
+    unsigned k;
+    const mode_t_ *m = shape_mode(s, &k);
+    if (m->shapes != 0) {
+        snprintf(buf, cap, "%s %u", m->name, k);
+    } else {
+        snprintf(buf, cap, "%s", m->name);
+    }
+}
+
+static void plant_shape(unsigned s)
+{
+    unsigned k;
+    const mode_t_ *m = shape_mode(s, &k);
+    if (m->shapes != 0) {
+        m->plant_at(k);
+    } else {
+        m->plant();
+    }
+}
+
+// all's weights for its shapes, in their order, as percent of an equal
+// share: the fair weights of a calibration (fair_weights), as
+// `rwfuzz -C -n 100000 all` prints them. Regenerate them after changing
+// what a plant yields or adding a shape; a table that does not count
+// all's shapes is refused.
+static const unsigned short shape_weights[] = {
+    // zext ubfx ccmp lvn dead cmn branch fold and cbz split cbc hammock
+    200, 90, 98, 50, 50, 122, 200, 50, 50, 50, 50, 92, 50,
+    // mem 0..15
+    50, 156, 200, 155, 69, 54, 200, 50, 200, 111, 50, 98,
+    200, 55, 50, 50,
+    // arith 0..31
+    171, 182, 87, 88, 194, 126, 109, 50, 85, 200, 200, 187,
+    88, 184, 50, 200, 184, 97, 155, 130, 129, 138, 114, 50,
+    91, 50, 87, 50, 50, 106, 50, 50,
+    // fp 0..9
+    54, 64, 50, 85, 50, 50, 109, 55, 50, 50,
+    // lse 0..2
+    50, 50, 50,
+};
+
+// The weights all draws its shapes by, as running totals: shape_weights,
+// or -t's; a calibration draws every shape alike.
+static uint64_t shape_cumulative[SHAPES_MAX];
+static bool shapes_weighted;
+
+static bool weigh_shapes(void)
+{
+    unsigned n = shape_count();
+    if (sizeof(shape_weights) / sizeof(shape_weights[0]) != n) {
+        fprintf(stderr, "rwfuzz: shape_weights has %zu weights for all's %u "
+                "shapes; `rwfuzz -C -n 100000 all` prints a new table\n",
+                sizeof(shape_weights) / sizeof(shape_weights[0]), n);
+        return false;
+    }
+    uint64_t sum = 0;
+    for (unsigned s = 0; s < n; s++) {
+        sum += shape_weights[s];
+        shape_cumulative[s] = sum;
+    }
+    shapes_weighted = true;
+    return true;
+}
+static long shape_plants[SHAPES_MAX];  // plants laid, for a calibration
+
+static void plant_any(void)
+{
+    unsigned n = shape_count(), s = 0;
+    if (shapes_weighted) {
+        uint64_t r = rnd() % shape_cumulative[n - 1u];
+        while (shape_cumulative[s] <= r) {
+            s++;
+        }
+    } else {
+        s = rr(n);
+    }
+    int before = nbody;
+    plant_shape(s);
+    for (int i = before; i < nbody; i++) {
+        body[i].shape = (unsigned short)(s + 1u);
+    }
+    if (nbody > before) {
+        shape_plants[s]++;
     }
 }
 
@@ -4144,6 +4253,48 @@ static FILE *note_open(char **text, size_t *len)
 
 #define BATCH 256
 
+// Draw programs FIRST.. into BATCH (N of them) from STREAM, assemble
+// the plants' texts, then lay each program out and analyze it -- and,
+// for a run, ask for the words its findings' edits need. False when the
+// assembler cannot be run.
+static bool draw_batch(long first, int n, program_t *batch,
+                       uint64_t stream, bool for_running)
+{
+    rng = &gen_rng;
+    at_phase = "drawing";
+    for (int k = 0; k < n; k++) {
+        at_program = first + k;
+        gen_rng = stream_start(first + k, stream);
+        gen_body(mode->plant);
+        memcpy(batch[k].body, body, sizeof(body));
+        batch[k].nbody = nbody;
+    }
+    at_phase = "assembling the batch from";
+    at_program = first;
+    if (!asm_flush()) {
+        return false;
+    }
+    at_phase = "analyzing";
+    for (int k = 0; k < n; k++) {
+        at_program = first + k;
+        cur = &batch[k];
+        memcpy(body, cur->body, sizeof(body));
+        nbody = cur->nbody;
+        assemble();
+        analyze();
+        memcpy(cur->prog, prog, sizeof(prog));
+        cur->nprog = nprog;
+        cur->epi_start = epi_start;
+        cur->stub_start = stub_start;
+        for (int h = 0; h < cur->nhits && for_running; h++) {
+            request_edits(&cur->hits[h]);
+        }
+    }
+    at_phase = "assembling the batch from";
+    at_program = first;
+    return !for_running || asm_flush();
+}
+
 // Run batches of programs, BATCH at a time, taking the next batch's
 // number from *next until all PROGRAMS are done, into the tallies and
 // notes. One process does it all, or -j workers share *next. A worker
@@ -4168,42 +4319,7 @@ static int run_programs(long programs, long *next)
             break;
         }
         int n = programs - first < BATCH ? (int)(programs - first) : BATCH;
-        // Draw the bodies, assemble the plants' texts, then lay each
-        // program out and analyze it.
-        rng = &gen_rng;
-        at_phase = "drawing";
-        for (int k = 0; k < n; k++) {
-            at_program = first + k;
-            gen_rng = stream_start(first + k, STREAM_GEN);
-            gen_body(mode->plant);
-            memcpy(batch[k].body, body, sizeof(body));
-            batch[k].nbody = nbody;
-        }
-        at_phase = "assembling the batch from";
-        at_program = first;
-        if (!asm_flush()) {
-            asm_close();
-            return 2;
-        }
-        at_phase = "analyzing";
-        for (int k = 0; k < n; k++) {
-            at_program = first + k;
-            cur = &batch[k];
-            memcpy(body, cur->body, sizeof(body));
-            nbody = cur->nbody;
-            assemble();
-            analyze();
-            memcpy(cur->prog, prog, sizeof(prog));
-            cur->nprog = nprog;
-            cur->epi_start = epi_start;
-            cur->stub_start = stub_start;
-            for (int h = 0; h < cur->nhits; h++) {
-                request_edits(&cur->hits[h]);
-            }
-        }
-        at_phase = "assembling the batch from";
-        at_program = first;
-        if (!asm_flush()) {
+        if (!draw_batch(first, n, batch, STREAM_GEN, true)) {
             asm_close();
             return 2;
         }
@@ -4442,6 +4558,427 @@ static bool run_workers(long programs, long *next, int jobs)
     return ok;
 }
 
+// === Calibration ===
+//
+// Which shapes yield which findings, for -C's report and -t's weights:
+// all's programs, drawn from a stream of their own and only analyzed --
+// nothing runs, so it is quick -- with each finding put down to every
+// shape whose plant laid a word of its window, and to the filler when
+// none did.
+typedef struct {
+    const char *name;
+    long total, by_filler;
+    long by_shape[SHAPES_MAX];
+} yield_t;
+
+static yield_t *yields;
+static size_t nyields;
+
+static yield_t *yield_for(const char *name)
+{
+    for (size_t i = 0; i < nyields; i++) {
+        if (strcmp(yields[i].name, name) == 0) {
+            return &yields[i];
+        }
+    }
+    if (nyields == TALLIES_MAX) {
+        fprintf(stderr, "rwfuzz: more than %d finding names\n", TALLIES_MAX);
+        exit(2);
+    }
+    yields[nyields].name = name;
+    return &yields[nyields++];
+}
+
+static bool calibrate(long programs)
+{
+    const char *keep = only;
+    only = NULL;
+    yields = calloc(TALLIES_MAX, sizeof(*yields));
+    program_t *batch = calloc(BATCH, sizeof(*batch));
+    if (yields == NULL || batch == NULL) {
+        perror("rwfuzz: calloc");
+        return false;
+    }
+    if (!asm_open()) {
+        return false;
+    }
+    memset(shape_plants, 0, sizeof(shape_plants));
+    bool ok = true;
+    for (long first = 0; first < programs && ok; first += BATCH) {
+        int n = programs - first < BATCH ? (int)(programs - first) : BATCH;
+        ok = draw_batch(first, n, batch, STREAM_CAL, false);
+        for (int k = 0; ok && k < n; k++) {
+            const program_t *p = &batch[k];
+            for (int h = 0; h < p->nhits; h++) {
+                const hit_t *hit = &p->hits[h];
+                yield_t *y = yield_for(hit->name);
+                bool seen[SHAPES_MAX] = { false };
+                bool planted = false;
+                for (unsigned w = 0; w < hit->count; w++) {
+                    long i = (long)hit->start + (long)w - body_start;
+                    if (i < 0 || i >= p->nbody || p->body[i].shape == 0) {
+                        continue;
+                    }
+                    unsigned sh = p->body[i].shape - 1u;
+                    if (!seen[sh]) {
+                        seen[sh] = true;
+                        y->by_shape[sh]++;
+                    }
+                    planted = true;
+                }
+                y->total++;
+                y->by_filler += !planted;
+            }
+        }
+    }
+    asm_close();
+    free(batch);
+    only = keep;
+    return ok;
+}
+
+// Kind Y's findings per plant of shape S.
+static double yield_of(const yield_t *y, unsigned s)
+{
+    return shape_plants[s] != 0 ? (double)y->by_shape[s] / shape_plants[s]
+                                : 0.0;
+}
+
+static unsigned best_shape(const yield_t *y)
+{
+    unsigned best = 0;
+    for (unsigned s = 1; s < shape_count(); s++) {
+        if (yield_of(y, s) > yield_of(y, best)) {
+            best = s;
+        }
+    }
+    return best;
+}
+
+static int by_total(const void *a, const void *b)
+{
+    const yield_t *x = a, *y = b;
+    if (x->total != y->total) {
+        return x->total < y->total ? -1 : 1;
+    }
+    return strcmp(x->name, y->name);
+}
+
+// -C: each shape's plants and what they yield, each kind's rate and the
+// shape that yields it best, and then what wants work: a shape that
+// yields nothing or little -- fewer findings than 1 per 10 plants -- a
+// kind whose best shape yields it in fewer than 1 plant in 50, a kind
+// only the filler yields.
+#define LOW_YIELD 0.02
+#define LOW_SHAPE 0.1
+
+static void print_calibration(long programs)
+{
+    unsigned n = shape_count();
+    long plants = 0;
+    for (unsigned s = 0; s < n; s++) {
+        plants += shape_plants[s];
+    }
+    printf("rwfuzz calibrate: %ld programs, %ld plants of %u shapes, "
+           "findings of %zu kinds\n", programs, plants, n, nyields);
+    printf("  %7s %6s  %-9s  %s\n", "plants", "yield", "shape",
+           "kinds it yields most, per plant");
+    for (unsigned s = 0; s < n; s++) {
+        char name[32];
+        shape_name(s, name, sizeof(name));
+        double sum = 0;
+        unsigned top[3] = { 0, 0, 0 };
+        bool have[3] = { false, false, false };
+        for (size_t k = 0; k < nyields; k++) {
+            double v = yield_of(&yields[k], s);
+            sum += v;
+            for (unsigned t = 0; t < 3; t++) {
+                if (v > 0 && (!have[t] || v > yield_of(&yields[top[t]], s))) {
+                    for (unsigned u = 2; u > t; u--) {
+                        top[u] = top[u - 1u];
+                        have[u] = have[u - 1u];
+                    }
+                    top[t] = (unsigned)k;
+                    have[t] = true;
+                    break;
+                }
+            }
+        }
+        printf("  %7ld %6.3f  %-9s ", shape_plants[s], sum, name);
+        for (unsigned t = 0; t < 3 && have[t]; t++) {
+            printf("%s %s %.3f", t == 0 ? "" : ";", yields[top[t]].name,
+                   yield_of(&yields[top[t]], s));
+        }
+        printf("\n");
+    }
+    qsort(yields, nyields, sizeof(yields[0]), by_total);
+    printf("  %9s %6s  %-9s %7s  %s\n", "per M", "yield", "best", "filler",
+           "kind");
+    for (size_t k = 0; k < nyields; k++) {
+        const yield_t *y = &yields[k];
+        char name[32];
+        unsigned b = best_shape(y);
+        shape_name(b, name, sizeof(name));
+        printf("  %9.0f %6.3f  %-9s %6.0f%%  %s\n",
+               1e6 * (double)y->total / (double)programs, yield_of(y, b),
+               y->by_shape[b] != 0 ? name : "-",
+               100.0 * (double)y->by_filler / (double)y->total, y->name);
+    }
+    printf("  shapes that yield nothing:");
+    bool none = true;
+    for (unsigned s = 0; s < n; s++) {
+        bool any = false;
+        for (size_t k = 0; k < nyields && !any; k++) {
+            any = yields[k].by_shape[s] != 0;
+        }
+        if (!any) {
+            char name[32];
+            shape_name(s, name, sizeof(name));
+            printf(" %s", name);
+            none = false;
+        }
+    }
+    printf("%s\n", none ? " none" : "");
+    printf("  shapes that yield under 1 finding per %.0f plants:",
+           1.0 / LOW_SHAPE);
+    none = true;
+    for (unsigned s = 0; s < n; s++) {
+        double sum = 0;
+        for (size_t k = 0; k < nyields; k++) {
+            sum += yield_of(&yields[k], s);
+        }
+        if (sum > 0 && sum < LOW_SHAPE) {
+            char name[32];
+            shape_name(s, name, sizeof(name));
+            printf(" %s %.3f", name, sum);
+            none = false;
+        }
+    }
+    printf("%s\n", none ? " none" : "");
+    printf("  kinds no shape yields in 1 plant of %.0f:", 1.0 / LOW_YIELD);
+    none = true;
+    for (size_t k = 0; k < nyields; k++) {
+        const yield_t *y = &yields[k];
+        if (y->by_filler != y->total
+                && yield_of(y, best_shape(y)) < LOW_YIELD) {
+            printf("%s %s", none ? "" : ";", y->name);
+            none = false;
+        }
+    }
+    printf("%s\n", none ? " none" : "");
+    printf("  kinds only the filler yields:");
+    none = true;
+    for (size_t k = 0; k < nyields; k++) {
+        if (yields[k].by_filler == yields[k].total) {
+            printf("%s %s", none ? "" : ";", yields[k].name);
+            none = false;
+        }
+    }
+    printf("%s\n", none ? " none" : "");
+}
+
+// Weights for all's shapes, summing to 1, that raise the rare kinds: the
+// ones that minimize the sum over the kinds the plants yield of
+// 1 / rate, a kind's findings per program (alpha-fairness at alpha 2,
+// solved by exponentiated gradient). Between drawing the shapes alike,
+// which leaves rates as uneven as the yields, and maximizing the
+// rarest's, it evens rates out by about a square root. Each shape stays
+// between half and twice its equal share: uncapped, a shape that yields
+// a kind in 1 plant of 1,000 drew 13 times its share, to lift that one
+// kind and starve twenty others.
+#define WEIGHT_FLOOR 0.5
+#define WEIGHT_CAP 2.0
+
+static double kind_rate(const yield_t *y, const double *w, double per_plant,
+                        long programs)
+{
+    double r = (double)y->by_filler / (double)programs;
+    for (unsigned s = 0; s < shape_count(); s++) {
+        r += per_plant * w[s] * yield_of(y, s);
+    }
+    return r;
+}
+
+static void fair_weights(long programs, double *w)
+{
+    unsigned n = shape_count();
+    long plants = 0;
+    for (unsigned s = 0; s < n; s++) {
+        plants += shape_plants[s];
+    }
+    double per_plant = (double)plants / (double)programs;
+    double v[SHAPES_MAX], g[SHAPES_MAX];
+    for (unsigned s = 0; s < n; s++) {
+        v[s] = 1.0 / n;
+    }
+    for (int it = 0; it < 3000; it++) {
+        for (unsigned s = 0; s < n; s++) {
+            w[s] = WEIGHT_FLOOR / n + (1.0 - WEIGHT_FLOOR) * v[s];
+            g[s] = 0;
+        }
+        for (size_t k = 0; k < nyields; k++) {
+            const yield_t *y = &yields[k];
+            if (y->by_filler == y->total) {
+                continue;           // no shape moves it
+            }
+            double r = kind_rate(y, w, per_plant, programs);
+            for (unsigned s = 0; s < n; s++) {
+                g[s] += per_plant * yield_of(y, s) / (r * r);
+            }
+        }
+        double most = 0, sum = 0;
+        for (unsigned s = 0; s < n; s++) {
+            most = g[s] > most ? g[s] : most;
+        }
+        double eta = 0.5 / sqrt(1.0 + it / 50.0);
+        for (unsigned s = 0; s < n; s++) {
+            v[s] *= exp(eta * g[s] / most);
+            sum += v[s];
+        }
+        for (unsigned s = 0; s < n; s++) {
+            v[s] /= sum;
+        }
+        // The cap, by clipping and handing the excess to the shapes
+        // below it, in proportion, until none is over.
+        double vmax = (WEIGHT_CAP - WEIGHT_FLOOR) / ((1.0 - WEIGHT_FLOOR) * n);
+        for (int round = 0; round < 64; round++) {
+            double excess = 0, below = 0;
+            for (unsigned s = 0; s < n; s++) {
+                if (v[s] > vmax) {
+                    excess += v[s] - vmax;
+                    v[s] = vmax;
+                } else if (v[s] < vmax) {
+                    below += v[s];
+                }
+            }
+            if (excess <= 0 || below <= 0) {
+                break;
+            }
+            for (unsigned s = 0; s < n; s++) {
+                if (v[s] < vmax) {
+                    v[s] += excess * v[s] / below;
+                }
+            }
+        }
+    }
+    for (unsigned s = 0; s < n; s++) {
+        w[s] = WEIGHT_FLOOR / n + (1.0 - WEIGHT_FLOOR) * v[s];
+    }
+}
+
+static int by_double(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+// -C's last part: what the fair weights would do, against drawing the
+// shapes alike, and them as shape_weights' initializer.
+static void print_weights(long programs)
+{
+    unsigned n = shape_count();
+    long plants = 0;
+    for (unsigned s = 0; s < n; s++) {
+        plants += shape_plants[s];
+    }
+    double per_plant = (double)plants / (double)programs;
+    double w[SHAPES_MAX], even[SHAPES_MAX];
+    fair_weights(programs, w);
+    for (unsigned s = 0; s < n; s++) {
+        even[s] = 1.0 / n;
+    }
+    double a[TALLIES_MAX], b[TALLIES_MAX];
+    size_t m = 0;
+    for (size_t k = 0; k < nyields; k++) {
+        if (yields[k].by_filler != yields[k].total) {
+            a[m] = 1e6 * kind_rate(&yields[k], even, per_plant, programs);
+            b[m] = 1e6 * kind_rate(&yields[k], w, per_plant, programs);
+            m++;
+        }
+    }
+    qsort(a, m, sizeof(a[0]), by_double);
+    qsort(b, m, sizeof(b[0]), by_double);
+    printf("  fair weights, per million programs against shapes drawn alike:"
+           " rarest %.0f -> %.0f, tenth %.0f -> %.0f, median %.0f -> %.0f\n",
+           a[0], b[0], a[m / 10], b[m / 10], a[m / 2], b[m / 2]);
+    printf("  as shape_weights, percent of an equal share:\n");
+    for (size_t i = 0; i + 1u < NMODES; i++) {
+        const mode_t_ *md = &modes[i];
+        unsigned first = 0;
+        for (size_t j = 0; j < i; j++) {
+            first += shapes_of(&modes[j]);
+        }
+        bool one = md->shapes == 0;
+        if (one && (i == 0 || modes[i - 1].shapes != 0)) {
+            printf("    //");
+            for (size_t j = i; j + 1u < NMODES && modes[j].shapes == 0; j++) {
+                printf(" %s", modes[j].name);
+            }
+            printf("\n   ");
+        } else if (!one) {
+            printf("    // %s 0..%u\n   ", md->name, md->shapes - 1u);
+        }
+        for (unsigned k = 0; k < shapes_of(md); k++) {
+            printf(" %u,", (unsigned)(w[first + k] * n * 100.0 + 0.5));
+            if (!one && k % 12u == 11u && k + 1u < shapes_of(md)) {
+                printf("\n   ");
+            }
+        }
+        if (!one || i + 2u == NMODES || modes[i + 1].shapes != 0) {
+            printf("\n");
+        }
+    }
+}
+
+// -t NAME: plant only the shapes that yield findings whose name contains
+// NAME, each as often as it yields them, from a calibration of
+// TARGET_PROGRAMS; false, saying why, when no shape does.
+#define TARGET_PROGRAMS 4096
+
+static char target_shapes_text[512];
+
+static bool target_shapes(const char *name)
+{
+    if (!calibrate(TARGET_PROGRAMS)) {
+        return false;
+    }
+    unsigned n = shape_count();
+    double w[SHAPES_MAX] = { 0 }, most = 0;
+    for (size_t k = 0; k < nyields; k++) {
+        if (strstr(yields[k].name, name) != NULL) {
+            for (unsigned s = 0; s < n; s++) {
+                w[s] += yield_of(&yields[k], s);
+            }
+        }
+    }
+    for (unsigned s = 0; s < n; s++) {
+        most = w[s] > most ? w[s] : most;
+    }
+    if (most == 0) {
+        fprintf(stderr, "rwfuzz: no shape's plant yields a finding named "
+                "\"%s\" in %d programs; -f tests it wherever the filler "
+                "yields it\n", name, TARGET_PROGRAMS);
+        return false;
+    }
+    uint64_t sum = 0;
+    size_t len = 0;
+    for (unsigned s = 0; s < n; s++) {
+        uint64_t q = w[s] > 0 ? (uint64_t)(w[s] / most * 1e6) + 1u : 0;
+        sum += q;
+        shape_cumulative[s] = sum;
+        if (q != 0 && len < sizeof(target_shapes_text)) {
+            char sn[32];
+            shape_name(s, sn, sizeof(sn));
+            len += (size_t)snprintf(target_shapes_text + len,
+                                    sizeof(target_shapes_text) - len,
+                                    "%s %s %.3f", len == 0 ? "" : ",", sn,
+                                    w[s]);
+        }
+    }
+    shapes_weighted = true;
+    return true;
+}
+
 static int by_place(const void *a, const void *b)
 {
     const note_t *x = a, *y = b;
@@ -4476,7 +5013,7 @@ static void print_notes(void)
 static void usage(void)
 {
     fprintf(stderr, "usage: rwfuzz [-n PROGRAMS] [-s SEED] [-f NAME] "
-            "[-k KINDS] [-j JOBS] MODE\n"
+            "[-t NAME] [-k KINDS] [-j JOBS] [-C] MODE\n"
             "modes:");
     for (size_t i = 0; i < NMODES; i++) {
         fprintf(stderr, " %s", modes[i].name);
@@ -4487,8 +5024,10 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     long programs = 100000, min_kinds = 0, jobs = 1;
+    const char *target = NULL;
+    bool calibrate_only = false;
     int opt;
-    while ((opt = getopt(argc, argv, "n:s:f:k:j:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:s:f:t:k:j:C")) != -1) {
         switch (opt) {
         case 'n':
             programs = atol(optarg);
@@ -4498,6 +5037,12 @@ int main(int argc, char **argv)
             break;
         case 'f':
             only = optarg;
+            break;
+        case 't':
+            target = only = optarg;
+            break;
+        case 'C':
+            calibrate_only = true;
             break;
         case 'k':
             min_kinds = atol(optarg);
@@ -4519,7 +5064,8 @@ int main(int argc, char **argv)
             mode = &modes[i];
         }
     }
-    if (mode == NULL) {
+    if (mode == NULL || ((calibrate_only || target != NULL)
+                         && mode->plant != plant_any)) {
         usage();
         return 2;
     }
@@ -4531,6 +5077,18 @@ int main(int argc, char **argv)
     // The const audit's rewrites are as concrete as the folds': the
     // consumer takes the immediate and the chain stays.
     features = host_features() | ARMLINT_AUDIT_CONST;
+    if (calibrate_only) {
+        if (!calibrate(programs)) {
+            return 2;
+        }
+        print_calibration(programs);
+        print_weights(programs);
+        return 0;
+    }
+    if (target != NULL ? !target_shapes(target)
+            : mode->plant == plant_any && !weigh_shapes()) {
+        return 2;
+    }
 
     // The next batch to run, in memory the workers share.
     long *next = mmap(NULL, sizeof(*next), PROT_READ | PROT_WRITE,
@@ -4590,6 +5148,10 @@ int main(int argc, char **argv)
     } else if (mode->control != NULL) {
         printf("  control: %ld refused rewrites applied anyway, %ld changed "
                "the result\n", controls, control_diffs);
+    }
+    if (target != NULL) {
+        printf("  planted, by the findings per plant that ask for it:%s\n",
+               target_shapes_text);
     }
     if (mode->findings[0] == NULL || only != NULL) {
         qsort(tallies, ntallies, sizeof(tallies[0]), by_tested);
