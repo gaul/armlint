@@ -1519,8 +1519,8 @@ static void push_chain(char w, unsigned r, uint64_t v)
     }
 }
 
-// arith's shapes: cases 0..30, and its default.
-#define ARITH_SHAPES 32u
+// arith's shapes: cases 0..30, its default (31), and 32..33.
+#define ARITH_SHAPES 34u
 
 static void plant_arith_at(unsigned shape)
 {
@@ -2116,6 +2116,75 @@ static void plant_arith_at(unsigned shape)
         push_text("orr %c%u, %c%u, %c%u, lsr #%u", w, d, w, d, w, b, k);
         break;
     }
+    case 32: {
+        // A sign extension, then a second extension of its result in
+        // place: a sign extension from as many bits or more at the same
+        // width, which changes nothing; or a zero extension from as few
+        // bits or fewer, which leaves an in-place first one nothing to
+        // do. Now and then one from more or fewer bits, which changes
+        // the value. No shape made these pairs, so only the filler's
+        // chance adjacencies ran them.
+        static const char *const sx[] = { "sxtb", "sxth", "sxtw" };
+        static const unsigned sbits[] = { 8u, 16u, 32u };
+        unsigned np = x ? 3u : 2u;
+        unsigned ps = rr(np);
+        unsigned j = rr(2);
+        bool in_place = j == 1 ? rr(8) != 0 : rr(2) == 0;
+        push_text("%s %c%u, w%u", sx[ps], w, d, in_place ? d : b);
+        if (j == 0) {
+            push_text("%s %c%u, w%u", sx[rr(np)], w, d, d);
+            break;
+        }
+        unsigned c = rr(4) == 0 ? sbits[ps] + 1u + rr(4u)
+                                : 1u + rr(sbits[ps]);
+        if (c >= 32u) {
+            push_text("mov w%u, w%u", d, d);
+        } else if ((c == 8u || c == 16u) && rr(2) == 0) {
+            push_text("uxt%c w%u, w%u", c == 8u ? 'b' : 'h', d, d);
+        } else {
+            push_text("and %c%u, %c%u, #0x%llx", w, d, w, d,
+                      (unsigned long long)((1ull << c) - 1u));
+        }
+        break;
+    }
+    case 33: {
+        // A mask or zero extension, then a mask of its result: the
+        // AND/extend chain, one instruction when the second reads only
+        // bits the first passed or their masks meet in one. The first's
+        // register must die: the second writes it, or a kill follows.
+        // Only the zero-extension plant made these, by chance (1 plant in
+        // 90).
+        unsigned plo = rr(4) == 0 ? rr(width / 2u) : 0;
+        unsigned plen = 2u + rr(width - plo - 2u);
+        uint64_t pm = (plen >= 64u ? ~0ull : (1ull << plen) - 1u) << plo;
+        unsigned clo = rr(width - 1u);
+        unsigned clen = 1u + rr(width - clo - 1u);
+        uint64_t cm = (clen >= 64u ? ~0ull : (1ull << clen) - 1u) << clo;
+        uint64_t m = x ? ~0ull : 0xFFFFFFFFull;
+        if ((pm & m) == m) {
+            pm &= m >> 1;               // all ones is no immediate
+        }
+        if (!x && plo == 0 && (plen == 8u || plen == 16u) && rr(2) == 0) {
+            push_text("uxt%c w%u, w%u", plen == 8u ? 'b' : 'h', d, b);
+        } else if (x && rr(8) == 0) {
+            push_text("mov w%u, w%u", d, b);
+        } else {
+            push_text("and %c%u, %c%u, #0x%llx", w, d, w, b,
+                      (unsigned long long)(pm & m));
+        }
+        unsigned e = rr(2) == 0 ? d : reg_besides(b, d);
+        unsigned k = rr(4);
+        if (k == 3) {
+            push_text("tst %c%u, #0x%llx", w, d, (unsigned long long)cm);
+        } else {
+            push_text("%s %c%u, %c%u, #0x%llx", k == 2 ? "ands" : "and", w,
+                      e, w, d, (unsigned long long)cm);
+        }
+        if (e != d || k == 3) {
+            mostly_kill(d);
+        }
+        break;
+    }
     default: {
         // A MOV of 2^32 - k and a 64-bit compare of a 32-bit value.
         unsigned k = 1u + rr(4096);
@@ -2335,12 +2404,18 @@ static void plant_lse_loop(unsigned shape)
         }
         push_text("st%sxr%s w%u, %c%u, [x28]", rel ? "l" : "", sz, st, w, nv);
         push_text("cbnz w%u, #%u", st, at);
+        // The fold leaves both the computed value and the status
+        // unwritten, so both must die after the loop: left to chance,
+        // they rarely did (1 plant in 30 folded).
+        mostly_kill(nv);
+        mostly_kill(st);
         break;
     }
     case 1:
         push_text("ld%sxr%s %c%u, [x28]", acq ? "a" : "", sz, w, old);
         push_text("st%sxr%s w%u, %c%u, [x28]", rel ? "l" : "", sz, st, w, val);
         push_text("cbnz w%u, #%u", st, at);
+        mostly_kill(st);
         break;
     default:
         push_text("ld%sxr %c%u, [x28]", acq ? "a" : "", w, old);
@@ -2348,6 +2423,7 @@ static void plant_lse_loop(unsigned shape)
         push_text("b.ne #%u", at + 20u);
         push_text("st%sxr w%u, %c%u, [x28]", rel ? "l" : "", st, w, nv);
         push_text("cbnz w%u, #%u", st, at);
+        mostly_kill(st);
         break;
     }
 }
@@ -4057,16 +4133,16 @@ static void plant_shape(unsigned s)
 // all's shapes is refused.
 static const unsigned short shape_weights[] = {
     // zext ubfx ccmp lvn dead cmn branch fold and cbz split cbc hammock
-    200, 90, 98, 50, 50, 122, 200, 50, 50, 50, 50, 92, 50,
+    50, 101, 115, 50, 50, 147, 50, 50, 50, 50, 50, 100, 50,
     // mem 0..15
-    50, 156, 200, 155, 69, 54, 200, 50, 200, 111, 50, 98,
-    200, 55, 50, 50,
-    // arith 0..31
-    171, 182, 87, 88, 194, 126, 109, 50, 85, 200, 200, 187,
-    88, 184, 50, 200, 184, 97, 155, 130, 129, 138, 114, 50,
-    91, 50, 87, 50, 50, 106, 50, 50,
+    50, 174, 200, 171, 77, 60, 200, 50, 59, 127, 53, 109,
+    200, 63, 50, 50,
+    // arith 0..33
+    188, 200, 98, 97, 200, 141, 119, 50, 96, 200, 200, 200,
+    97, 194, 50, 200, 200, 107, 171, 168, 147, 165, 128, 50,
+    101, 50, 97, 50, 50, 124, 50, 50, 100, 50,
     // fp 0..9
-    54, 64, 50, 85, 50, 50, 109, 55, 50, 50,
+    60, 71, 50, 95, 50, 50, 120, 61, 50, 50,
     // lse 0..2
     50, 50, 50,
 };
