@@ -1444,7 +1444,9 @@ static size_t v8pool_skip_bytes(unsigned features, const uint8_t *buf,
 
 // Scan the raw buffer once and mark every 4-byte slot that some
 // direct branch targets: B/BL (imm26), B.cond/BC.cond (imm19),
-// CBZ/CBNZ (imm19), TBZ/TBNZ (imm14). Returns a heap bitmap (one bit
+// CBZ/CBNZ (imm19), TBZ/TBNZ (imm14), and every word-aligned ADR
+// target (an address-taken entry point, e.g. a hand-set return
+// address in x30). Returns a heap bitmap (one bit
 // per slot, bit i covering byte offset 4*i) and stores the slot
 // count in *out_slots; NULL when there is nothing to scan or the
 // allocation fails. The map can only under-approximate real entry
@@ -1494,6 +1496,24 @@ static uint8_t *scan_branch_targets(const uint8_t *buf, size_t len,
             int32_t imm14 = (int32_t)((op >> 5) & 0x3FFFu);
             imm14 = (imm14 ^ 0x2000) - 0x2000;
             disp = (int64_t)imm14 * 4;
+        } else if ((op & 0x9F000000u) == 0x10000000u) {
+            // ADR: a materialized code address is an entry point as
+            // surely as a branch target -- something will BR/BLR/RET to
+            // it. ART's Baker read barriers are the motivating case:
+            // `adr x30, L; cbnz x20, thunk; ldr ...; L:` makes L the
+            // thunk's return point, reached with x20 != 0, so facts
+            // proven on the fall-through path (x20 == 0) do not hold at
+            // L. The displacement is in bytes (immhi:immlo, 21 bits); an
+            // unaligned target is data and cannot be a slot. ADRP is
+            // page-relative and needs the load address, so it is not
+            // followed here.
+            int32_t imm21 = (int32_t)((((op >> 5) & 0x7FFFFu) << 2)
+                                      | ((op >> 29) & 3u));
+            imm21 = (imm21 ^ 0x100000) - 0x100000;
+            if ((imm21 & 3) != 0) {
+                continue;
+            }
+            disp = imm21;
         } else {
             continue;
         }

@@ -10401,12 +10401,21 @@ static void test_branch_decided(void)
         // mov w8, wzr ; and x9, x10, #0xff ; cbz x8, 1f ; ret ; 1: ret
         { { 0x2A1F03E8u, 0x92401D49u, 0xB4000048u, 0xD65F03C0u, 0xD65F03C0u }, 5, ALWAYS,
           "-> b 0x10; always taken: x8 is 0x0 (known 0x8 bytes back)" },
+        // ART's Baker read barrier pair with both ADRs naming the end,
+        // so nothing re-enters between the checks -- the control for
+        // the ADR side-entry negative at the end of the table:
+        // adr x30, 3f ; cbnz x20, 1f ; ldr w1, [x22] ; adr x30, 3f ;
+        // cbnz x20, 1f ; ldr w24, [x1, #0x1c] ; 3: ret ; 1: ret
+        { { 0x100000DEu, 0xB50000D4u, 0xB94002C1u, 0x1000007Eu, 0xB5000074u,
+            0xB9401C38u, 0xD65F03C0u, 0xD65F03C0u }, 8, NEVER,
+          "-> delete; never taken: x20 is 0x0 (known 0xc bytes back)" },
         // Negatives: a write between (a MOV, a post-index base, an LSE
         // atomic's destination), a call, a MOVK sequence (a JIT patch
         // site), a branch to the next instruction (check_branch_to_next's),
         // another compare, a load, a W zero test before an X one, SP,
         // an ADRP, UDF and MSR ending the region, a rewrite of the
-        // compared register between two compares.
+        // compared register between two compares, an ADR target between
+        // two tests.
         // cbz x0, 1f ; mov x0, x1 ; cbz x0, 1f ; ret ; 1: ret
         { { 0xB4000080u, 0xAA0103E0u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
         // cbz x0, 1f ; bl 1f ; cbz x0, 1f ; ret ; 1: ret
@@ -10457,6 +10466,14 @@ static void test_branch_decided(void)
         { { 0xB4000080u, 0xF8408420u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
         // cbz x0, 1f ; ldadd x1, x0, [x2] ; cbz x0, 1f ; ret ; 1: ret
         { { 0xB4000080u, 0xF8210040u, 0xB4000040u, 0xD65F03C0u, 0xD65F03C0u }, 5, NONE, NULL },
+        // An ADR target is an entry point: the Baker read barrier sets
+        // x30 to 2: and the marking thunk returns there with x20 != 0,
+        // so the first CBNZ's fall-through fact must not reach the
+        // second one.
+        // adr x30, 2f ; cbnz x20, 1f ; ldr w1, [x22] ; 2: adr x30, 3f ;
+        // cbnz x20, 1f ; ldr w24, [x1, #0x1c] ; 3: ret ; 1: ret
+        { { 0x1000007Eu, 0xB50000D4u, 0xB94002C1u, 0x1000007Eu, 0xB5000074u,
+            0xB9401C38u, 0xD65F03C0u, 0xD65F03C0u }, 8, NONE, NULL },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         char other[ARMLINT_FINDING_DETAIL_LEN];
