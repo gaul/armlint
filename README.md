@@ -212,6 +212,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`add` + `ldr`/`str [xt]`](analyses.md#add--ldr-foldable-to-register-offset-ldr) | `ldr`/`str [xn, xm{, lsl #s}]` |
 | [`sxtw` + `ldr`/`str [xn, xt]`](analyses.md#sxtw--register-offset-ldr-foldable-into-the-load) | `ldr`/`str [xn, ws, sxtw {#s}]` |
 | [`ldrb`/`ldrh`/`ldr` (or `ldrsb`/`ldrsh Wt`) + `sxtb`/`sxth`/`sxtw`](analyses.md#load--sign-extend-foldable-to-ldrsbldrshldrsw) | `ldrsb`/`ldrsh`/`ldrsw` (`Xt` for the re-widened sign loads) |
+| [`ldr` + `mov` copy of the loaded register](analyses.md#ldr--mov-of-the-loaded-value-foldable-into-the-load) | `ldr` straight into the copy's destination |
 | [`add #a` + `ldr`/`str [xt]` (incl. `mov xt, sp`)](analyses.md#add--ldr-foldable-to-immediate-offset-ldr) | `ldr`/`str [xn, #a]` / `ldr [sp]` |
 | [`ldr`/`ldp [xn]` + `add`/`sub xn`](analyses.md#ldrstr-or-ldpstp--addsub-foldable-to-post-indexed-form) | `ldr [xn], #±imm` / `ldp [sp], #imm` (post-index) |
 | [`add`/`sub xn` + `ldr`/`stp [xn]`](analyses.md#addsub--ldrstr-or-ldpstp-foldable-to-pre-indexed-form) | `ldr [xn, #±imm]!` / `stp [sp, #-imm]!` (pre-index) |

@@ -5060,6 +5060,47 @@ there, so they would want the pool bit alone.
   register-offset forms have `LDRS` equivalents and could fold the
   same way.
 
+## LDR + MOV of the loaded value foldable into the load
+
+* An integer load whose value a register copy moves elsewhere, the
+  loaded register dead afterwards, can load into the copy's destination
+  directly:
+  * `ldr w0, [sp, #0x2c] ; mov x22, x0` -> `ldr w22, [sp, #0x2c]`
+  * `ldr x2, [x25, #0xd0] ; mov x1, x2` -> `ldr x1, [x25, #0xd0]`
+  * `ldrsh w4, [x24, #6] ; mov w24, w4` -> `ldrsh w24, [x24, #6]`
+  It is what a register allocator leaves when it reloads a spilled
+  value into a temporary and a parallel move then copies it home.
+* Producers: `LDR`/`LDRB`/`LDRH`/`LDRSB`/`LDRSH`/`LDRSW` by unsigned or
+  unscaled immediate or by register offset, with no writeback.
+  Prefetches, the unprivileged `LDTR*` forms and the LSE atomics that
+  share the register-offset class are excluded.
+* Width: an `X` copy of any of them is the load's own value, since a
+  load writing `Wt` zeroes the top half the copy carries, so the load
+  keeps its form. A `W` copy is accepted only of a load that writes
+  `Wt`; narrowing an `X` load would be a different access.
+* Up to two instructions may sit between, nine in ten of the sites in
+  ART's output. They may neither read nor write the loaded register
+  (the copy must see the load's value) nor the copy's destination (the
+  rewrite moves that write to the load), and transfer no control. The
+  load stays where it is, so its address registers are unconstrained,
+  and a destination that is one of them is fine: a load reads its
+  address before writing `Rt`. One load is tracked at a time, so a load
+  inside the gap replaces it: a false negative, never a wrong finding.
+* The rewrite leaves the loaded register holding whatever it held
+  before, so the finding defers until the forward register-liveness
+  scan proves it dead. It spans load through copy, so the side-entry
+  gate refuses a branch, or an `ADR`-taken return point, into the
+  window. That matters for ART: its Baker read barrier
+  (`adr x30, L ; cbnz x20, thunk ; ldr w0, [x0, #0xd8] ; L: mov x1, x0`)
+  returns from a thunk specific to the load's destination register to
+  `L`, so renaming that register there would break the barrier.
+* On ART's Android 17 output (core boot image and two apps, 21.6M
+  instructions) the check reports 1,140 sites, one instruction each. A
+  shape census with no side-entry gate put the population near 3,700;
+  the gate removes the read-barrier loads and the copies that are
+  branch targets. "AND/extend chain foldable to one" loses 6 findings
+  to the shared deferral slot (TODO.md's multi-slot deferral).
+
 ## ADD + LDR foldable to immediate-offset LDR
 
 * `add xt, xn, #a ; ldr xt, [xt, #b]` -> `ldr xt, [xn, #(a+b)]`,

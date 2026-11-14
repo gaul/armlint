@@ -1596,6 +1596,20 @@ bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
 bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
                           size_t offset, armlint_finding *out);
 
+// Detect an integer load whose value a register copy moves elsewhere,
+// the loaded register dead afterwards:
+//     ldr w0, [sp, #0x2c]
+//     mov x22, x0            -> ldr w22, [sp, #0x2c]
+// The load writes the copy's destination itself and the copy goes. Any
+// non-writeback, non-atomic LDR/LDRB/LDRH/LDRSB/LDRSH/LDRSW (unsigned
+// or unscaled immediate, or register offset) qualifies; an X copy of
+// any of them, a W copy only of one that writes Wt. Up to two
+// instructions may sit between if they leave both registers alone and
+// transfer no control. The loaded register's death defers through the
+// forward register-liveness scan (defer_dead_mov).
+bool check_load_copy_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out);
+
 // Detect an in-place ADD/SUB immediate on a register the previous
 // instruction copied -- the consumer can read the copy's source
 // instead and the copy deletes:

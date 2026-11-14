@@ -1105,6 +1105,7 @@ static void ccmp_reg(uint8_t out[4], unsigned sf, unsigned is_ccmp,
                      unsigned rn, unsigned rm, unsigned nzcv,
                      unsigned cond);
 static void ldr_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
+static void ldr_x_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
 static void ldrb_w_uimm0(uint8_t out[4], unsigned rt, unsigned rn);
 static int run_lvn_words(const uint32_t *words, size_t n, const char *name,
                          char *detail, size_t detail_size);
@@ -9704,6 +9705,107 @@ static void test_cheap_const_copy(void)
     movz_w(&code[0], 1, 5);
     mov_x_reg(&code[4], 1, 1);
     assert(run_helper_check(code, 8) == 1);  // mov x1, x1: self-MOV finding only
+}
+
+// check_load_copy_fold: a load whose value is copied elsewhere, the
+// loaded register then dead, loads straight into the copy's destination.
+static void test_load_copy_fold(void)
+{
+    const char *name = "LDR + MOV of the loaded value foldable into the load";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    uint8_t code[24];
+
+    // -- Positives. Each ends with movz w0, #1, which kills the loaded
+    //    register so the deferred finding commits. --
+
+    // ldr w0, [x1] ; mov x22, x0 -> ldr w22, [x1]: a W load zero-extends,
+    // so an X copy of it is the W load's own value.
+    ldr_w_uimm0(&code[0], 0, 1);
+    mov_x(&code[4], 22, 0);
+    movz_w(&code[8], 0, 1);
+    assert(run_named_buffer_check(code, 12, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> ldr w22, [x1]") == 0);
+
+    // ldr x0, [x1] ; mov x22, x0 -> ldr x22, [x1].
+    ldr_x_uimm0(&code[0], 0, 1);
+    mov_x(&code[4], 22, 0);
+    movz_w(&code[8], 0, 1);
+    assert(run_named_check(code, 12, name) == 1);
+
+    // ldr w0, [x1] ; mov w22, w0: a W copy of a W load.
+    ldr_w_uimm0(&code[0], 0, 1);
+    mov_w_reg(&code[4], 22, 0);
+    movz_w(&code[8], 0, 1);
+    assert(run_named_check(code, 12, name) == 1);
+
+    // One instruction between that leaves w0 and x22 alone.
+    ldr_w_uimm0(&code[0], 0, 1);
+    movz_w(&code[4], 5, 1);
+    mov_x(&code[8], 22, 0);
+    movz_w(&code[12], 0, 1);
+    assert(run_named_check(code, 16, name) == 1);
+
+    // The destination is the load's base: ldr w0, [x22] ; mov x22, x0 ->
+    // ldr w22, [x22] (a load reads its address before writing Rt).
+    ldr_w_uimm0(&code[0], 0, 22);
+    mov_x(&code[4], 22, 0);
+    movz_w(&code[8], 0, 1);
+    assert(run_named_check(code, 12, name) == 1);
+
+    // -- Negatives. --
+
+    // The loaded register is read after the copy: mov x5, x0.
+    ldr_w_uimm0(&code[0], 0, 1);
+    mov_x(&code[4], 22, 0);
+    mov_x(&code[8], 5, 0);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // A W copy of an X load keeps only the low half; that needs a
+    // different load.
+    ldr_x_uimm0(&code[0], 0, 1);
+    mov_w_reg(&code[4], 22, 0);
+    movz_w(&code[8], 0, 1);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // A gap that reads the destination (mov x5, x22), writes it (movz
+    // w22, #1), or reads the loaded register (mov w5, w0).
+    ldr_w_uimm0(&code[0], 0, 1);
+    mov_x(&code[4], 5, 22);
+    mov_x(&code[8], 22, 0);
+    movz_w(&code[12], 0, 1);
+    assert(run_named_check(code, 16, name) == 0);
+    ldr_w_uimm0(&code[0], 0, 1);
+    movz_w(&code[4], 22, 1);
+    mov_x(&code[8], 22, 0);
+    movz_w(&code[12], 0, 1);
+    assert(run_named_check(code, 16, name) == 0);
+    ldr_w_uimm0(&code[0], 0, 1);
+    mov_w_reg(&code[4], 5, 0);
+    mov_x(&code[8], 22, 0);
+    movz_w(&code[12], 0, 1);
+    assert(run_named_check(code, 16, name) == 0);
+
+    // A load into the destination in the gap: ldr w22, [x2].
+    ldr_w_uimm0(&code[0], 0, 1);
+    ldr_w_uimm0(&code[4], 22, 2);
+    mov_x(&code[8], 22, 0);
+    movz_w(&code[12], 0, 1);
+    assert(run_named_check(code, 16, name) == 0);
+
+    // Three instructions between is too far; a branch between ends it.
+    ldr_w_uimm0(&code[0], 0, 1);
+    movz_w(&code[4], 5, 1);
+    movz_w(&code[8], 6, 1);
+    movz_w(&code[12], 7, 1);
+    mov_x(&code[16], 22, 0);
+    movz_w(&code[20], 0, 1);
+    assert(run_named_check(code, 24, name) == 0);
+    ldr_w_uimm0(&code[0], 0, 1);
+    cbz_w(&code[4], 5, 8);
+    mov_x(&code[8], 22, 0);
+    movz_w(&code[12], 0, 1);
+    assert(run_named_check(code, 16, name) == 0);
 }
 
 static void test_reg_copy_chain(void)
@@ -20753,6 +20855,7 @@ int main(void)
     test_mov_cage_orr_add();
     test_cheap_const_copy();
     test_reg_copy_chain();
+    test_load_copy_fold();
     test_copy_add_sub_fold();
     test_sp_mov_overwritten();
     test_value_recompute();

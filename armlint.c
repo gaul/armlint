@@ -270,6 +270,21 @@ struct armlint_state {
     unsigned aul_window;    // as alr_window
     char aul_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // An integer load pending a register copy of what it loaded
+    // (check_load_copy_fold): lcf_rt the loaded register, lcf_xdest
+    // whether the load writes all 64 bits, lcf_mnem and lcf_tail the
+    // load's spelling around Rt (`ldr` and `[sp, #0x2c]`), lcf_gap the
+    // instructions seen since and lcf_touched the GPRs they read or wrote.
+    bool lcf_active;
+    bool lcf_xdest;
+    unsigned lcf_rt;
+    unsigned lcf_gap;
+    uint32_t lcf_touched;
+    size_t lcf_offset;
+    char lcf_mnem[16];
+    char lcf_tail[ARMLINT_FINDING_LINE_LEN];
+    char lcf_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / CMN Rn,#0 /
     // CMN Rn,XZR / TST Rn,Rn) pending a B.EQ/B.NE consumer (any
     // form), a B.HI/B.LS consumer (the SUBS forms only --
@@ -2569,6 +2584,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->ext_pending = false;
     state->sxl_pending = false;
     state->lsx_active = false;
+    state->lcf_active = false;
     state->add_pending = false;
     state->addi_pending = false;
     state->mf_active = false;
@@ -12998,6 +13014,151 @@ bool check_reg_copy_chain(armlint_state *state, const cs_insn *insn,
         state->rcc_active = false;
     }
     return found;
+}
+
+// The most instructions check_load_copy_fold lets sit between a load
+// and the copy of what it loaded: nine in ten of ART's sites are within
+// two (see analyses.md), and the GPR mask the gap needs is per register.
+#define LCF_GAP_MAX 2u
+
+// An integer load of one register with no writeback: LDR/LDRB/LDRH and
+// LDRSB/LDRSH/LDRSW by unsigned immediate, unscaled immediate (LDUR*)
+// or register offset. Prefetches, the unprivileged LDTR* forms (bits
+// 11:10 = 10 with bit 21 clear), the pre-/post-indexed forms and the
+// LSE atomics sharing the register-offset class (bit 21 set, bits 11:10
+// = 00) are excluded. *xdest is whether the load writes all 64 bits of
+// Rt (LDR Xt and the X-form sign-extending loads); every other form
+// writes Wt, zeroing the top half.
+static bool decode_plain_int_load(uint32_t op, unsigned *rt, bool *xdest)
+{
+    unsigned size = op >> 30;
+    unsigned opc = (op >> 22) & 3u;
+    if ((op & 0x3F000000u) == 0x38000000u) {
+        unsigned b21 = (op >> 21) & 1u;
+        unsigned mode = (op >> 10) & 3u;
+        if (!((b21 == 0u && mode == 0u) || (b21 == 1u && mode == 2u))) {
+            return false;
+        }
+    } else if ((op & 0x3F000000u) != 0x39000000u) {
+        return false;
+    }
+    if (opc == 0u                       // a store
+            || (opc == 2u && size == 3u)  // PRFM / PRFUM
+            || (opc == 3u && size >= 2u)) {  // unallocated
+        return false;
+    }
+    *rt = op & 0x1Fu;
+    *xdest = (opc == 1u && size == 3u) || opc == 2u;
+    return true;
+}
+
+// Every GPR the instruction may read or write, as a mask over 0..30.
+static uint32_t insn_gpr_touch_mask(const cs_insn *insn)
+{
+    uint32_t mask = insn_gpr_write_mask(insn);
+    for (int r = 0; r < 31; r++) {
+        bool reads, writes;
+        insn_reg_access(insn, r, &reads, &writes);
+        if (reads || writes) {
+            mask |= 1u << r;
+        }
+    }
+    return mask;
+}
+
+// An integer load whose value is copied to another register, the
+// loaded register then dead:
+//     ldr w0, [sp, #0x2c]
+//     mov x22, x0            -> ldr w22, [sp, #0x2c]
+// The shape a register allocator leaves when it reloads a spilled value
+// into a temporary and a later parallel move copies it to its home
+// (ART's arm64 output has thousands). The load can write the copy's
+// destination itself and the copy goes. An X copy of any load is the
+// load's own value -- a W-writing load zeroes the top half the copy
+// carries -- so the load keeps its form; a W copy is accepted only of a
+// W-writing load, as narrowing an X load would need a different one.
+//
+// Up to LCF_GAP_MAX instructions may sit between, provided they neither
+// read nor write the loaded register (the copy must see the load's
+// value) nor the copy's destination (whose write the rewrite moves to
+// the load), and transfer no control. The load stays where it is, so
+// its address registers are unconstrained, and a destination that is
+// one of them is fine: a load reads its address before writing Rt. The
+// rewrite leaves the loaded register holding whatever it held before,
+// so it must be dead after the copy, which defers through the shared
+// forward register-liveness scan. The finding spans load through copy,
+// so the central side-entry gate refuses a branch into the gap.
+bool check_load_copy_fold(armlint_state *state, const cs_insn *insn,
+                          size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->lcf_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+
+    if (state->lcf_active) {
+        unsigned sf, opc, n_bit, rd, rn, rm;
+        if (decode_logic_shifted_lsl0(op, &sf, &opc, &n_bit, &rd, &rn, &rm)
+                && opc == 1u && n_bit == 0u && rn == 31u
+                && rm == state->lcf_rt && rd != 31u && rd != rm
+                && (sf != 0u || !state->lcf_xdest)
+                && ((state->lcf_touched >> rd) & 1u) == 0u) {
+            unsigned span = (unsigned)((offset - state->lcf_offset) / 4u + 1u);
+            out->name = "LDR + MOV of the loaded value foldable into the load";
+            out->start_offset = state->lcf_offset;
+            out->insn_count = span;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail), "-> %s %c%u, %s",
+                state->lcf_mnem, state->lcf_xdest ? 'x' : 'w', rd,
+                state->lcf_tail);
+            finding_replace_with_detail(out, state->lcf_offset, 0);
+            finding_delete(out, offset);
+            snprintf(out->lines[0], sizeof(out->lines[0]), "%s",
+                state->lcf_disasm);
+            unsigned line = 1;
+            if (span > 2u) {
+                snprintf(out->lines[line++], sizeof(out->lines[0]),
+                    "... %u instruction%s ...", span - 2u,
+                    span == 3u ? "" : "s");
+            }
+            snprintf(out->lines[line], sizeof(out->lines[0]), "%s %s",
+                insn->mnemonic, insn->op_str);
+            state->lcf_active = false;
+            defer_dead_mov(state, out, state->lcf_rt);
+        } else if (classify_reg_liveness(insn, (int)state->lcf_rt)
+                       != LIV_UNKNOWN
+                || insn_writes_reg(insn, (int)state->lcf_rt)
+                || ++state->lcf_gap > LCF_GAP_MAX) {
+            // The loaded value is used or replaced here, control leaves,
+            // or the copy is too far to look for.
+            state->lcf_active = false;
+        } else {
+            state->lcf_touched |= insn_gpr_touch_mask(insn);
+        }
+    }
+
+    // Open: a plain integer load into a real register, spelled
+    // `mnemonic Rt, <address>` so the rewrite can rename Rt.
+    unsigned rt;
+    bool xdest;
+    const char *comma = strchr(insn->op_str, ',');
+    if (decode_plain_int_load(op, &rt, &xdest) && rt != 31u
+            && comma != NULL && comma[1] == ' '
+            && strlen(insn->mnemonic) < sizeof(state->lcf_mnem)) {
+        state->lcf_active = true;
+        state->lcf_xdest = xdest;
+        state->lcf_rt = rt;
+        state->lcf_gap = 0;
+        state->lcf_touched = 0;
+        state->lcf_offset = offset;
+        snprintf(state->lcf_mnem, sizeof(state->lcf_mnem), "%s",
+            insn->mnemonic);
+        snprintf(state->lcf_tail, sizeof(state->lcf_tail), "%s", comma + 2);
+        snprintf(state->lcf_disasm, sizeof(state->lcf_disasm), "%s %s",
+            insn->mnemonic, insn->op_str);
+    }
+    return false;
 }
 
 // In-place ADD/SUB immediate on a register the previous instruction
@@ -25449,6 +25610,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mov_cage_orr_add,
     check_cheap_const_copy,
     check_reg_copy_chain,
+    check_load_copy_fold,
     check_copy_add_sub_fold,
     check_sp_mov_overwritten,
     check_value_recompute,

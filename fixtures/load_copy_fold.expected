@@ -1,0 +1,31 @@
+LDR + MOV of the loaded value foldable into the load at offset: 0x0 <_main>: -> ldr w22, [sp, #0x2c] (2 instructions)
+  ldr w0, [sp, #0x2c]
+  mov x22, x0
+
+LDR + MOV of the loaded value foldable into the load at offset: 0xc <_main+0xc>: -> ldr x1, [x25, #0xd0] (2 instructions)
+  ldr x2, [x25, #0xd0]
+  mov x1, x2
+
+LDR + MOV of the loaded value foldable into the load at offset: 0x18 <_main+0x18>: -> ldr w23, [x19, #0x98] (3 instructions)
+  ldr w3, [x19, #0x98]
+  ... 1 instruction ...
+  mov x23, x3
+
+LDR + MOV of the loaded value foldable into the load at offset: 0x28 <_main+0x28>: -> ldrsh w24, [x24, #6] (2 instructions)
+  ldrsh w4, [x24, #6]
+  mov w24, w4
+
+register write overwritten unread at offset: 0x50 <_main+0x50>: -> delete; w28 is overwritten before any read (1 instructions)
+  mov w28, #8
+  mov x28, x8
+
+Optimization opportunities by type:
+       4  LDR + MOV of the loaded value foldable into the load
+       1  register write overwritten unread
+
+Optimization opportunities by function:
+       5  _main
+
+4 bytes skipped unlinted (undecodable words, V8 constant pools, or bytes outside the function symbols)
+
+5 optimization opportunities in 26 instructions
