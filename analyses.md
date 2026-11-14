@@ -219,6 +219,37 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   matched as a producer: it is normally a `W`-register `MOV` (a `W`
   write already zeros the upper half), not a literal instruction.
 
+## extension discarded by logical-op shift
+
+* A logical op whose `LSL` shifts every extended bit of its `Rm` out sees
+  only bits the extension copied from its source, so it can read the
+  source and the extension goes:
+  * `sxtw x0, w0 ; sxtw x1, w2 ; and x1, x1, #0xffffffff ;
+    orr x0, x1, x0, lsl #32` -> the first `sxtw` goes
+  * `sxtb w6, w7 ; and w6, w8, w6, lsl #24` -> `and w6, w8, w7, lsl #24`
+  The first is Kotlin's `packInts` (`IntOffset`, `IntSize`, ...) as ART
+  compiles it, nearly all of the sites in practice.
+* The extension is any `SBFM`/`UBFM` with `immr = 0` keeping fewer bits
+  than its register (`SXTB`/`SXTH`/`SXTW`, `UXTB`/`UXTH`/`UXTW`,
+  `SBFX`/`UBFX #0`). The consumer is any of
+  `AND`/`BIC`/`ORR`/`ORN`/`EOR`/`EON`/`ANDS`/`BICS` with `LSL #s`, where
+  `s` plus the extension's width is at least the consumer's width, reading
+  the extension's result as `Rm` only. The adjacent `ADD`/`SUB` form is
+  the extended-register check's ("extension discarded by ADD/SUB shift is
+  redundant").
+* Between them, the field folds' gap rule: nothing reads or writes the
+  extension's result, nothing writes its source, and control stays, up to
+  15 instructions. Two extensions are tracked at once, since `packInts`
+  puts the second operand's extension in the gap. The result must be
+  dead after the consumer: structurally when the consumer overwrites it,
+  otherwise through the forward register-liveness scan. Without that
+  proof, or when another check's deferral holds the scan's slot, only the
+  consumer is rewritten and the extension stays.
+* On ART's Android 17 output for 71 F-Droid apps, the core boot image
+  and two other apps (367M instructions) the check reports
+  21,054 sites: 17,256 delete the extension and 3,798 rewrite only the
+  consumer.
+
 ## compare-zero branch foldable into CBZ/CBNZ
 
 * `cmp w0, #0 ; b.eq target` instead of `cbz w0, target`. Same for

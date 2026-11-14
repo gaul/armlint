@@ -2650,6 +2650,15 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
 bool check_ext_mul_widening(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// Detect an extension (SBFM/UBFM with immr = 0) whose bits a later
+// logical op's LSL shifts out entirely, so the op can read the source:
+//     sxtw x0, w1 ; orr x0, x2, x0, lsl #32 -> orr x0, x2, x1, lsl #32
+// Up to 15 instructions may sit between if they leave the extension's
+// registers alone; its result must be dead after the op (structurally,
+// or through defer_dead_mov, else the extension stays).
+bool check_ext_shift_discard(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out);
+
 // Widening-multiply analogue of check_mul_add_sub_fold. Detect
 // SMULL/UMULL Xt, Wa, Wb (the Ra == XZR aliases of SMADDL/UMADDL)
 // immediately followed by an X-form ADD/SUB (shifted-register, LSL #0,

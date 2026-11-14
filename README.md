@@ -116,6 +116,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`lsl`/`lsr`/`asr`/`ror` + `add`/`sub`/`and`/`orr`/`eor`](analyses.md#shift-foldable-into-shifted-register-form) | `add Rd, Rn, Rm, <shift> #n` |
 | [`lsl`/`lsr` + shifted `orr`/`eor`/`add` (funnel/rotate)](analyses.md#funnel-shift-foldable-into-extr-or-ror) | `extr Rd, Rhi, Rlo, #lsb` (or `ror` when both halves match) |
 | [`sxtw`/`uxtb`/`sxtb` + `add`/`sub`](analyses.md#extend-foldable-into-shiftedextended-register-form) | `add Rd, Rn, Wm, sxtw` |
+| [`sxtw`/`sxtb`/`uxth` + `orr`/`eor`/`and` whose `lsl` shifts the extension out](analyses.md#extension-discarded-by-logical-op-shift) | the op reads the source, the extension deleted |
 | [`cmp`/`cmn`/`tst` zero-test + `b.eq`/`b.ne` (`b.hi`/`b.ls` after `cmp`)](analyses.md#compare-zero-branch-foldable-into-cbzcbnz) | `cbz`/`cbnz` |
 | [`cmp`/`cmn`/`tst` zero-test + `b.lt`/`b.ge`/`b.mi`/`b.pl`](analyses.md#compare-zero-signed-branch-foldable-into-tbztbnz) | `tbnz`/`tbz Rn, #(msb)` |
 | [`tst #(1<<k)` + `b.eq`/`b.ne`](analyses.md#tst-single-bit--beqne-foldable-into-tbztbnz) | `tbz`/`tbnz Rn, #k` |

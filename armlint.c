@@ -295,6 +295,18 @@ struct armlint_state {
     unsigned smx_window;
     size_t smx_offset;
     char smx_disasm[ARMLINT_FINDING_LINE_LEN];
+    // Pending extensions for check_ext_shift_discard (two, so one
+    // between another and its consumer does not evict it): rd its
+    // result, rn its source, width the low source bits it carries.
+    struct esd_slot {
+        bool active;
+        unsigned rd;
+        unsigned rn;
+        unsigned width;
+        unsigned window;
+        size_t offset;
+        char disasm[ARMLINT_FINDING_LINE_LEN];
+    } esd[2];
 
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / CMN Rn,#0 /
     // CMN Rn,XZR / TST Rn,Rn) pending a B.EQ/B.NE consumer (any
@@ -2628,6 +2640,9 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lse_stage = 0;
     state->pending_lse_active = false;
     state->pending_fp_active = false;
+    for (size_t i = 0; i < sizeof(state->esd) / sizeof(state->esd[0]); i++) {
+        state->esd[i].active = false;
+    }
     if (have_fallback) {
         // Still run mov_close for its state reset; a MOV-chain finding
         // colliding with the fallback at end-of-region is forfeited
@@ -19270,6 +19285,127 @@ bool check_ext_mul_widening(armlint_state *state, const cs_insn *insn,
     return produced;
 }
 
+// An extension whose bits a logical op's LSL shifts out entirely:
+//     sxtw x0, w1
+//     ...
+//     orr  x0, x2, x0, lsl #32   -> orr x0, x2, x1, lsl #32
+// The consumer sees only the low (width - lsl) bits of its Rm, all
+// within the extension's field, so it can read the source directly and
+// the extension goes. Kotlin's packInts compiles to this in ART. The
+// extension is any SBFM/UBFM with immr = 0 (SXT*, UXT*, SBFX/UBFX #0);
+// the consumer any AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS with LSL reading
+// the result as Rm only. The field folds' gap rule applies between
+// them, and the result must be dead after the consumer: structurally
+// when the consumer overwrites it, otherwise through the forward
+// register-liveness scan, falling back to the consumer-only rewrite.
+// The adjacent ADD/SUB form is check_extend_add_sub_fold's.
+bool check_ext_shift_discard(armlint_state *state, const cs_insn *insn,
+                             size_t offset, armlint_finding *out)
+{
+    const size_t nslots = sizeof(state->esd) / sizeof(state->esd[0]);
+    if (insn->size != 4) {
+        for (size_t i = 0; i < nslots; i++) {
+            state->esd[i].active = false;
+        }
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    bool produced = false;
+
+    unsigned sf = (op >> 31) & 1u;
+    unsigned rd = op & 0x1Fu;
+    unsigned rn = (op >> 5) & 0x1Fu;
+    for (size_t i = 0; i < nslots; i++) {
+        struct esd_slot *p = &state->esd[i];
+        if (!p->active) {
+            continue;
+        }
+        unsigned opc = (op >> 29) & 3u;
+        unsigned n = (op >> 21) & 1u;
+        unsigned lsl = (op >> 10) & 0x3Fu;
+        unsigned rm = (op >> 16) & 0x1Fu;
+        unsigned width = sf ? 64u : 32u;
+        if (!produced && (op & 0x1FC00000u) == 0x0A000000u && rm == p->rd
+                && rn != p->rd && lsl != 0u && lsl < width
+                && lsl + p->width >= width) {
+            static const char *const mnem[2][4] = {
+                { "and", "orr", "eor", "ands" },
+                { "bic", "orn", "eon", "bics" },
+            };
+            char d[8], a[8], b[8], cons[ARMLINT_FINDING_LINE_LEN];
+            kv_reg_name(d, sizeof(d), rd, sf);
+            kv_reg_name(a, sizeof(a), rn, sf);
+            kv_reg_name(b, sizeof(b), p->rn, sf);
+            unsigned span = (unsigned)((offset - p->offset) / 4u + 1u);
+            out->name = "extension discarded by logical-op shift is redundant";
+            out->start_offset = p->offset;
+            out->insn_count = span;
+            clear_finding_strings(out);
+            snprintf(out->detail, sizeof(out->detail),
+                "-> %s %s, %s, %s, lsl #%u", mnem[n][opc], d, a, b, lsl);
+            finding_delete(out, p->offset);
+            finding_replace_with_detail(out, offset, 0);
+            snprintf(cons, sizeof(cons), "%s %s", insn->mnemonic,
+                insn->op_str);
+            field_fold_lines(out, p->disasm, span, cons);
+            if (rd == p->rd) {
+                produced = true;
+            } else {
+                // Reading the source holds whether or not the extension
+                // stays. That rewrite is reported at once rather than
+                // evicting another check's pending deferral.
+                armlint_finding fb = *out;
+                snprintf(fb.detail, sizeof(fb.detail),
+                    "-> %s %s, %s, %s, lsl #%u (extend stays)",
+                    mnem[n][opc], d, a, b, lsl);
+                fb.nedits = 0;
+                finding_replace_with_detail(&fb, offset, 0);
+                if (state->pending_mz_active) {
+                    *out = fb;
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, p->rd);
+                    state->pending_mz_has_fallback = true;
+                    state->pending_mz_fallback = fb;
+                }
+            }
+            p->active = false;
+        } else if (!field_fold_gap_ok(insn, p->rd, p->rn, &p->window)) {
+            p->active = false;
+        }
+    }
+
+    // Open: SBFM/UBFM Rd, Rn, #0, #imms keeping fewer bits than the
+    // register (W: SXTB/SXTH, UXTB/UXTH; X: also SXTW/UXTW), into a
+    // free slot or over the older one.
+    unsigned imms = (op >> 10) & 0x3Fu;
+    uint32_t fixed = op & 0x7FFF0000u;
+    bool bfm = sf ? (fixed == 0x13400000u || fixed == 0x53400000u)
+                  : (fixed == 0x13000000u || fixed == 0x53000000u);
+    if (bfm && imms + 1u < (sf ? 64u : 32u) && rd != 31u && rn != 31u) {
+        size_t slot = 0;
+        for (size_t i = 0; i < nslots; i++) {
+            if (!state->esd[i].active) {
+                slot = i;
+                break;
+            }
+            if (state->esd[i].offset < state->esd[slot].offset) {
+                slot = i;
+            }
+        }
+        struct esd_slot *p = &state->esd[slot];
+        p->active = true;
+        p->rd = rd;
+        p->rn = rn;
+        p->width = imms + 1u;
+        p->offset = offset;
+        p->window = LIVENESS_WINDOW;
+        snprintf(p->disasm, sizeof(p->disasm), "%s %s", insn->mnemonic,
+            insn->op_str);
+    }
+    return produced;
+}
+
 // Decode the widening multiply aliases SMULL / UMULL Xd, Wn, Wm -- the
 // Ra == XZR forms of SMADDL / UMADDL (Data-processing 3-source). Both
 // have sf = 1 (X destination), op54 = 00, class 11011, o0 = 0 (the
@@ -25894,6 +26030,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_mvn_logic_fold,
     check_add_one_csel_fold,
     check_extend_add_sub_fold,
+    check_ext_shift_discard,
     check_add_ldr_register_offset,
     check_sxtw_ldr_fold,
     check_ldr_sext_fold,

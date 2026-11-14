@@ -1,0 +1,51 @@
+AND/extend chain foldable to one at offset: 0x4 <_main+0x4>: -> and x1, x2, #0xffffffff (2 instructions)
+  sxtw x1, w2
+  and x1, x1, #0xffffffff
+
+extension discarded by logical-op shift is redundant at offset: 0x0 <_main>: -> orr x0, x1, x0, lsl #32 (4 instructions)
+  sxtw x0, w0
+  ... 2 instructions ...
+  orr x0, x1, x0, lsl #32
+
+extension discarded by logical-op shift is redundant at offset: 0x10 <_main+0x10>: -> eor x3, x5, x4, lsl #40 (2 instructions)
+  sxtw x3, w4
+  eor x3, x5, x3, lsl #40
+
+extension discarded by logical-op shift is redundant at offset: 0x18 <_main+0x18>: -> and w6, w8, w7, lsl #24 (2 instructions)
+  sxtb w6, w7
+  and w6, w8, w6, lsl #24
+
+extension discarded by logical-op shift is redundant at offset: 0x20 <_main+0x20>: -> orr x11, x12, x10, lsl #48 (2 instructions)
+  uxth w9, w10
+  orr x11, x12, x9, lsl #48
+
+register write overwritten unread at offset: 0xc <_main+0xc>: -> delete; x0 is overwritten before any read (1 instructions)
+  orr x0, x1, x0, lsl #32
+  ... 11 instructions ...
+  sxtw x0, w1
+
+register write overwritten unread at offset: 0x14 <_main+0x14>: -> delete; x3 is overwritten before any read (1 instructions)
+  eor x3, x5, x3, lsl #40
+  ... 12 instructions ...
+  sxtw x3, w4
+
+register write overwritten unread at offset: 0x1c <_main+0x1c>: -> delete; w6 is overwritten before any read (1 instructions)
+  and w6, w8, w6, lsl #24
+  ... 12 instructions ...
+  sxtw x6, w7
+
+extension discarded by logical-op shift is redundant at offset: 0x50 <_main+0x50>: -> orr x8, x9, x7, lsl #32 (extend stays) (2 instructions)
+  sxtw x6, w7
+  orr x8, x9, x6, lsl #32
+
+Optimization opportunities by type:
+       5  extension discarded by logical-op shift is redundant
+       3  register write overwritten unread
+       1  AND/extend chain foldable to one
+
+Optimization opportunities by function:
+       9  _main
+
+4 bytes skipped unlinted (undecodable words, V8 constant pools, or bytes outside the function symbols)
+
+9 optimization opportunities in 27 instructions

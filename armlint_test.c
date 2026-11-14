@@ -13359,6 +13359,96 @@ static void test_ext_mul_widening(void)
     assert(run_named_check(code, 20, name) == 0);
 }
 
+// Encode a logical shifted-register op: base selects the op and width
+// (0xAA000000 ORR X, 0xCA000000 EOR X, 0x0A000000 AND W, 0xAA400000
+// ORR X with LSR); shift is the imm6 amount.
+static void logic_shifted(uint8_t out[4], uint32_t base, unsigned rd,
+                          unsigned rn, unsigned rm, unsigned shift)
+{
+    write_le32(out, base | ((rm & 0x1Fu) << 16) | ((shift & 0x3Fu) << 10)
+        | ((rn & 0x1Fu) << 5) | (rd & 0x1Fu));
+}
+
+static void test_ext_shift_discard(void)
+{
+    const char *name = "extension discarded by logical-op shift is redundant";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    uint8_t code[24];
+
+    // -- Positives. --
+
+    // Kotlin's packInts: sxtw x0, w0 ; sxtw x1, w2 ;
+    // and x1, x1, #0xffffffff ; orr x0, x1, x0, lsl #32. The second
+    // extension sits in the gap without evicting the first.
+    sxtw_x(&code[0], 0, 0);
+    sxtw_x(&code[4], 1, 2);
+    write_le32(&code[8], 0x92407C21u);          // and x1, x1, #0xffffffff
+    logic_shifted(&code[12], 0xAA000000u, 0, 1, 0, 32);
+    assert(run_named_buffer_check(code, 16, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> orr x0, x1, x0, lsl #32") == 0);
+
+    // Adjacent EOR from a fresh source: sxtw x3, w4 ;
+    // eor x3, x5, x3, lsl #40 -> eor x3, x5, x4, lsl #40.
+    sxtw_x(&code[0], 3, 4);
+    logic_shifted(&code[4], 0xCA000000u, 3, 5, 3, 40);
+    assert(run_named_buffer_check(code, 8, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> eor x3, x5, x4, lsl #40") == 0);
+
+    // W-form SXTB, W consumer: lsl #24 leaves only the low byte.
+    sxtb_w(&code[0], 6, 7);
+    logic_shifted(&code[4], 0x0A000000u, 6, 8, 6, 24);
+    assert(run_named_buffer_check(code, 8, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> and w6, w8, w7, lsl #24") == 0);
+
+    // Fresh destination, the extension dead after: deferred, then
+    // reported with the deletion.
+    uxth_w(&code[0], 0, 10);
+    logic_shifted(&code[4], 0xAA000000u, 11, 12, 0, 48);
+    assert(run_x0_dead(code, 8) == 1);
+
+    // Fresh destination, the extension read again: the consumer-only
+    // rewrite, the extension stays.
+    sxtw_x(&code[0], 0, 7);
+    logic_shifted(&code[4], 0xAA000000u, 8, 9, 0, 32);
+    add_x(&code[8], 10, 0, 5);
+    movz_x(&code[12], 0, 7, 0);
+    assert(run_named_buffer_check(code, 16, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> orr x8, x9, x7, lsl #32 (extend stays)") == 0);
+
+    // -- Negatives. --
+
+    // LSL #31 keeps bit 32 of a SXTW result, a copy of the sign.
+    sxtw_x(&code[0], 0, 1);
+    logic_shifted(&code[4], 0xAA000000u, 0, 2, 0, 31);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // LSR keeps the high bits.
+    sxtw_x(&code[0], 0, 1);
+    logic_shifted(&code[4], 0xAA400000u, 0, 2, 0, 32);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // The extension is also the unshifted operand.
+    sxtw_x(&code[0], 0, 1);
+    logic_shifted(&code[4], 0xAA000000u, 0, 0, 0, 32);
+    assert(run_named_check(code, 8, name) == 0);
+
+    // The source is overwritten in the gap.
+    sxtw_x(&code[0], 0, 1);
+    movz_w(&code[4], 1, 3);
+    logic_shifted(&code[8], 0xAA000000u, 0, 2, 0, 32);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // The extension is read in the gap.
+    sxtw_x(&code[0], 0, 1);
+    add_x(&code[4], 3, 0, 4);
+    logic_shifted(&code[8], 0xAA000000u, 0, 2, 0, 32);
+    assert(run_named_check(code, 12, name) == 0);
+}
+
 static void test_mul_add_sub_fold(void)
 {
     uint8_t code[16];
@@ -20986,6 +21076,7 @@ int main(void)
     test_mov_reg_offset_fold();
     test_mul_add_sub_fold();
     test_ext_mul_widening();
+    test_ext_shift_discard();
     test_widening_mul_add_sub_fold();
     test_neg_add_sub_fold();
     test_mvn_logic_fold();
