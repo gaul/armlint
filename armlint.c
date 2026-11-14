@@ -285,6 +285,17 @@ struct armlint_state {
     char lcf_tail[ARMLINT_FINDING_LINE_LEN];
     char lcf_disasm[ARMLINT_FINDING_LINE_LEN];
 
+    // A 32-to-64-bit extension pending a 64-bit MUL/MADD/MSUB reading it
+    // (check_ext_mul_widening): SXTW (smx_signed) or UXTW / MOV Wd, Wn,
+    // smx_rd its result, smx_rn the W register it extends.
+    bool smx_active;
+    bool smx_signed;
+    unsigned smx_rd;
+    unsigned smx_rn;
+    unsigned smx_window;
+    size_t smx_offset;
+    char smx_disasm[ARMLINT_FINDING_LINE_LEN];
+
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / CMN Rn,#0 /
     // CMN Rn,XZR / TST Rn,Rn) pending a B.EQ/B.NE consumer (any
     // form), a B.HI/B.LS consumer (the SUBS forms only --
@@ -2600,6 +2611,7 @@ bool armlint_flush(armlint_state *state, armlint_finding *out)
     state->lcv_active = false;
     state->adf_active = false;
     state->cmx_active = false;
+    state->smx_active = false;
     state->cab_active = false;
     state->rbc_active = false;
     state->pcnt_stage = 0;
@@ -15003,6 +15015,26 @@ static void kv_op_fact(const armlint_state *state, uint32_t op,
         }
         kv_bitfield_bits(opc, sf, (op >> 16) & 0x3Fu, (op >> 10) & 0x3Fu,
                          d0, d1, a0, a1, &out->k0, &out->k1);
+        if (opc == 0u) {
+            // SBFM copies its field's sign through the top of the
+            // register (S as decode_sext_producer counts it), which known
+            // bits cannot say when the field is unknown: the result is an
+            // S-bit signed value. SXTW, ASR and SBFIZ alike.
+            unsigned immr = (op >> 16) & 0x3Fu;
+            unsigned imms = (op >> 10) & 0x3Fu;
+            unsigned width = sf ? 64u : 32u;
+            if (immr < width && imms < width) {
+                unsigned sbits = imms >= immr ? imms - immr + 1u
+                                              : width - immr + imms + 1u;
+                if (sbits < width) {
+                    unsigned view = sf ? 1u : 0u;
+                    int64_t lo = -((int64_t)1 << (sbits - 1u));
+                    int64_t hi = ((int64_t)1 << (sbits - 1u)) - 1;
+                    out->slo[view] = out->slo[view] > lo ? out->slo[view] : lo;
+                    out->shi[view] = out->shi[view] < hi ? out->shi[view] : hi;
+                }
+            }
+        }
     } else if ((op & 0x5FE00000u) == 0x5AC00000u
             && ((op >> 10) & 0x3Fu) >= 4u && ((op >> 10) & 0x3Fu) <= 7u) {
         // CLZ/CLS/CTZ/CNT count at most 64.
@@ -15144,6 +15176,35 @@ static void kv_reset(armlint_state *state)
     state->kv_valid = true;
 }
 
+// A sign-extending integer load, LDRSB/LDRSH/LDRSW in any addressing
+// mode: *bits the access size, *xform whether it writes all of Xt. The
+// LSE atomics share the register-offset class (bit 21 set) everywhere
+// but bits 11:10 = 10, and zero-extend, so only that pattern is a load
+// there; prefetches and unallocated (size, opc) pairs are refused.
+static bool decode_sext_load(uint32_t op, unsigned *rt, unsigned *bits,
+                             bool *xform)
+{
+    unsigned size = op >> 30;
+    unsigned opc = (op >> 22) & 3u;
+    if ((op & 0x3F000000u) == 0x38000000u) {
+        if (((op >> 21) & 1u) != 0u && ((op >> 10) & 3u) != 2u) {
+            return false;
+        }
+    } else if ((op & 0x3F000000u) != 0x39000000u) {
+        return false;
+    }
+    if (opc == 2u && size <= 2u) {
+        *xform = true;
+    } else if (opc == 3u && size <= 1u) {
+        *xform = false;
+    } else {
+        return false;
+    }
+    *bits = 8u << size;
+    *rt = op & 0x1Fu;
+    return true;
+}
+
 // Decode the instruction at `offset`, whose effects the next sync
 // applies. Its text is kept when it may become a fact's source.
 static void kv_record(armlint_state *state, const cs_insn *insn,
@@ -15186,6 +15247,26 @@ static void kv_record(armlint_state *state, const cs_insn *insn,
             pd->fact[0].k0 = ~kv_ones(zero_from);
             pd->freg[0] = rd;
             pd->nfact = 1;
+            source = true;
+        }
+        unsigned srt, sbits;
+        bool sx;
+        if (decode_sext_load(op, &srt, &sbits, &sx) && srt != 31u) {
+            // A sign-extending load: an sbits-bit signed value in the
+            // view it writes (a W-form one also zeroes the top half,
+            // which the zeroing producer above may already have said).
+            if (pd->nfact == 0 || pd->freg[0] != srt) {
+                kv_fact_unknown(&pd->fact[0]);
+                if (!sx) {
+                    pd->fact[0].k0 = 0xFFFFFFFF00000000ull;
+                }
+                pd->freg[0] = srt;
+                pd->nfact = 1;
+            }
+            pd->written |= 1u << srt;
+            unsigned view = sx ? 1u : 0u;
+            pd->fact[0].slo[view] = -((int64_t)1 << (sbits - 1u));
+            pd->fact[0].shi[view] = ((int64_t)1 << (sbits - 1u)) - 1;
             source = true;
         }
         pd->nzcv_written = lvn_writes_nzcv(insn, op, classify_liveness(op));
@@ -19071,6 +19152,121 @@ bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
         }
     }
 
+    return produced;
+}
+
+// A 64-bit multiply whose operands are 32-bit values sign-extended
+// (zero-extended) to 64 bits, one of them by an extension this fold can
+// delete:
+//     sxtw x0, w1
+//     sxtw x1, w2
+//     mul  x0, x0, x1        -> smull x0, w0, w2   (the second SXTW goes)
+// SMULL/UMULL (and SMADDL/SMSUBL/SMNEGL and their U forms) extend their
+// W operands themselves, so the extension that only fed the multiply is
+// deleted and the multiply reads the extension's source. That is the
+// saving: the multiply's rewrite alone is one-for-one.
+//
+// The extension is SXTW for the signed forms and UXTW or MOV Wd, Wn for
+// the unsigned ones; the multiply's other operand must already be such
+// a value, which the known-value engine proves from its X view's range
+// (a sign-extending load or SBFM, a W-form write, a constant). The
+// multiply may read the extension's result as either operand or both,
+// but not as the accumulator. Between them the field folds' gap rule
+// applies (field_fold_gap_ok): nothing reads or writes the extension's
+// result, nothing writes its source, and control stays. The result
+// must be dead after the multiply -- structurally when the multiply
+// overwrites it, otherwise through the forward register-liveness scan.
+bool check_ext_mul_widening(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out)
+{
+    if (insn->size != 4) {
+        state->smx_active = false;
+        return false;
+    }
+    uint32_t op = insn_word(insn);
+    bool produced = false;
+
+    if (state->smx_active) {
+        unsigned rd = op & 0x1Fu;
+        unsigned rn = (op >> 5) & 0x1Fu;
+        unsigned ra = (op >> 10) & 0x1Fu;
+        unsigned rm = (op >> 16) & 0x1Fu;
+        bool is_sub = ((op >> 15) & 1u) != 0u;
+        unsigned e = state->smx_rd;
+        if ((op & 0xFFE00000u) == 0x9B000000u
+                && (rn == e || rm == e) && ra != e && rd != 31u) {
+            // The other operand, if any, must be a 32-bit value of the
+            // extension's kind before the multiply.
+            unsigned other = rn == e ? rm : rn;
+            bool fits = true;
+            if (other != e) {
+                kv_sync(state, insn, offset);
+                kv_fact f;
+                uint64_t lo, hi;
+                int64_t slo, shi;
+                kv_get(state, other, &f);
+                kv_range(&f, 1, &lo, &hi, &slo, &shi);
+                fits = other != 31u
+                    && (state->smx_signed
+                        ? slo <= shi && slo >= INT32_MIN && shi <= INT32_MAX
+                        : lo <= hi && hi <= 0xFFFFFFFFu);
+            }
+            if (fits) {
+                unsigned a = rn == e ? state->smx_rn : rn;
+                unsigned b = rm == e ? state->smx_rn : rm;
+                char sign = state->smx_signed ? 's' : 'u';
+                unsigned span = (unsigned)
+                    ((offset - state->smx_offset) / 4u + 1u);
+                out->name = "SXTW/UXTW + MUL foldable to SMULL/UMULL";
+                out->start_offset = state->smx_offset;
+                out->insn_count = span;
+                clear_finding_strings(out);
+                if (ra == 31u) {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %c%s x%u, w%u, w%u", sign,
+                        is_sub ? "mnegl" : "mull", rd, a, b);
+                } else {
+                    snprintf(out->detail, sizeof(out->detail),
+                        "-> %c%s x%u, w%u, w%u, x%u", sign,
+                        is_sub ? "msubl" : "maddl", rd, a, b, ra);
+                }
+                finding_delete(out, state->smx_offset);
+                finding_replace_with_detail(out, offset, 0);
+                char mul[ARMLINT_FINDING_LINE_LEN];
+                snprintf(mul, sizeof(mul), "%s %s", insn->mnemonic,
+                    insn->op_str);
+                field_fold_lines(out, state->smx_disasm, span, mul);
+                if (rd == e) {
+                    produced = true;
+                } else {
+                    defer_dead_mov(state, out, e);
+                }
+            }
+            // The multiply read the extension: closed either way.
+            state->smx_active = false;
+        } else if (!field_fold_gap_ok(insn, state->smx_rd, state->smx_rn,
+                                      &state->smx_window)) {
+            state->smx_active = false;
+        }
+    }
+
+    // Open: SXTW Xd, Wn (SBFM #0, #31), UXTW Xd, Wn (UBFM #0, #31), or
+    // MOV Wd, Wm, which zero-extends just as UXTW does.
+    unsigned rd = op & 0x1Fu;
+    bool sxtw = (op & 0xFFFFFC00u) == 0x93407C00u;
+    bool uxtw = (op & 0xFFFFFC00u) == 0xD3407C00u;
+    bool movw = (op & 0xFFE0FFE0u) == 0x2A0003E0u
+        && ((op >> 16) & 0x1Fu) != 31u;
+    if ((sxtw || uxtw || movw) && rd != 31u) {
+        state->smx_active = true;
+        state->smx_signed = sxtw;
+        state->smx_rd = rd;
+        state->smx_rn = movw ? (op >> 16) & 0x1Fu : (op >> 5) & 0x1Fu;
+        state->smx_offset = offset;
+        state->smx_window = LIVENESS_WINDOW;
+        snprintf(state->smx_disasm, sizeof(state->smx_disasm), "%s %s",
+            insn->mnemonic, insn->op_str);
+    }
     return produced;
 }
 
@@ -25692,6 +25888,7 @@ const armlint_check_fn armlint_check_registry[] = {
     check_subs_cmp_redundant,
     check_dead_compare,
     check_mul_add_sub_fold,
+    check_ext_mul_widening,
     check_widening_mul_add_sub_fold,
     check_neg_add_sub_fold,
     check_mvn_logic_fold,

@@ -203,6 +203,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
 | [`mul` + `add`/`sub`](analyses.md#mul--addsub-foldable-to-maddmsub) | `madd`/`msub` (or `mneg`) |
+| [`sxtw`/`uxtw` + 64-bit `mul`/`madd`/`msub` of 32-bit values](analyses.md#sxtwuxtw--mul-foldable-to-smullumull) | `smull`/`umull`/`smaddl`/`smsubl` (and `u` forms), the extension deleted |
 | [`smull`/`umull` + `add`/`sub`](analyses.md#smullumull--addsub-foldable-to-smaddlumaddl) | `smaddl`/`umaddl`/`smsubl`/`umsubl` |
 | [`neg` + `add`/`sub`](analyses.md#neg--addsub-foldable-to-subadd) | `sub`/`add` |
 | [`neg` + `csel`](analyses.md#neg--addsub-foldable-to-subadd) | `csneg` (inverted cond for the then slot) |

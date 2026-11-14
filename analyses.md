@@ -2671,7 +2671,10 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   value -- an AND, a bitfield extract or shift, a narrow or W-form load
   (the zeroing-producer table the redundant zero-extension check
   uses), any W-form write, a CSET (0 or 1), a CSEL (what its two
-  sources agree on); from copies, an X-form MOV carrying all of its
+  sources agree on); from producers that bound the signed range but pin
+  no bit -- an SBFM (SXTB/SXTH/SXTW, ASR, SBFX/SBFIZ), whose result is an
+  S-bit signed value, and a sign-extending load (LDRSB/LDRSH/LDRSW in any
+  addressing mode); from copies, an X-form MOV carrying all of its
   source's facts and a W-form one its W view; and from the fall-through
   edge of every conditional branch: CBZ that its register is not zero,
   CBNZ that it is, TBZ that the bit is set, TBNZ that it is clear, and
@@ -4826,6 +4829,40 @@ there, so they would want the pool bit alone.
   `MADD`/`MSUB` has the same latency as the bare multiply, so the fold
   removes the dependent `ADD`/`SUB` essentially for free, plus one
   instruction.
+
+## SXTW/UXTW + MUL foldable to SMULL/UMULL
+
+* A 64-bit multiply whose operands are both 32-bit values extended to 64
+  bits is the widening multiply, which extends its `W` operands itself:
+  * `sxtw x0, w1 ; sxtw x1, w2 ; mul x0, x0, x1` -> the second `sxtw`
+    goes and the `mul` becomes `smull x0, w0, w2`
+  * `mov x0, #0xc ; sxtw x2, w2 ; mul x0, x2, x0` -> `smull x0, w2, w0`
+  * `ldr w3, [x4] ; mov w5, w6 ; madd x7, x3, x5, x8` ->
+    `umaddl x7, w3, w6, x8`
+  This is Java's `(long) a * (long) b` and `(long) a * C` as ART compiles
+  it.
+* The rewrite of the multiply alone is one-for-one, so the check reports
+  only where it can also delete an extension: an `SXTW` (signed forms)
+  or `UXTW`/`MOV Wd, Wn` (unsigned) whose result the multiply reads as
+  an operand, not as the accumulator. The multiply then reads the
+  extension's source. Its other operand must already be a 32-bit value
+  of the same kind, which the [known-value engine](#conditional-branch-decided-by-known-values)
+  proves from the range of its `X` view -- a sign-extending load or
+  SBFM, a W-form write, a constant that fits. `MUL`, `MADD`, `MSUB` and
+  `MNEG` map to `SMULL`/`UMULL`, `SMADDL`, `SMSUBL` and `SMNEGL` and
+  their unsigned twins.
+* Between the extension and the multiply, the field folds' gap rule:
+  nothing reads or writes the extension's result, nothing writes its
+  source, and control stays, up to 15 instructions. The extension's
+  result must be dead after the multiply: structurally when the multiply
+  overwrites it, otherwise through the forward register-liveness scan.
+  The finding spans extension through multiply for the side-entry gate.
+* On ART's Android 17 output (core boot image and two apps, 21.6M
+  instructions) the check reports 83 sites (80 `smull`, 2 `smaddl`, 1
+  `smsubl`), one extension each. The engine's new signed ranges also add
+  18 findings to three of its other users: 13 `AND`/`UBFX` no-ops (a
+  `uxth` of an `ldrsb` byte already proven non-negative) and 5 decided
+  branches.
 
 ## SMULL/UMULL + ADD/SUB foldable to SMADDL/UMADDL
 

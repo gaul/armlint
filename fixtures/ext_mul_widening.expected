@@ -1,0 +1,32 @@
+SXTW/UXTW + MUL foldable to SMULL/UMULL at offset: 0x4 <_main+0x4>: -> smull x0, w0, w2 (2 instructions)
+  sxtw x1, w2
+  mul x0, x0, x1
+
+register write overwritten unread at offset: 0x8 <_main+0x8>: -> delete; x0 is overwritten before any read (1 instructions)
+  mul x0, x0, x1
+  ... 1 instruction ...
+  mov x0, #0xc
+
+load + sign-extend foldable to LDRSB/LDRSH/LDRSW at offset: 0x14 <_main+0x14>: -> ldrsw x2, [x1, #0x8] (2 instructions)
+  ldr w2, [x1, #8]
+  sxtw x2, w2
+
+SXTW/UXTW + MUL foldable to SMULL/UMULL at offset: 0x18 <_main+0x18>: -> smull x0, w2, w0 (2 instructions)
+  sxtw x2, w2
+  mul x0, x2, x0
+
+SXTW/UXTW + MUL foldable to SMULL/UMULL at offset: 0x28 <_main+0x28>: -> umaddl x7, w3, w6, x8 (2 instructions)
+  mov w5, w6
+  madd x7, x3, x5, x8
+
+Optimization opportunities by type:
+       3  SXTW/UXTW + MUL foldable to SMULL/UMULL
+       1  load + sign-extend foldable to LDRSB/LDRSH/LDRSW
+       1  register write overwritten unread
+
+Optimization opportunities by function:
+       5  _main
+
+4 bytes skipped unlinted (undecodable words, V8 constant pools, or bytes outside the function symbols)
+
+5 optimization opportunities in 24 instructions

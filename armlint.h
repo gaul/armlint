@@ -2637,6 +2637,19 @@ bool check_mov_reg_offset_split(armlint_state *state, const cs_insn *insn,
 bool check_mul_add_sub_fold(armlint_state *state, const cs_insn *insn,
                             size_t offset, armlint_finding *out);
 
+// Detect a 64-bit MUL/MADD/MSUB (MNEG) whose operands are 32-bit values
+// extended to 64 bits, one of them by an SXTW (UXTW / MOV Wd, Wn) whose
+// only use is the multiply:
+//     sxtw x0, w1 ; sxtw x1, w2 ; mul x0, x0, x1 -> sxtw x0, w1 ;
+//                                                  smull x0, w0, w2
+// The widening forms extend their W operands themselves, so the
+// extension goes. The other operand's range comes from the known-value
+// engine; the extension's result must be dead after the multiply
+// (structurally, or through defer_dead_mov). Up to 15 instructions may
+// sit between if they leave the extension's registers alone.
+bool check_ext_mul_widening(armlint_state *state, const cs_insn *insn,
+                            size_t offset, armlint_finding *out);
+
 // Widening-multiply analogue of check_mul_add_sub_fold. Detect
 // SMULL/UMULL Xt, Wa, Wb (the Ra == XZR aliases of SMADDL/UMADDL)
 // immediately followed by an X-form ADD/SUB (shifted-register, LSL #0,

@@ -13253,6 +13253,112 @@ static void test_mov_reg_offset_fold(void)
     assert(run_helper_check(code, 8) == 0);
 }
 
+// check_ext_mul_widening: a 64-bit multiply of 32-bit extended values,
+// one extension deletable, folds to the widening form.
+static void sxtw_raw(uint8_t out[4], unsigned rd, unsigned rn)
+{
+    write_le32(out, 0x93407C00u | (rn << 5) | rd);
+}
+
+static void ldrsw_raw(uint8_t out[4], unsigned rt, unsigned rn)
+{
+    write_le32(out, 0xB9800000u | (rn << 5) | rt);
+}
+
+static void test_ext_mul_widening(void)
+{
+    const char *name = "SXTW/UXTW + MUL foldable to SMULL/UMULL";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
+    uint8_t code[24];
+
+    // -- Positives. --
+
+    // ART's (long) a * (long) b: sxtw x0, w1 ; sxtw x1, w2 ;
+    // mul x0, x0, x1 -> smull x0, w0, w2. The engine knows x0 is
+    // sign-extended; the second SXTW goes, its result overwritten next.
+    sxtw_raw(&code[0], 0, 1);
+    sxtw_raw(&code[4], 1, 2);
+    mul_x(&code[8], 0, 0, 1);
+    movz_w(&code[12], 1, 0);
+    assert(run_named_buffer_check(code, 16, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> smull x0, w0, w2") == 0);
+
+    // A constant that fits in 32 bits, the SXTW in place, MUL
+    // overwriting it: mov x0, #12 ; sxtw x2, w2 ; mul x2, x2, x0 ->
+    // smull x2, w2, w0 (no deferral needed).
+    movz_x(&code[0], 0, 12, 0);
+    sxtw_raw(&code[4], 2, 2);
+    mul_x(&code[8], 2, 2, 0);
+    assert(run_named_check(code, 12, name) == 1);
+
+    // MADD with an accumulator, the other operand from LDRSW:
+    // ldrsw x3, [x4] ; sxtw x1, w2 ; madd x0, x3, x1, x5 ->
+    // smaddl x0, w3, w2, x5.
+    ldrsw_raw(&code[0], 3, 4);
+    sxtw_raw(&code[4], 1, 2);
+    madd_x(&code[8], 0, 3, 1, 5);
+    movz_w(&code[12], 1, 0);
+    assert(run_named_buffer_check(code, 16, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> smaddl x0, w3, w2, x5") == 0);
+
+    // Unsigned: ldr w3, [x4] (zero-extends) ; uxtw x1, w2 ;
+    // mul x0, x3, x1 -> umull x0, w3, w2.
+    ldr_w_uimm0(&code[0], 3, 4);
+    uxtw(&code[4], 1, 2);
+    mul_x(&code[8], 0, 3, 1);
+    movz_w(&code[12], 1, 0);
+    assert(run_named_buffer_check(code, 16, name, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> umull x0, w3, w2") == 0);
+
+    // A gap that leaves x1 and w2 alone.
+    sxtw_raw(&code[0], 0, 1);
+    sxtw_raw(&code[4], 1, 2);
+    movz_w(&code[8], 7, 1);
+    mul_x(&code[12], 0, 0, 1);
+    movz_w(&code[16], 1, 0);
+    assert(run_named_check(code, 20, name) == 1);
+
+    // -- Negatives. --
+
+    // The other operand is an arbitrary 64-bit value.
+    sxtw_raw(&code[0], 1, 2);
+    mul_x(&code[4], 0, 3, 1);
+    movz_w(&code[8], 1, 0);
+    assert(run_named_check(code, 12, name) == 0);
+
+    // Mixed kinds: a zero-extended other operand under SXTW.
+    ldr_w_uimm0(&code[0], 3, 4);
+    sxtw_raw(&code[4], 1, 2);
+    mul_x(&code[8], 0, 3, 1);
+    movz_w(&code[12], 1, 0);
+    assert(run_named_check(code, 16, name) == 0);
+
+    // The extension's result is read again after the multiply.
+    sxtw_raw(&code[0], 0, 1);
+    sxtw_raw(&code[4], 1, 2);
+    mul_x(&code[8], 0, 0, 1);
+    mov_x(&code[12], 5, 1);
+    assert(run_named_check(code, 16, name) == 0);
+
+    // The extension is the accumulator.
+    sxtw_raw(&code[0], 0, 1);
+    sxtw_raw(&code[4], 1, 2);
+    madd_x(&code[8], 0, 0, 1, 1);
+    movz_w(&code[12], 1, 0);
+    assert(run_named_check(code, 16, name) == 0);
+
+    // A gap that writes the extension's source: movz w2, #1.
+    sxtw_raw(&code[0], 0, 1);
+    sxtw_raw(&code[4], 1, 2);
+    movz_w(&code[8], 2, 1);
+    mul_x(&code[12], 0, 0, 1);
+    movz_w(&code[16], 1, 0);
+    assert(run_named_check(code, 20, name) == 0);
+}
+
 static void test_mul_add_sub_fold(void)
 {
     uint8_t code[16];
@@ -20879,6 +20985,7 @@ int main(void)
     test_extend_cvtf_fold();
     test_mov_reg_offset_fold();
     test_mul_add_sub_fold();
+    test_ext_mul_widening();
     test_widening_mul_add_sub_fold();
     test_neg_add_sub_fold();
     test_mvn_logic_fold();
