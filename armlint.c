@@ -12872,7 +12872,8 @@ bool check_cheap_const_copy(armlint_state *state, const cs_insn *insn,
     unsigned reg_width = is_64bit ? 64u : 32u;
     uint64_t value = state->mov_value & width_mask(reg_width);
 
-    // Zero-valued chains are the MOV #0 check's territory.
+    // Zero-valued chains are the MOV #0 check's territory, its copy
+    // fallback included.
     if (value == 0) {
         return false;
     }
@@ -20590,7 +20591,21 @@ bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                         mnem, rd_buf, orig_rn_buf, orig_rm_buf);
                 }
                 mov_zero_finding_render_lines(state, out, consumer_line);
-                return mov_zero_defer(state, out);
+                // A copy of the zero (MOV Rd, Rm) can read ZR instead
+                // even when the zero stays live, as nonzero constants
+                // do in check_cheap_const_copy.
+                bool copy = opc_l == 1 && rn == 31 && rd != 31 && rd != rm;
+                armlint_finding fb = *out;
+                bool deferred = mov_zero_defer(state, out);
+                if (copy) {
+                    fb.name = "MOV of live zero constant foldable to MOV from ZR";
+                    snprintf(fb.detail, sizeof(fb.detail),
+                        "-> mov %s, %czr", rd_buf, wx);
+                    finding_replace_with_detail(&fb, offset, 0);
+                    state->pending_mz_has_fallback = true;
+                    state->pending_mz_fallback = fb;
+                }
+                return deferred;
             }
         }
     }

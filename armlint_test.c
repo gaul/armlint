@@ -9641,6 +9641,9 @@ static void test_mov_add_sub_split(void)
 
 static void test_cheap_const_copy(void)
 {
+    const char *live_zero =
+        "MOV of live zero constant foldable to MOV from ZR";
+    char detail[ARMLINT_FINDING_DETAIL_LEN];
     uint8_t code[16];
 
     // The move-resolver argument-homing shape: movz w1, #1 ; mov x2, x1.
@@ -9689,6 +9692,24 @@ static void test_cheap_const_copy(void)
     movz_w(&code[0], 0, 0);
     mov_x_reg(&code[4], 10, 0);
     assert(run_x0_dead(code, 8) == 1);
+    assert(run_named_reg_dead(code, 8, 0, live_zero) == 0);
+
+    // The zero read again after the copy: the MOV stays, and only the
+    // copy reads ZR instead.
+    movz_w(&code[0], 0, 0);
+    mov_x_reg(&code[4], 10, 0);
+    mov_x_reg(&code[8], 11, 0);
+    assert(run_named_buffer_check(code, 12, live_zero, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> mov x10, xzr") == 0);
+
+    // W copy.
+    movz_w(&code[0], 0, 0);
+    mov_w_reg(&code[4], 10, 0);
+    mov_x_reg(&code[8], 11, 0);
+    assert(run_named_buffer_check(code, 12, live_zero, detail,
+                                  sizeof(detail)) == 1);
+    assert(strcmp(detail, "-> mov w10, wzr") == 0);
 
     // An intervening instruction closes the chain.
     movz_w(&code[0], 11, 7);

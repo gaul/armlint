@@ -202,6 +202,7 @@ not yet implemented live in [TODO.md](TODO.md).
 | [`mov #C` + `orr Xd, x28, Xc` (V8 cage base)](analyses.md#mov--cage-base-orr-foldable-to-add-immediate-feature-gated--m-v8) | `add Xd, x28, #C` (`-m v8`) |
 | [`fmul` + in-place `fneg`](analyses.md#fmul--fneg-foldable-to-fnmul) | `fnmul` (bit-exact in every rounding mode) |
 | [`mov #0` + `str`/`add`/`and`/`csel`/`ccmp` use](analyses.md#mov-0--use-foldable-to-zr) | use `wzr`/`xzr` |
+| [`mov #0` + `mov` copy, the zero still live](analyses.md#mov-0--use-foldable-to-zr) | copy from `xzr` |
 | [`mov #C` + `ldr`/`str [xn, xc]`](analyses.md#mov--register-offset-ldrstr-foldable-to-immediate-offset) | `ldr`/`str [xn, #C]` (or `ldur`/`stur`) |
 | [`mul` + `add`/`sub`](analyses.md#mul--addsub-foldable-to-maddmsub) | `madd`/`msub` (or `mneg`) |
 | [`sxtw`/`uxtw` + 64-bit `mul`/`madd`/`msub` of 32-bit values](analyses.md#sxtwuxtw--mul-foldable-to-smullumull) | `smull`/`umull`/`smaddl`/`smsubl` (and `u` forms), the extension deleted |

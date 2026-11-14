@@ -2559,6 +2559,11 @@ bool check_extend_cvtf_fold(armlint_state *state, const cs_insn *insn,
 // register-offset store forms, where the ZR substitution would also
 // be sound: 15 candidate sites across the mining corpus, measured
 // and left in TODO.md rather than implemented.
+//
+// A copy of the zero (MOV Rd, Rm) stashes a fallback for a failed
+// deadness proof: the copy alone reads ZR and the MOV stays ("MOV of
+// live zero constant foldable to MOV from ZR"), the zero case of
+// check_cheap_const_copy.
 bool check_mov_zero_to_xzr(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 

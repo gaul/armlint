@@ -4761,6 +4761,23 @@ there, so they would want the pool bit alone.
   /bin/bash and 38 on /bin/zsh was this). The central emission gate
   (`armlint_finding_has_side_entry`) drops a finding whose use slot
   is a direct-branch target.
+* A copy of the zero (`mov xm, xd`, an `ORR` from ZR) has a fallback for
+  when the forward scan finds the zero still live: only the copy is
+  rewritten, to `mov xm, xzr`, and the MOV stays ("MOV of live zero
+  constant foldable to MOV from ZR"). That is check_cheap_const_copy's
+  rewrite for zero: it saves nothing, but removes the copy's dependency
+  on the MOV. It is ART's parallel-move shape, where the resolver
+  copies a zero it has just materialized for another argument:
+
+  ```
+  mov w1, #0
+  mov x22, x1     ->  mov x22, xzr
+  bl  ...
+  ```
+
+  On ART's Android 17 output for 71 F-Droid apps, the core boot image
+  and two other apps (367M instructions) it reports 458,846 sites, all
+  X-form copies.
 
 ## MOV + register-offset LDR/STR foldable to immediate offset
 

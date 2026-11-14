@@ -1,0 +1,24 @@
+MOV of live zero constant foldable to MOV from ZR at offset: 0x0 <_main>: -> mov x22, xzr (2 instructions)
+  movz w1, #0x0
+  orr x22, xzr, x1
+
+MOV of live zero constant foldable to MOV from ZR at offset: 0xc <_main+0xc>: -> mov x4, xzr (2 instructions)
+  movz w3, #0x0
+  orr x4, xzr, x3
+
+MOV #0 + use foldable to ZR at offset: 0x18 <_main+0x18>: -> orr x7, xzr, xzr (2 instructions)
+  movz w6, #0x0
+  orr x7, xzr, x6
+
+MOV of live zero constant foldable to MOV from ZR at offset: 0x24 <_main+0x24>: -> mov w9, wzr (2 instructions)
+  movz w8, #0x0
+  orr w9, wzr, w8
+
+Optimization opportunities by type:
+       3  MOV of live zero constant foldable to MOV from ZR
+       1  MOV #0 + use foldable to ZR
+
+Optimization opportunities by function:
+       4  _main
+
+4 optimization opportunities in 11 instructions
