@@ -1031,8 +1031,9 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
 
 // Mirror of check_lsr_and_to_ubfx for the opposite ("mask then
 // shift-right") order. Detect AND Rd, Rs, #mask -- where mask is a
-// single contiguous run of 1s [lo, hi] -- immediately followed by
-// LSR Rd, Rd, #n (the LSR reads and writes the AND's destination). The
+// single contiguous run of 1s [lo, hi] -- followed by LSR Rd, Rd, #n
+// (the LSR reads and writes the AND's destination), directly or past a
+// gap that leaves Rd unread and unwritten and Rs unwritten. The
 // pair extracts Rs[hi .. n] (the run bits at or above the shift) into
 // the low bits; equivalent to a single UBFX Rd, Rs, #n, #(hi+1-n).
 //
@@ -1043,9 +1044,10 @@ bool check_lsr_and_to_ubfx(armlint_state *state, const cs_insn *insn,
 bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out);
 
-// The left-shift mirror of the two checks above: an AND-low-mask or LSR
-// immediately followed by LSL Rd, Rd, #n (the LSL reads and writes the
-// producer's destination).
+// The left-shift mirror of the two checks above: an AND-low-mask, a
+// zero-extension or an LSR followed by LSL Rd, Rd, #n (the LSL reads and
+// writes the producer's destination), directly or past a gap as in
+// check_and_lsr_to_ubfx.
 //   and wd, ws, #((1<<w)-1) ; lsl wd, wd, #n -> ubfiz wd, ws, #n, #w
 //     ((ws & low-w-bits) << n; width capped at datasize-n when it would
 //      overflow), and

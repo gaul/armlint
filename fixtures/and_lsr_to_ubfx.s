@@ -49,9 +49,19 @@ _main:
     and     w0, w1, #0xff0
     lsr     w5, w0, #4
 
-    // N6) Intervening instruction expires the pending AND.
+    // 6) A gap leaving w0 and w1 alone (ART's shape: a load between).
+    and     w7, w0, #0x7f8
+    ldr     x10, [x9, x10, lsl #3]
+    lsr     w7, w7, #3            // -> ubfx w7, w0, #3, #8
+
+    // N6) A gap reading the AND's result keeps the AND.
     and     w0, w1, #0xff0
-    mov     w5, #1
+    mov     w5, w0
+    lsr     w0, w0, #4
+
+    // N7) A gap writing the AND's source moves the UBFX input.
+    and     w0, w1, #0xff0
+    mov     w1, #1
     lsr     w0, w0, #4
 
     ret

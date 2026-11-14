@@ -58,22 +58,31 @@ register write overwritten unread at offset: 0x44 <_main+0x44>: -> delete; w0 is
   lsr w0, w0, #4
   and w0, w1, #0xff0
 
-register already holds the recomputed value at offset: 0x50 <_main+0x50>: -> delete; w0 already holds this value (set 0x8 bytes back) (1 instructions)
+AND+LSR foldable into UBFX at offset: 0x50 <_main+0x50>: -> ubfx w7, w0, #3, #8 (3 instructions)
+  and w7, w0, #0x7f8
+  ... 1 instruction ...
+  lsr w7, w7, #3
+
+register already holds the recomputed value at offset: 0x5c <_main+0x5c>: -> delete; w0 already holds this value (set 0x14 bytes back) (1 instructions)
   and w0, w1, #0xff0
   and w0, w1, #0xff0
 
 register write overwritten unread at offset: 0x4c <_main+0x4c>: -> delete; w5 is overwritten before any read (1 instructions)
   lsr w5, w0, #4
-  ... 1 instruction ...
-  mov w5, #1
+  ... 4 instructions ...
+  mov w5, w0
+
+register write overwritten unread at offset: 0x64 <_main+0x64>: -> delete; w0 is overwritten before any read (1 instructions)
+  lsr w0, w0, #4
+  and w0, w1, #0xff0
 
 Optimization opportunities by type:
-      10  register write overwritten unread
-       5  AND+LSR foldable into UBFX
+      11  register write overwritten unread
+       6  AND+LSR foldable into UBFX
        1  operation on known values foldable to MOV #imm
        1  register already holds the recomputed value
 
 Optimization opportunities by function:
-      17  _main
+      19  _main
 
-17 optimization opportunities in 24 instructions
+19 optimization opportunities in 30 instructions

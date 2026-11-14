@@ -57,4 +57,15 @@ _main:
     and     w0, w1, #0xff0
     lsl     w0, w0, #4
 
+    // N3) A branch between ends straight-line code.
+    and     w0, w1, #0xff
+    cbz     w5, 1f
+    lsl     w0, w0, #4
+1:
+
+    // A gap leaving w7 and w0 alone (ART's shape: a load between).
+    and     w7, w0, #7
+    ldr     x10, [x9, x10, lsl #3]
+    lsl     w7, w7, #3            // -> ubfiz w7, w0, #3, #3
+
     ret

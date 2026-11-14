@@ -243,6 +243,9 @@ struct armlint_state {
     unsigned alr_lo;
     unsigned alr_hi;
     size_t alr_offset;
+    // Instructions left before the gapped fold gives up (see
+    // field_fold_gap_ok); the adjacent case never consults it.
+    unsigned alr_window;
     char alr_disasm[ARMLINT_FINDING_LINE_LEN];
 
     // AND-low-mask, a zero-extension (UXTB/UXTH/UXTW or a W-form MOV), or
@@ -264,6 +267,7 @@ struct armlint_state {
     unsigned aul_rn;
     unsigned aul_param;
     size_t aul_offset;
+    unsigned aul_window;    // as alr_window
     char aul_disasm[ARMLINT_FINDING_LINE_LEN];
 
     // Zero-test of Rn (CMP Rn,#0 / CMP Rn,XZR / CMN Rn,#0 /
@@ -3565,6 +3569,42 @@ static bool decode_and_imm(uint32_t op, unsigned *out_sf, uint64_t *out_mask,
     return true;
 }
 
+static bool insn_writes_reg(const cs_insn *insn, int reg);
+
+// The gap rule of the field folds (check_and_lsr_to_ubfx,
+// check_and_lsr_lsl_fold), the ADD/SUB chain's (check_add_sub_imm_chain):
+// whether a pending producer of rd from rn survives `insn`, an
+// instruction between it and its shift. The rewrite deletes the producer
+// and has the shift read rn instead, so the gap must neither read rd
+// (the producer would have to stay) nor write it (no field left to
+// shift), must not write rn (the shift would read the wrong source), and
+// must not transfer control. *window bounds the gap. The finding spans
+// producer through shift, so the central side-entry gate refuses a branch
+// into the gap.
+static bool field_fold_gap_ok(const cs_insn *insn, unsigned rd, unsigned rn,
+                              unsigned *window)
+{
+    if (classify_reg_liveness(insn, (int)rd) != LIV_UNKNOWN
+            || insn_writes_reg(insn, (int)rn)) {
+        return false;
+    }
+    return *window != 0 && --*window != 0;
+}
+
+// The finding lines of a field fold spanning `span` instructions: the
+// producer, an elided gap if there is one, and the shift.
+static void field_fold_lines(armlint_finding *out, const char *producer,
+                             unsigned span, const char *shift)
+{
+    snprintf(out->lines[0], sizeof(out->lines[0]), "%s", producer);
+    unsigned line = 1;
+    if (span > 2u) {
+        snprintf(out->lines[line++], sizeof(out->lines[0]),
+            "... %u instruction%s ...", span - 2u, span == 3u ? "" : "s");
+    }
+    snprintf(out->lines[line], sizeof(out->lines[0]), "%s", shift);
+}
+
 bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                            size_t offset, armlint_finding *out)
 {
@@ -3578,13 +3618,20 @@ bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
 
     // (1) Close: LSR Rd, Rd, #n consuming the pending AND? The LSR must
-    //     read and write the AND's destination (Rd == Rn == alr_rd).
+    //     read and write the AND's destination (Rd == Rn == alr_rd). It
+    //     need not follow directly: field_fold_gap_ok lets the AND
+    //     survive instructions that leave its registers alone.
     if (state->alr_active) {
         unsigned c_sf, c_rd, c_rn, n;
-        if (decode_lsr_imm(op, &c_sf, &c_rd, &c_rn, &n)
+        if (!(decode_lsr_imm(op, &c_sf, &c_rd, &c_rn, &n)
                 && c_sf == (state->alr_is_64bit ? 1u : 0u)
                 && c_rd == state->alr_rd
-                && c_rn == state->alr_rd) {
+                && c_rn == state->alr_rd)) {
+            if (!field_fold_gap_ok(insn, state->alr_rd, state->alr_rn,
+                                   &state->alr_window)) {
+                state->alr_active = false;
+            }
+        } else {
             unsigned lo = state->alr_lo;
             unsigned hi = state->alr_hi;
             // (mask & ws) >> n is a bottom-aligned field -- a single
@@ -3597,27 +3644,30 @@ bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
             if (lo <= n && n <= hi) {
                 unsigned width = hi + 1u - n;
                 char w_or_x = state->alr_is_64bit ? 'x' : 'w';
+                unsigned span = (unsigned)
+                    ((offset - state->alr_offset) / 4u + 1u);
 
                 out->name = "AND+LSR foldable into UBFX";
                 out->start_offset = state->alr_offset;
-                out->insn_count = 2;
+                out->insn_count = span;
                 clear_finding_strings(out);
 
                 snprintf(out->detail, sizeof(out->detail),
                     "-> ubfx %c%u, %c%u, #%u, #%u",
                     w_or_x, c_rd, w_or_x, state->alr_rn, n, width);
-                finding_rewrite_tail(out);
-
-                snprintf(out->lines[0], sizeof(out->lines[0]),
-                    "%s", state->alr_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "lsr %c%u, %c%u, #%u",
+                // The AND goes; the LSR becomes the UBFX; a gap stays.
+                finding_delete(out, state->alr_offset);
+                finding_replace_with_detail(out, offset, 0);
+                char shift[ARMLINT_FINDING_LINE_LEN];
+                snprintf(shift, sizeof(shift), "lsr %c%u, %c%u, #%u",
                     w_or_x, c_rd, w_or_x, c_rn, n);
+                field_fold_lines(out, state->alr_disasm, span, shift);
                 produced = true;
             }
+            // The LSR read the AND's result: this AND is closed either
+            // way.
+            state->alr_active = false;
         }
-        // Strict adjacency: any non-matching instruction expires.
-        state->alr_active = false;
     }
 
     // (2) Open: is this AND Rd, Rs, #<single contiguous run> (Rd != XZR)?
@@ -3653,6 +3703,7 @@ bool check_and_lsr_to_ubfx(armlint_state *state, const cs_insn *insn,
                 state->alr_lo = lo;
                 state->alr_hi = hi;
                 state->alr_offset = offset;
+                state->alr_window = LIVENESS_WINDOW;
                 snprintf(state->alr_disasm, sizeof(state->alr_disasm),
                     "%s %s", insn->mnemonic, insn->op_str);
             }
@@ -3733,14 +3784,23 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
     uint32_t op = insn_word(insn);
 
     // (1) Close: LSL Rd, Rd, #n consuming the pending AND-low-mask / LSR?
+    //     As in check_and_lsr_to_ubfx, the LSL may sit past a gap that
+    //     field_fold_gap_ok lets the producer survive.
     if (state->aul_active) {
         unsigned c_sf, c_rd, c_rn, n;
-        if (decode_lsl_imm(op, &c_sf, &c_rd, &c_rn, &n)
+        if (!(decode_lsl_imm(op, &c_sf, &c_rd, &c_rn, &n)
                 && c_sf == (state->aul_is_64bit ? 1u : 0u)
                 && c_rd == state->aul_rd
-                && c_rn == state->aul_rd) {
+                && c_rn == state->aul_rd)) {
+            if (!field_fold_gap_ok(insn, state->aul_rd, state->aul_rn,
+                                   &state->aul_window)) {
+                state->aul_active = false;
+            }
+        } else {
             unsigned datasize = state->aul_is_64bit ? 64u : 32u;
             char w_or_x = state->aul_is_64bit ? 'x' : 'w';
+            unsigned span = (unsigned)
+                ((offset - state->aul_offset) / 4u + 1u);
 
             if (!state->aul_is_lsr) {
                 // AND low w bits, then LSL #n:
@@ -3755,16 +3815,19 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
                     ? "zero-extend + LSL foldable into UBFIZ"
                     : "AND+LSL foldable into UBFIZ";
                 out->start_offset = state->aul_offset;
-                out->insn_count = 2;
+                out->insn_count = span;
                 clear_finding_strings(out);
                 snprintf(out->detail, sizeof(out->detail),
                     "-> ubfiz %c%u, %c%u, #%u, #%u",
                     w_or_x, c_rd, w_or_x, state->aul_rn, n, width);
-                finding_rewrite_tail(out);
-                snprintf(out->lines[0], sizeof(out->lines[0]),
-                    "%s", state->aul_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %s", insn->mnemonic, insn->op_str);
+                finding_delete(out, state->aul_offset);
+                finding_replace_with_detail(out, offset, 0);
+                {
+                    char shift[ARMLINT_FINDING_LINE_LEN];
+                    snprintf(shift, sizeof(shift), "%s %s", insn->mnemonic,
+                        insn->op_str);
+                    field_fold_lines(out, state->aul_disasm, span, shift);
+                }
                 produced = true;
             } else if (n == state->aul_param) {
                 // LSR #a then LSL #a clears the low a bits:
@@ -3779,21 +3842,24 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
                 }
                 out->name = "LSR+LSL foldable into bit-clearing AND";
                 out->start_offset = state->aul_offset;
-                out->insn_count = 2;
+                out->insn_count = span;
                 clear_finding_strings(out);
                 snprintf(out->detail, sizeof(out->detail),
                     "-> and %c%u, %c%u, #0x%" PRIx64,
                     w_or_x, c_rd, w_or_x, state->aul_rn, mask);
-                finding_rewrite_tail(out);
-                snprintf(out->lines[0], sizeof(out->lines[0]),
-                    "%s", state->aul_disasm);
-                snprintf(out->lines[1], sizeof(out->lines[1]),
-                    "%s %s", insn->mnemonic, insn->op_str);
+                finding_delete(out, state->aul_offset);
+                finding_replace_with_detail(out, offset, 0);
+                {
+                    char shift[ARMLINT_FINDING_LINE_LEN];
+                    snprintf(shift, sizeof(shift), "%s %s", insn->mnemonic,
+                        insn->op_str);
+                    field_fold_lines(out, state->aul_disasm, span, shift);
+                }
                 produced = true;
             }
+            // The LSL read the producer's result: closed either way.
+            state->aul_active = false;
         }
-        // Strict adjacency: any non-matching instruction expires.
-        state->aul_active = false;
     }
 
     // (2) Open: an AND with a low mask, a zero-extension (UXT*/MOV), or an
@@ -3809,6 +3875,7 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
         state->aul_rn = a_rn;
         state->aul_param = w_width;
         state->aul_offset = offset;
+        state->aul_window = LIVENESS_WINDOW;
         snprintf(state->aul_disasm, sizeof(state->aul_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     } else if (decode_zext_field_producer(op, &w_width, &zext_is_64bit,
@@ -3825,6 +3892,7 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
         state->aul_rn = a_rn;
         state->aul_param = w_width;
         state->aul_offset = offset;
+        state->aul_window = LIVENESS_WINDOW;
         snprintf(state->aul_disasm, sizeof(state->aul_disasm),
             "%s %s", insn->mnemonic, insn->op_str);
     } else {
@@ -3839,6 +3907,7 @@ bool check_and_lsr_lsl_fold(armlint_state *state, const cs_insn *insn,
             state->aul_rn = l_rn;
             state->aul_param = l_shift;
             state->aul_offset = offset;
+            state->aul_window = LIVENESS_WINDOW;
             snprintf(state->aul_disasm, sizeof(state->aul_disasm),
                 "%s %s", insn->mnemonic, insn->op_str);
         }

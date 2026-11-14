@@ -5006,6 +5006,7 @@ static void test_lsr_and_to_ubfx(void)
 
 static void test_and_lsr_to_ubfx(void)
 {
+    const char *ubfx_name = "AND+LSR foldable into UBFX";
     uint8_t code[16];
 
     // -- Positives. --
@@ -5091,11 +5092,49 @@ static void test_and_lsr_to_ubfx(void)
     lsr_w(&code[4], 0, 5, 4);
     DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
-    // Intervening instruction expires the pending AND.
+    // -- The gap. --
+
+    // The LSR may sit past instructions that leave w0 and w1 alone:
+    // and w0, w1, #0xff0 ; movz w5, #1 ; lsr w0, w0, #4 and the same
+    // with a load between (ART's shape) -> ubfx w0, w1, #4, #8.
     and_run(&code[0], 0, 0, 1, 4, 8);
     movz_w(&code[4], 5, 1);
     lsr_w(&code[8], 0, 0, 4);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_named_check(code, 12, ubfx_name) == 1);
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    ldr_w_uimm0(&code[4], 5, 6);
+    lsr_w(&code[8], 0, 0, 4);
+    assert(run_named_check(code, 12, ubfx_name) == 1);
+
+    // A gap that reads the AND's result keeps the AND: mov w5, w0.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    mov_w_reg(&code[4], 5, 0);
+    lsr_w(&code[8], 0, 0, 4);
+    assert(run_named_check(code, 12, ubfx_name) == 0);
+
+    // A gap that writes the AND's source moves the UBFX's input:
+    // movz w1, #1.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    movz_w(&code[4], 1, 1);
+    lsr_w(&code[8], 0, 0, 4);
+    assert(run_named_check(code, 12, ubfx_name) == 0);
+
+    // A branch in the gap ends straight-line code: cbz w5, +8.
+    and_run(&code[0], 0, 0, 1, 4, 8);
+    cbz_w(&code[4], 5, 8);
+    lsr_w(&code[8], 0, 0, 4);
+    assert(run_named_check(code, 12, ubfx_name) == 0);
+
+    // The window: sixteen instructions between is too far.
+    {
+        uint8_t far[72];
+        and_run(&far[0], 0, 0, 1, 4, 8);
+        for (unsigned i = 1; i <= 16; i++) {
+            movz_w(&far[4 * i], 5, 1);
+        }
+        lsr_w(&far[68], 0, 0, 4);
+        assert(run_named_check(far, 72, ubfx_name) == 0);
+    }
 
     // AND writing XZR (Rd=31) does not open the fold.
     and_run(&code[0], 0, 31, 1, 4, 8);
@@ -5110,6 +5149,7 @@ static void test_and_lsr_lsl_fold(void)
     // own as a low-32 zero-extension, which is a separate and correct
     // finding. These cases are about THIS fold's behaviour.
     const char *ubfiz_name = "zero-extend + LSL foldable into UBFIZ";
+    const char *and_ubfiz_name = "AND+LSL foldable into UBFIZ";
     uint8_t code[16];
 
     // -- Positives: AND low-mask + LSL -> UBFIZ. --
@@ -5194,11 +5234,30 @@ static void test_and_lsr_lsl_fold(void)
     lsl_w(&code[4], 31, 31, 4);
     assert(run_helper_check(code, 8) == 0);
 
-    // Intervening instruction expires the pending producer.
+    // -- The gap (see test_and_lsr_to_ubfx). --
+
+    // and w0, w1, #0xff ; ldr w5, [x6] ; lsl w0, w0, #4 -> ubfiz.
     and_w_lowmask(&code[0], 0, 1, 8);
+    ldr_w_uimm0(&code[4], 5, 6);
+    lsl_w(&code[8], 0, 0, 4);
+    assert(run_named_check(code, 12, and_ubfiz_name) == 1);
+
+    // lsr w0, w1, #4 ; movz w5, #1 ; lsl w0, w0, #4 -> bit-clearing AND.
+    lsr_w(&code[0], 0, 1, 4);
     movz_w(&code[4], 5, 1);
     lsl_w(&code[8], 0, 0, 4);
-    assert(run_helper_check(code, 12) == 0);
+    assert(run_named_check(code, 12,
+                           "LSR+LSL foldable into bit-clearing AND") == 1);
+
+    // A gap reading the field, or writing the source, keeps the pair.
+    and_w_lowmask(&code[0], 0, 1, 8);
+    mov_w_reg(&code[4], 5, 0);
+    lsl_w(&code[8], 0, 0, 4);
+    assert(run_named_check(code, 12, and_ubfiz_name) == 0);
+    and_w_lowmask(&code[0], 0, 1, 8);
+    movz_w(&code[4], 1, 1);
+    lsl_w(&code[8], 0, 0, 4);
+    assert(run_named_check(code, 12, and_ubfiz_name) == 0);
 
     // -- Positives: zero-extension (UXT*/MOV) + LSL -> UBFIZ. --
 
@@ -5269,9 +5328,14 @@ static void test_and_lsr_lsl_fold(void)
     lsl_w(&code[4], 0, 5, 4);
     DEAD_WRITES_UNCOUNTED(assert(run_helper_check(code, 8) == 0););
 
-    // Intervening instruction expires the pending zero-extension.
+    // The zero-extension survives a gap that leaves w0 and w1 alone,
+    // and not one that branches.
     uxtw(&code[0], 0, 1);
     movz_w(&code[4], 5, 1);
+    lsl_x(&code[8], 0, 0, 2);
+    assert(run_named_check(code, 12, ubfiz_name) == 1);
+    uxtw(&code[0], 0, 1);
+    cbz_w(&code[4], 5, 8);
     lsl_x(&code[8], 0, 0, 2);
     assert(run_named_check(code, 12, ubfiz_name) == 0);
 }

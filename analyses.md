@@ -647,6 +647,8 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   e.g. `0x0f0f0f0f`) and rotated masks that wrap the top of the
   register leave a gap and are skipped. `ANDS` (flag-setting) is
   excluded -- dropping it would lose the NZCV write.
+* The `LSR` need not follow directly; see the gap rule in the next
+  section.
 * Fuse win (see the shift fold): mask + shift become one `UBFX` --
   one fewer instruction, the shift off the critical path.
 
@@ -681,6 +683,18 @@ Throughout, `datasize` is the operand width in bits: 32 for the W-form,
   -- see the two-shift check above). The `LSL` must read and write the
   producer's destination, and `ANDS` (flag-setting) is excluded by the
   low-mask decoder.
+* The shift need not follow directly, here or in the `UBFX` check above.
+  The rewrite deletes the producer and has the shift read the producer's
+  source at its own position, so the producer survives instructions that
+  neither read nor write its destination, do not write its source, and do
+  not transfer control, up to 15 of them -- the rule of the
+  [ADD/SUB immediate chain](#addsub-immediate-chain-foldable-to-one). The
+  finding spans producer through shift, so the side-entry gate refuses a
+  branch into the gap. On ART's Android 17 output (core boot image and
+  two apps, 21.6M instructions) the gap adds 148 `AND`+`LSL` findings to
+  226 and 2 zero-extension ones to 28, nearly all
+  `and w7, w0, #7 ; ldr x10, [x9, x10, lsl #3] ; lsl w7, w7, #3`, an
+  independent load scheduled between; no gapped `AND`+`LSR` occurs there.
 * Fuse win (see the shift fold): two instructions become one, with the
   shift/mask off the critical path.
 
